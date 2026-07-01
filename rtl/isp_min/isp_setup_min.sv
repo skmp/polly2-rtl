@@ -1,5 +1,5 @@
 //
-// isp_setup_min - CMD_TRIANGLE_ISP_SETUP core (minimal-DSP, ~14-cycle).
+// isp_setup_min - CMD_TRIANGLE_ISP_SETUP core (minimal-DSP, ~18 cycles).
 //
 // Based on refsw2's ISP Setup(), with these deliberate differences:
 //   - tri_area computed ONCE; inv_tri_area = fast reciprocal of it (the only
@@ -14,7 +14,7 @@
 //
 // Datapath: 4 combinational mac16 lanes (mul16+add24), exactly one op per lane
 // per cycle (lane inputs registered -> result valid next cycle), plus the
-// 2-cycle fp_rcp_fast. EVERY arithmetic op flows through a lane: a multiply is
+// pipelined (3-cycle) fp_rcp_fast; c7 waits on rc_ack. Every arithmetic op flows
 // (a*b)+0; an add/sub is (a*ONE) +/- c. A fixed micro-schedule drives the lanes
 // each cycle and stores results into a scratchpad. done asserts at ~cycle 13.
 //
@@ -65,18 +65,25 @@ module isp_setup_min (
     reg  [31:0] lb_a,lb_b,lb_c; reg lb_s;  wire [31:0] lb_q;
     reg  [31:0] lc_a,lc_b,lc_c; reg lc_s;  wire [31:0] lc_q;
     reg  [31:0] ld_a,ld_b,ld_c; reg ld_s;  wire [31:0] ld_q;
-    mac16 u_la (.a(la_a),.b(la_b),.c(la_c),.sub(la_s),.q(la_q));
-    mac16 u_lb (.a(lb_a),.b(lb_b),.c(lb_c),.sub(lb_s),.q(lb_q));
-    mac16 u_lc (.a(lc_a),.b(lc_b),.c(lc_c),.sub(lc_s),.q(lc_q));
-    mac16 u_ld (.a(ld_a),.b(ld_b),.c(ld_c),.sub(ld_s),.q(ld_q));
+    mac16 u_la (.clk(clk),.reset(reset),.a(la_a),.b(la_b),.c(la_c),.sub(la_s),.q(la_q));
+    mac16 u_lb (.clk(clk),.reset(reset),.a(lb_a),.b(lb_b),.c(lb_c),.sub(lb_s),.q(lb_q));
+    mac16 u_lc (.clk(clk),.reset(reset),.a(lc_a),.b(lc_b),.c(lc_c),.sub(lc_s),.q(lc_q));
+    mac16 u_ld (.clk(clk),.reset(reset),.a(ld_a),.b(ld_b),.c(ld_c),.sub(ld_s),.q(ld_q));
 
     // ---------------- fast reciprocal ----------------
     // Dedicated input reg so the recip samples a stable tri_area exactly when
-    // rc_req is pulsed (avoids racing the tri_area store). 2-cycle latency:
-    // rc_req in cycle N -> rc_y valid in cycle N+2.
+    // rc_req is pulsed (avoids racing the tri_area store). 3-cycle latency;
+    // the setup FSM waits on rc_ack rather than a fixed cycle.
     reg        rc_req; reg [31:0] rc_in; wire rc_ack; wire [31:0] rc_y;
     fp_rcp_fast u_rcp (.clk(clk),.reset(reset),.in_valid(rc_req),.x(rc_in),
                        .out_valid(rc_ack),.y(rc_y));
+    // Sticky latch: the recip out_valid is a 1-clock pulse and may not land on a
+    // body (phase-0) clock, so capture it + the result for the FSM to consume.
+    reg        rc_done; reg [31:0] inv_reg;
+    always @(posedge clk) begin
+        if (reset || rc_req) rc_done <= 1'b0;
+        else if (rc_ack)     begin rc_done <= 1'b1; inv_reg <= rc_y; end
+    end
 
     // ---------------- sign helpers ----------------
     function fzero(input [31:0] f); fzero=(f[30:0]==31'd0); endfunction
@@ -93,21 +100,39 @@ module isp_setup_min (
     task L3(input [31:0]a,b,c,input s); begin ld_a<=a;ld_b<=b;ld_c<=c;ld_s<=s; end endtask
 
     // ---------------- FSM ----------------
+    // The mac16 lanes are now a 2-stage pipeline (mul|add) for timing, so a
+    // scheduled op takes several clocks. To keep the (correct) hand-written
+    // micro-schedule below unchanged, each logical cycle is stretched to MAC_PH
+    // real clocks: the case body runs only on phase 0 (issuing lane ops), and
+    // phases 1..MAC_PH-1 let the pipelined mac produce a stable result before
+    // the next logical cycle reads it. Lane inputs are registered and held
+    // across the phases, so the mac sees stable operands.
+    localparam integer MAC_PH = 4;   // clocks per logical setup cycle (3-stage mac + input reg)
+    reg [1:0] phase;
     reg [4:0] cyc;
     localparam LOAD=0, RUN=1, FIN=2;
     reg [1:0] st;
 
+    wire body = (phase == 2'd0);     // run the scheduled body this clock?
+
     always @(posedge clk) begin
-        if (reset) begin st<=LOAD; done<=0; rc_req<=0; cyc<=0; end
+        if (reset) begin st<=LOAD; done<=0; rc_req<=0; cyc<=0; phase<=0; end
         else begin
             done<=0; rc_req<=0;
+            // phase counter (advances the logical cycle every MAC_PH clocks)
+            if (st==RUN) phase <= (phase==MAC_PH-1) ? 2'd0 : phase+2'd1;
+            else         phase <= 2'd0;
+
             case (st)
             LOAD: if (start) begin
                 X1<=x1;Y1<=y1;Z1<=z1; X2<=x2;Y2<=y2;Z2<=z2; X3<=x3;Y3<=y3;Z3<=z3;
-                XB<=xbase; YB<=ybase; cyc<=0; st<=RUN;
+                XB<=xbase; YB<=ybase; cyc<=0; phase<=0; st<=RUN;
             end
-            RUN: begin
-                cyc<=cyc+1;
+            RUN: if (body) begin
+                // c7 waits for the (pipelined) reciprocal; every other cycle
+                // advances normally.
+                if (cyc==7 && !rc_done) cyc<=cyc;
+                else                    cyc<=cyc+1;
                 case (cyc)
                 // c0: issue area diffs
                 0: begin
@@ -143,7 +168,7 @@ module isp_setup_min (
                 // c5: store tri_area (req recip), Aa0/Ba0/XL2; issue Aa,Ba,YT2
                 5: begin
                     tri_area<=la_q; Aa0<=lb_q; Ba0<=lc_q; XL2<=ld_q;
-                    rc_in<=la_q; rc_req<=1;     // recip(tri_area); rc_y ready @c7
+                    rc_in<=la_q; rc_req<=1;     // recip(tri_area); c7 waits on rc_ack
                     // Aa=Aa0-(z2-z1)*(Y3-Y1) = (-(z2-z1))*(Y3-Y1)+Aa0
                     L1(fneg32(d_Z2Z1),d_Y3Y1,lb_q,0);
                     L2(fneg32(d_X2X1),d_Z3Z1,lc_q,0); // Ba=Ba0-(X2-X1)*(z3-z1)
@@ -157,12 +182,14 @@ module isp_setup_min (
                     L0(X3,ONE,XB,1);            // XL3
                     L1(Y3,ONE,YB,1);            // YT3
                 end
-                // c7: recip ready. store XL3/YT3/inv; issue ddx,ddy + DX12,DX23
-                7: begin
-                    XL3<=la_q; YT3<=lb_q;
-                    inv_area <= rc_y;
-                    L0(fneg32(Aa),rc_y,ZERO,0); // ddx = -(Aa*inv)
-                    L1(fneg32(Ba),rc_y,ZERO,0); // ddy = -(Ba*inv)
+                // c7: WAIT for reciprocal (rc_ack). When ready: store inv, issue
+                //     ddx=-Aa*inv, ddy=-Ba*inv, and the first edge diffs.
+                //     XL3/YT3 were produced in c6 and are captured on entry.
+                7: if (rc_done) begin
+                    XL3<=la_q; YT3<=lb_q;       // c6 results (stable during wait)
+                    inv_area <= inv_reg;
+                    L0(fneg32(Aa),inv_reg,ZERO,0); // ddx = -(Aa*inv)
+                    L1(fneg32(Ba),inv_reg,ZERO,0); // ddy = -(Ba*inv)
                     L2(sgn,d_X1X2,ZERO,0);      // DX12
                     L3(sgn,d_X2X3,ZERO,0);      // DX23
                 end

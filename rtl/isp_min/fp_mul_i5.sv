@@ -24,25 +24,25 @@ module fp_mul_i5 (
     wire [15:0] sig = {1'b1, f[22:8]};
     wire [20:0] prod = sig * {11'd0, k};         // 16 x 5 -> 21 bits
 
-    // Leading-one position of prod. sig has its 1 at bit15; multiplying by
-    // k in [1,31] adds 0..5 bits, so the leading one is at bit 15..20.
-    // Find it and normalize so the hidden 1 sits just above 15 fraction bits.
-    reg  [4:0]  msb;      // index of leading one (15..20)
-    integer i;
+    // Normalize. sig has its leading 1 at bit15; multiplying by k in [1,31] adds
+    // 0..5 bits, so the leading one is at bit 15..20 - only 6 possibilities.
+    // Flatten the leading-one search + shift into a small priority mux (no
+    // barrel shifter / general LZ loop): for a leading one at bit p, the 15
+    // fraction bits are prod[p-1 -: 15] and the exponent gains (p-15).
+    reg  [14:0] frac15;
+    reg  [2:0]  sh;                              // 0..5
     always @(*) begin
-        msb = 5'd15;
-        for (i = 15; i <= 20; i = i + 1)
-            if (prod[i]) msb = i[4:0];
+        casez (prod[20:15])
+            6'b1?????: begin frac15 = prod[19:5]; sh = 3'd5; end  // leading @20
+            6'b01????: begin frac15 = prod[18:4]; sh = 3'd4; end  // @19
+            6'b001???: begin frac15 = prod[17:3]; sh = 3'd3; end  // @18
+            6'b0001??: begin frac15 = prod[16:2]; sh = 3'd2; end  // @17
+            6'b00001?: begin frac15 = prod[15:1]; sh = 3'd1; end  // @16
+            default:   begin frac15 = prod[14:0]; sh = 3'd0; end  // @15
+        endcase
     end
-
-    // shift so leading one -> bit15, take low 15 as fraction (pad to 23).
-    wire [5:0]  sh   = msb - 5'd15;              // 0..5
-    wire [20:0] norm = prod >> sh;               // leading one now at bit15
-    wire [22:0] mant = {norm[14:0], 8'b0};       // 15 real frac bits, padded
-
-    // exponent: ef + (msb-15). The 16-bit sig already represents 1.f * 2^(ef-127)
-    // scaled by k; each extra leading-bit is one more power of two.
-    wire signed [10:0] e = $signed({3'b0, ef}) + $signed({6'b0, sh});
+    wire [22:0] mant = {frac15, 8'b0};           // 15 real frac bits, padded
+    wire signed [10:0] e = $signed({3'b0, ef}) + $signed({8'b0, sh});
 
     wire is_zero  = f_zero | k_zero;
     wire overflow = (e >= 255);

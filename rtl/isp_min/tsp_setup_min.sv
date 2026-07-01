@@ -58,10 +58,10 @@ module tsp_setup_min (
     reg  [31:0] l1a,l1b,l1c; reg l1s; wire [31:0] l1q;
     reg  [31:0] l2a,l2b,l2c; reg l2s; wire [31:0] l2q;
     reg  [31:0] l3a,l3b,l3c; reg l3s; wire [31:0] l3q;
-    mac16 ml0 (.a(l0a),.b(l0b),.c(l0c),.sub(l0s),.q(l0q));
-    mac16 ml1 (.a(l1a),.b(l1b),.c(l1c),.sub(l1s),.q(l1q));
-    mac16 ml2 (.a(l2a),.b(l2b),.c(l2c),.sub(l2s),.q(l2q));
-    mac16 ml3 (.a(l3a),.b(l3b),.c(l3c),.sub(l3s),.q(l3q));
+    mac16 ml0 (.clk(clk),.reset(reset),.a(l0a),.b(l0b),.c(l0c),.sub(l0s),.q(l0q));
+    mac16 ml1 (.clk(clk),.reset(reset),.a(l1a),.b(l1b),.c(l1c),.sub(l1s),.q(l1q));
+    mac16 ml2 (.clk(clk),.reset(reset),.a(l2a),.b(l2b),.c(l2c),.sub(l2s),.q(l2q));
+    mac16 ml3 (.clk(clk),.reset(reset),.a(l3a),.b(l3b),.c(l3c),.sub(l3s),.q(l3q));
 
     // ---------------- reciprocal ----------------
     reg        rc_req; reg [31:0] rc_in; wire rc_ack; wire [31:0] rc_y;
@@ -122,10 +122,23 @@ module tsp_setup_min (
     reg [1:0] fsm; reg [3:0] gc; reg [3:0] nextp;
     reg emitA, emitB;   // stage-6 emit flags resolved after both contexts
 
+    // The mac16 lanes are a 2-stage (mul|add) pipeline for timing; stretch each
+    // logical step to MAC_PH clocks so the scheduled body (which reads lane
+    // results in the next logical step) sees stable pipelined results. Body runs
+    // on phase 0; phases 1..MAC_PH-1 let the mac complete.
+    localparam integer MAC_PH = 4;
+    reg [1:0] phase;
+    wire body = (phase == 2'd0);
+
     always @(posedge clk) begin
-        if (reset) begin fsm<=LOAD; done<=0; rc_req<=0; plane_valid<=0; Ast<=7; Bst<=7; end
+        if (reset) begin fsm<=LOAD; done<=0; rc_req<=0; plane_valid<=0; Ast<=7; Bst<=7; phase<=0; end
         else begin
             done<=0; rc_req<=0; plane_valid<=0; emitA=0; emitB=0;
+            // phase counter: only LOAD runs every clock; GEO/RUN are stretched.
+            if (fsm==GEO || fsm==RUN) phase <= (phase==MAC_PH-1) ? 2'd0 : phase+2'd1;
+            else                      phase <= 2'd0;
+
+            if (fsm==LOAD || body)
             case (fsm)
             LOAD: if (start) begin
                 X1<=x1;Y1<=y1;Z1<=z1;X2<=x2;Y2<=y2;Z2<=z2;X3<=x3;Y3<=y3;Z3<=z3;

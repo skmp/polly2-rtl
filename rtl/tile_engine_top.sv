@@ -256,6 +256,7 @@ module tile_engine_top #(
         S_TSP_SETUP = 4'd8,  // wait for tsp_setup_min to finish
         S_DRAW_RD   = 4'd9,  // draw-tags: present dt read addr
         S_RAS_WR    = 4'd10, // rasterize: depth-compare + write-back phase
+        S_RAS_WAIT  = 4'd11, // rasterize: wait for pipelined line eval
         S_DONE      = 4'd5;
 
     reg [3:0]       state;
@@ -302,7 +303,7 @@ module tile_engine_top #(
             col_wdata[32*dr_bank +: 32]  = {8'hFF, dt_rdata[DTW*dr_bank + TAG_BITS-1 -: TAG_BITS]};
         end
         S_FLUSH_RD: col_addr[7*idx[2:0] +: 7] = idx[9:3];
-        S_ISP_RASTER:
+        S_ISP_RASTER, S_RAS_WAIT:
             for (ai = 0; ai < NBANKS; ai = ai + 1)
                 dt_addr[7*ai +: 7] = pix_addr(ras_x + ai[4:0], ras_y);
         S_RAS_WR:
@@ -366,6 +367,8 @@ module tile_engine_top #(
     localparam integer RAS_LANES = 8;
     reg  [4:0]  ras_y;                 // current line (0..31)
     reg  [4:0]  ras_x;                 // first pixel of the current chunk
+    reg         ras_in_valid;          // issue this chunk into the pipeline
+    wire        ras_out_valid;         // pipeline results ready
     wire [RAS_LANES-1:0]    ras_inside;
     wire [32*RAS_LANES-1:0] ras_invw_flat;
     // per-lane invW slice (function avoids an unpacked wire array + generate)
@@ -374,11 +377,13 @@ module tile_engine_top #(
     endfunction
 
     isp_raster_line #(.LANES(RAS_LANES)) u_line (
-        .y(ras_y), .x_base(ras_x),
+        .clk(clk_100m), .reset(reset_100m),
+        .in_valid(ras_in_valid), .y(ras_y), .x_base(ras_x),
         .c1(isp_c1), .c2(isp_c2), .c3(isp_c3), .c4(isp_c4),
         .dx12(isp_dx12),.dx23(isp_dx23),.dx31(isp_dx31),.dx41(isp_dx41),
         .dy12(isp_dy12),.dy23(isp_dy23),.dy31(isp_dy31),.dy41(isp_dy41),
         .ddx(isp_ddx_invw),.ddy(isp_ddy_invw),.c_invw(isp_c_invw),
+        .out_valid(ras_out_valid),
         .inside_mask(ras_inside),
         .invw_flat(ras_invw_flat)
     );
@@ -471,12 +476,14 @@ module tile_engine_top #(
             mem_chan <= 2'b0;
             isp_start<= 1'b0;
             tsp_start<= 1'b0;
+            ras_in_valid <= 1'b0;
         end else begin
             cmd_done <= 1'b0;    // default: single-cycle pulse
             mem_rd   <= 1'b0;
             mem_wr   <= 4'b0;
             isp_start<= 1'b0;    // default: single-cycle start pulse
             tsp_start<= 1'b0;
+            ras_in_valid <= 1'b0;   // default: single-cycle issue pulse
 
             case (state)
             // --------------------------------------------------------
@@ -582,12 +589,22 @@ module tile_engine_top #(
             // depth read address to all lane-banks (all banks share the same addr
             // in a chunk). isp_raster_line evaluates inside/invW combinationally.
             S_ISP_RASTER: begin
-                if (isp_r_cull) state <= S_DONE;   // dt read addr driven comb
-                else            state <= S_RAS_WR;
+                if (isp_r_cull) state <= S_DONE;
+                else begin
+                    ras_in_valid <= 1'b1;   // issue this chunk into the pipeline
+                    state        <= S_RAS_WAIT;
+                end
             end
 
-            // WRITE phase: dt_rdata valid; the comb block does the per-lane
-            // DepthMode test + write-back. Here we just advance the chunk.
+            // WAIT: hold ras_x/ras_y (so dt read addr + pipeline inputs are
+            // stable) until the pipelined line eval produces out_valid. dt_rdata
+            // for this chunk is valid throughout (addr held by the comb block).
+            S_RAS_WAIT: begin
+                if (ras_out_valid) state <= S_RAS_WR;
+            end
+
+            // WRITE phase: pipelined inside/invW valid; the comb block does the
+            // per-lane DepthMode test + write-back. Here we just advance.
             S_RAS_WR: begin
                 // advance x-chunk; at end of line advance y (or finish)
                 if (ras_x == XW'(TILE_W-RAS_LANES)) begin
