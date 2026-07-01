@@ -68,6 +68,20 @@ module tile_engine_top #(
     localparam REG_BG_TAG   = 6'd1;
     localparam REG_TILE_BASE= 6'd2;
 
+    // ISP triangle setup inputs (host writes these before CMD_TRIANGLE_ISP_SETUP)
+    localparam REG_X1 = 6'd8,  REG_Y1 = 6'd9,  REG_Z1 = 6'd10;
+    localparam REG_X2 = 6'd11, REG_Y2 = 6'd12, REG_Z2 = 6'd13;
+    localparam REG_X3 = 6'd14, REG_Y3 = 6'd15, REG_Z3 = 6'd16;
+    localparam REG_X_BASE = 6'd17, REG_Y_BASE = 6'd18;   // tile origin (screen)
+    localparam REG_ISP_WORD = 6'd19;                     // params->isp (CullMode)
+
+    // Convenient reads of the input registers (assign-from-regs style).
+    wire [31:0] isp_x1 = regs[REG_X1], isp_y1 = regs[REG_Y1], isp_z1 = regs[REG_Z1];
+    wire [31:0] isp_x2 = regs[REG_X2], isp_y2 = regs[REG_Y2], isp_z2 = regs[REG_Z2];
+    wire [31:0] isp_x3 = regs[REG_X3], isp_y3 = regs[REG_Y3], isp_z3 = regs[REG_Z3];
+    wire [31:0] isp_xbase = regs[REG_X_BASE], isp_ybase = regs[REG_Y_BASE];
+    wire [31:0] isp_word  = regs[REG_ISP_WORD];
+
     // ---- command opcodes ----
     localparam CMD_TILE_CLEAR            = 7'd64;
     localparam CMD_TRIANGLE_ISP_SETUP    = 7'd65;
@@ -194,6 +208,7 @@ module tile_engine_top #(
         S_DRAWTAGS  = 4'd2,
         S_FLUSH_RD  = 4'd3,  // present pixel, issue write
         S_FLUSH_WAIT= 4'd4,  // wait for ddram to accept (not busy)
+        S_ISP_SETUP = 4'd6,  // wait for isp_setup_min to finish
         S_DONE      = 4'd5;
 
     reg [3:0]       state;
@@ -207,6 +222,40 @@ module tile_engine_top #(
 
     assign ready = (state == S_IDLE);
 
+    // ------------------------------------------------------------------
+    // ISP triangle setup (CMD_TRIANGLE_ISP_SETUP)
+    // ------------------------------------------------------------------
+    // 4-lane, ~14-cycle, minimal-DSP setup. invW plane only. Tile-local:
+    // C1..C4 / c_invw anchored at (REG_X_BASE, REG_Y_BASE). Reduced precision
+    // (16-bit-mantissa mults, ~24-bit adds, cheap 1/x). Outputs are latched into
+    // the isp_* result registers below for the rasterizer to consume.
+    reg         isp_start;
+    wire        isp_done;
+    wire        isp_sgn_neg, isp_cull;
+    wire [31:0] w_dx12,w_dx23,w_dx31,w_dx41, w_dy12,w_dy23,w_dy31,w_dy41;
+    wire [31:0] w_c1,w_c2,w_c3,w_c4, w_ddx,w_ddy,w_cinvw;
+
+    isp_setup_min u_isp (
+        .clk(clk_100m), .reset(reset_100m), .start(isp_start), .done(isp_done),
+        .isp_word(isp_word),
+        .x1(isp_x1), .y1(isp_y1), .z1(isp_z1),
+        .x2(isp_x2), .y2(isp_y2), .z2(isp_z2),
+        .x3(isp_x3), .y3(isp_y3), .z3(isp_z3),
+        .xbase(isp_xbase), .ybase(isp_ybase),
+        .sgn_neg(isp_sgn_neg), .cull(isp_cull),
+        .dx12(w_dx12), .dx23(w_dx23), .dx31(w_dx31), .dx41(w_dx41),
+        .dy12(w_dy12), .dy23(w_dy23), .dy31(w_dy31), .dy41(w_dy41),
+        .c1(w_c1), .c2(w_c2), .c3(w_c3), .c4(w_c4),
+        .ddx_invw(w_ddx), .ddy_invw(w_ddy), .c_invw(w_cinvw)
+    );
+
+    // Latched setup results (the inner-loop rasterizer consumes these).
+    reg        isp_r_sgn_neg, isp_r_cull;
+    reg [31:0] isp_dx12,isp_dx23,isp_dx31,isp_dx41;
+    reg [31:0] isp_dy12,isp_dy23,isp_dy31,isp_dy41;
+    reg [31:0] isp_c1,isp_c2,isp_c3,isp_c4;
+    reg [31:0] isp_ddx_invw, isp_ddy_invw, isp_c_invw;
+
     always @(posedge clk_100m) begin
         if (reset_100m) begin
             state    <= S_IDLE;
@@ -215,10 +264,12 @@ module tile_engine_top #(
             mem_rd   <= 1'b0;
             mem_wr   <= 4'b0;
             mem_chan <= 2'b0;
+            isp_start<= 1'b0;
         end else begin
             cmd_done <= 1'b0;    // default: single-cycle pulse
             mem_rd   <= 1'b0;
             mem_wr   <= 4'b0;
+            isp_start<= 1'b0;    // default: single-cycle start pulse
 
             case (state)
             // --------------------------------------------------------
@@ -235,6 +286,10 @@ module tile_engine_top #(
                             CMD_TILE_CLEAR:     state <= S_CLEAR;
                             CMD_TILE_DRAW_TAGS: state <= S_DRAWTAGS;
                             CMD_TILE_FLUSH:     state <= S_FLUSH_RD;
+                            CMD_TRIANGLE_ISP_SETUP: begin
+                                isp_start <= 1'b1;      // kick the setup pipeline
+                                state     <= S_ISP_SETUP;
+                            end
                             // nop commands: acknowledge, one cycle before ready
                             default: begin
                                 cmd_done <= 1'b1;
@@ -282,6 +337,19 @@ module tile_engine_top #(
                         idx   <= idx + 1'b1;
                         state <= S_FLUSH_RD;
                     end
+                end
+            end
+
+            // --------------------------------------------------------
+            // TRIANGLE_ISP_SETUP: wait for the setup pipeline, latch results.
+            S_ISP_SETUP: begin
+                if (isp_done) begin
+                    isp_r_sgn_neg <= isp_sgn_neg; isp_r_cull <= isp_cull;
+                    isp_dx12<=w_dx12; isp_dx23<=w_dx23; isp_dx31<=w_dx31; isp_dx41<=w_dx41;
+                    isp_dy12<=w_dy12; isp_dy23<=w_dy23; isp_dy31<=w_dy31; isp_dy41<=w_dy41;
+                    isp_c1<=w_c1; isp_c2<=w_c2; isp_c3<=w_c3; isp_c4<=w_c4;
+                    isp_ddx_invw<=w_ddx; isp_ddy_invw<=w_ddy; isp_c_invw<=w_cinvw;
+                    state <= S_DONE;
                 end
             end
 
