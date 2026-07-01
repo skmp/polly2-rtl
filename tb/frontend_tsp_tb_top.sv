@@ -427,7 +427,13 @@ module frontend_tsp_tb_top import tsp_pkg::*; (
                 end
                 RSTATE_FLUSH: begin
                     // shade every pixel of the tile (stream through tsp_shade_pp),
-                    // then write out the colors
+                    // then write out the colors.
+                    // IMPORTANT: the plane cache is TILE-LOCAL - tsp_setup_min
+                    // anchors the interpolation planes at this tile's origin
+                    // (t_xbase/t_ybase). A cached tag from a PREVIOUS tile holds
+                    // planes anchored at the wrong origin, so the cache MUST be
+                    // invalidated at the start of every tile's shade pass.
+                    for (i = 0; i < PC_N; i = i + 1) pc_valid[i] = 1'b0;
                     $display("[TILE %0d,%0d] shade+flush", cur_tx, cur_ty);
                     shp <= 10'd0; sh_out_n <= 0;
                     st <= SH_PIX;
