@@ -22,9 +22,11 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/isp_min/fp_mul16.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/isp_min/fp_add24.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/isp_min/fp_rcp_fast.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/isp_min/fp_mul_i5.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/isp_min/fp_mul_c9.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/isp_min/mac16.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/isp_min/isp_setup_min.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/isp_min/isp_raster_line.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/isp_min/tsp_setup_min.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tile_engine_top.sv
 # VRAM ROM init: under `SYNTHESIS, tri_setup_seq_top loads build/vram.mif via the
 # ram_init_file attribute (gsplat gauss_lut pattern). Generate it with

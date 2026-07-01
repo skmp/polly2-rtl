@@ -28,7 +28,7 @@
 //       64 TILE_CLEAR           : depth/tag tile <= {REG_BG_DEPTH, REG_BG_TAG}
 //       65 TRIANGLE_ISP_SETUP   : compute edge/invW-plane coeffs (isp_setup_min)
 //       66 TRIANGLE_ISP_RASTERIZE: opaque; one line/clock, depth test + tag write
-//       67 TRIANGLE_TSP_SETUP    : nop
+//       67 TRIANGLE_TSP_SETUP    : compute 10 interp planes (tsp_setup_min)
 //       68 TRIANGLE_TSP_SHADE    : nop
 //       69 TILE_DRAW_TAGS        : color[y][x] <= {8'hFF, tag[y][x]}
 //       70 TILE_FLUSH            : color tile -> DDR3 at REG_TILE_BASE + y*32+x
@@ -76,12 +76,27 @@ module tile_engine_top #(
     localparam REG_ISP_WORD = 6'd19;                     // params->isp (Cull/Depth/ZWrite)
     localparam REG_ISP_TAG  = 6'd20;                     // parameter_tag_t written on pass
 
+    // TSP triangle setup inputs (host writes before CMD_TRIANGLE_TSP_SETUP).
+    // TSP has its OWN vertices (separate from the ISP ones above).
+    localparam REG_T_X1=6'd24, REG_T_Y1=6'd25, REG_T_Z1=6'd26;
+    localparam REG_T_X2=6'd27, REG_T_Y2=6'd28, REG_T_Z2=6'd29;
+    localparam REG_T_X3=6'd30, REG_T_Y3=6'd31, REG_T_Z3=6'd32;
+    localparam REG_T_U1=6'd33, REG_T_V1=6'd34, REG_T_U2=6'd35, REG_T_V2=6'd36, REG_T_U3=6'd37, REG_T_V3=6'd38;
+    localparam REG_T_COL1=6'd39, REG_T_COL2=6'd40, REG_T_COL3=6'd41;   // packed ARGB
+    localparam REG_T_OFS1=6'd42, REG_T_OFS2=6'd43, REG_T_OFS3=6'd44;   // packed offset
+    localparam REG_ISP_TSP=6'd45, REG_TSP=6'd46, REG_TCW=6'd47;        // TA words
+
     // Convenient reads of the input registers (assign-from-regs style).
     wire [31:0] isp_x1 = regs[REG_X1], isp_y1 = regs[REG_Y1], isp_z1 = regs[REG_Z1];
     wire [31:0] isp_x2 = regs[REG_X2], isp_y2 = regs[REG_Y2], isp_z2 = regs[REG_Z2];
     wire [31:0] isp_x3 = regs[REG_X3], isp_y3 = regs[REG_Y3], isp_z3 = regs[REG_Z3];
     wire [31:0] isp_xbase = regs[REG_X_BASE], isp_ybase = regs[REG_Y_BASE];
     wire [31:0] isp_word  = regs[REG_ISP_WORD];
+
+    // TSP: the isp_tsp word carries the Gouraud/Texture/Offset flags for setup.
+    wire        tsp_gouraud = regs[REG_ISP_TSP][23];
+    wire        tsp_offset  = regs[REG_ISP_TSP][24];
+    wire        tsp_texture = regs[REG_ISP_TSP][25];
 
     // ---- command opcodes ----
     localparam CMD_TILE_CLEAR            = 7'd64;
@@ -92,15 +107,32 @@ module tile_engine_top #(
     localparam CMD_TILE_DRAW_TAGS        = 7'd69;
     localparam CMD_TILE_FLUSH            = 7'd70;
 
-    // ---- tile buffers ----
-    // Organized as TILE_W banks (one per x column), each TILE_H deep (indexed by
-    // y). This lets the rasterizer write/read a whole scanline (all x, fixed y)
-    // in a single clock. Linear index idx = y*TILE_W + x maps to
-    //   bank x = idx[XW-1:0], row y = idx[IDX_W-1:XW].
-    // depth/tag entry: {32-bit invW depth, TAG_BITS tag}
-    (* ramstyle = "M10K" *) reg [32+TAG_BITS-1:0] dt_buf  [0:TILE_W-1][0:TILE_H-1];
-    // color: 32-bit
-    (* ramstyle = "M10K" *) reg [31:0]            col_buf [0:TILE_W-1][0:TILE_H-1];
+    // ---- tile buffers (block RAM, banked) ----
+    // Both buffers are NBANKS single-port M10K banks so a NBANKS-pixel span of a
+    // scanline is accessed per clock while still mapping to block RAM. See
+    // tile_ram: bank = x[BW-1:0], addr = {y, x[4:BW]}.
+    localparam integer NBANKS = 8;
+    localparam integer DTW    = 32 + TAG_BITS;   // depth+tag width (56)
+
+    // depth/tag RAM
+    reg  [NBANKS-1:0]      dt_we;
+    reg  [7*NBANKS-1:0]    dt_addr;
+    reg  [DTW*NBANKS-1:0]  dt_wdata;
+    wire [DTW*NBANKS-1:0]  dt_rdata;
+    tile_ram #(.WIDTH(DTW), .NBANKS(NBANKS)) u_dt (
+        .clk(clk_100m), .we(dt_we), .addr(dt_addr), .wdata(dt_wdata), .rdata(dt_rdata));
+
+    // color RAM
+    reg  [NBANKS-1:0]      col_we;
+    reg  [7*NBANKS-1:0]    col_addr;
+    reg  [32*NBANKS-1:0]   col_wdata;
+    wire [32*NBANKS-1:0]   col_rdata;
+    tile_ram #(.WIDTH(32), .NBANKS(NBANKS)) u_col (
+        .clk(clk_100m), .we(col_we), .addr(col_addr), .wdata(col_wdata), .rdata(col_rdata));
+
+    // pixel (x,y) -> {bank, addr}. bank = x[2:0], addr = {y, x[4:3]}.
+    function [2:0] pix_bank(input [4:0] x);           pix_bank = x[2:0]; endfunction
+    function [6:0] pix_addr(input [4:0] x, input [4:0] y); pix_addr = {y, x[4:3]}; endfunction
 
     // linear-index split helpers (for the CLEAR/DRAWTAGS/FLUSH iterators)
     wire [XW-1:0] idx_x;
@@ -219,6 +251,7 @@ module tile_engine_top #(
         S_FLUSH_WAIT= 4'd4,  // wait for ddram to accept (not busy)
         S_ISP_SETUP = 4'd6,  // wait for isp_setup_min to finish
         S_ISP_RASTER= 4'd7,  // rasterize one line per clock (opaque)
+        S_TSP_SETUP = 4'd8,  // wait for tsp_setup_min to finish
         S_DONE      = 4'd5;
 
     reg [3:0]       state;
@@ -272,29 +305,30 @@ module tile_engine_top #(
     // ------------------------------------------------------------------
     // ISP rasterize (CMD_TRIANGLE_ISP_RASTERIZE) - opaque only.
     // ------------------------------------------------------------------
-    // Processes one 32-pixel scanline per clock. isp_raster_line evaluates all
-    // 32 Xhs/invW combinationally for the current line; per inside-pixel we run
-    // the opaque DepthMode test and, on pass, write invW depth + tag into the
-    // 32 depth/tag banks (all in the same clock).
-    reg  [4:0]  ras_y;                 // current line
-    wire [31:0] ras_inside;
-    wire [31:0] ras_invw [0:TILE_W-1];
+    // Processes RAS_LANES pixels per clock. isp_raster_line evaluates the
+    // Xhs/invW of RAS_LANES consecutive pixels [ras_x .. ras_x+RAS_LANES-1]
+    // combinationally; per inside-pixel we run the opaque DepthMode test and, on
+    // pass, write invW depth + tag into those banks (all in the same clock).
+    // The FSM sweeps ras_x across the line in TILE_W/RAS_LANES chunks.
+    // Set RAS_LANES back to TILE_W (32) to restore whole-line-per-clock.
+    localparam integer RAS_LANES = 8;
+    reg  [4:0]  ras_y;                 // current line (0..31)
+    reg  [4:0]  ras_x;                 // first pixel of the current chunk
+    wire [RAS_LANES-1:0]    ras_inside;
+    wire [32*RAS_LANES-1:0] ras_invw_flat;
+    // per-lane invW slice (function avoids an unpacked wire array + generate)
+    function [31:0] ras_invw(input integer lane);
+        ras_invw = ras_invw_flat[32*lane +: 32];
+    endfunction
 
-    isp_raster_line u_line (
-        .y(ras_y),
+    isp_raster_line #(.LANES(RAS_LANES)) u_line (
+        .y(ras_y), .x_base(ras_x),
         .c1(isp_c1), .c2(isp_c2), .c3(isp_c3), .c4(isp_c4),
         .dx12(isp_dx12),.dx23(isp_dx23),.dx31(isp_dx31),.dx41(isp_dx41),
         .dy12(isp_dy12),.dy23(isp_dy23),.dy31(isp_dy31),.dy41(isp_dy41),
         .ddx(isp_ddx_invw),.ddy(isp_ddy_invw),.c_invw(isp_c_invw),
         .inside_mask(ras_inside),
-        .invw_0(ras_invw[0]),  .invw_1(ras_invw[1]),  .invw_2(ras_invw[2]),  .invw_3(ras_invw[3]),
-        .invw_4(ras_invw[4]),  .invw_5(ras_invw[5]),  .invw_6(ras_invw[6]),  .invw_7(ras_invw[7]),
-        .invw_8(ras_invw[8]),  .invw_9(ras_invw[9]),  .invw_10(ras_invw[10]),.invw_11(ras_invw[11]),
-        .invw_12(ras_invw[12]),.invw_13(ras_invw[13]),.invw_14(ras_invw[14]),.invw_15(ras_invw[15]),
-        .invw_16(ras_invw[16]),.invw_17(ras_invw[17]),.invw_18(ras_invw[18]),.invw_19(ras_invw[19]),
-        .invw_20(ras_invw[20]),.invw_21(ras_invw[21]),.invw_22(ras_invw[22]),.invw_23(ras_invw[23]),
-        .invw_24(ras_invw[24]),.invw_25(ras_invw[25]),.invw_26(ras_invw[26]),.invw_27(ras_invw[27]),
-        .invw_28(ras_invw[28]),.invw_29(ras_invw[29]),.invw_30(ras_invw[30]),.invw_31(ras_invw[31])
+        .invw_flat(ras_invw_flat)
     );
 
     // opaque DepthMode compare: does new invW pass against stored depth?
@@ -331,8 +365,49 @@ module tile_engine_top #(
         end
     endfunction
 
-    wire [2:0] depth_mode = isp_word[29:27];
-    wire       zwrite_dis = isp_word[24];
+    // ISP_TSP word bitfields (refsw core_structs ISP layout, LSB-first):
+    //  [22]UV_16b [23]Gouraud [24]Offset [25]Texture [26]ZWriteDis
+    //  [28:27]CullMode [31:29]DepthMode
+    wire [2:0] depth_mode = isp_word[31:29];
+    wire       zwrite_dis = isp_word[26];
+
+    // ------------------------------------------------------------------
+    // TSP FPU setup (CMD_TRIANGLE_TSP_SETUP)
+    // ------------------------------------------------------------------
+    // Produces the 10 interpolation planes (U,V, base Col RGBA, offset Ofs RGBA)
+    // in PlaneStepper {ddx,ddy,c} form, streamed out one per plane_valid pulse.
+    // Latched into isp-plane result registers for the (future) TSP shade step.
+    reg         tsp_start;
+    wire        tsp_done, tsp_pvalid;
+    wire [3:0]  tsp_pidx;
+    wire [31:0] tsp_pddx, tsp_pddy, tsp_pc;
+
+    tsp_setup_min u_tsp (
+        .clk(clk_100m), .reset(reset_100m), .start(tsp_start), .done(tsp_done),
+        .gouraud(tsp_gouraud), .texture(tsp_texture), .offset(tsp_offset),
+        .x1(regs[REG_T_X1]),.y1(regs[REG_T_Y1]),.z1(regs[REG_T_Z1]),
+        .x2(regs[REG_T_X2]),.y2(regs[REG_T_Y2]),.z2(regs[REG_T_Z2]),
+        .x3(regs[REG_T_X3]),.y3(regs[REG_T_Y3]),.z3(regs[REG_T_Z3]),
+        .xbase(isp_xbase), .ybase(isp_ybase),
+        .u1(regs[REG_T_U1]),.v1(regs[REG_T_V1]),.u2(regs[REG_T_U2]),.v2(regs[REG_T_V2]),
+        .u3(regs[REG_T_U3]),.v3(regs[REG_T_V3]),
+        .col1(regs[REG_T_COL1]),.col2(regs[REG_T_COL2]),.col3(regs[REG_T_COL3]),
+        .ofs1(regs[REG_T_OFS1]),.ofs2(regs[REG_T_OFS2]),.ofs3(regs[REG_T_OFS3]),
+        .plane_valid(tsp_pvalid), .plane_idx(tsp_pidx),
+        .o_ddx(tsp_pddx), .o_ddy(tsp_pddy), .o_c(tsp_pc)
+    );
+
+    // Latched TSP planes: index 0=U 1=V 2..5=Col 6..9=Ofs; each {ddx,ddy,c}.
+    reg [31:0] tsp_ddx [0:9];
+    reg [31:0] tsp_ddy [0:9];
+    reg [31:0] tsp_c   [0:9];
+    always @(posedge clk_100m) begin
+        if (tsp_pvalid) begin
+            tsp_ddx[tsp_pidx] <= tsp_pddx;
+            tsp_ddy[tsp_pidx] <= tsp_pddy;
+            tsp_c  [tsp_pidx] <= tsp_pc;
+        end
+    end
 
     always @(posedge clk_100m) begin
         if (reset_100m) begin
@@ -343,11 +418,13 @@ module tile_engine_top #(
             mem_wr   <= 4'b0;
             mem_chan <= 2'b0;
             isp_start<= 1'b0;
+            tsp_start<= 1'b0;
         end else begin
             cmd_done <= 1'b0;    // default: single-cycle pulse
             mem_rd   <= 1'b0;
             mem_wr   <= 4'b0;
             isp_start<= 1'b0;    // default: single-cycle start pulse
+            tsp_start<= 1'b0;
 
             case (state)
             // --------------------------------------------------------
@@ -369,8 +446,12 @@ module tile_engine_top #(
                                 state     <= S_ISP_SETUP;
                             end
                             CMD_TRIANGLE_ISP_RASTERIZE: begin
-                                ras_y <= 5'd0;          // start at line 0
+                                ras_y <= 5'd0; ras_x <= 5'd0;   // start at (0,0)
                                 state <= S_ISP_RASTER;
+                            end
+                            CMD_TRIANGLE_TSP_SETUP: begin
+                                tsp_start <= 1'b1;
+                                state     <= S_TSP_SETUP;
                             end
                             // nop commands: acknowledge, one cycle before ready
                             default: begin
@@ -443,20 +524,34 @@ module tile_engine_top #(
                 if (isp_r_cull) begin
                     state <= S_DONE;
                 end else begin
-                    for (bi = 0; bi < TILE_W; bi = bi + 1) begin
+                    // process RAS_LANES pixels of this chunk (bank = ras_x+bi)
+                    for (bi = 0; bi < RAS_LANES; bi = bi + 1) begin
                         if (ras_inside[bi] &&
-                            fcmp_pass(depth_mode, ras_invw[bi],
-                                      dt_buf[bi][ras_y][32+TAG_BITS-1:TAG_BITS])) begin
+                            fcmp_pass(depth_mode, ras_invw(bi),
+                                      dt_buf[ras_x + bi[4:0]][ras_y][32+TAG_BITS-1:TAG_BITS])) begin
                             // depth (top 32b) written unless ZWriteDis; tag always
-                            dt_buf[bi][ras_y] <= {
-                                zwrite_dis ? dt_buf[bi][ras_y][32+TAG_BITS-1:TAG_BITS]
-                                           : ras_invw[bi],
+                            dt_buf[ras_x + bi[4:0]][ras_y] <= {
+                                zwrite_dis ? dt_buf[ras_x + bi[4:0]][ras_y][32+TAG_BITS-1:TAG_BITS]
+                                           : ras_invw(bi),
                                 regs[REG_ISP_TAG][TAG_BITS-1:0] };
                         end
                     end
-                    if (ras_y == YW'(TILE_H-1)) state <= S_DONE;
-                    else                        ras_y <= ras_y + 1'b1;
+                    // advance x-chunk; at end of line advance y (or finish)
+                    if (ras_x == XW'(TILE_W-RAS_LANES)) begin
+                        ras_x <= 5'd0;
+                        if (ras_y == YW'(TILE_H-1)) state <= S_DONE;
+                        else                        ras_y <= ras_y + 1'b1;
+                    end else begin
+                        ras_x <= ras_x + XW'(RAS_LANES);
+                    end
                 end
+            end
+
+            // --------------------------------------------------------
+            // TRIANGLE_TSP_SETUP: wait for the plane pipeline. Planes are
+            // latched into tsp_ddx/ddy/c by the dedicated always block above.
+            S_TSP_SETUP: begin
+                if (tsp_done) state <= S_DONE;
             end
 
             // --------------------------------------------------------
