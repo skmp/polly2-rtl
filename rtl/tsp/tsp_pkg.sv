@@ -174,6 +174,26 @@ package tsp_pkg;
         logic      triangle_done;   // 1-cycle: consumer finished this triangle
     } triangle_ack_t;
 
+    // ---- PVR named register file (reg_file) ----
+    // The full scalar PVR register set (names, real byte offsets, and bitfield
+    // struct types) is AUTO-GENERATED from minicast pvr_regs.h. See
+    // tools/gen_pvr_regs.py; regenerate into rtl/tsp/gen/pvr_regs_gen.svh.
+    // This provides: OFF_<NAME> (13-bit byte offset) for every scalar register,
+    // a packed struct type <name>_reg_t for each bitfield register, and the
+    // aggregate pvr_regs_t. Table regions (FOG 0x200, PAL 0x1000) are NOT in the
+    // struct - reg_file backs them with M10K + dedicated read ports below.
+    localparam [12:0] OFF_FOG_TABLE_LO  = 13'h200;   // FOG_TABLE_START
+    localparam [12:0] OFF_FOG_TABLE_HI  = 13'h3FC;   // FOG_TABLE_END
+    localparam [12:0] OFF_PAL_RAM_LO    = 13'h1000;  // PALETTE_RAM_START
+    localparam [12:0] OFF_PAL_RAM_HI    = 13'h1FFC;  // PALETTE_RAM_END
+`include "pvr_regs_gen.svh"
+
+    // PAL / FOG table read-port bundles (injected read: addr in -> data out).
+    typedef struct packed { logic [9:0] raddr; } pal_rd_req_t;   // 0..1023
+    typedef struct packed { logic [31:0] rdata; } pal_rd_resp_t;
+    typedef struct packed { logic [6:0] raddr; } fog_rd_req_t;   // 0..127
+    typedef struct packed { logic [31:0] rdata; } fog_rd_resp_t;
+
     // ISP word (ISP_TSP) bit positions (LSB-first, core_structs.h:59):
     //   CacheBypass=21, UV_16b=22, Gouraud=23, Offset=24, Texture=25,
     //   ZWriteDis=26, CullMode=[28:27], DepthMode=[31:29].

@@ -20,7 +20,7 @@
 # MODE selects the scene fed to gen_vectors (default: tri).
 
 VERILATOR ?= verilator
-VFLAGS    = -Wno-WIDTH -Wno-UNOPTFLAT -Wno-UNSIGNED -Wno-DECLFILENAME
+VFLAGS    = -Wno-WIDTH -Wno-UNOPTFLAT -Wno-UNSIGNED -Wno-DECLFILENAME -Irtl/tsp/gen
 
 # combinational (bit-exact) design
 RTL_COMB  = rtl/fp_add.sv rtl/fp_mul.sv rtl/fp_div.sv \
@@ -38,7 +38,7 @@ MODE ?= tri
 MODEARG = $(if $(filter quad,$(MODE)),quad,)
 
 .PHONY: all vectors fp sim sim-tri sim-quad seq seq-tri seq-quad ip ip-tri ip-quad quartus clean \
-        test tex tex-addr tex-uv tex-filter tex-combiner tex-fetch pipe dcache256 oparse ispstrip region planecache
+        test tex tex-addr tex-uv tex-filter tex-combiner tex-fetch pipe dcache256 oparse ispstrip region regfile regen planecache
 
 # TSP module files (package first). ISP shared FP units come from rtl/isp_min.
 TSP_RTL = rtl/tsp/tsp_pkg.sv $(filter-out rtl/tsp/tsp_pkg.sv,$(wildcard rtl/tsp/*.sv))
@@ -46,7 +46,7 @@ TSP_RTL = rtl/tsp/tsp_pkg.sv $(filter-out rtl/tsp/tsp_pkg.sv,$(wildcard rtl/tsp/
 all: fp sim-tri sim-quad seq-tri seq-quad ip-tri ip-quad
 
 # ---- run the fast unit tests (FP prims + TSP texture blocks + full pipeline) ----
-test: fp tex dcache256 oparse ispstrip region pipe
+test: fp tex dcache256 oparse ispstrip region regfile pipe
 
 # ---- TSP texture-pipeline block tests (randomized vectors vs refsw) ----
 TSP = rtl/tsp
@@ -101,6 +101,20 @@ oparse: | $(BUILD)
 	  $(TSP)/tsp_pkg.sv tb/object_list_parser_tb_top.sv $(TSP)/object_list_parser.sv $(TSP)/data_cache256.sv \
 	  $(CWD)/tb/object_list_parser_tb.cpp --Mdir $(BUILD)/obj_oparse -o tb
 	./$(BUILD)/obj_oparse/tb
+
+# regenerate the PVR register typedefs from minicast's pvr_regs.h
+PVR_REGS_H = ../minicast/libswirl/hw/pvr/pvr_regs.h
+regen:
+	python3 tools/gen_pvr_regs.py $(PVR_REGS_H) > rtl/tsp/gen/pvr_regs_gen.svh
+	@echo "regenerated rtl/tsp/gen/pvr_regs_gen.svh"
+
+# reg_file unit test: PVR scalar regs (generated) + FOG/PAL M10K tables.
+regfile: | $(BUILD)
+	$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ --public-flat-rw -Irtl/tsp/gen \
+	  --top-module reg_file_tb_top \
+	  $(TSP)/tsp_pkg.sv tb/reg_file_tb_top.sv $(TSP)/reg_file.sv \
+	  $(CWD)/tb/reg_file_tb.cpp --Mdir $(BUILD)/obj_regfile -o tb
+	./$(BUILD)/obj_regfile/tb
 
 # region_array_parser unit test: region walk -> per-tile ordered states.
 region: | $(BUILD)

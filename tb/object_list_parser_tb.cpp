@@ -19,12 +19,21 @@ static void tick(){ dut->clk=0; dut->eval(); dut->clk=1; dut->eval(); }
 static uint32_t rng=0xC0FFEE11;
 static uint32_t rnd(){uint32_t x=rng;x^=x<<13;x^=x>>17;x^=x<<5;rng=x;return x;}
 
+// Write a 32-bit word at a 32-bit-VIEW byte address, de-interleaving into the
+// physical 64-bit VRAM exactly like refsw pvr_map32 (so the cache's 32-bit-view
+// read returns it): view word q=addr>>2 -> bank=q[20], wofs=q[19:0]; physical
+// VRAM[wofs&0xFFFF], low 32 if bank0 else high 32.
 static void put_word(uint32_t byte_addr, uint32_t val){
-    uint32_t wi = byte_addr >> 3; int lane = (byte_addr>>2)&1;
-    uint64_t w = VRAM[wi];
-    w &= ~((uint64_t)0xFFFFFFFFu << (32*lane));
-    w |= ((uint64_t)val) << (32*lane);
-    VRAM[wi] = w;
+    uint32_t q = byte_addr >> 2; uint32_t bank = (q>>20)&1; uint32_t wofs = (q&0xFFFFF)&0xFFFF;
+    uint64_t w = VRAM[wofs];
+    w &= ~((uint64_t)0xFFFFFFFFu << (32*bank));
+    w |= ((uint64_t)val) << (32*bank);
+    VRAM[wofs] = w;
+}
+// Read a 32-bit word from a 32-bit-VIEW byte address (same de-interleave).
+static uint32_t get_word(uint32_t byte_addr){
+    uint32_t q = byte_addr >> 2; uint32_t bank = (q>>20)&1; uint32_t wofs = (q&0xFFFFF)&0xFFFF;
+    return (uint32_t)(VRAM[wofs] >> (32*bank));
 }
 
 static uint32_t tstrip_entry(uint32_t poff,uint32_t skip,uint32_t shadow,uint32_t mask){
@@ -45,8 +54,7 @@ static std::vector<GoldEntry> golden_walk(uint32_t base_words){
     std::vector<GoldEntry> out;
     uint32_t base = base_words*4;
     for(int guard=0; guard<100000; guard++){
-        uint32_t wi = base>>3; int lane=(base>>2)&1;
-        uint32_t e = (uint32_t)(VRAM[wi] >> (32*lane));
+        uint32_t e = get_word(base);
         base += 4;
         if (((e>>31)&1)==0){
             uint32_t poff=e&0x1FFFFF, skip=(e>>21)&7, shadow=(e>>24)&1, mask=(e>>25)&0x3F;

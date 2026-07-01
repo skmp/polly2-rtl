@@ -17,12 +17,14 @@ static void tick(){ dut->clk=0; dut->eval(); dut->clk=1; dut->eval(); }
 static uint32_t rng=0xB16B00B5;
 static uint32_t rnd(){uint32_t x=rng;x^=x<<13;x^=x>>17;x^=x<<5;rng=x;return x;}
 
+// Write a 32-bit word at a 32-bit-VIEW byte address, de-interleaving into the
+// physical 64-bit VRAM like refsw pvr_map32 (matches data_cache256's read view).
 static void put_word(uint32_t byte_addr, uint32_t val){
-    uint32_t wi = byte_addr >> 3; int lane = (byte_addr>>2)&1;
-    uint64_t w = VRAM[wi];
-    w &= ~((uint64_t)0xFFFFFFFFu << (32*lane));
-    w |= ((uint64_t)val) << (32*lane);
-    VRAM[wi] = w;
+    uint32_t q = byte_addr >> 2; uint32_t bank = (q>>20)&1; uint32_t wofs = (q&0xFFFFF)&0xFFFF;
+    uint64_t w = VRAM[wofs];
+    w &= ~((uint64_t)0xFFFFFFFFu << (32*bank));
+    w |= ((uint64_t)val) << (32*bank);
+    VRAM[wofs] = w;
 }
 
 // region_state_e one-hot (must match tsp_pkg)
