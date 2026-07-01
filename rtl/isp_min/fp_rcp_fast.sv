@@ -10,7 +10,8 @@
 //         exp = 253 - ex after the <<1 normalize of r1 into [1,2).
 //
 // DaZ input -> saturates to a large finite value (no inf/NaN).
-// Latency: 2 cycles (issue -> registered NR -> valid).
+// Latency: 1 cycle (seed+NR+pack are combinational; result registered once).
+// in_valid in cycle N -> out_valid & y in cycle N+1. Accuracy ~0.0015% (16-bit).
 //
 module fp_rcp_fast (
     input             clk,
@@ -50,7 +51,7 @@ module fp_rcp_fast (
     function [31:0] nr_pack(
         input [16:0] m,     // Q1.16 in [1,2)
         input [16:0] r0,    // Q0.16 in (0.5,1]
-        input [7:0]  ex,
+        input [7:0]  exf,
         input        s, input xz);
         reg [33:0] mr;       // m*r0  : Q1.16 * Q0.16 = Q1.32 (~1.0)
         reg [17:0] two_m;    // (2 - m*r0) in Q1.16  (~1.0)
@@ -70,7 +71,7 @@ module fp_rcp_fast (
             // the fraction is r1[14:0]. If r1 == 1.0 exactly (bit16 set) the
             // value is 2^0 with zero fraction.
             frac = r1[16] ? 23'd0 : {r1[14:0], 8'b0};
-            e    = (r1[16] ? 11'sd254 : 11'sd253) - $signed({3'b0, ex});
+            e    = (r1[16] ? 11'sd254 : 11'sd253) - $signed({3'b0, exf});
 
             if (xz)            nr_pack = {s, 8'hFE, 23'h7FFFFF};
             else if (e <= 0)   nr_pack = {s, 31'd0};
