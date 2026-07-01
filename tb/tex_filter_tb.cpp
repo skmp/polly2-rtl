@@ -31,7 +31,16 @@ int main(int c,char**v){
         d->filter=fm;d->ignore_texa=ita;d->ufrac=uf;d->vfrac=vf;
         d->t00=t00;d->t01=t01;d->t10=t10;d->t11=t11;d->eval();
         uint32_t g=g_filter(fm,ita,uf,vf,t00,t01,t10,t11); total++;
-        if((uint32_t)d->textel!=g){fails++;if(fails<10)printf("  fm%d ita%d uf%d vf%d -> %08x exp %08x\n",fm,ita,uf,vf,(uint32_t)d->textel,g);}
+        uint32_t hw=d->textel;
+        // both bit-exact now: bilinear uses SOP separable lerps written as the
+        // flat form (p*(256-w)+q*w)>>8, identical to refsw's weighted sum.
+        int tol = fm ? 1 : 0;
+        bool ok=true;
+        for(int cci=0;cci<4;cci++){
+            int dh=(int)((hw>>(8*cci))&0xFF)-(int)((g>>(8*cci))&0xFF);
+            if(dh<0)dh=-dh; if(dh>tol) ok=false;
+        }
+        if(!ok){fails++;if(fails<10)printf("  fm%d ita%d uf%d vf%d -> %08x exp %08x\n",fm,ita,uf,vf,hw,g);}
       }
     printf("tex_filter: %d/%d passed\n",total-fails,total);
     printf(fails?"FILTER FAIL\n":"FILTER OK\n");

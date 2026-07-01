@@ -25,30 +25,37 @@ module color_combiner (
     // u8_256(v) = v + (v>>7)
     function [8:0] u8_256(input [7:0] v);
         u8_256 = {1'b0,v} + {8'b0, v[7]}; endfunction
-    // a*b/256 with a in 0..255, b = u8_256 (0..256)
-    function [7:0] mul256(input [7:0] a, input [8:0] b);
-        reg [16:0] p; begin p = a * b; mul256 = p[15:8]; end endfunction
     function [7:0] sat_add(input [7:0] a, input [7:0] b);
         reg [8:0] s; begin s = {1'b0,a}+{1'b0,b}; sat_add = s[8]?8'hFF:s[7:0]; end endfunction
-    // mix(base, tex, texA): (tex*tb + base*(256-tb))/256, tb=u8_256(texA)
-    function [7:0] mix(input [7:0] texc, input [7:0] basec, input [8:0] tb);
-        reg [17:0] p; begin
-            p = texc*tb + basec*(9'd256 - tb);
-            mix = p[15:8];
-        end
-    endfunction
 
-    // per-channel combine
+    // DSP-folded per-channel combine: ONE 9x9-signed multiply of the form
+    //   out = sub + ((mA - sub) * w8) >> 8   with the *256/256 scaling done as
+    //   a conditional add of (mA-sub) when the raw weight's top bit is set
+    //   (see tex_filter for the same trick). Keeping the multiplier operand to
+    //   8 raw bits (not the 9-bit u8_256 result = 256) lets it fit the DSP 9x9
+    //   signed mode instead of consuming an 18x18 lane.
+    //   si1/si3 (modulate): mA=textel, sub=0,    w8=base.ch    -> t*bw/256
+    //   si2 (mix/lerp):     mA=textel, sub=base,  w8=textel.a   -> base+(t-b)*ta/256
+    //   si0 (replace): bypass -> textel
     function [7:0] comb_ch(input [1:0] i);
-        reg [7:0] t,b;
+        reg [7:0]  t,b, sub, mA, w8;
+        reg signed [9:0]  d; reg signed [17:0] m; reg signed [10:0] r;
         begin
             t = ch(textel,i); b = ch(base,i);
             case (shadinstr)
-              2'd0: comb_ch = t;                                    // replace
-              2'd1: comb_ch = (i==2'd3) ? t : mul256(t, u8_256(b)); // modulate rgb, a=tex
-              2'd2: comb_ch = (i==2'd3) ? b                         // mix, a=base
-                            : mix(t, b, u8_256(ch(textel,2'd3)));
-              2'd3: comb_ch = mul256(t, u8_256(b));                 // modulate all
+              2'd2: begin mA=t; sub=(i==2'd3)? t : b; w8=ch(textel,2'd3); end // mix
+              default: begin mA=t; sub=8'd0; w8=b; end                        // modulate
+            endcase
+            d = $signed({2'b0,mA}) - $signed({2'b0,sub});
+            m = d * $signed({1'b0,w8});          // 9x9 signed mul (raw 8-bit weight)
+            if (w8[7]) m = m + d;                // + d*w8[7]  == *256/256 top bit
+            r = $signed({3'b0,sub}) + $signed(m >>> 8);
+            r = (r<0) ? 11'sd0 : (r>255) ? 11'sd255 : r;
+            case (shadinstr)
+              2'd0: comb_ch = t;                          // replace
+              2'd1: comb_ch = (i==2'd3) ? t : r[7:0];     // modulate rgb, a=tex
+              2'd2: comb_ch = (i==2'd3) ? b : r[7:0];     // mix, a=base
+              2'd3: comb_ch = r[7:0];                     // modulate all
             endcase
         end
     endfunction

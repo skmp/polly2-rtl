@@ -46,8 +46,15 @@ module tsp_shade import tsp_pkg::*; (
     fp_mul_i5 u_mi (.f(mi_f), .k(mi_k), .y(mi_y));
     reg  [31:0] mm_a, mm_b; wire [31:0] mm_y;
     fp_mul16  u_mm (.a(mm_a), .b(mm_b), .y(mm_y));
-    reg  [31:0] ad_a, ad_b; reg ad_s; wire [31:0] ad_y;
-    fp_add24  u_ad (.a(ad_a), .b_in(ad_b), .sub(ad_s), .y(ad_y));
+    // add split into two ~10ns halves (align | normalize) so each interp cycle
+    // holds at most one; registered `ad_sum/ad_ebig/ad_sbig` between them.
+    reg  [31:0] ad_a, ad_b; reg ad_s;
+    wire [24:0] ad_sum_c; wire [7:0] ad_eb_c; wire ad_sb_c;
+    fp_add24_s1 u_ad1 (.a(ad_a), .b_in(ad_b), .sub(ad_s),
+                       .sum(ad_sum_c), .e_big(ad_eb_c), .s_big(ad_sb_c));
+    reg [24:0] ad_sum; reg [7:0] ad_eb; reg ad_sb;
+    wire [31:0] ad_y;
+    fp_add24_s2 u_ad2 (.sum(ad_sum), .e_big(ad_eb), .s_big(ad_sb), .y(ad_y));
     reg        rc_req; reg [31:0] rc_in; wire rc_ack; wire [31:0] rc_y;
     fp_rcp_fast u_rc (.clk(clk),.reset(reset),.in_valid(rc_req),.x(rc_in),
                       .out_valid(rc_ack),.y(rc_y));
@@ -69,13 +76,15 @@ module tsp_shade import tsp_pkg::*; (
     reg [3:0]  pidx; reg [2:0] istep;
     reg [31:0] t_ddx_x;
 
-    // ---- uv -> texel corners ----
+    // ---- uv -> texel corners (combinational; outputs registered below) ----
     wire [10:0] c00u,c00v,c01u,c01v,c10u,c10v,c11u,c11v; wire [7:0] ufrac,vfrac;
     tex_uv2texel u_uv (
         .u(attr[0]), .v(attr[1]), .texu(texu), .texv(texv),
         .clampu(clampu),.clampv(clampv),.flipu(flipu),.flipv(flipv),
         .c00u(c00u),.c00v(c00v),.c01u(c01u),.c01v(c01v),
         .c10u(c10u),.c10v(c10v),.c11u(c11u),.c11v(c11v),.ufrac(ufrac),.vfrac(vfrac));
+    // registered uv2texel results (breaks the attr -> uv2texel -> ... -> argb chain)
+    reg [10:0] r00u,r00v,r01u,r01v,r10u,r10v,r11u,r11v; reg [7:0] uf_r,vf_r;
 
     // ---- texel fetch (per corner) ----
     reg        tf_req; reg [10:0] tf_u, tf_v; wire tf_ack; wire [31:0] tf_argb;
@@ -86,17 +95,18 @@ module tsp_shade import tsp_pkg::*; (
 
     reg [31:0] corner [0:3];
     wire [31:0] t_filt;
-    tex_filter u_flt (.filter(bilinear),.ignore_texa(ignoretexa),.ufrac(ufrac),.vfrac(vfrac),
+    tex_filter u_flt (.filter(bilinear),.ignore_texa(ignoretexa),.ufrac(uf_r),.vfrac(vf_r),
                       .t00(corner[0]),.t01(corner[1]),.t10(corner[2]),.t11(corner[3]),.textel(t_filt));
+    reg [31:0] textel_r;    // registered filter result (its own pipeline stage)
 
     reg [31:0] base_col, ofs_col;
     wire [31:0] comb_col;
     color_combiner u_cc (.pp_texture(pp_texture),.pp_offset(pp_offset),.shadinstr(shadinstr),
-                         .base(base_col),.textel(t_filt),.offset(ofs_col),.col(comb_col));
+                         .base(base_col),.textel(textel_r),.offset(ofs_col),.col(comb_col));
 
     // ---- FSM ----
     localparam S_IDLE=0,S_IW=1,S_INTERP=2,S_TEXSEL=3,S_CSEL=4,S_CFETCH=5,
-               S_CNEXT=6,S_COMB=7,S_DONE=8;
+               S_CNEXT=6,S_FILT=9,S_COMB=7,S_DONE=8;
     reg [3:0] st;
     reg [1:0] corner_i;
 
@@ -108,47 +118,61 @@ module tsp_shade import tsp_pkg::*; (
             S_IDLE: if (req) begin rc_in<=invw_in; rc_req<=1; st<=S_IW; end
             S_IW: if (rc_ack) begin Wp<=rc_y; pidx<=0; istep<=0; st<=S_INTERP; end
 
+            // Per-plane serial interp; the add is split (s1 align | s2 normalize)
+            // across two isteps so no cycle holds a full fp_add24 (~19ns).
+            //   a = (ddx*x + ddy*y + c) * W
             S_INTERP: begin
                 case (istep)
-                0: begin mi_f<=p_ddx[pidx]; mi_k<=px; istep<=1; end
-                1: begin t_ddx_x<=mi_y; mi_f<=p_ddy[pidx]; mi_k<=py; istep<=2; end
-                2: begin ad_a<=t_ddx_x; ad_b<=mi_y; ad_s<=0; istep<=3; end
-                3: begin ad_a<=ad_y; ad_b<=p_c[pidx]; ad_s<=0; istep<=4; end
-                4: begin mm_a<=ad_y; mm_b<=Wp; istep<=5; end
-                5: begin attr[pidx]<=mm_y;
+                0: begin mi_f<=p_ddx[pidx]; mi_k<=px; istep<=1; end          // ddx*x
+                1: begin t_ddx_x<=mi_y; mi_f<=p_ddy[pidx]; mi_k<=py; istep<=2; end // ddy*y
+                2: begin ad_a<=t_ddx_x; ad_b<=mi_y; ad_s<=0; istep<=3; end   // add s1 in
+                3: begin ad_sum<=ad_sum_c; ad_eb<=ad_eb_c; ad_sb<=ad_sb_c; istep<=4; end // s1->reg
+                4: begin ad_a<=ad_y; ad_b<=p_c[pidx]; ad_s<=0; istep<=5; end // +c: add s1 in
+                5: begin ad_sum<=ad_sum_c; ad_eb<=ad_eb_c; ad_sb<=ad_sb_c; istep<=6; end // s1->reg
+                6: begin mm_a<=ad_y; mm_b<=Wp; istep<=7; end                 // *W
+                7: begin attr[pidx]<=mm_y;
                         if (pidx==4'd9) st<=S_TEXSEL;
                         else begin pidx<=pidx+1; istep<=0; end
                     end
                 endcase
             end
 
+            // register the uv2texel results here (this cycle contains only the
+            // uv2texel combinational block -> breaks the long chain into the
+            // filter/combiner cycles below). Also pack base/offset colours.
             S_TEXSEL: begin
                 base_col <= {f2u8(attr[5]),f2u8(attr[4]),f2u8(attr[3]),f2u8(attr[2])};
                 ofs_col  <= {f2u8(attr[9]),f2u8(attr[8]),f2u8(attr[7]),f2u8(attr[6])};
-                if (!pp_texture) st<=S_COMB;
+                r00u<=c00u; r00v<=c00v; r01u<=c01u; r01v<=c01v;
+                r10u<=c10u; r10v<=c10v; r11u<=c11u; r11v<=c11v;
+                uf_r<=ufrac; vf_r<=vfrac;
+                if (!pp_texture) begin textel_r<=32'h00000000; st<=S_COMB; end
                 else begin corner_i<=2'd3; st<=S_CSEL; end   // t11 first (nearest)
             end
 
-            // select corner (u,v) and issue fetch
+            // select corner (registered u,v) and issue fetch
             S_CSEL: begin
                 case (corner_i)
-                  2'd0: begin tf_u<=c00u; tf_v<=c00v; end
-                  2'd1: begin tf_u<=c01u; tf_v<=c01v; end
-                  2'd2: begin tf_u<=c10u; tf_v<=c10v; end
-                  2'd3: begin tf_u<=c11u; tf_v<=c11v; end
+                  2'd0: begin tf_u<=r00u; tf_v<=r00v; end
+                  2'd1: begin tf_u<=r01u; tf_v<=r01v; end
+                  2'd2: begin tf_u<=r10u; tf_v<=r10v; end
+                  2'd3: begin tf_u<=r11u; tf_v<=r11v; end
                 endcase
                 tf_req<=1; st<=S_CFETCH;
             end
             S_CFETCH: if (tf_ack) begin corner[corner_i]<=tf_argb; st<=S_CNEXT; end
             S_CNEXT: begin
-                if (!bilinear)            st<=S_COMB;   // nearest: only t11 needed
-                else if (corner_i==2'd2)  st<=S_COMB;   // order 3,0,1,2 done
+                if (!bilinear)            st<=S_FILT;   // nearest: only t11 needed
+                else if (corner_i==2'd2)  st<=S_FILT;   // order 3,0,1,2 done
                 else begin
                     corner_i <= (corner_i==2'd3)?2'd0:corner_i+2'd1;
                     st<=S_CSEL;
                 end
             end
 
+            // filter cycle (only tex_filter combinational) -> register result
+            S_FILT: begin textel_r <= t_filt; st<=S_COMB; end
+            // combiner cycle (only color_combiner combinational)
             S_COMB: begin argb<=comb_col; st<=S_DONE; end
             S_DONE: begin done<=1; st<=S_IDLE; end
             default: st<=S_IDLE;
