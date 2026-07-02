@@ -54,7 +54,7 @@ MODE ?= tri
 MODEARG = $(if $(filter quad,$(MODE)),quad,)
 
 .PHONY: all vectors fp sim sim-tri sim-quad seq seq-tri seq-quad ip ip-tri ip-quad quartus clean \
-        test tex tex-addr tex-uv tex-filter tex-combiner tex-fetch pipe oparse isprim region regfile regen planecache
+        test tex tex-addr tex-uv tex-filter tex-combiner tex-fetch pipe oparse isprim region regfile regen planecache setupstream
 
 # TSP module files (package first). ISP shared FP units come from rtl/isp_min.
 TSP_RTL = rtl/tsp/tsp_pkg.sv $(filter-out rtl/tsp/tsp_pkg.sv,$(wildcard rtl/tsp/*.sv))
@@ -62,7 +62,7 @@ TSP_RTL = rtl/tsp/tsp_pkg.sv $(filter-out rtl/tsp/tsp_pkg.sv,$(wildcard rtl/tsp/
 all: fp sim-tri sim-quad seq-tri seq-quad ip-tri ip-quad
 
 # ---- run the fast unit tests (FP prims + TSP texture blocks + full pipeline) ----
-test: fp tex oparse isprim region regfile pipe
+test: fp tex oparse isprim region regfile setupstream pipe
 
 # ---- TSP texture-pipeline block tests (randomized vectors vs refsw) ----
 TSP = rtl/tsp
@@ -111,6 +111,16 @@ oparse: | $(BUILD)
 	  $(TSP)/tsp_pkg.sv tb/object_list_parser_tb_top.sv $(TSP)/object_list_parser.sv \
 	  $(CWD)/tb/object_list_parser_tb.cpp --Mdir $(BUILD)/obj_oparse -o tb
 	./$(BUILD)/obj_oparse/tb
+
+# isp_setup_streamed unit test: 4-way interleaved setup vs isp_setup_min reference,
+# bit-exact per triangle. Confirms the interleave timing (lane/slot alignment).
+setupstream: | $(BUILD)
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) --public-flat-rw --top-module isp_setup_streamed_tb_top \
+	  tb/isp_setup_streamed_tb_top.sv \
+	  rtl/isp_min/isp_setup_min.sv rtl/isp_min/isp_setup_streamed.sv \
+	  rtl/isp_min/mac16.sv rtl/isp_min/fp_mul16.sv rtl/isp_min/fp_add24.sv rtl/isp_min/fp_rcp_fast.sv \
+	  $(CWD)/tb/isp_setup_streamed_tb.cpp --Mdir $(BUILD)/obj_setupstream -o tb
+	./$(BUILD)/obj_setupstream/tb
 
 # regenerate the PVR register typedefs from minicast's pvr_regs.h
 PVR_REGS_H = ../minicast/libswirl/hw/pvr/pvr_regs.h

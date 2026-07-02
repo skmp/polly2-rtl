@@ -1,0 +1,317 @@
+//
+// isp_primitive_iterator_pf - PREFETCHING variant of isp_primitive_iterator.
+//
+// Same function (walk STRIP/ARRAY entries, emit per-triangle XYZ core tags from
+// the parameter buffer) and same refsw semantics, but the record burst READER and
+// the triangle EMIT FSM are fully decoupled through a PING-PONG of two record
+// buffers, and entries are pulled from a STREAMING input. This lets the reader
+// fetch the NEXT record's data (paying DDR latency) WHILE the emit FSM is still
+// draining the CURRENT record's triangles - so the per-record fetch is hidden
+// behind the downstream setup, instead of serializing in front of it.
+//
+// Streaming entry interface (replaces start/entry/busy):
+//   entry_valid : an entry is available on entry/entry_type (LEVEL)
+//   entry_ack   : iterator consumed the entry this cycle (1-cycle pulse) ->
+//                 the producer (isp_core) advances to the next entry
+//   flush       : (LEVEL) no more entries will arrive for this list; once the
+//                 iterator has drained everything it pulses `drained`.
+//   drained     : (1-cycle) all pulled entries fully emitted AND flush seen ->
+//                 the list is complete (barrier for isp_core).
+//
+// Triangle output (trio/ack) and refsw record/vertex layout are IDENTICAL to
+// isp_primitive_iterator (see that file's header for the record math).
+//
+module isp_primitive_iterator_pf import tsp_pkg::*; (
+    input                  clk,
+    input                  reset,
+    input      [26:0]      param_base,       // PARAM_BASE & 0xF00000 (byte addr)
+    input                  intensity_shadow, // FPU_SHAD_SCALE.intensity_shadow
+
+    // streaming entry input
+    input                  entry_valid,      // an entry is available
+    input      entry_type_e    entry_type,   // ENT_STRIP or ENT_TRI
+    input      objlist_entry_t entry,        // mask (STRIP) / count (ARRAY)
+    output reg             entry_ack,        // 1-cycle: consumed the entry
+    output                 busy,             // LEVEL: iterator has work in flight
+                                             // (records read/being read/emitting).
+                                             // isp_core's barrier gates on !busy &&
+                                             // eq_empty (no flush/drained needed).
+
+    // triangle output
+    output triangle_out_t  trio,
+    input  triangle_ack_t  ack,
+
+    // direct DDR3 read port (64-bit beats, via shared arbiter)
+    output ddr_rd_req_t    dreq,
+    input  ddr_rd_resp_t   dresp
+);
+    // ================= per-buffer record state (ping-pong, 2 deep) =================
+    // Each buffer holds one record's fetched data + the emit-relevant geometry.
+    xyz_t      vslot [0:1][0:7];       // [buf][vertex] XYZ
+    reg [31:0] b_isp   [0:1];          // isp word
+    reg [5:0]  b_mask  [0:1];          // strip mask
+    reg [2:0]  b_skip  [0:1];
+    reg        b_shadow[0:1];
+    reg [20:0] b_po    [0:1];          // param_offs_in_words of this record
+    reg        b_array [0:1];          // 1 = array record (tag_offset 0), 0 = strip
+    reg [3:0]  b_nfill [0:1];          // vertices captured (Z landed)
+    reg        b_ready [0:1];          // buffer holds a complete/streaming record
+    reg        b_done  [0:1];          // buffer's burst fully read (all verts in)
+
+    // ================= entry expansion (array -> multiple records) =================
+    // The reader owns record advancement. For an array entry we expand `count`
+    // records; for a strip, one record. This state tracks the entry currently
+    // being expanded by the READER (independent of what emit is draining).
+    reg        ex_active;              // an entry is being expanded by the reader
+    reg        ex_array;
+    reg [2:0]  ex_skip;   reg ex_shadow;   reg [5:0] ex_mask;
+    reg [20:0] ex_po;                  // running param_offs of the next record
+    reg [26:0] ex_base;                // running byte base of the next record
+    reg [4:0]  ex_count;               // records remaining (array); 1 for strip
+    wire       ex_two_vol   = ex_shadow & ~intensity_shadow;
+    wire [4:0] ex_stride_w  = 5'd3 + ex_skip * (ex_two_vol ? 5'd2 : 5'd1);
+    wire [4:0] ex_hdr_words = ex_two_vol ? 5'd5 : 5'd3;
+    wire [26:0] ex_rec_bytes = {22'b0, ex_hdr_words, 2'b00} + 27'd3 * {ex_stride_w, 2'b00};
+    wire [20:0] ex_rec_words = ex_rec_bytes[22:2];
+
+    // outstanding-record bookkeeping: reader has fetched (or is fetching) records
+    // that emit has not yet finished. flush + none-outstanding + reader idle -> done.
+    reg [3:0]  outstanding;            // records fetched-but-not-emitted
+
+    // LEVEL busy: any record buffered, being read, being expanded, being emitted,
+    // or any outstanding. This is the AUTHORITATIVE producer-idle signal for the
+    // isp_core barrier (a pulse-cleared reg was racy).
+
+    // ================= burst reader (fills rd_buf) =================
+    reg        rd_buf;                 // buffer the reader is filling
+    // geometry of the record currently being READ (latched when reader starts it)
+    reg [26:0] rd_base;   reg [2:0] rd_skip;  reg rd_shadow; reg [5:0] rd_mask;
+    reg [20:0] rd_po;     reg rd_array;
+    wire       rd_two_vol   = rd_shadow & ~intensity_shadow;
+    wire [4:0] rd_stride_w  = 5'd3 + rd_skip * (rd_two_vol ? 5'd2 : 5'd1);
+    wire [4:0] rd_hdr_words = rd_two_vol ? 5'd5 : 5'd3;
+    // For a STRIP, read only up to the LAST vertex any enabled triangle needs,
+    // not all 8. Triangle i (mask[5-i]) uses verts i,i+1,i+2; the highest enabled
+    // i = 5 - (lowest set bit of mask), so verts needed = (5-lsb)+3 = 8-lsb.
+    // (Array records always read exactly 3.)
+    function automatic [2:0] lsb6(input [5:0] m);
+        casez (m)
+            6'b?????1: lsb6 = 3'd0;
+            6'b????10: lsb6 = 3'd1;
+            6'b???100: lsb6 = 3'd2;
+            6'b??1000: lsb6 = 3'd3;
+            6'b?10000: lsb6 = 3'd4;
+            6'b100000: lsb6 = 3'd5;
+            default:   lsb6 = 3'd5;   // mask==0 (no tris): read minimal (3 verts)
+        endcase
+    endfunction
+    wire [3:0] rd_strip_nv = 4'd8 - {1'b0, lsb6(rd_mask)};   // 3..8
+    wire [3:0] rd_nverts    = rd_array ? 4'd3 : rd_strip_nv;
+
+    wire [24:0] rd_base_vw  = rd_base[26:2];
+    wire        rd_bank     = rd_base_vw[20];
+    wire [19:0] rd_phys     = rd_base_vw[19:0];
+    wire [8:0]  rd_span_vw  = {4'b0, rd_hdr_words}
+                            + ({5'b0,(rd_nverts-4'd1)} * {4'b0, rd_stride_w}) + 9'd3;
+
+    reg  [5:0]  ni;                    // needed-item index
+    wire        ni_isp = (ni == 6'd0);
+    reg  [3:0]  ni_vx;                 // vertex index (tracked, no divider)
+    reg  [1:0]  ni_cmp;                // component (0=x,1=y,2=z)
+    wire [8:0]  need_off = ni_isp ? 9'd0
+                        : {4'b0, rd_hdr_words} + ({5'b0, ni_vx} * {4'b0, rd_stride_w})
+                                               + {7'b0, ni_cmp};
+
+    localparam R_IDLE=2'd0, R_REQ=2'd1, R_STREAM=2'd2;
+    reg [1:0]  rst;
+    reg [8:0]  beat;
+    wire [31:0] beat_half = rd_bank ? dresp.dout[63:32] : dresp.dout[31:0];
+
+    reg        dreq_rd_r; reg [28:0] dreq_addr_r; reg [7:0] dreq_burst_r;
+    assign dreq.rd    = dreq_rd_r;
+    assign dreq.addr  = dreq_addr_r;
+    assign dreq.burst = dreq_burst_r;
+
+    // ================= emit FSM (drains em_buf) =================
+    reg        em_buf;                 // buffer emit is draining
+    reg        tri_ready_r;
+    xyz_t      v0_r, v1_r, v2_r;
+    core_tag_t tag_r;
+    assign trio.triangle_ready = tri_ready_r;
+    assign trio.isp            = b_isp[em_buf];
+    assign trio.v0 = v0_r; assign trio.v1 = v1_r; assign trio.v2 = v2_r;
+    assign trio.tag            = tag_r;
+    assign trio.prim_done      = 1'b0;   // not used by isp_core-pf path (drained instead)
+
+    function automatic [3:0] va(input [2:0] i); va = {1'b0,i} + (i[0] ? 4'd1 : 4'd0); endfunction
+    function automatic [3:0] vb(input [2:0] i); vb = {1'b0,i} + (i[0] ? 4'd0 : 4'd1); endfunction
+
+    function automatic core_tag_t mk_tag(input b, input [2:0] toff);
+        mk_tag = '{ invalid:1'b0, pad:2'b00,
+                    cache_bypass:b_isp[b][ISP_CACHEBYPASS_BIT],
+                    shadow:b_shadow[b], skip:b_skip[b],
+                    param_offs_in_words:b_po[b], tag_offset:toff };
+    endfunction
+
+    localparam E_IDLE=2'd0, E_SEEK=2'd1, E_PRESENT=2'd2, E_REL=2'd3;
+    reg [1:0]  est;
+    reg [2:0]  s_i;
+
+    // authoritative LEVEL busy: anything in flight anywhere in the iterator.
+    assign busy = ex_active || (rst != R_IDLE) || (est != E_IDLE)
+                || (outstanding != 4'd0) || b_ready[0] || b_ready[1];
+
+    always @(posedge clk) begin
+        if (reset) begin
+            rst<=R_IDLE; est<=E_IDLE; dreq_rd_r<=0; entry_ack<=0;
+            rd_buf<=0; em_buf<=0; ex_active<=0; outstanding<=0;
+            b_ready[0]<=0; b_ready[1]<=0; b_done[0]<=0; b_done[1]<=0;
+            tri_ready_r<=0;
+        end else begin
+            entry_ack <= 1'b0;
+            dreq_rd_r <= 1'b0;
+
+            // ==================== READER ====================
+            // Continuously: if not expanding an entry, pull the next entry; else
+            // fetch the next record of the current entry into the FREE buffer.
+            case (rst)
+            R_IDLE: begin
+                if (!ex_active) begin
+                    // pull a new entry to expand (if the target buffer is free)
+                    if (entry_valid && !b_ready[rd_buf]) begin
+                        ex_active <= 1'b1;
+                        ex_array  <= (entry_type != ENT_STRIP);
+                        ex_skip   <= entry.skip;
+                        ex_shadow <= entry.shadow;
+                        ex_mask   <= entry.mask;
+                        ex_po     <= entry.param_offs_in_words;
+                        ex_base   <= param_base + {entry.param_offs_in_words, 2'b00};
+                        ex_count  <= (entry_type != ENT_STRIP) ? entry.count : 5'd1;
+                        entry_ack <= 1'b1;     // consume it; producer advances
+                    end
+                end else if (!b_ready[rd_buf]) begin
+                    // start the next record of the current entry into rd_buf
+                    rd_base   <= ex_base;
+                    rd_skip   <= ex_skip;
+                    rd_shadow <= ex_shadow;
+                    rd_mask   <= ex_mask;
+                    rd_po     <= ex_po;
+                    rd_array  <= ex_array;
+                    rst       <= R_REQ;
+                end
+            end
+            R_REQ: if (!dresp.busy) begin
+                dreq_rd_r    <= 1'b1;
+                dreq_addr_r  <= {4'b0011, 5'b0, rd_phys};
+                dreq_burst_r <= rd_span_vw[7:0];
+                beat         <= 9'd0;
+                ni           <= 6'd0;
+                ni_vx        <= 4'd0;
+                ni_cmp       <= 2'd0;
+                b_nfill[rd_buf] <= 4'd0;
+                b_done [rd_buf] <= 1'b0;
+                rst          <= R_STREAM;
+            end
+            R_STREAM: if (dresp.dready) begin
+                if (beat == need_off) begin
+                    if (ni_isp) b_isp[rd_buf] <= beat_half;
+                    else begin
+                        case (ni_cmp)
+                            2'd0:    vslot[rd_buf][ni_vx].x <= beat_half;
+                            2'd1:    vslot[rd_buf][ni_vx].y <= beat_half;
+                            default: vslot[rd_buf][ni_vx].z <= beat_half;
+                        endcase
+                        if (ni_cmp == 2'd2) b_nfill[rd_buf] <= b_nfill[rd_buf] + 4'd1;
+                    end
+                    ni <= ni + 6'd1;
+                    if (!ni_isp) begin
+                        if (ni_cmp == 2'd2) begin ni_cmp<=2'd0; ni_vx<=ni_vx+4'd1; end
+                        else                       ni_cmp<=ni_cmp+2'd1;
+                    end
+                end
+                if (beat == rd_span_vw - 9'd1) begin
+                    // record fully read: publish geometry, mark buffer ready, and
+                    // advance the entry expansion / free the reader for the next.
+                    b_mask [rd_buf] <= rd_mask;
+                    b_skip [rd_buf] <= rd_skip;
+                    b_shadow[rd_buf]<= rd_shadow;
+                    b_po   [rd_buf] <= rd_po;
+                    b_array[rd_buf] <= rd_array;
+                    b_done [rd_buf] <= 1'b1;
+                    b_ready[rd_buf] <= 1'b1;
+                    rd_buf          <= ~rd_buf;
+                    // advance expansion: next array record, or finish this entry
+                    if (ex_array && ex_count != 5'd1) begin
+                        ex_count <= ex_count - 5'd1;
+                        ex_base  <= ex_base + ex_rec_bytes;
+                        ex_po    <= ex_po   + ex_rec_words;
+                    end else begin
+                        ex_active <= 1'b0;     // entry done expanding
+                    end
+                    rst <= R_IDLE;
+                end else beat <= beat + 9'd1;
+            end
+            default: rst <= R_IDLE;
+            endcase
+
+            // ==================== EMIT ====================
+            case (est)
+            E_IDLE: if (b_ready[em_buf]) begin
+                s_i <= 3'd0;
+                est <= b_array[em_buf] ? E_PRESENT : E_SEEK;
+            end
+            E_SEEK: begin
+                // strip: seek s_i to the next set mask bit. A DISABLED triangle is
+                // skipped immediately (its verts may not have been read - the burst
+                // is trimmed to the last ENABLED triangle's verts). An ENABLED
+                // triangle waits for its 3 verts (nfill > s_i+2) before emitting.
+                if (!b_mask[em_buf][3'd5 - s_i]) begin
+                    if (s_i == 3'd5) est <= E_REL;      // no more triangles
+                    else s_i <= s_i + 3'd1;             // skip disabled, no vert wait
+                end else if (b_nfill[em_buf] > {1'b0,s_i} + 4'd2) begin
+                    v0_r <= vslot[em_buf][va(s_i)];
+                    v1_r <= vslot[em_buf][vb(s_i)];
+                    v2_r <= vslot[em_buf][{1'b0,s_i}+4'd2];
+                    tag_r <= mk_tag(em_buf, s_i);
+                    tri_ready_r <= 1'b1;
+                    est <= E_PRESENT;
+                end
+            end
+            E_PRESENT: begin
+                if (b_array[em_buf] && !tri_ready_r) begin
+                    if (b_nfill[em_buf] >= 4'd3) begin
+                        v0_r<=vslot[em_buf][0]; v1_r<=vslot[em_buf][1]; v2_r<=vslot[em_buf][2];
+                        tag_r<=mk_tag(em_buf, 3'd0);
+                        tri_ready_r <= 1'b1;
+                    end
+                end else begin
+                    tri_ready_r <= 1'b1;
+                    if (ack.triangle_done) begin
+                        tri_ready_r <= 1'b0;
+                        if (b_array[em_buf]) est <= E_REL;
+                        else if (s_i == 3'd5) est <= E_REL;
+                        else begin s_i <= s_i + 3'd1; est <= E_SEEK; end
+                    end
+                end
+            end
+            E_REL: begin
+                // release the buffer; one record retired.
+                b_ready[em_buf] <= 1'b0;
+                em_buf          <= ~em_buf;
+                est             <= E_IDLE;
+            end
+            endcase
+
+            // outstanding = records fetched-but-not-emitted. Single update point so
+            // a same-cycle fetch-complete (+1) and buffer-release (-1) reconcile.
+            begin : os_update
+                reg push, pop;
+                push = (rst==R_STREAM) && dresp.dready && (beat==rd_span_vw-9'd1);
+                pop  = (est==E_REL);
+                outstanding <= outstanding + (push ? 4'd1 : 4'd0) - (pop ? 4'd1 : 4'd0);
+            end
+            // (list-done is observed by isp_core via !busy && eq_empty; no
+            //  flush/drained handshake needed.)
+        end
+    end
+endmodule
