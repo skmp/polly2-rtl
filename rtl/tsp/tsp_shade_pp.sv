@@ -57,6 +57,7 @@ module tsp_shade_pp import tsp_pkg::*; #(
     output reg           out_valid,
     output reg [IDW-1:0] out_id,
     output reg [31:0]    out_argb,
+    output reg [31:0]    out_tsp,        // pixel's TSP word (SrcInstr/DstInstr for blend)
 
     // ---- caller sees stall so it can hold the input stable ----
     output            stall,
@@ -325,6 +326,7 @@ module tsp_shade_pp import tsp_pkg::*; #(
             out_valid<=vF;
             out_argb <=comb_col;
             out_id   <=F_id;
+            out_tsp  <=F_tsp;   // aligned with out_argb (blend unit lives in the caller)
         end
     end
 endmodule

@@ -27,8 +27,14 @@ VERILATOR ?= verilator
 NJOBS    := $(shell nproc 2>/dev/null || echo 4)
 MAKEFLAGS += -j$(NJOBS)
 
+# NOTE: --threads was tried but SLOWED this design down: the testbenches are
+# dominated by one large sequential FSM `always` block, so Verilator can't find
+# enough independent dataflow to parallelize, and per-cycle thread-sync overhead
+# dominates. Left single-threaded. To parallelize, run independent scenes with
+# `make -j` instead. (Set VTHREADS>1 to re-enable experimentally.)
+VTHREADS ?= 1
 VFLAGS    = -Wno-WIDTH -Wno-UNOPTFLAT -Wno-UNSIGNED -Wno-DECLFILENAME -Irtl/tsp/gen \
-            -j $(NJOBS) \
+            -j $(NJOBS) $(if $(filter-out 1,$(VTHREADS)),--threads $(VTHREADS),) \
             --output-split 40000 --output-split-cfuncs 500 \
             -CFLAGS "-O3 -march=native"
 
@@ -150,6 +156,18 @@ frontendtsp: | $(BUILD)
 	  $(wildcard rtl/isp_min/*.sv) \
 	  $(CWD)/tb/frontend_tsp_tb.cpp --Mdir $(BUILD)/obj_frontendtsp -o tb
 	./$(BUILD)/obj_frontendtsp/tb $(DUMP)
+
+# front-end + ISP + TSP + LAYER PEELING: OP as before; PT/TR use the peel depth
+# compare (isp_depth_cmp_lp) with dual depth/tag buffers + a per-pixel valid bit,
+# re-running the object list per peel pass, and blending at the end of the TSP
+# pipe -> shaded_lp_<name>.bmp.
+frontendtsplp: | $(BUILD)
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ --public-flat-rw \
+	  --top-module frontend_tsp_lp_tb_top \
+	  $(TSP_RTL) tb/frontend_tsp_lp_tb_top.sv \
+	  $(wildcard rtl/isp_min/*.sv) \
+	  $(CWD)/tb/frontend_tsp_lp_tb.cpp --Mdir $(BUILD)/obj_frontendtsplp -o tb
+	./$(BUILD)/obj_frontendtsplp/tb $(DUMP)
 
 # front-end + ISP + TSP, TRIPLE-BUFFERED: 3 concurrent tile stages (ISP / TSP /
 # writeout) on rotating buffers -> shaded_pp_<name>.bmp.

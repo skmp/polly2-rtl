@@ -8,6 +8,64 @@
 //
 package tsp_pkg;
 
+    // ---- PVR instruction-word bit structs (mirror refsw2 core_structs.h) ----
+    // Packed-struct field order is MSB->LSB, i.e. the REVERSE of the C bitfield
+    // declaration order (C lists LSB first). Overlay onto a 32-bit word with
+    // isp_tsp_t'(word) / tsp_t'(word) / tcw_t'(word), then read w.Field.
+    //
+    //   union ISP_TSP { u32 Reserved:20; DCalcCtrl:1; CacheBypass:1; UV_16b:1;
+    //                   Gouraud:1; Offset:1; Texture:1; ZWriteDis:1; CullMode:2;
+    //                   DepthMode:3; }
+    typedef struct packed {
+        logic [2:0]  DepthMode;    // [31:29]
+        logic [1:0]  CullMode;     // [28:27]
+        logic        ZWriteDis;    // [26]
+        logic        Texture;      // [25]
+        logic        Offset;       // [24]
+        logic        Gouraud;      // [23]
+        logic        UV_16b;       // [22]
+        logic        CacheBypass;  // [21]
+        logic        DCalcCtrl;    // [20]
+        logic [19:0] Reserved;     // [19:0]
+    } isp_tsp_t;
+
+    //   union TSP { TexV:3; TexU:3; ShadInstr:2; MipMapD:4; SupSample:1;
+    //               FilterMode:2; ClampV:1; ClampU:1; FlipV:1; FlipU:1;
+    //               IgnoreTexA:1; UseAlpha:1; ColorClamp:1; FogCtrl:2;
+    //               DstSelect:1; SrcSelect:1; DstInstr:3; SrcInstr:3; }
+    typedef struct packed {
+        logic [2:0]  SrcInstr;     // [31:29]
+        logic [2:0]  DstInstr;     // [28:26]
+        logic        SrcSelect;    // [25]
+        logic        DstSelect;    // [24]
+        logic [1:0]  FogCtrl;      // [23:22]
+        logic        ColorClamp;   // [21]
+        logic        UseAlpha;     // [20]
+        logic        IgnoreTexA;   // [19]
+        logic        FlipU;        // [18]
+        logic        FlipV;        // [17]
+        logic        ClampU;       // [16]
+        logic        ClampV;       // [15]
+        logic [1:0]  FilterMode;   // [14:13]
+        logic        SupSample;    // [12]
+        logic [3:0]  MipMapD;      // [11:8]
+        logic [1:0]  ShadInstr;    // [7:6]
+        logic [2:0]  TexU;         // [5:3]
+        logic [2:0]  TexV;         // [2:0]
+    } tsp_t;
+
+    //   union TCW { TexAddr:21; Reserved:4; StrideSel:1; ScanOrder:1; PixelFmt:3;
+    //               VQ_Comp:1; MipMapped:1; }  (PalSelect overlays TexAddr[20:15])
+    typedef struct packed {
+        logic        MipMapped;    // [31]
+        logic        VQ_Comp;      // [30]
+        logic [2:0]  PixelFmt;     // [29:27]
+        logic        ScanOrder;    // [26]
+        logic        StrideSel;    // [25]
+        logic [3:0]  Reserved;     // [24:21]
+        logic [20:0] TexAddr;      // [20:0]  (PalSelect = TexAddr[20:15])
+    } tcw_t;
+
     // ---- DDR3 raw 64-bit read port ----
     // request: cache -> DDR arbiter
     typedef struct packed {
