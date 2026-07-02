@@ -2,7 +2,7 @@
 // with depth-test + CoreTag param-tag writes, exactly as in tile_engine_top's
 // CMD_TRIANGLE_ISP_SETUP / CMD_TRIANGLE_ISP_RASTERIZE path:
 //
-//   region_array_parser -> object_list_parser -> isp_tristrip_iterator
+//   region_array_parser -> object_list_parser -> isp_primitive_iterator
 //     -> isp_setup_min (edge/invW planes, tile-local at the tile origin)
 //     -> isp_raster_line (8 lanes/clk, 32x32 tile sweep)
 //     -> depth compare (isp_depth_cmp, refsw DepthMode) -> {invW, CoreTag} write
@@ -80,11 +80,11 @@ module frontend_isp_tb_top import tsp_pkg::*; (
         .list_ptr(ol_list_ptr),.busy(ol_busy),.done(ol_done),
         .prim(ol_prim),.ack(ol_ack),.creq(ol_creq),.cresp(ol_cresp));
 
-    reg              it_start; objlist_entry_t it_entry;
+    reg              it_start; objlist_entry_t it_entry; entry_type_e it_etype;
     wire             it_busy;
     triangle_out_t   it_trio; triangle_ack_t it_ack;
-    isp_tristrip_iterator u_it (.clk(clk),.reset(reset),.start(it_start),
-        .param_base(param_base),.entry(it_entry),.busy(it_busy),
+    isp_primitive_iterator u_it (.clk(clk),.reset(reset),.start(it_start),
+        .param_base(param_base),.entry_type(it_etype),.entry(it_entry),.busy(it_busy),
         .trio(it_trio),.ack(it_ack),.creq(pr_creq),.cresp(pr_cresp));
 
     // -------------------- depth/tag tile + 640x480 framebuffer --------------------
@@ -282,12 +282,13 @@ module frontend_isp_tb_top import tsp_pkg::*; (
             end
 
             S_ENTRY: begin
-                if (ol_prim.entry_type == ENT_STRIP) begin
+                if (ol_prim.entry_type == ENT_STRIP || ol_prim.entry_type == ENT_TRI) begin
                     it_entry <= ol_prim.entry;
+                    it_etype <= ol_prim.entry_type;
                     it_start <= 1'b1;
                     st <= S_IT_WAIT;
                 end else begin
-                    // tri/quad array: skip for now
+                    // quad array: skip for now
                     ol_ack.entry_done <= 1'b1;
                     st <= S_OL_ACK;
                 end

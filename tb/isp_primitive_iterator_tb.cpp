@@ -1,18 +1,18 @@
-// isp_tristrip_iterator unit test: builds param records (isp/tsp/tcw header +
+// isp_primitive_iterator unit test: builds param records (isp/tsp/tcw header +
 // up to 8 XYZ-only vertices, optional two-volume padding) in a behavioral
 // VRAM, drives an ENT_STRIP entry (param_offs/skip/shadow/mask), and checks
 // the emitted triangle stream (isp word + v0/v1/v2 XYZ) against a C golden
 // mirroring refsw decode_pvr_vertices (XYZ only) + RenderTriangleStrip's
 // triangle/vertex selection (refsw_lists.cpp:176..201).
-#include "Visp_tristrip_iterator_tb_top.h"
-#include "Visp_tristrip_iterator_tb_top___024root.h"
+#include "Visp_primitive_iterator_tb_top.h"
+#include "Visp_primitive_iterator_tb_top___024root.h"
 #include "verilated.h"
 #include <cstdio>
 #include <cstdint>
 #include <vector>
 
-static Visp_tristrip_iterator_tb_top* dut;
-#define VRAM dut->rootp->isp_tristrip_iterator_tb_top__DOT__vram
+static Visp_primitive_iterator_tb_top* dut;
+#define VRAM dut->rootp->isp_primitive_iterator_tb_top__DOT__vram
 static void tick(){ dut->clk=0; dut->eval(); dut->clk=1; dut->eval(); }
 
 static uint32_t rng=0xFEED1234;
@@ -93,10 +93,12 @@ static void run_case(const char* name, uint32_t base_words, uint32_t skip, bool 
     auto gold = golden_strip(isp, mask, verts, base_words, skip, two_vol?1:0);
 
     dut->param_base=0;
+    dut->etype = 0;                       // ENT_STRIP
     dut->entry_param_offs = base_words;   // param_offs_in_words (base is word-addr)
     dut->entry_skip = skip;
     dut->entry_shadow = two_vol ? 1 : 0;
     dut->entry_mask = mask;
+    dut->entry_count = 0;
     dut->start=1; tick(); dut->start=0;
 
     size_t gi=0; int guard=0;
@@ -133,9 +135,69 @@ static void run_case(const char* name, uint32_t base_words, uint32_t skip, bool 
     }
 }
 
+// ---- triangle ARRAY: `count` separate records, each 3 verts, 1 triangle, ----
+// tag_offset=0, param_offs = that record's own word offset (refsw RenderTriangleArray).
+static void run_array(const char* name, uint32_t base_words, uint32_t skip, bool two_vol,
+                      uint32_t count, uint32_t isp0){
+    dut->reset=1; dut->start=0; dut->consume=0; tick(); tick(); tick(); dut->reset=0;
+    for(int i=0;i<300;i++) tick();
+
+    // record size (words): header (3 or 5) + 3 verts * (3 + skip*(1+two_vol))
+    uint32_t vstride = 3 + skip*(two_vol?2:1);
+    uint32_t rec_words = (two_vol?5:3) + 3*vstride;
+
+    std::vector<GoldTri> gold;
+    for(uint32_t r=0;r<count;r++){
+        uint32_t rbase_words = base_words + r*rec_words;
+        uint32_t isp = isp0 + r;            // distinct isp per record
+        Vtx v[8]; for(int i=0;i<8;i++) v[i]={rnd(),rnd(),rnd()};
+        build_record(rbase_words*4, isp, skip, two_vol, v);
+        // one triangle: v0,v1,v2 (no winding swap for arrays), tag_offset=0
+        uint32_t tag = core_tag((isp>>21)&1, two_vol?1:0, skip, rbase_words, 0);
+        gold.push_back({isp, tag, v[0], v[1], v[2]});
+    }
+
+    dut->param_base=0;
+    dut->etype = 1;                          // ENT_TRI
+    dut->entry_param_offs = base_words;
+    dut->entry_skip = skip;
+    dut->entry_shadow = two_vol ? 1 : 0;
+    dut->entry_mask = 0;
+    dut->entry_count = count;                // prims+1 already
+    dut->start=1; tick(); dut->start=0;
+
+    size_t gi=0; int guard=0;
+    while(true){
+        if (dut->prim_done) break;
+        if (dut->triangle_ready){
+            total++;
+            if (gi>=gold.size()){ printf("[%s] extra tri #%zu\n",name,gi); fails++; }
+            else {
+                auto&g=gold[gi];
+                bool ok = (dut->out_isp==g.isp)&&(dut->out_tag==g.tag)
+                    && vtx_eq(dut->v0x,dut->v0y,dut->v0z,g.v0)
+                    && vtx_eq(dut->v1x,dut->v1y,dut->v1z,g.v1)
+                    && vtx_eq(dut->v2x,dut->v2y,dut->v2z,g.v2);
+                if(!ok){ fails++;
+                    if(fails<20) printf("[%s] tri #%zu: hw isp=%08x tag=%08x v=(%x,%x,%x)(%x,%x,%x)(%x,%x,%x)\n"
+                        "        exp isp=%08x tag=%08x v=(%x,%x,%x)(%x,%x,%x)(%x,%x,%x)\n",
+                        name,gi,dut->out_isp,dut->out_tag,dut->v0x,dut->v0y,dut->v0z,dut->v1x,dut->v1y,dut->v1z,dut->v2x,dut->v2y,dut->v2z,
+                        g.isp,g.tag,g.v0.x,g.v0.y,g.v0.z,g.v1.x,g.v1.y,g.v1.z,g.v2.x,g.v2.y,g.v2.z);
+                }
+            }
+            dut->consume=1; tick(); dut->consume=0; gi++;
+        } else tick();
+        if(++guard>200000){ printf("[%s] TIMEOUT (gi=%zu/%zu)\n",name,gi,gold.size()); fails++; break; }
+    }
+    if (gi < gold.size()){
+        printf("[%s] missing tris: got %zu expected %zu\n",name,gi,gold.size());
+        fails += (int)(gold.size()-gi); total += (int)(gold.size()-gi);
+    }
+}
+
 int main(int argc,char**argv){
     Verilated::commandArgs(argc,argv);
-    dut=new Visp_tristrip_iterator_tb_top;
+    dut=new Visp_primitive_iterator_tb_top;
     for(int i=0;i<65536;i++) VRAM[i]=0;
 
     // ---- case 1: full mask, skip=0, single volume ----
@@ -165,7 +227,20 @@ int main(int argc,char**argv){
         run_case(name, 300+t*40, skip, tv, mask, isp, v);
     }
 
-    printf("isp_tristrip_iterator: %d/%d passed\n", total-fails, total);
-    printf(fails?"ISPSTRIP FAIL\n":"ISPSTRIP OK\n");
+    // ---- triangle ARRAY cases ----
+    run_array("arr_c1_skip0",   1000, 0, false, 1,  0x55550010);
+    run_array("arr_c4_skip0",   1100, 0, false, 4,  0x55550020);
+    run_array("arr_c3_skip2",   1300, 2, false, 3,  0x55550030);
+    run_array("arr_c2_twovol",  1500, 1, true,  2,  0x55550040);
+    for(int t=0;t<20;t++){
+        uint32_t count = 1 + (rnd()%6);
+        uint32_t skip  = rnd()&3;
+        bool tv = rnd()&1;
+        char name[32]; snprintf(name,sizeof(name),"arr_rand%d",t);
+        run_array(name, 2000+t*80, skip, tv, count, 0x66660000u+t*16);
+    }
+
+    printf("isp_primitive_iterator: %d/%d passed\n", total-fails, total);
+    printf(fails?"ISPRIM FAIL\n":"ISPRIM OK\n");
     return fails?1:0;
 }

@@ -116,11 +116,11 @@ module frontend_tsp_tb_top import tsp_pkg::*; (
         .list_ptr(ol_list_ptr),.busy(ol_busy),.done(ol_done),
         .prim(ol_prim),.ack(ol_ack),.creq(ol_creq),.cresp(ol_cresp));
 
-    reg              it_start; objlist_entry_t it_entry;
+    reg              it_start; objlist_entry_t it_entry; entry_type_e it_etype;
     wire             it_busy;
     triangle_out_t   it_trio; triangle_ack_t it_ack;
-    isp_tristrip_iterator u_it (.clk(clk),.reset(reset),.start(it_start),
-        .param_base(param_base),.entry(it_entry),.busy(it_busy),
+    isp_primitive_iterator u_it (.clk(clk),.reset(reset),.start(it_start),
+        .param_base(param_base),.entry_type(it_etype),.entry(it_entry),.busy(it_busy),
         .trio(it_trio),.ack(it_ack),.creq(pr_creq),.cresp(pr_cresp));
 
     // -------------------- depth/tag tile + color buffer + framebuffer --------------------
@@ -254,7 +254,7 @@ module frontend_tsp_tb_top import tsp_pkg::*; (
     wire [4:0]  sh_stride_w = 5'd3 + sh_skip * (sh_two_vol ? 5'd2 : 5'd1);
     wire [26:0] sh_stride_b = {sh_stride_w, 2'b00};
 
-    // ---- 32-bit word reader over the TSP data cache (as isp_tristrip_iterator) ----
+    // ---- 32-bit word reader over the TSP data cache (as isp_primitive_iterator) ----
     reg  [26:0] f_addr; reg f_go; reg [31:0] f_word; reg f_word_v; reg [2:0] f_sel;
     reg  [26:0] ts_laddr_r; reg ts_req_r;
     assign ts_creq.req   = ts_req_r;
@@ -448,12 +448,13 @@ module frontend_tsp_tb_top import tsp_pkg::*; (
             end
 
             S_ENTRY: begin
-                if (ol_prim.entry_type == ENT_STRIP) begin
+                if (ol_prim.entry_type == ENT_STRIP || ol_prim.entry_type == ENT_TRI) begin
                     it_entry <= ol_prim.entry;
+                    it_etype <= ol_prim.entry_type;
                     it_start <= 1'b1;
                     st <= S_IT_WAIT;
                 end else begin
-                    // tri/quad array: skip for now
+                    // quad array: skip for now
                     ol_ack.entry_done <= 1'b1;
                     st <= S_OL_ACK;
                 end

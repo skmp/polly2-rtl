@@ -153,7 +153,7 @@ package tsp_pkg;
         logic      list_done;   // 1-cycle: consumer finished this state
     } region_ack_t;
 
-    // ---- isp_tristrip_iterator output: one triangle at a time ----
+    // ---- isp_primitive_iterator output: one triangle at a time ----
     // Iterates a single ENT_STRIP entry's masked triangles (i=0..5 where
     // mask[i] set), reading only XYZ per vertex (UV/color/offset ignored for
     // now). Handshake mirrors object_list_parser: triangle_ready (LEVEL, XYZ
