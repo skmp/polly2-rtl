@@ -43,14 +43,56 @@ module frontend_tsp_pp_tb_top import tsp_pkg::*; (
     // -------------------- 8 MB behavioral VRAM --------------------
     (* verilator public_flat_rw *) reg [63:0] vram [0:1048575];
 
-    // DDR read stub factory
+    // DDR read stub factory - simple 1-beat model (used by ra + ts)
     `define DDRPORT(NM) \
         ddr_rd_req_t NM``_dreq; ddr_rd_resp_t NM``_dresp; \
         reg [63:0] NM``_do; reg NM``_dv; \
         assign NM``_dresp.busy=1'b0; assign NM``_dresp.dout=NM``_do; assign NM``_dresp.dready=NM``_dv; \
         always @(posedge clk) begin NM``_dv<=0; if(NM``_dreq.rd) begin NM``_do<=vram[NM``_dreq.addr[19:0]]; NM``_dv<=1; end end
 
-    `DDRPORT(ra) `DDRPORT(ol) `DDRPORT(pr) `DDRPORT(ts)
+    `DDRPORT(ra) `DDRPORT(ts)
+
+    // objlist + param ports - BURST + latency model (each a single 64-bit channel):
+    // a read is accepted for RD_LAT dead cycles, then `burst` consecutive beats
+    // stream out one/cycle from incrementing addresses. The OL parser and ISP
+    // iterator read DDR DIRECTLY through these (no line cache).
+    localparam integer RD_LAT = 8;
+    // objlist port
+    ddr_rd_req_t  ol_dreq; ddr_rd_resp_t ol_dresp;
+    reg ol_busy_d; reg [19:0] ol_word; reg [7:0] ol_beats, ol_lat;
+    reg [63:0] ol_do; reg ol_dv;
+    assign ol_dresp.busy=ol_busy_d; assign ol_dresp.dout=ol_do; assign ol_dresp.dready=ol_dv;
+    always @(posedge clk) begin
+        ol_dv <= 1'b0;
+        if (reset) ol_busy_d <= 1'b0;
+        else if (!ol_busy_d) begin
+            if (ol_dreq.rd) begin ol_busy_d<=1'b1; ol_word<=ol_dreq.addr[19:0];
+                ol_beats<=ol_dreq.burst; ol_lat<=RD_LAT[7:0]; end
+        end else if (ol_lat != 0) ol_lat <= ol_lat - 8'd1;
+        else begin
+            ol_do<=vram[ol_word]; ol_dv<=1'b1; ol_word<=ol_word+20'd1;
+            if (ol_beats <= 8'd1) ol_busy_d <= 1'b0;
+            ol_beats <= ol_beats - 8'd1;
+        end
+    end
+    // param port
+    ddr_rd_req_t  pr_dreq; ddr_rd_resp_t pr_dresp;
+    reg pr_busy; reg [19:0] pr_word; reg [7:0] pr_beats, pr_lat;
+    reg [63:0] pr_do; reg pr_dv;
+    assign pr_dresp.busy=pr_busy; assign pr_dresp.dout=pr_do; assign pr_dresp.dready=pr_dv;
+    always @(posedge clk) begin
+        pr_dv <= 1'b0;
+        if (reset) pr_busy <= 1'b0;
+        else if (!pr_busy) begin
+            if (pr_dreq.rd) begin pr_busy<=1'b1; pr_word<=pr_dreq.addr[19:0];
+                pr_beats<=pr_dreq.burst; pr_lat<=RD_LAT[7:0]; end
+        end else if (pr_lat != 0) pr_lat <= pr_lat - 8'd1;
+        else begin
+            pr_do<=vram[pr_word]; pr_dv<=1'b1; pr_word<=pr_word+20'd1;
+            if (pr_beats <= 8'd1) pr_busy <= 1'b0;
+            pr_beats <= pr_beats - 8'd1;
+        end
+    end
 
     // texture DDR ports (4 corners x {data,VQ} = 8)
     genvar gi_tex;
@@ -68,11 +110,11 @@ module frontend_tsp_pp_tb_top import tsp_pkg::*; (
     endgenerate
 
     // -------------------- caches --------------------
-    cache_req256_t ra_creq, ol_creq, pr_creq, ts_creq;
-    cache_resp256_t ra_cresp, ol_cresp, pr_cresp, ts_cresp;
+    // Region parser + TSP param reader keep their 256-bit line caches; the OL
+    // parser and ISP iterator read DDR DIRECTLY (own line buffers / burst).
+    cache_req256_t ra_creq, ts_creq;
+    cache_resp256_t ra_cresp, ts_cresp;
     data_cache256 u_ra_c (.clk(clk),.reset(reset),.creq(ra_creq),.cresp(ra_cresp),.dreq(ra_dreq),.dresp(ra_dresp));
-    data_cache256 u_ol_c (.clk(clk),.reset(reset),.creq(ol_creq),.cresp(ol_cresp),.dreq(ol_dreq),.dresp(ol_dresp));
-    data_cache256 u_pr_c (.clk(clk),.reset(reset),.creq(pr_creq),.cresp(pr_cresp),.dreq(pr_dreq),.dresp(pr_dresp));
     data_cache256 u_ts_c (.clk(clk),.reset(reset),.creq(ts_creq),.cresp(ts_cresp),.dreq(ts_dreq),.dresp(ts_dresp));
 
     cache_req_t   pp_tc_req [0:3], pp_vq_req [0:3];
@@ -99,7 +141,7 @@ module frontend_tsp_pp_tb_top import tsp_pkg::*; (
     prim_out_t   ol_prim; prim_ack_t ol_ack;
     object_list_parser u_ol (.clk(clk),.reset(reset),.start(ol_start),
         .list_ptr(ol_list_ptr),.busy(ol_busy),.done(ol_done),.prim(ol_prim),.ack(ol_ack),
-        .creq(ol_creq),.cresp(ol_cresp));
+        .dreq(ol_dreq),.dresp(ol_dresp));
 
     reg              it_start; objlist_entry_t it_entry; entry_type_e it_etype;
     wire             it_busy;
@@ -107,7 +149,7 @@ module frontend_tsp_pp_tb_top import tsp_pkg::*; (
     isp_primitive_iterator u_it (.clk(clk),.reset(reset),.start(it_start),
         .intensity_shadow(regs.fpu_shad_scale.intensity_shadow),
         .param_base(param_base),.entry_type(it_etype),.entry(it_entry),.busy(it_busy),
-        .trio(it_trio),.ack(it_ack),.creq(pr_creq),.cresp(pr_cresp));
+        .trio(it_trio),.ack(it_ack),.dreq(pr_dreq),.dresp(pr_dresp));
 
     // -------------------- triple-buffered tile slots --------------------
     // slot_state lifecycle: FREE -> ISP -> TSPRDY -> TSPRUN -> WRRDY -> FREE.
@@ -214,6 +256,7 @@ module frontend_tsp_pp_tb_top import tsp_pkg::*; (
     reg  [31:0] t_x1,t_y1,t_z1, t_x2,t_y2,t_z2, t_x3,t_y3,t_z3;
     reg  [31:0] tri_tag, su_tag;
     wire        isp_done, isp_sgn_neg, isp_cull;
+    wire [4:0]  w_bx0, w_bx1, w_by0, w_by1;   // tile-local bbox from setup
     wire [31:0] w_dx12,w_dx23,w_dx31,w_dx41, w_dy12,w_dy23,w_dy31,w_dy41;
     wire [31:0] w_c1,w_c2,w_c3,w_c4, w_ddx,w_ddy,w_cinvw;
     isp_setup_min u_isp (
@@ -222,7 +265,8 @@ module frontend_tsp_pp_tb_top import tsp_pkg::*; (
         .xbase(t_xbase), .ybase(t_ybase), .sgn_neg(isp_sgn_neg), .cull(isp_cull),
         .dx12(w_dx12),.dx23(w_dx23),.dx31(w_dx31),.dx41(w_dx41),
         .dy12(w_dy12),.dy23(w_dy23),.dy31(w_dy31),.dy41(w_dy41),
-        .c1(w_c1),.c2(w_c2),.c3(w_c3),.c4(w_c4),.ddx_invw(w_ddx),.ddy_invw(w_ddy),.c_invw(w_cinvw));
+        .c1(w_c1),.c2(w_c2),.c3(w_c3),.c4(w_c4),.ddx_invw(w_ddx),.ddy_invw(w_ddy),.c_invw(w_cinvw),
+        .bx0(w_bx0),.bx1(w_bx1),.by0(w_by0),.by1(w_by1));
 
     reg [31:0] isp_dx12,isp_dx23,isp_dx31,isp_dx41;
     reg [31:0] isp_dy12,isp_dy23,isp_dy31,isp_dy41;
@@ -232,12 +276,9 @@ module frontend_tsp_pp_tb_top import tsp_pkg::*; (
     // streamed rasterizer. HW depth does a full 32-px line/clock (DSP-heavy on
     // fabric, so synth keeps 8); Verilator sim uses 32 = whole line/clock so the
     // sweep is 32 cyc/tri instead of 128.
-`ifdef VERILATOR
-    localparam integer RAS_LANES = 32;
-`else
     localparam integer RAS_LANES = 8;
-`endif
     reg  [4:0]  ras_y, ras_x;
+    reg  [4:0]  rbx0, rbx1, rby1;   // active bbox sweep bounds (chunk-aligned x)
     reg  [4:0]  st_a;                    // ISP engine state
     wire        ras_in_valid;
     wire        ras_out_valid;
@@ -266,33 +307,58 @@ module frontend_tsp_pp_tb_top import tsp_pkg::*; (
       end
     endgenerate
 
-    // ISP engine states. Per-triangle work is split into two parallel sub-FSMs
-    // (setup / raster) that run while st_a==A_PRIM, so ISP SETUP of the next
-    // triangle overlaps the raster SCAN of the current one.
-    localparam A_IDLE=0, A_RA=2, A_STATE=3, A_OL_WAIT=4, A_ENTRY=5,
-               A_PRIM=6, A_OL_ACK=10,
+    // ISP engine states. The producer (region -> objlist -> entry FIFO) runs
+    // AHEAD; a concurrent iterator-consumer (it_cst) pops entries -> runs the
+    // iterator -> pushes triangles into the triangle FIFO; the setup/raster
+    // sub-FSMs pop that FIFO. All three overlap so the iterator's per-triangle
+    // read latency is hidden behind setup+raster of earlier triangles.
+    localparam A_IDLE=0, A_RA=2, A_STATE=3, A_OL_RUN=4,
+               A_DRAIN=6,
                A_RA_ACK=11, A_RA_ACK_NEXT=12, A_DONE=13;
-    // 3-stage ISP pipeline: fetch(N+2) || setup(N+1) || raster(N).
-    // fetch sub-FSM (iterator -> fh_* handoff; single accept state)
-    localparam FE_IDLE=0;
-    reg fe_st;
     // setup sub-FSM
     localparam SU_IDLE=0, SU_RUN=1;
     reg su_st;
     // raster sub-FSM
     localparam RS_IDLE=0, RS_RAS=1, RS_DRAIN=2;
     reg [1:0] rs_st;
-    // 1-deep FETCH handoff (fetch -> setup)
-    reg        fh_valid;
-    reg [31:0] fh_x1,fh_y1,fh_z1, fh_x2,fh_y2,fh_z2, fh_x3,fh_y3,fh_z3;
-    reg [31:0] fh_isp, fh_tag;
+
+    // ---- entry FIFO (object_list_parser -> iterator), depth 8 ----
+    localparam integer EQ_N = 8;
+    reg [1:0]       eq_etype [0:EQ_N-1];
+    objlist_entry_t eq_entry [0:EQ_N-1];
+    reg [3:0] eq_head, eq_tail; reg [4:0] eq_count;
+    reg       eq_push, eq_pop;
+    wire eq_full  = (eq_count == EQ_N);
+    wire eq_empty = (eq_count == 0);
+    localparam IT_IDLE=0, IT_RUN=1; reg it_cst;   // iterator-consumer FSM
+    reg prim_seen;   // iterator pulsed prim_done for the current entry
+
+    // ---- triangle FIFO (producer -> consumer), depth 8 ----
+    localparam integer FIFO_N = 8;
+    reg [31:0] fq_isp [0:FIFO_N-1];
+    reg [31:0] fq_tag [0:FIFO_N-1];
+    reg [31:0] fq_x1[0:FIFO_N-1], fq_y1[0:FIFO_N-1], fq_z1[0:FIFO_N-1];
+    reg [31:0] fq_x2[0:FIFO_N-1], fq_y2[0:FIFO_N-1], fq_z2[0:FIFO_N-1];
+    reg [31:0] fq_x3[0:FIFO_N-1], fq_y3[0:FIFO_N-1], fq_z3[0:FIFO_N-1];
+    reg [3:0]  fq_head, fq_tail;
+    reg [4:0]  fq_count;
+    reg        fifo_push, fifo_pop;
+    wire fq_full  = (fq_count == FIFO_N);
+    wire fq_empty = (fq_count == 0);
+
     // 1-deep pending-planes handoff (setup -> raster)
-    reg        pend_valid, prim_seen;
+    reg        pend_valid;
     reg [31:0] pend_dx12,pend_dx23,pend_dx31,pend_dx41;
     reg [31:0] pend_dy12,pend_dy23,pend_dy31,pend_dy41;
     reg [31:0] pend_c1,pend_c2,pend_c3,pend_c4;
     reg [31:0] pend_ddx,pend_ddy,pend_cinvw, pend_isp, pend_tag;
+    reg [4:0]  pend_bx0,pend_bx1,pend_by0,pend_by1;  // tile-local bounding box
     assign ras_in_valid = (rs_st == RS_RAS);
+
+    // consumer fully idle: entry FIFO empty, iterator idle & not busy, setup +
+    // raster + pend handoff all idle.
+    wire consumer_idle = eq_empty && (it_cst==IT_IDLE) && !it_busy
+                       && (su_st==SU_IDLE) && (rs_st==RS_IDLE) && !pend_valid;
 
     localparam integer NCHUNK = (TILE_W/RAS_LANES) * TILE_H;
     integer ras_inflight;
@@ -404,12 +470,15 @@ module frontend_tsp_pp_tb_top import tsp_pkg::*; (
             ra_ack.list_done<=0; ol_ack.entry_done<=0; it_ack.triangle_done<=0;
             ras_inflight<=0; tri_count<=0; cull_count<=0; tri_seen<=0;
             isp_finished<=0; isp_fin<=0; isp_no_more<=0;
-            fe_st<=FE_IDLE; su_st<=SU_IDLE; rs_st<=RS_IDLE;
-            fh_valid<=0; pend_valid<=0; prim_seen<=0;
+            su_st<=SU_IDLE; rs_st<=RS_IDLE;
+            pend_valid<=0; prim_seen<=0;
+            fq_head<=0; fq_tail<=0; fq_count<=0;
+            eq_head<=0; eq_tail<=0; eq_count<=0; it_cst<=IT_IDLE;
         end else begin
             ra_start<=0; ol_start<=0; it_start<=0; isp_start<=0;
             ra_ack.list_done<=0; ol_ack.entry_done<=0; it_ack.triangle_done<=0;
             isp_fin<=0;
+            eq_push = 1'b0;
 
             // streamed rasterizer consumer -> dt_depth/dt_tag of slot_isp
             if (ras_out_valid) begin
@@ -453,7 +522,7 @@ module frontend_tsp_pp_tb_top import tsp_pkg::*; (
                     ra_ack.list_done<=1'b1; st_a<=A_RA_ACK;
                 end
                 RSTATE_OP, RSTATE_PT, RSTATE_TR: begin
-                    ol_list_ptr<=ra_out.list_ptr; ol_start<=1'b1; st_a<=A_OL_WAIT;
+                    ol_list_ptr<=ra_out.list_ptr; ol_start<=1'b1; st_a<=A_OL_RUN;
                 end
                 RSTATE_FLUSH: begin
                     // ISP done for this tile: tell the scheduler (isp_fin) which
@@ -466,23 +535,34 @@ module frontend_tsp_pp_tb_top import tsp_pkg::*; (
                 endcase
             end
 
-            A_OL_WAIT: begin
-                if (ol_done) begin ra_ack.list_done<=1'b1; st_a<=A_RA_ACK; end
-                else if (ol_prim.entry_ready) st_a<=A_ENTRY;
+            // A_OL_RUN: PRODUCER - push each OL entry into the entry FIFO (eq) and
+            // ack the OL parser so it decodes the next entry ahead. STRIP/TRI are
+            // queued; QUAD is skipped. On list end (ol_done) -> BARRIER (A_DRAIN).
+            // The iterator CONSUMER (it_cst) runs concurrently below, popping eq
+            // into the triangle FIFO independent of st_a.
+            A_OL_RUN: begin
+                if (ol_done) st_a<=A_DRAIN;
+                else if (ol_prim.entry_ready && !ol_ack.entry_done) begin
+                    if (ol_prim.entry_type==ENT_STRIP || ol_prim.entry_type==ENT_TRI) begin
+                        if (!eq_full) begin
+                            eq_etype[eq_tail[2:0]] <= ol_prim.entry_type;
+                            eq_entry[eq_tail[2:0]] <= ol_prim.entry;
+                            eq_tail <= (eq_tail==EQ_N-1) ? 4'd0 : eq_tail+4'd1;
+                            eq_push = 1'b1;
+                            ol_ack.entry_done <= 1'b1;
+                        end
+                    end else begin
+                        ol_ack.entry_done <= 1'b1;   // quad: skip (ack, don't queue)
+                    end
+                end
             end
-            A_ENTRY: begin
-                if (ol_prim.entry_type==ENT_STRIP || ol_prim.entry_type==ENT_TRI) begin
-                    it_entry<=ol_prim.entry; it_etype<=ol_prim.entry_type; it_start<=1'b1;
-                    prim_seen<=1'b0; st_a<=A_PRIM;
-                end else begin ol_ack.entry_done<=1'b1; st_a<=A_OL_ACK; end
+
+            // BARRIER at list end: wait for the entry FIFO + iterator + triangle
+            // FIFO + setup/raster to all drain before letting region advance.
+            A_DRAIN: if (fq_empty && consumer_idle) begin
+                ra_ack.list_done<=1'b1; st_a<=A_RA_ACK;
             end
-            // per-triangle work runs in the two parallel sub-FSMs below; the entry
-            // completes when the iterator reported prim_done AND both are idle.
-            A_PRIM: if (prim_seen && fe_st==FE_IDLE && su_st==SU_IDLE && rs_st==RS_IDLE
-                        && !fh_valid && !pend_valid) begin
-                ol_ack.entry_done<=1'b1; st_a<=A_OL_ACK;
-            end
-            A_OL_ACK: st_a<=A_OL_WAIT;
+
             A_RA_ACK: st_a<=A_RA;                       // same granted slot, next state of same tile
             // tile done: wait for the scheduler to consume isp_fin (drop the old
             // grant) before A_RA looks for the next grant, so we don't re-render
@@ -492,64 +572,97 @@ module frontend_tsp_pp_tb_top import tsp_pkg::*; (
             default: st_a<=A_IDLE;
             endcase
 
-            // ======= parallel FETCH / SETUP / RASTER sub-FSMs (A_PRIM) =======
-            if (st_a == A_PRIM) begin
-                // iterator finished producing this entry's triangles
-                if (it_trio.prim_done) prim_seen <= 1'b1;
-
-                // ---- FETCH: iterator -> fh_* handoff ----
-                if (fe_st==FE_IDLE && it_trio.triangle_ready && !fh_valid && !it_ack.triangle_done) begin
-                    fh_isp <= it_trio.isp; fh_tag <= it_trio.tag;
-                    fh_x1<=it_trio.v0.x; fh_y1<=it_trio.v0.y; fh_z1<=it_trio.v0.z;
-                    fh_x2<=it_trio.v1.x; fh_y2<=it_trio.v1.y; fh_z2<=it_trio.v1.z;
-                    fh_x3<=it_trio.v2.x; fh_y3<=it_trio.v2.y; fh_z3<=it_trio.v2.z;
-                    it_ack.triangle_done <= 1'b1;      // advance iterator to next tri
-                    fh_valid <= 1'b1; tri_seen <= tri_seen + 1;
-                end
-
-                // ---- SETUP: fh_* -> isp_setup_min -> pend_* ----
-                case (su_st)
-                SU_IDLE: if (fh_valid && !pend_valid) begin
-                    isp_word_su <= fh_isp; su_tag <= fh_tag;
-                    t_x1<=fh_x1; t_y1<=fh_y1; t_z1<=fh_z1;
-                    t_x2<=fh_x2; t_y2<=fh_y2; t_z2<=fh_z2;
-                    t_x3<=fh_x3; t_y3<=fh_y3; t_z3<=fh_z3;
-                    fh_valid <= 1'b0;
-                    isp_start <= 1'b1; su_st <= SU_RUN;
-                end
-                SU_RUN: if (isp_done) begin
-                    if (isp_cull) cull_count <= cull_count + 1;
-                    else begin
-                        pend_dx12<=w_dx12;pend_dx23<=w_dx23;pend_dx31<=w_dx31;pend_dx41<=w_dx41;
-                        pend_dy12<=w_dy12;pend_dy23<=w_dy23;pend_dy31<=w_dy31;pend_dy41<=w_dy41;
-                        pend_c1<=w_c1;pend_c2<=w_c2;pend_c3<=w_c3;pend_c4<=w_c4;
-                        pend_ddx<=w_ddx;pend_ddy<=w_ddy;pend_cinvw<=w_cinvw;
-                        pend_isp<=isp_word_su; pend_tag<=su_tag; pend_valid<=1'b1;
-                    end
-                    su_st <= SU_IDLE;
-                end
-                endcase
-
-                // ---- raster: pend_* -> active planes -> 32x32 sweep ----
-                case (rs_st)
-                RS_IDLE: if (pend_valid) begin
-                    isp_dx12<=pend_dx12;isp_dx23<=pend_dx23;isp_dx31<=pend_dx31;isp_dx41<=pend_dx41;
-                    isp_dy12<=pend_dy12;isp_dy23<=pend_dy23;isp_dy31<=pend_dy31;isp_dy41<=pend_dy41;
-                    isp_c1<=pend_c1;isp_c2<=pend_c2;isp_c3<=pend_c3;isp_c4<=pend_c4;
-                    isp_ddx_invw<=pend_ddx;isp_ddy_invw<=pend_ddy;isp_c_invw<=pend_cinvw;
-                    isp_word<=pend_isp; tri_tag<=pend_tag;
-                    pend_valid<=1'b0; tri_count<=tri_count+1;
-                    ras_y<=5'd0; ras_x<=5'd0; rs_st<=RS_RAS;
-                end
-                RS_RAS: begin
-                    if (ras_x==5'(TILE_W-RAS_LANES)) begin
-                        ras_x<=5'd0;
-                        if (ras_y==5'(TILE_H-1)) rs_st<=RS_DRAIN; else ras_y<=ras_y+5'd1;
-                    end else ras_x<=ras_x+5'(RAS_LANES);
-                end
-                RS_DRAIN: if (ras_inflight==0 && !ras_in_valid && !ras_out_valid) rs_st<=RS_IDLE;
-                endcase
+            // ==== ITERATOR CONSUMER: entry FIFO -> iterator -> tri FIFO ====
+            // Runs independent of st_a. IT_IDLE: pop an entry, start the iterator.
+            // IT_RUN: drain the iterator's triangles into the triangle FIFO (stall
+            // when full); on prim_done + iterator idle, return to IT_IDLE.
+            eq_pop    = 1'b0;
+            fifo_push = 1'b0;
+            case (it_cst)
+            IT_IDLE: if (!eq_empty && !it_busy && !it_start) begin
+                it_entry <= eq_entry[eq_head[2:0]];
+                it_etype <= entry_type_e'(eq_etype[eq_head[2:0]]);
+                it_start <= 1'b1;
+                prim_seen <= 1'b0;
+                eq_head <= (eq_head==EQ_N-1) ? 4'd0 : eq_head+4'd1;
+                eq_pop  = 1'b1;
+                it_cst  <= IT_RUN;
             end
+            IT_RUN: begin
+                if (it_trio.prim_done) prim_seen <= 1'b1;
+                if (it_trio.triangle_ready && !fq_full && !it_ack.triangle_done) begin
+                    fq_isp[fq_tail[2:0]] <= it_trio.isp;
+                    fq_tag[fq_tail[2:0]] <= it_trio.tag;
+                    fq_x1[fq_tail[2:0]]<=it_trio.v0.x; fq_y1[fq_tail[2:0]]<=it_trio.v0.y; fq_z1[fq_tail[2:0]]<=it_trio.v0.z;
+                    fq_x2[fq_tail[2:0]]<=it_trio.v1.x; fq_y2[fq_tail[2:0]]<=it_trio.v1.y; fq_z2[fq_tail[2:0]]<=it_trio.v1.z;
+                    fq_x3[fq_tail[2:0]]<=it_trio.v2.x; fq_y3[fq_tail[2:0]]<=it_trio.v2.y; fq_z3[fq_tail[2:0]]<=it_trio.v2.z;
+                    it_ack.triangle_done <= 1'b1;   // advance iterator to next tri
+                    fq_tail  <= (fq_tail==FIFO_N-1) ? 4'd0 : fq_tail+4'd1;
+                    fifo_push = 1'b1;
+                    tri_seen <= tri_seen + 1;
+                end
+                if (prim_seen && !it_busy) it_cst <= IT_IDLE;   // entry finished
+            end
+            endcase
+
+            // ============ CONSUMER: FIFO -> setup -> raster ============
+            // ---- SETUP: pop FIFO -> isp_setup_min -> pend_* ----
+            fifo_pop = 1'b0;
+            case (su_st)
+            SU_IDLE: if (!fq_empty && !pend_valid) begin
+                isp_word_su <= fq_isp[fq_head[2:0]]; su_tag <= fq_tag[fq_head[2:0]];
+                t_x1<=fq_x1[fq_head[2:0]]; t_y1<=fq_y1[fq_head[2:0]]; t_z1<=fq_z1[fq_head[2:0]];
+                t_x2<=fq_x2[fq_head[2:0]]; t_y2<=fq_y2[fq_head[2:0]]; t_z2<=fq_z2[fq_head[2:0]];
+                t_x3<=fq_x3[fq_head[2:0]]; t_y3<=fq_y3[fq_head[2:0]]; t_z3<=fq_z3[fq_head[2:0]];
+                fq_head <= (fq_head==FIFO_N-1) ? 4'd0 : fq_head+4'd1;
+                fifo_pop = 1'b1;
+                isp_start <= 1'b1; su_st <= SU_RUN;
+            end
+            SU_RUN: if (isp_done) begin
+                if (isp_cull) cull_count <= cull_count + 1;
+                else begin
+                    pend_dx12<=w_dx12;pend_dx23<=w_dx23;pend_dx31<=w_dx31;pend_dx41<=w_dx41;
+                    pend_dy12<=w_dy12;pend_dy23<=w_dy23;pend_dy31<=w_dy31;pend_dy41<=w_dy41;
+                    pend_c1<=w_c1;pend_c2<=w_c2;pend_c3<=w_c3;pend_c4<=w_c4;
+                    pend_ddx<=w_ddx;pend_ddy<=w_ddy;pend_cinvw<=w_cinvw;
+                    pend_isp<=isp_word_su; pend_tag<=su_tag; pend_valid<=1'b1;
+                    // tile-local bounding box, computed by isp_setup_min.
+                    pend_bx0<=w_bx0; pend_bx1<=w_bx1; pend_by0<=w_by0; pend_by1<=w_by1;
+                end
+                su_st <= SU_IDLE;
+            end
+            endcase
+
+            // ---- RASTER: pend_* -> active planes -> BOUNDING-BOX sweep ----
+            // Only sweep the chunks/rows the triangle's tile-local bbox covers.
+            case (rs_st)
+            RS_IDLE: if (pend_valid) begin
+                isp_dx12<=pend_dx12;isp_dx23<=pend_dx23;isp_dx31<=pend_dx31;isp_dx41<=pend_dx41;
+                isp_dy12<=pend_dy12;isp_dy23<=pend_dy23;isp_dy31<=pend_dy31;isp_dy41<=pend_dy41;
+                isp_c1<=pend_c1;isp_c2<=pend_c2;isp_c3<=pend_c3;isp_c4<=pend_c4;
+                isp_ddx_invw<=pend_ddx;isp_ddy_invw<=pend_ddy;isp_c_invw<=pend_cinvw;
+                isp_word<=pend_isp; tri_tag<=pend_tag;
+                pend_valid<=1'b0; tri_count<=tri_count+1;
+                // chunk-aligned x range + row range from the bbox
+                rbx0 <= pend_bx0 & 5'(~(RAS_LANES-1));
+                rbx1 <= pend_bx1 & 5'(~(RAS_LANES-1));
+                rby1 <= pend_by1;
+                ras_y <= pend_by0;
+                ras_x <= pend_bx0 & 5'(~(RAS_LANES-1));
+                rs_st<=RS_RAS;
+            end
+            RS_RAS: begin
+                if (ras_x==rbx1) begin
+                    ras_x<=rbx0;
+                    if (ras_y==rby1) rs_st<=RS_DRAIN; else ras_y<=ras_y+5'd1;
+                end else ras_x<=ras_x+5'(RAS_LANES);
+            end
+            RS_DRAIN: if (ras_inflight==0 && !ras_in_valid && !ras_out_valid) rs_st<=RS_IDLE;
+            endcase
+
+            // ---- FIFO count maintenance (single update; push/pop may coincide) ----
+            fq_count <= fq_count + (fifo_push ? 5'd1 : 5'd0) - (fifo_pop ? 5'd1 : 5'd0);
+            eq_count <= eq_count + (eq_push  ? 5'd1 : 5'd0) - (eq_pop   ? 5'd1 : 5'd0);
         end
     end
 
