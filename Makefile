@@ -63,25 +63,25 @@ tex: tex-addr tex-uv tex-filter tex-combiner tex-fetch
 	@echo "=== all texture block tests passed ==="
 
 tex-addr: | $(BUILD)
-	$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module tex_addr \
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module tex_addr \
 	  $(TSP)/tex_addr.sv $(CWD)/tb/tex_addr_tb.cpp \
 	  --Mdir $(BUILD)/obj_texaddr -o tb
 	./$(BUILD)/obj_texaddr/tb
 
 tex-uv: | $(BUILD)
-	$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module tex_uv2texel \
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module tex_uv2texel \
 	  $(TSP)/tex_uv2texel.sv $(CWD)/tb/tex_uv2texel_tb.cpp \
 	  --Mdir $(BUILD)/obj_texuv -o tb
 	./$(BUILD)/obj_texuv/tb
 
 tex-filter: | $(BUILD)
-	$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module tex_filter \
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module tex_filter \
 	  $(TSP)/tex_filter.sv $(CWD)/tb/tex_filter_tb.cpp \
 	  --Mdir $(BUILD)/obj_texfilt -o tb
 	./$(BUILD)/obj_texfilt/tb
 
 tex-combiner: | $(BUILD)
-	$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module color_combiner \
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module color_combiner \
 	  $(TSP)/color_combiner.sv $(CWD)/tb/tex_combiner_tb.cpp \
 	  --Mdir $(BUILD)/obj_texcomb -o tb
 	./$(BUILD)/obj_texcomb/tb
@@ -91,7 +91,7 @@ tex-combiner: | $(BUILD)
 # the shaded colour buffer vs a refsw-equivalent model.
 DDRSTUB = tb/ddram_stub.sv tb/sysmem_stub.sv
 pipe: | $(BUILD)
-	$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-PINCONNECTEMPTY --public-flat-rw \
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-PINCONNECTEMPTY --public-flat-rw \
 	  --top-module tile_engine_top \
 	  $(TSP_RTL) rtl/tile_engine_top.sv $(wildcard rtl/isp_min/*.sv) $(DDRSTUB) \
 	  $(CWD)/tb/tsp_pipe_tb.cpp --Mdir $(BUILD)/obj_pipe -o tb
@@ -99,14 +99,14 @@ pipe: | $(BUILD)
 
 # data_cache256 unit test: 256-bit line cache + behavioural 64-bit DDR.
 dcache256: | $(BUILD)
-	$(VERILATOR) --cc --exe --build $(VFLAGS) --public-flat-rw --top-module data_cache256_tb_top \
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) --public-flat-rw --top-module data_cache256_tb_top \
 	  $(TSP)/tsp_pkg.sv tb/data_cache256_tb_top.sv $(TSP)/data_cache256.sv $(CWD)/tb/data_cache256_tb.cpp \
 	  --Mdir $(BUILD)/obj_dcache256 -o tb
 	./$(BUILD)/obj_dcache256/tb
 
 # object_list_parser unit test: list walker + injected 256b data$ + behav DDR.
 oparse: | $(BUILD)
-	$(VERILATOR) --cc --exe --build $(VFLAGS) --public-flat-rw --top-module object_list_parser_tb_top \
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) --public-flat-rw --top-module object_list_parser_tb_top \
 	  $(TSP)/tsp_pkg.sv tb/object_list_parser_tb_top.sv $(TSP)/object_list_parser.sv $(TSP)/data_cache256.sv \
 	  $(CWD)/tb/object_list_parser_tb.cpp --Mdir $(BUILD)/obj_oparse -o tb
 	./$(BUILD)/obj_oparse/tb
@@ -120,7 +120,7 @@ regen:
 # front-end integration run: reg_file + 8MB VRAM + RA/OL/tristrip + faux ISP,
 # driven from real PVR dumps (dumps/pvr_regs_menu.bin, dumps/vram_menu.bin).
 frontend: | $(BUILD)
-	$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ --public-flat-rw \
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ --public-flat-rw \
 	  --top-module frontend_tb_top \
 	  $(TSP)/tsp_pkg.sv tb/frontend_tb_top.sv \
 	  $(TSP)/reg_file.sv $(TSP)/region_array_parser.sv $(TSP)/object_list_parser.sv \
@@ -131,7 +131,7 @@ frontend: | $(BUILD)
 # front-end + real ISP integration: adds isp_setup_min + isp_raster_line +
 # depth-test + CoreTag tag writes; tile FLUSH -> 640x480 fb -> output.bmp.
 frontendisp: | $(BUILD)
-	$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ --public-flat-rw \
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ --public-flat-rw \
 	  --top-module frontend_isp_tb_top \
 	  $(TSP)/tsp_pkg.sv tb/frontend_isp_tb_top.sv \
 	  $(TSP)/reg_file.sv $(TSP)/region_array_parser.sv $(TSP)/object_list_parser.sv \
@@ -143,16 +143,26 @@ frontendisp: | $(BUILD)
 # front-end + ISP + TSP: tile flush shades every pixel through a tag-keyed TSP
 # plane cache (param fetch + tsp_setup_min) and tsp_shade -> shaded_<name>.bmp.
 frontendtsp: | $(BUILD)
-	$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ --public-flat-rw \
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ --public-flat-rw \
 	  --top-module frontend_tsp_tb_top \
 	  $(TSP_RTL) tb/frontend_tsp_tb_top.sv \
 	  $(wildcard rtl/isp_min/*.sv) \
 	  $(CWD)/tb/frontend_tsp_tb.cpp --Mdir $(BUILD)/obj_frontendtsp -o tb
 	./$(BUILD)/obj_frontendtsp/tb $(DUMP)
 
+# front-end + ISP + TSP, TRIPLE-BUFFERED: 3 concurrent tile stages (ISP / TSP /
+# writeout) on rotating buffers -> shaded_pp_<name>.bmp.
+frontendtsppp: | $(BUILD)
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ -Wno-MULTIDRIVEN --public-flat-rw \
+	  --top-module frontend_tsp_pp_tb_top \
+	  $(TSP_RTL) tb/frontend_tsp_pp_tb_top.sv \
+	  $(wildcard rtl/isp_min/*.sv) \
+	  $(CWD)/tb/frontend_tsp_pp_tb.cpp --Mdir $(BUILD)/obj_frontendtsppp -o tb
+	./$(BUILD)/obj_frontendtsppp/tb $(DUMP)
+
 # tsp_shade_pp: fully-pipelined shader, verified bit-equal vs serial tsp_shade.
 tspshadepp: | $(BUILD)
-	$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ --public-flat-rw \
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ --public-flat-rw \
 	  --top-module tsp_shade_pp_tb_top \
 	  $(TSP_RTL) tb/tsp_shade_pp_tb_top.sv \
 	  $(wildcard rtl/isp_min/*.sv) \
@@ -161,7 +171,7 @@ tspshadepp: | $(BUILD)
 
 # streamed rasterizer consume-path equivalence vs serial (bit-exact tile diff).
 rasterstream: | $(BUILD)
-	$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ --public-flat-rw \
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ --public-flat-rw \
 	  --top-module isp_raster_stream_tb_top \
 	  $(TSP)/tsp_pkg.sv tb/isp_raster_stream_tb_top.sv \
 	  $(wildcard rtl/isp_min/*.sv) \
@@ -170,14 +180,14 @@ rasterstream: | $(BUILD)
 
 # fp_mul_c9 (colour*z) fuzz vs float*int
 mulc9: | $(BUILD)
-	$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module fp_mul_c9_tb_top \
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module fp_mul_c9_tb_top \
 	  rtl/tsp/fp_mul_c9.sv tb/fp_mul_c9_tb_top.sv \
 	  $(CWD)/tb/fp_mul_c9_tb.cpp --Mdir $(BUILD)/obj_mulc9 -o tb
 	./$(BUILD)/obj_mulc9/tb
 
 # reg_file unit test: PVR scalar regs (generated) + FOG/PAL M10K tables.
 regfile: | $(BUILD)
-	$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ --public-flat-rw -Irtl/tsp/gen \
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ --public-flat-rw -Irtl/tsp/gen \
 	  --top-module reg_file_tb_top \
 	  $(TSP)/tsp_pkg.sv tb/reg_file_tb_top.sv $(TSP)/reg_file.sv \
 	  $(CWD)/tb/reg_file_tb.cpp --Mdir $(BUILD)/obj_regfile -o tb
@@ -185,21 +195,21 @@ regfile: | $(BUILD)
 
 # region_array_parser unit test: region walk -> per-tile ordered states.
 region: | $(BUILD)
-	$(VERILATOR) --cc --exe --build $(VFLAGS) --public-flat-rw --top-module region_array_parser_tb_top \
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) --public-flat-rw --top-module region_array_parser_tb_top \
 	  $(TSP)/tsp_pkg.sv tb/region_array_parser_tb_top.sv $(TSP)/region_array_parser.sv $(TSP)/data_cache256.sv \
 	  $(CWD)/tb/region_array_parser_tb.cpp --Mdir $(BUILD)/obj_region -o tb
 	./$(BUILD)/obj_region/tb
 
 # isp_primitive_iterator unit test: strip + tri-array iterator (XYZ only).
 isprim: | $(BUILD)
-	$(VERILATOR) --cc --exe --build $(VFLAGS) --public-flat-rw --top-module isp_primitive_iterator_tb_top \
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) --public-flat-rw --top-module isp_primitive_iterator_tb_top \
 	  $(TSP)/tsp_pkg.sv tb/isp_primitive_iterator_tb_top.sv $(TSP)/isp_primitive_iterator.sv $(TSP)/data_cache256.sv \
 	  $(CWD)/tb/isp_primitive_iterator_tb.cpp --Mdir $(BUILD)/obj_isprim -o tb
 	./$(BUILD)/obj_isprim/tb
 
 # tex_fetch integrated test: tex_fetch + 2 injected caches + behavioural DDR.
 tex-fetch: | $(BUILD)
-	$(VERILATOR) --cc --exe --build $(VFLAGS) --public-flat-rw --top-module texfetch_tb_top \
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) --public-flat-rw --top-module texfetch_tb_top \
 	  $(TSP)/tsp_pkg.sv tb/tex_fetch_tb_top.sv $(TSP)/tex_fetch.sv $(TSP)/tex_addr.sv \
 	  $(TSP)/tex_decode.sv $(TSP)/tex_cache.sv $(CWD)/tb/tex_fetch_tb.cpp \
 	  --Mdir $(BUILD)/obj_texfetch -o tb
@@ -217,14 +227,14 @@ $(BUILD):
 
 # ---- FP primitive fuzz ----
 fp: | $(BUILD)
-	$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module fp_prims \
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module fp_prims \
 	  -Irtl tb/fp_prims.sv $(CWD)/tb/fp_prims_tb.cpp \
 	  --Mdir $(BUILD)/obj_fpprims -o fp_prims_tb
 	./$(BUILD)/obj_fpprims/fp_prims_tb
 
 # ---- combinational setup TB (bit-exact) ----
 sim: vectors
-	$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module tri_setup_top \
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module tri_setup_top \
 	  -CFLAGS "-I$(CWD)/build" \
 	  -Irtl $(RTL_COMB) $(CWD)/tb/tri_setup_tb.cpp \
 	  --Mdir $(BUILD)/obj_setup -o tri_setup_tb
@@ -235,7 +245,7 @@ sim-quad: ; $(MAKE) sim MODE=quad
 
 # ---- sequenced setup TB (one mul+add/unit, one reciprocal; ULP tolerance) ----
 seq: vectors
-	$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module tri_setup_seq_top \
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module tri_setup_seq_top \
 	  -CFLAGS "-I$(CWD)/build" \
 	  -Irtl $(RTL_SEQ) $(CWD)/tb/tri_setup_seq_tb.cpp \
 	  --Mdir $(BUILD)/obj_seqtop -o tri_setup_seq_tb
@@ -254,7 +264,7 @@ RTL_IP    = rtl/fp_add.sv rtl/fp_mul.sv rtl/fp_div.sv rtl/u8_to_float.sv \
             tb/altera_fp_stubs.sv rtl/fmac_seq.sv rtl/fp_recip.sv \
             rtl/isp_setup_seq.sv rtl/tsp_setup_seq.sv rtl/tri_setup_seq_top.sv
 ip: vectors
-	$(VERILATOR) --cc --exe --build $(VFLAGS) -DSYNTHESIS -Wno-MULTITOP \
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) -DSYNTHESIS -Wno-MULTITOP \
 	  --top-module tri_setup_seq_top -CFLAGS "-I$(CWD)/build" \
 	  -Irtl $(RTL_IP) $(CWD)/tb/tri_setup_seq_tb.cpp \
 	  --Mdir $(BUILD)/obj_ip -o tri_setup_ip_tb
