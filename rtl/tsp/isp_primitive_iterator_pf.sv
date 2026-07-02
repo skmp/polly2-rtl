@@ -118,9 +118,17 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
     wire        ni_isp = (ni == 6'd0);
     reg  [3:0]  ni_vx;                 // vertex index (tracked, no divider)
     reg  [1:0]  ni_cmp;                // component (0=x,1=y,2=z)
-    wire [8:0]  need_off = ni_isp ? 9'd0
-                        : {4'b0, rd_hdr_words} + ({5'b0, ni_vx} * {4'b0, rd_stride_w})
-                                               + {7'b0, ni_cmp};
+    // need_off used to be combinational: hdr + ni_vx*stride + ni_cmp. That per-beat
+    // MULTIPLY, fed by rd_shadow (via rd_stride_w/rd_hdr_words) and compared against
+    // `beat`, then gating the vslot write, was the 100 MHz critical path. Instead we
+    // ACCUMULATE it in a register: same value, no multiply and no rd_shadow->compare
+    // combinational chain (rd_shadow now only feeds the small +1 / +stride-2 step).
+    //   +1        stepping a component within a vertex (c: 0->1, 1->2)
+    //   +stride-2 crossing z of vertex v to x of vertex v+1
+    // Seeded at the ISP word (need_off_r=0); on the ISP->first-vertex transition it
+    // jumps to rd_hdr_words. Max value ~ 5 + 7*9 + 2 = 70, fits in 9 bits.
+    reg  [8:0]  need_off_r;
+    wire [8:0]  need_off = need_off_r;
 
     localparam R_IDLE=2'd0, R_REQ=2'd1, R_STREAM=2'd2;
     reg [1:0]  rst;
@@ -213,6 +221,7 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
                 ni           <= 6'd0;
                 ni_vx        <= 4'd0;
                 ni_cmp       <= 2'd0;
+                need_off_r   <= 9'd0;   // ISP word is at offset 0
                 b_nfill[rd_buf] <= 4'd0;
                 b_done [rd_buf] <= 1'b0;
                 rst          <= R_STREAM;
@@ -229,6 +238,13 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
                         if (ni_cmp == 2'd2) b_nfill[rd_buf] <= b_nfill[rd_buf] + 4'd1;
                     end
                     ni <= ni + 6'd1;
+                    // advance need_off_r by the same value the old multiply produced:
+                    //   ISP word     -> first vertex x  : jump to header size
+                    //   z of vertex  -> x of next vertex : + (stride - 2)
+                    //   x/y within a vertex             : + 1
+                    if (ni_isp)              need_off_r <= {4'b0, rd_hdr_words};
+                    else if (ni_cmp == 2'd2) need_off_r <= need_off_r + {4'b0, rd_stride_w} - 9'd2;
+                    else                     need_off_r <= need_off_r + 9'd1;
                     if (!ni_isp) begin
                         if (ni_cmp == 2'd2) begin ni_cmp<=2'd0; ni_vx<=ni_vx+4'd1; end
                         else                       ni_cmp<=ni_cmp+2'd1;
