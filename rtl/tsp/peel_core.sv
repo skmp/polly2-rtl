@@ -370,26 +370,51 @@ module peel_core import tsp_pkg::*; (
     );
 
     // ==================================================================
-    // TSP plane cache: 64 entries, keyed by the FULL CoreTag word.
-    // cache_bypass is deliberately IGNORED (always cache). Miss -> param
-    // fetch (GetFpuEntry) + tsp_setup_min; per entry: 10 planes {ddx,ddy,c}
-    // + the record's isp/tsp/tcw words.
+    // TSP plane cache: 64 entries, keyed by the FULL CoreTag word, banked into M10K
+    // in the plane_cache module (u_pc). cache_bypass is deliberately IGNORED (always
+    // cache). Miss -> param fetch (GetFpuEntry) + tsp_setup_min; per entry: 10 planes
+    // {ddx,ddy,c} + the record's isp/tsp/tcw words. The wide plane payload lives in
+    // M10K (registered read -> SH_LOOK is a 2-cycle lookup: present read, then sample
+    // hit + payload); the small tag/valid mirrors stay in logic for the hit test +
+    // single-cycle invalidate. cur_* is the live working entry (feeds tsp_shade); the
+    // whole cur_* bundle is committed to the cache in one write at TSP_RUN.
     // ==================================================================
     localparam integer PC_N = 64;
-    reg            pc_valid [0:PC_N-1];
-    reg [31:0]     pc_tag   [0:PC_N-1];
-    reg [31:0]     pc_isp   [0:PC_N-1];
-    reg [31:0]     pc_tsp   [0:PC_N-1];
-    reg [31:0]     pc_tcw   [0:PC_N-1];
-    reg [31:0]     pc_ddx   [0:PC_N-1][0:9];
-    reg [31:0]     pc_ddy   [0:PC_N-1][0:9];
-    reg [31:0]     pc_c     [0:PC_N-1][0:9];
 
     // current entry (feeds tsp_shade)
     reg [31:0] cur_isp, cur_tsp, cur_tcw;
     reg [31:0] cur_ddx [0:9];
     reg [31:0] cur_ddy [0:9];
     reg [31:0] cur_c   [0:9];
+
+    // flat 320-bit views of cur_* (lane j at [32*j +: 32]) for the cache write port
+    wire [319:0] cur_ddx_flat, cur_ddy_flat, cur_c_flat;
+    genvar gpc;
+    generate
+      for (gpc = 0; gpc < 10; gpc = gpc + 1) begin : pcflat
+        assign cur_ddx_flat[32*gpc +: 32] = cur_ddx[gpc];
+        assign cur_ddy_flat[32*gpc +: 32] = cur_ddy[gpc];
+        assign cur_c_flat  [32*gpc +: 32] = cur_c  [gpc];
+      end
+    endgenerate
+
+    // plane_cache control (typed ports; driven by the shade FSM)
+    reg          pc_inval;                 // clear all valid (S_SHADE_START, 1-cyc reg)
+    reg          pc_lu_req;                // lookup (COMBINATIONAL: st==SH_LOOK)
+    reg          pc_wr_req;                // commit (TSP_RUN, 1-cyc reg)
+    wire         pc_rd_valid, pc_hit;
+    wire [31:0]  pc_o_isp, pc_o_tsp, pc_o_tcw;
+    wire [319:0] pc_o_ddx, pc_o_ddy, pc_o_c;
+    plane_cache #(.NENT(PC_N), .SLOTW(6)) u_pc (
+        .clk(clk), .reset(reset), .inval(pc_inval),
+        .lu_req(pc_lu_req), .lu_slot(sh_slot), .lu_tag(sh_tag),
+        .rd_valid(pc_rd_valid), .hit(pc_hit),
+        .o_isp(pc_o_isp), .o_tsp(pc_o_tsp), .o_tcw(pc_o_tcw),
+        .o_ddx(pc_o_ddx), .o_ddy(pc_o_ddy), .o_c(pc_o_c),
+        .wr_req(pc_wr_req), .wr_slot(sh_slot), .wr_tag(sh_tag),
+        .wr_isp(cur_isp), .wr_tsp(cur_tsp), .wr_tcw(cur_tcw),
+        .wr_ddx(cur_ddx_flat), .wr_ddy(cur_ddy_flat), .wr_c(cur_c_flat)
+    );
 
     // shade-pass state
     reg [9:0]  shp;           // current tile pixel 0..1023
@@ -580,7 +605,8 @@ module peel_core import tsp_pkg::*; (
                S_PEEL_BUF_RUN=35,          // PeelBuffers RMW walk (read A -> write B)
                // shade producer: 1-cycle peel-RAM read latency for pixel shp
                SH_RD=36,
-               S_FLUSH_RD=37;              // FLUSH: prime col-RAM read of pixel fw_i
+               S_FLUSH_RD=37,              // FLUSH: prime col-RAM read of pixel fw_i
+               SH_LOOK2=38;                // plane-cache registered-read result cycle
     reg [5:0] st;
 
     // consumer sub-FSM (setup is now the streamed pipeline u_isp -> pq FIFO)
@@ -743,6 +769,10 @@ module peel_core import tsp_pkg::*; (
         cb_ca_id    = pp_out_id;
         cb_fl_valid = (st == S_FLUSH_RD || st == S_FLUSH_WR);   // FLUSH read (fw_i)
         cb_fl_id    = fw_i;
+
+        // ---- plane cache: lookup presented while st==SH_LOOK so u_pc registers the
+        // read at the SH_LOOK->SH_LOOK2 edge (hit/o_* valid IN SH_LOOK2). ----
+        pc_lu_req = (st == SH_LOOK);
     end
 
     always @(posedge clk) begin
@@ -760,12 +790,15 @@ module peel_core import tsp_pkg::*; (
             has_pt<=1'b0; has_tr<=1'b0; peel_which<=1'b0;
             b_valid<=1'b0; cb_valid<=1'b0;
             cl_i<=7'd0; pb_i<=7'd0; pb_rd<=7'd0; pb_pipe<=1'b0; first_peel<=1'b0;
-            for (i = 0; i < PC_N; i = i + 1) pc_valid[i] = 1'b0;
+            pc_inval<=1'b0; pc_wr_req<=1'b0;
+            // (plane cache valid bits are cleared by u_pc's own reset; pc_lu_req is
+            //  combinational, driven from st==SH_LOOK)
         end else begin
             done<=0; ra_start<=0; ol_start<=0;
             tsp_start<=0; pp_in_valid<=0; f_go<=0;
             ra_ack.list_done<=0; ol_ack.entry_done<=0; it_ack.triangle_done<=0;
             eq_push = 1'b0;
+            pc_inval<=1'b0; pc_wr_req<=1'b0;  // 1-cyc strobes (pc_lu_req is combi)
             // fbw_req is driven COMBINATIONALLY (see the FLUSH write block below).
 
             // ============ streamed rasterizer CONSUMER: stage A -> stage B ============
@@ -1048,7 +1081,7 @@ module peel_core import tsp_pkg::*; (
             // start streaming pixels. shade_mode selects which pixels; shade_ret is
             // where we go when the pipe drains.
             S_SHADE_START: begin
-                for (i = 0; i < PC_N; i = i + 1) pc_valid[i] = 1'b0;
+                pc_inval <= 1'b1;             // clear the plane cache (1-cyc bulk)
                 shp <= 10'd0; sh_out_n <= 0; sh_pending <= 0;
                 st <= SH_PIX;
             end
@@ -1078,17 +1111,22 @@ module peel_core import tsp_pkg::*; (
                 end
             end
 
-            // plane-cache lookup by the full tag (cache_bypass ignored)
-            SH_LOOK: begin
-                if (pc_valid[sh_slot] && pc_tag[sh_slot] == sh_tag) begin
+            // plane-cache lookup by the full tag (cache_bypass ignored). M10K payload
+            // is registered-read: pc_lu_req is asserted COMBINATIONALLY while
+            // st==SH_LOOK (see the buffer-request block), so u_pc registers the read
+            // at the SH_LOOK->SH_LOOK2 edge and hit/o_* are valid IN SH_LOOK2.
+            SH_LOOK: st <= SH_LOOK2;
+
+            SH_LOOK2: begin
+                if (pc_hit) begin
                     hit_count <= hit_count + 1;
-                    cur_isp = pc_isp[sh_slot];
-                    cur_tsp = pc_tsp[sh_slot];
-                    cur_tcw = pc_tcw[sh_slot];
+                    cur_isp = pc_o_isp;
+                    cur_tsp = pc_o_tsp;
+                    cur_tcw = pc_o_tcw;
                     for (j = 0; j < 10; j = j + 1) begin
-                        cur_ddx[j] = pc_ddx[sh_slot][j];
-                        cur_ddy[j] = pc_ddy[sh_slot][j];
-                        cur_c[j]   = pc_c[sh_slot][j];
+                        cur_ddx[j] = pc_o_ddx[32*j +: 32];
+                        cur_ddy[j] = pc_o_ddy[32*j +: 32];
+                        cur_c[j]   = pc_o_c  [32*j +: 32];
                     end
                     st <= SH_PRESENT;
                 end else begin
@@ -1166,8 +1204,6 @@ module peel_core import tsp_pkg::*; (
                         // stay 0) and kick tsp_setup_min
                         for (j = 0; j < 10; j = j + 1) begin
                             cur_ddx[j]=32'd0; cur_ddy[j]=32'd0; cur_c[j]=32'd0;
-                            pc_ddx[sh_slot][j]=32'd0; pc_ddy[sh_slot][j]=32'd0;
-                            pc_c[sh_slot][j]=32'd0;
                         end
                         tsp_start <= 1'b1; st <= TSP_RUN;
                     end
@@ -1179,8 +1215,6 @@ module peel_core import tsp_pkg::*; (
                     if (fv_i == 2'd2) begin
                         for (j = 0; j < 10; j = j + 1) begin
                             cur_ddx[j]=32'd0; cur_ddy[j]=32'd0; cur_c[j]=32'd0;
-                            pc_ddx[sh_slot][j]=32'd0; pc_ddy[sh_slot][j]=32'd0;
-                            pc_c[sh_slot][j]=32'd0;
                         end
                         tsp_start <= 1'b1; st <= TSP_RUN;
                     end
@@ -1190,14 +1224,12 @@ module peel_core import tsp_pkg::*; (
                 endcase
             end
 
-            // wait for tsp_setup_min; planes stream into cur_* AND the cache
-            // via the tsp_pvalid capture below; on done, commit the cache meta.
+            // wait for tsp_setup_min; planes stream into cur_* via the tsp_pvalid
+            // capture below. On done, commit the WHOLE cur_* bundle to the plane
+            // cache in one write (pc_wr_req; u_pc's write ports are wired to sh_tag +
+            // cur_*). cur_* is complete by tsp_done (setup emits all planes first).
             TSP_RUN: if (tsp_done) begin
-                pc_valid[sh_slot] = 1'b1;
-                pc_tag[sh_slot]   = sh_tag;
-                pc_isp[sh_slot]   = cur_isp;
-                pc_tsp[sh_slot]   = cur_tsp;
-                pc_tcw[sh_slot]   = cur_tcw;
+                pc_wr_req <= 1'b1;
                 st <= SH_PRESENT;
             end
 
@@ -1360,14 +1392,13 @@ module peel_core import tsp_pkg::*; (
             eq_count <= eq_count + (eq_push  ? 5'd1 : 5'd0) - (eq_pop   ? 5'd1 : 5'd0);
             pq_count <= pq_count + (pq_push  ? 5'd1 : 5'd0) - (pq_pop   ? 5'd1 : 5'd0);
 
-            // plane stream capture (runs regardless of FSM state)
+            // plane stream capture (runs regardless of FSM state). Only cur_* is
+            // filled now; the whole bundle is committed to the plane cache in one
+            // pc_wr_req at TSP_RUN (no per-plane cache writes).
             if (tsp_pvalid) begin
                 cur_ddx[tsp_pidx] = tsp_pddx;
                 cur_ddy[tsp_pidx] = tsp_pddy;
                 cur_c[tsp_pidx]   = tsp_pc;
-                pc_ddx[sh_slot][tsp_pidx] = tsp_pddx;
-                pc_ddy[sh_slot][tsp_pidx] = tsp_pddy;
-                pc_c[sh_slot][tsp_pidx]   = tsp_pc;
             end
         end
     end
