@@ -60,10 +60,15 @@ module isp_setup_streamed (
     localparam integer NS = 4;    // interleave depth = MAC_PH
 
     // ---------------- per-slot vertex holders ----------------
-    reg [31:0] X1[0:NS-1],Y1[0:NS-1],Z1[0:NS-1];
-    reg [31:0] X2[0:NS-1],Y2[0:NS-1],Z2[0:NS-1];
-    reg [31:0] X3[0:NS-1],Y3[0:NS-1],Z3[0:NS-1];
-    reg [31:0] XB[0:NS-1],YB[0:NS-1];
+    // ramstyle=logic: these 4-deep arrays must be LUT registers, NOT block RAM.
+    // Quartus otherwise infers altsyncram, whose late read-data starves the long
+    // combinational bbox cloud (f2i_floor barrel-shift -> min/max -> clamp5) and
+    // blows the 100 MHz path by ~11 ns. Keeping them as registers removes the RAM
+    // read delay; the bbox itself is additionally pipelined below.
+    reg [31:0] X1[0:NS-1],Y1[0:NS-1],Z1[0:NS-1]  /* synthesis ramstyle = "logic" */;
+    reg [31:0] X2[0:NS-1],Y2[0:NS-1],Z2[0:NS-1]  /* synthesis ramstyle = "logic" */;
+    reg [31:0] X3[0:NS-1],Y3[0:NS-1],Z3[0:NS-1]  /* synthesis ramstyle = "logic" */;
+    reg [31:0] XB[0:NS-1],YB[0:NS-1]             /* synthesis ramstyle = "logic" */;
     reg [31:0] ISPW[0:NS-1];
     reg [31:0] TAG[0:NS-1];       // opaque payload carried through
 
@@ -86,6 +91,20 @@ module isp_setup_streamed (
     reg [31:0] o_c1[0:NS-1],o_c2[0:NS-1],o_c3[0:NS-1];
     reg [31:0] o_ddx[0:NS-1],o_ddy[0:NS-1],o_cinvw[0:NS-1];
     reg        o_sgnneg[0:NS-1], o_cull[0:NS-1];
+
+    // ---------------- pipelined tile-local bbox (per slot) ----------------
+    // The bbox used to be one combinational cloud (f2i_floor barrel-shift -> 6x
+    // 16-bit min/max -> clamp5) evaluated in the retire cycle - the 100 MHz critical
+    // path. The vertices are fixed from accept (c0) onward, so we spread the cloud
+    // across 3 schedule steps into per-slot registers, and retire just copies them.
+    //   stage bb1 (@cyc 3): f2i_floor each coord, subtract tile origin -> local ints
+    //   stage bb2 (@cyc 4): min/max reduce -> bbox extents
+    //   stage bb3 (@cyc 5): clamp5 -> o_bx0/o_bx1/o_by0/o_by1
+    reg signed [15:0] lXa[0:NS-1],lXb[0:NS-1],lXc[0:NS-1];   // local X of v1,v2,v3
+    reg signed [15:0] lYa[0:NS-1],lYb[0:NS-1],lYc[0:NS-1];   // local Y of v1,v2,v3
+    reg signed [15:0] bxmin_r[0:NS-1],bxmax_r[0:NS-1];
+    reg signed [15:0] bymin_r[0:NS-1],bymax_r[0:NS-1];
+    reg [4:0] o_bx0[0:NS-1],o_bx1[0:NS-1],o_by0[0:NS-1],o_by1[0:NS-1];
 
     // per-slot control
     reg        slot_busy[0:NS-1];
@@ -236,11 +255,23 @@ module isp_setup_streamed (
                 1: begin
                     d_X1X3[sl]<=qa; d_Y2Y3[sl]<=qb; d_Y1Y3[sl]<=qc; d_X2X3[sl]<=qd;
                     L0(X1[sl],ONE,X2[sl],1); L1(Y1[sl],ONE,Y2[sl],1); L2(X2[sl],ONE,X1[sl],1); L3(Y2[sl],ONE,Y1[sl],1);
+                    // bbox stage 1: float->int floor of each vertex, minus tile origin
+                    lXa[sl] <= f2i_floor(X1[sl]) - f2i_floor(XB[sl]);
+                    lXb[sl] <= f2i_floor(X2[sl]) - f2i_floor(XB[sl]);
+                    lXc[sl] <= f2i_floor(X3[sl]) - f2i_floor(XB[sl]);
+                    lYa[sl] <= f2i_floor(Y1[sl]) - f2i_floor(YB[sl]);
+                    lYb[sl] <= f2i_floor(Y2[sl]) - f2i_floor(YB[sl]);
+                    lYc[sl] <= f2i_floor(Y3[sl]) - f2i_floor(YB[sl]);
                     cyc[sl]<=5'd2;
                 end
                 2: begin
                     d_X1X2[sl]<=qa; d_Y1Y2[sl]<=qb; d_X2X1[sl]<=qc; d_Y2Y1[sl]<=qd;
                     L0(X3[sl],ONE,X1[sl],1); L1(Y3[sl],ONE,Y1[sl],1); L2(Z2[sl],ONE,Z1[sl],1); L3(Z3[sl],ONE,Z1[sl],1);
+                    // bbox stage 2: min/max reduce
+                    bxmin_r[sl] <= (lXa[sl]<lXb[sl]?(lXa[sl]<lXc[sl]?lXa[sl]:lXc[sl]):(lXb[sl]<lXc[sl]?lXb[sl]:lXc[sl]));
+                    bxmax_r[sl] <= (lXa[sl]>lXb[sl]?(lXa[sl]>lXc[sl]?lXa[sl]:lXc[sl]):(lXb[sl]>lXc[sl]?lXb[sl]:lXc[sl]));
+                    bymin_r[sl] <= (lYa[sl]<lYb[sl]?(lYa[sl]<lYc[sl]?lYa[sl]:lYc[sl]):(lYb[sl]<lYc[sl]?lYb[sl]:lYc[sl]));
+                    bymax_r[sl] <= (lYa[sl]>lYb[sl]?(lYa[sl]>lYc[sl]?lYa[sl]:lYc[sl]):(lYb[sl]>lYc[sl]?lYb[sl]:lYc[sl]));
                     cyc[sl]<=5'd3;
                 end
                 3: begin
@@ -249,6 +280,9 @@ module isp_setup_streamed (
                     L1(d_Y1Y3[sl],d_X2X3[sl],ZERO,0);
                     L2(X1[sl],ONE,XB[sl],1);
                     L3(Y1[sl],ONE,YB[sl],1);
+                    // bbox stage 3: clamp5 -> final per-slot bbox outputs
+                    o_bx0[sl] <= clamp5(bxmin_r[sl]);   o_bx1[sl] <= clamp5(bxmax_r[sl]+16'sd1);
+                    o_by0[sl] <= clamp5(bymin_r[sl]);   o_by1[sl] <= clamp5(bymax_r[sl]+16'sd1);
                     cyc[sl]<=5'd4;
                 end
                 4: begin
@@ -360,8 +394,8 @@ module isp_setup_streamed (
                         dy12<=o_dy12[sl]; dy23<=o_dy23[sl]; dy31<=o_dy31[sl]; dy41<=ZERO;
                         c1<=o_c1[sl]; c2<=o_c2[sl]; c3<=o_c3[sl]; c4<=ONE;
                         ddx_invw<=o_ddx[sl]; ddy_invw<=o_ddy[sl]; c_invw<=o_cinvw[sl];
-                        bx0<=clamp5(bxmin_s); bx1<=clamp5(bxmax_s+16'sd1);
-                        by0<=clamp5(bymin_s); by1<=clamp5(bymax_s+16'sd1);
+                        bx0<=o_bx0[sl]; bx1<=o_bx1[sl];
+                        by0<=o_by0[sl]; by1<=o_by1[sl];
                         slot_busy[sl] <= 1'b0;
                     end
                     // else: stay at cyc[sl]==14, slot_busy stays 1 -> retry next turn
@@ -372,14 +406,6 @@ module isp_setup_streamed (
         end
     end
 
-    // ---- per-slot bbox (combinational on the retiring slot's vertices) ----
-    // computed for slot `s` (the one serviced this clock) so cyc==14 can latch it.
-    wire signed [15:0] ob_s  = f2i_floor(XB[phase]);
-    wire signed [15:0] obY_s = f2i_floor(YB[phase]);
-    wire signed [15:0] lX1s = f2i_floor(X1[phase])-ob_s, lX2s = f2i_floor(X2[phase])-ob_s, lX3s = f2i_floor(X3[phase])-ob_s;
-    wire signed [15:0] lY1s = f2i_floor(Y1[phase])-obY_s, lY2s = f2i_floor(Y2[phase])-obY_s, lY3s = f2i_floor(Y3[phase])-obY_s;
-    wire signed [15:0] bxmin_s = (lX1s<lX2s?(lX1s<lX3s?lX1s:lX3s):(lX2s<lX3s?lX2s:lX3s));
-    wire signed [15:0] bxmax_s = (lX1s>lX2s?(lX1s>lX3s?lX1s:lX3s):(lX2s>lX3s?lX2s:lX3s));
-    wire signed [15:0] bymin_s = (lY1s<lY2s?(lY1s<lY3s?lY1s:lY3s):(lY2s<lY3s?lY2s:lY3s));
-    wire signed [15:0] bymax_s = (lY1s>lY2s?(lY1s>lY3s?lY1s:lY3s):(lY2s>lY3s?lY2s:lY3s));
+    // (bbox is now pipelined per-slot at cyc 1..3 above and copied out at retire;
+    //  the old combinational bbox cloud on the retiring slot's vertices was removed.)
 endmodule
