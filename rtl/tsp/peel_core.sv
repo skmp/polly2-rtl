@@ -159,15 +159,53 @@ module peel_core import tsp_pkg::*; (
         .list_ptr(ol_list_ptr),.busy(ol_busy),.done(ol_done),
         .prim(ol_prim),.ack(ol_ack),.dreq(ol_dreq),.dresp(ol_dresp));
 
-    reg              it_start; objlist_entry_t it_entry; entry_type_e it_etype;
-    wire             it_busy;
+    // Prefetching iterator: streaming entry input (entry_valid/entry_ack) driven
+    // from the entry FIFO head, ping-pong record buffers so the next record's DDR
+    // burst overlaps the current record's triangle emit. The barrier gates on the
+    // iterator's AUTHORITATIVE level busy (it_pf_busy), NOT a pulse-cleared reg -
+    // the peel loop re-runs the OL list per pass; the iterator restarts simply by
+    // having entries streamed into it again (idle -> busy as new entries arrive).
+    wire             it_entry_valid, it_entry_ack, it_pf_busy;
+    objlist_entry_t  it_entry; entry_type_e it_etype;   // combinational eq head
     triangle_out_t   it_trio; triangle_ack_t it_ack;
-    isp_primitive_iterator u_it (.clk(clk),.reset(reset),.start(it_start),
+    isp_primitive_iterator_pf u_it (.clk(clk),.reset(reset),
         .intensity_shadow(regs.fpu_shad_scale.intensity_shadow),
-        .param_base(param_base),.entry_type(it_etype),.entry(it_entry),.busy(it_busy),
+        .param_base(param_base),
+        .entry_valid(it_entry_valid),.entry_type(it_etype),.entry(it_entry),
+        .entry_ack(it_entry_ack),.busy(it_pf_busy),
         .trio(it_trio),.ack(it_ack),.dreq(pr_dreq),.dresp(pr_dresp));
 
     // -------------------- depth/tag tile + color buffer + framebuffer --------------------
+    // NOTE (improvement #3 - M10K banking of the tile buffers): DEFERRED / left as
+    // registers, intentionally, to preserve bit-exact peel semantics. Unlike
+    // isp_core (single {depth,tag} buffer, one clean 2-stage chunk R/W), peel_core's
+    // tile buffers cannot ALL be banked into tile_ram without a pipeline rewrite that
+    // risks the verified layer-peel behaviour:
+    //   * dt_depth/dt_tag/dt_valid/dt_depth2/dt_tag2 - the peel depth compare
+    //     (isp_depth_cmp_lp) reads FIVE of these COMBINATIONALLY per lane and writes
+    //     FOUR same-cycle (see the dcmp generate + the ras_out_valid consumer). A
+    //     tile_ram (registered read) forces a 2-stage stage-A/stage-B pipeline like
+    //     isp_core's, PLUS: (a) carry b_peeling/b_peel_which into stage B, (b) move
+    //     the `more_to_draw` accumulate (currently combinational off ras_more_lp)
+    //     into stage B, (c) add `!b_valid` to consumer_idle AND RS_DRAIN (mirroring
+    //     isp_core) so PeelBuffers/CLEAR/SetTagToMax/next-triangle never race the
+    //     trailing write, (d) rewrite CLEAR / SetTagToMax / PeelBuffers as sequential
+    //     128-chunk walks over the RAM ports - PeelBuffers being a pipelined
+    //     read(A)->write(B)+clear(A) RMW, and (e) re-time the SH_PIX single-pixel
+    //     reads (dt_tag[shp]/dt_depth[shp]/dt_valid[shp]) which today use dt_valid
+    //     combinationally to decide the per-pass skip. Each of those is a separate
+    //     bit-exactness hazard in the peel loop.
+    //   * col_buf - the blend reads col_buf[pp_out_id] COMBINATIONALLY as `dst` and
+    //     the shade consumer writes the SAME id the SAME cycle (read-modify-write
+    //     through tsp_blend). tile_ram's registered read-first port cannot serve a
+    //     combinational same-cycle dst; banking requires reworking tsp_shade_pp's
+    //     tail into a registered RMW with per-pixel RAW-hazard handling. NOT bankable
+    //     bit-exact here.
+    //   * dt_pt - 1 bit x 1024 (negligible), and the blend reads dt_pt[pp_out_id]
+    //     COMBINATIONALLY for the PT alpha-test; banking it buys no M10K and costs
+    //     bit-exactness. Kept as a reg.
+    // The 4-way streamed setup + 8-deep plane FIFO (#1), the prefetch iterator +
+    // it_pf_busy barrier (#2), and the 1px/cycle combinational FLUSH (#4) ARE applied.
     localparam integer TILE_W = 32, TILE_H = 32;
     reg [31:0] dt_depth [0:TILE_W*TILE_H-1];   // invW depth (depthBufferA / zb)
     reg [31:0] dt_tag   [0:TILE_W*TILE_H-1];   // CoreTag   (tagBufferA   / pb)
@@ -194,26 +232,38 @@ module peel_core import tsp_pkg::*; (
         end
     endfunction
 
-    // -------------------- ISP triangle setup (as tile_engine_top) --------------------
-    // isp_word_su/su_tag feed the SETUP stage (triangle N+1); isp_word/tri_tag are
-    // the ACTIVE raster triangle (N) used by the depth compare / tag write.
-    reg         isp_start;
-    reg  [31:0] isp_word, isp_word_su;
-    reg  [31:0] t_x1,t_y1,t_z1, t_x2,t_y2,t_z2, t_x3,t_y3,t_z3;
+    // -------------------- ISP triangle setup (4-way interleaved streamed) --------------------
+    // isp_word/tri_tag are the ACTIVE raster triangle (popped from the plane FIFO
+    // pq) used by the depth compare / tag write. The streamed setup accepts from the
+    // tri FIFO (fq) head and retires planes into the 8-deep plane FIFO (pq).
+    reg  [31:0] isp_word;                  // active (raster) triangle's isp
     reg  [31:0] t_xbase, t_ybase;
-    reg  [31:0] tri_tag, su_tag;          // active / setup triangle CoreTag
-    wire        isp_done, isp_sgn_neg, isp_cull;
+    reg  [31:0] tri_tag;                   // active (raster) triangle's CoreTag
+    wire        isp_sgn_neg, isp_cull;
     wire [4:0]  w_bx0, w_bx1, w_by0, w_by1;   // tile-local bbox from setup
     wire [31:0] w_dx12,w_dx23,w_dx31,w_dx41, w_dy12,w_dy23,w_dy31,w_dy41;
     wire [31:0] w_c1,w_c2,w_c3,w_c4, w_ddx,w_ddy,w_cinvw;
 
-    isp_setup_min u_isp (
-        .clk(clk), .reset(reset), .start(isp_start), .done(isp_done),
-        .isp_word(isp_word_su),
-        .x1(t_x1), .y1(t_y1), .z1(t_z1),
-        .x2(t_x2), .y2(t_y2), .z2(t_z2),
-        .x3(t_x3), .y3(t_y3), .z3(t_z3),
+    // Streaming setup interface: accept a triangle from the tri FIFO (fq) whenever
+    // in_ready, retire one (out_valid) into the plane FIFO (pq) when out_ready.
+    //   su_in_valid  : fq has a triangle AND pq has room (throttle at pq near-full)
+    //   su_out_valid : retire; push non-culled planes into pq (out_ready = !pq_full)
+    //   su_busy      : any slot in flight (barrier).
+    wire        su_in_valid, su_in_ready, su_out_valid, su_busy;
+    wire [31:0] su_out_tag, su_out_isp;
+    assign su_in_valid = !fq_empty && (pq_count <= 5'd4);
+
+    isp_setup_streamed u_isp (
+        .clk(clk), .reset(reset),
+        .in_valid(su_in_valid), .in_ready(su_in_ready),
+        .isp_word(fq_isp[fq_head[2:0]]), .in_tag(fq_tag[fq_head[2:0]]),
+        .x1(fq_x1[fq_head[2:0]]), .y1(fq_y1[fq_head[2:0]]), .z1(fq_z1[fq_head[2:0]]),
+        .x2(fq_x2[fq_head[2:0]]), .y2(fq_y2[fq_head[2:0]]), .z2(fq_z2[fq_head[2:0]]),
+        .x3(fq_x3[fq_head[2:0]]), .y3(fq_y3[fq_head[2:0]]), .z3(fq_z3[fq_head[2:0]]),
         .xbase(t_xbase), .ybase(t_ybase),
+        .busy(su_busy),
+        .out_ready(!pq_full),
+        .out_valid(su_out_valid), .out_tag(su_out_tag), .out_isp(su_out_isp),
         .sgn_neg(isp_sgn_neg), .cull(isp_cull),
         .dx12(w_dx12), .dx23(w_dx23), .dx31(w_dx31), .dx41(w_dx41),
         .dy12(w_dy12), .dy23(w_dy23), .dy31(w_dy31), .dy41(w_dy41),
@@ -511,8 +561,7 @@ module peel_core import tsp_pkg::*; (
                S_SHADE_START=31, S_OP_DONE=32, S_FLUSH_WR=33;
     reg [5:0] st;
 
-    // consumer sub-FSMs
-    localparam SU_IDLE=0, SU_RUN=1;              reg su_st;
+    // consumer sub-FSM (setup is now the streamed pipeline u_isp -> pq FIFO)
     localparam RS_IDLE=0, RS_RAS=1, RS_DRAIN=2;  reg [1:0] rs_st;
 
     // ---- unified PT+TL layer-peel pass loop (TB-FSM; refsw do..while(MoreToDraw)) ----
@@ -544,7 +593,15 @@ module peel_core import tsp_pkg::*; (
     reg       eq_push, eq_pop;
     wire eq_full  = (eq_count == EQ_N);
     wire eq_empty = (eq_count == 0);
-    localparam IT_IDLE=0, IT_RUN=1; reg it_cst;   // iterator-consumer FSM
+
+    // entry FIFO head -> prefetching iterator's streaming input. The iterator pulls
+    // entries via entry_valid/entry_ack; the barrier observes list-done via
+    // eq_empty && !it_pf_busy (no pull FSM, no it_cst / prim_seen tracking).
+    always @(*) begin
+        it_entry = eq_entry[eq_head[2:0]];
+        it_etype = entry_type_e'(eq_etype[eq_head[2:0]]);
+    end
+    assign it_entry_valid = !eq_empty;
 
     // ---- triangle FIFO (producer -> consumer), depth 8 ----
     localparam integer FIFO_N = 8;
@@ -559,17 +616,31 @@ module peel_core import tsp_pkg::*; (
     wire fq_full  = (fq_count == FIFO_N);
     wire fq_empty = (fq_count == 0);
 
-    reg        pend_valid, prim_seen;
-    reg [31:0] pend_dx12,pend_dx23,pend_dx31,pend_dx41;
-    reg [31:0] pend_dy12,pend_dy23,pend_dy31,pend_dy41;
-    reg [31:0] pend_c1,pend_c2,pend_c3,pend_c4;
-    reg [31:0] pend_ddx,pend_ddy,pend_cinvw, pend_isp, pend_tag;
-    reg [4:0]  pend_bx0,pend_bx1,pend_by0,pend_by1;  // tile-local bounding box
+    // ---- 8-deep PLANE FIFO (pq): streamed setup -> rasterizer ----
+    // Decouples the (interleaved) setup from the rasterizer so setup runs ahead and
+    // fills the FIFO instead of lock-stepping through the old 1-deep pend handoff.
+    localparam integer PQ_N = 8;
+    reg [31:0] pq_dx12[0:PQ_N-1],pq_dx23[0:PQ_N-1],pq_dx31[0:PQ_N-1],pq_dx41[0:PQ_N-1];
+    reg [31:0] pq_dy12[0:PQ_N-1],pq_dy23[0:PQ_N-1],pq_dy31[0:PQ_N-1],pq_dy41[0:PQ_N-1];
+    reg [31:0] pq_c1[0:PQ_N-1],pq_c2[0:PQ_N-1],pq_c3[0:PQ_N-1],pq_c4[0:PQ_N-1];
+    reg [31:0] pq_ddx[0:PQ_N-1],pq_ddy[0:PQ_N-1],pq_cinvw[0:PQ_N-1];
+    reg [31:0] pq_isp[0:PQ_N-1],pq_tag[0:PQ_N-1];
+    reg [4:0]  pq_bx0[0:PQ_N-1],pq_bx1[0:PQ_N-1],pq_by0[0:PQ_N-1],pq_by1[0:PQ_N-1];
+    reg [3:0]  pq_head, pq_tail;
+    reg [4:0]  pq_count;
+    reg        pq_push, pq_pop;
+    wire pq_full  = (pq_count == PQ_N);
+    wire pq_empty = (pq_count == 0);
 
-    // consumer fully idle: entry FIFO empty, iterator idle & not busy, setup +
-    // raster + pend handoff all idle.
-    wire consumer_idle = eq_empty && (it_cst==IT_IDLE) && !it_busy
-                       && (su_st==SU_IDLE) && (rs_st==RS_IDLE) && !pend_valid;
+    // consumer fully idle: entry FIFO empty, iterator authoritative-idle (it_pf_busy
+    // clear: no record buffered/being read/emitted/outstanding), streamed setup
+    // idle (!su_busy), raster idle, and the plane FIFO empty. Using it_pf_busy (not
+    // a pulse-cleared reg) is the isp_core fix: a drained pulse racing a refilled eq
+    // could open the barrier while triangles were still pending -> next state's
+    // CLEAR/PeelBuffers/FLUSH would corrupt live tile data. The peel loop re-runs
+    // the OL list per pass; the barrier waits for it_pf_busy to clear each pass.
+    wire consumer_idle = eq_empty && !it_pf_busy
+                       && !su_busy && (rs_st==RS_IDLE) && pq_empty;
 
     // shade pass pixel accounting: producer index shp, consumer count sh_out_n
     integer sh_out_n;
@@ -584,28 +655,44 @@ module peel_core import tsp_pkg::*; (
     integer tri_count, cull_count, miss_count, hit_count, tri_seen;
     reg [5:0] cur_tx, cur_ty;      // latched tile coords (stable during lists)
     integer i, l, j;
-    integer px, py;
+
+    // ---- COMBINATIONAL framebuffer-write (FLUSH), valid/ready handshake ----
+    // fbw_req is presented + accepted the SAME cycle so a blocking controller works
+    // (busy holds; we advance fw_i only when the pixel is consumed). The screen
+    // pixel for the linear tile index fw_i (0..1023): x=fw_i[4:0], y=fw_i[9:5].
+    wire [10:0] fw_px = {5'd0, cur_tx}*11'd32 + {6'd0, fw_i[4:0]};
+    wire [10:0] fw_py = {5'd0, cur_ty}*11'd32 + {6'd0, fw_i[9:5]};
+    wire        fw_onscreen = (fw_px < 11'd640) && (fw_py < 11'd480);
+    always @(*) begin
+        fbw_req.we      = (st==S_FLUSH_WR) && fw_onscreen;
+        fbw_req.pix_idx = fw_py*20'd640 + {9'd0, fw_px};
+        fbw_req.argb    = col_buf[fw_i];
+    end
+    // a pixel is consumed this cycle when: on-screen and the sink accepted it, OR
+    // off-screen (nothing to write -> skip immediately).
+    wire fw_pix_consumed = (st==S_FLUSH_WR) &&
+                           ( (fw_onscreen && !fbw_resp.busy) || !fw_onscreen );
 
     always @(posedge clk) begin
         if (reset) begin
-            st<=S_IDLE; done<=0; ra_start<=0; ol_start<=0; it_start<=0;
-            isp_start<=0; tsp_start<=0; pp_in_valid<=0; f_go<=0;
+            st<=S_IDLE; done<=0; ra_start<=0; ol_start<=0;
+            tsp_start<=0; pp_in_valid<=0; f_go<=0;
             ra_ack.list_done<=0; ol_ack.entry_done<=0; it_ack.triangle_done<=0;
             tri_count<=0; cull_count<=0; miss_count<=0; hit_count<=0; tri_seen<=0;
             sh_out_n<=0; ras_inflight<=0;
-            su_st<=SU_IDLE; rs_st<=RS_IDLE;
-            pend_valid<=0; prim_seen<=0;
+            rs_st<=RS_IDLE;
+            pq_head<=0; pq_tail<=0; pq_count<=0;
             fq_head<=0; fq_tail<=0; fq_count<=0;
-            eq_head<=0; eq_tail<=0; eq_count<=0; it_cst<=IT_IDLE;
+            eq_head<=0; eq_tail<=0; eq_count<=0;
             peeling<=1'b0; more_to_draw<=1'b0; peel_pass<=8'd0; op_shaded<=1'b0;
             has_pt<=1'b0; has_tr<=1'b0; peel_which<=1'b0;
             for (i = 0; i < PC_N; i = i + 1) pc_valid[i] = 1'b0;
         end else begin
-            done<=0; ra_start<=0; ol_start<=0; it_start<=0;
-            isp_start<=0; tsp_start<=0; pp_in_valid<=0; f_go<=0;
+            done<=0; ra_start<=0; ol_start<=0;
+            tsp_start<=0; pp_in_valid<=0; f_go<=0;
             ra_ack.list_done<=0; ol_ack.entry_done<=0; it_ack.triangle_done<=0;
             eq_push = 1'b0;
-            fbw_req.we <= 1'b0;   // default: no fb pixel presented (re-asserted in S_FLUSH_WR)
+            // fbw_req is driven COMBINATIONALLY (see the FLUSH write block below).
 
             // -------- streamed rasterizer CONSUMER (runs every cycle) --------
             if (ras_out_valid) begin
@@ -834,30 +921,16 @@ module peel_core import tsp_pkg::*; (
             end
 
             // FLUSH writeout: STREAM the accumulation buffer (col_buf) to the
-            // framebuffer through the injected write port, one pixel per accepted
-            // cycle (held while fbw_resp.busy). fw_i walks 0..1023; off-screen
-            // pixels (px>=640 || py>=480) are skipped. On the last pixel -> ack.
+            // framebuffer at ONE PIXEL PER CYCLE. fbw_req is driven COMBINATIONALLY
+            // (see the fb-write block above) from fw_i; here we only ADVANCE fw_i,
+            // and only when the pixel is consumed (fw_pix_consumed): on-screen pixel
+            // accepted (we && !busy) OR an off-screen pixel (skipped). A busy on-
+            // screen pixel HOLDS fw_i so the combinational fbw_req keeps presenting
+            // it -> works with a real controller that blocks.
             S_FLUSH_WR: begin
-                /* verilator lint_off WIDTH */
-                px = {26'd0, cur_tx}*32 + (fw_i % TILE_W);
-                py = {26'd0, cur_ty}*32 + (fw_i / TILE_W);
-                /* verilator lint_on WIDTH */
-                if (px >= 640 || py >= 480) begin
-                    // off-screen: skip without presenting
+                if (fw_pix_consumed) begin
                     if (fw_i == 10'd1023) begin ra_ack.list_done <= 1'b1; st <= S_RA_ACK; end
                     else fw_i <= fw_i + 10'd1;
-                end else begin
-                    fbw_req.we      <= 1'b1;
-                    /* verilator lint_off WIDTH */
-                    fbw_req.pix_idx <= py*640 + px;
-                    /* verilator lint_on WIDTH */
-                    fbw_req.argb    <= col_buf[fw_i];
-                    // accepted iff we were presenting and the port isn't busy
-                    if (fbw_req.we && !fbw_resp.busy) begin
-                        fbw_req.we <= 1'b0;
-                        if (fw_i == 10'd1023) begin ra_ack.list_done <= 1'b1; st <= S_RA_ACK; end
-                        else fw_i <= fw_i + 10'd1;
-                    end
                 end
             end
 
@@ -1058,93 +1131,92 @@ module peel_core import tsp_pkg::*; (
             default: st<=S_IDLE;
             endcase
 
-            // ======== ITERATOR CONSUMER: entry FIFO -> iterator -> tri FIFO ========
-            // Runs independent of `st`. IT_IDLE: pop an entry, start the iterator.
-            // IT_RUN: drain the iterator's triangles into the triangle FIFO (stall
-            // when full); on prim_done + iterator idle, return to IT_IDLE.
+            // ======== ENTRY FIFO -> prefetching iterator -> tri FIFO ========
+            // The iterator pulls entries itself (entry_valid/entry_ack); we pop the
+            // eq FIFO on ack and push its emitted triangles into fq. No it_cst pull
+            // FSM / prim_seen: the barrier observes list-done via !it_pf_busy.
             eq_pop    = 1'b0;
             fifo_push = 1'b0;
-            case (it_cst)
-            IT_IDLE: if (!eq_empty && !it_busy && !it_start) begin
-                it_entry <= eq_entry[eq_head[2:0]];
-                it_etype <= entry_type_e'(eq_etype[eq_head[2:0]]);
-                it_start <= 1'b1;
-                prim_seen <= 1'b0;
+
+            // entry FIFO pop when the iterator consumes the head entry
+            if (it_entry_ack && !eq_empty) begin
                 eq_head <= (eq_head==EQ_N-1) ? 4'd0 : eq_head+4'd1;
                 eq_pop  = 1'b1;
-                it_cst  <= IT_RUN;
             end
-            IT_RUN: begin
-                if (it_trio.prim_done) prim_seen <= 1'b1;
-                if (it_trio.triangle_ready && !fq_full && !it_ack.triangle_done) begin
-                    fq_isp[fq_tail[2:0]] <= it_trio.isp;
-                    fq_tag[fq_tail[2:0]] <= it_trio.tag;
-                    fq_x1[fq_tail[2:0]]<=it_trio.v0.x; fq_y1[fq_tail[2:0]]<=it_trio.v0.y; fq_z1[fq_tail[2:0]]<=it_trio.v0.z;
-                    fq_x2[fq_tail[2:0]]<=it_trio.v1.x; fq_y2[fq_tail[2:0]]<=it_trio.v1.y; fq_z2[fq_tail[2:0]]<=it_trio.v1.z;
-                    fq_x3[fq_tail[2:0]]<=it_trio.v2.x; fq_y3[fq_tail[2:0]]<=it_trio.v2.y; fq_z3[fq_tail[2:0]]<=it_trio.v2.z;
-                    it_ack.triangle_done <= 1'b1;   // advance iterator to next tri
-                    fq_tail  <= (fq_tail==FIFO_N-1) ? 4'd0 : fq_tail+4'd1;
-                    fifo_push = 1'b1;
-                    tri_seen <= tri_seen + 1;
-                    if (tri_seen % 100 == 0)
-                        $display("[TILE %0d,%0d] TRI %0d tag=%08h isp=%08h",
-                            cur_tx, cur_ty, tri_seen, it_trio.tag, it_trio.isp);
-                end
-                if (prim_seen && !it_busy) it_cst <= IT_IDLE;   // entry finished
-            end
-            endcase
 
-            // ================= CONSUMER: FIFO -> setup -> raster =================
-            // ---- SETUP: pop FIFO -> isp_setup_min -> pend_* ----
+            // push emitted triangles into the tri FIFO (hold-until-space handshake)
+            if (it_trio.triangle_ready && !fq_full && !it_ack.triangle_done) begin
+                fq_isp[fq_tail[2:0]] <= it_trio.isp;
+                fq_tag[fq_tail[2:0]] <= it_trio.tag;
+                fq_x1[fq_tail[2:0]]<=it_trio.v0.x; fq_y1[fq_tail[2:0]]<=it_trio.v0.y; fq_z1[fq_tail[2:0]]<=it_trio.v0.z;
+                fq_x2[fq_tail[2:0]]<=it_trio.v1.x; fq_y2[fq_tail[2:0]]<=it_trio.v1.y; fq_z2[fq_tail[2:0]]<=it_trio.v1.z;
+                fq_x3[fq_tail[2:0]]<=it_trio.v2.x; fq_y3[fq_tail[2:0]]<=it_trio.v2.y; fq_z3[fq_tail[2:0]]<=it_trio.v2.z;
+                it_ack.triangle_done <= 1'b1;   // advance iterator to next tri
+                fq_tail  <= (fq_tail==FIFO_N-1) ? 4'd0 : fq_tail+4'd1;
+                fifo_push = 1'b1;
+                tri_seen <= tri_seen + 1;
+                if (tri_seen % 100 == 0)
+                    $display("[TILE %0d,%0d] TRI %0d tag=%08h isp=%08h",
+                        cur_tx, cur_ty, tri_seen, it_trio.tag, it_trio.isp);
+            end
+
+            // ============ CONSUMER: tri FIFO -> streamed setup -> plane FIFO ============
             fifo_pop = 1'b0;
-            case (su_st)
-            SU_IDLE: if (!fq_empty && !pend_valid) begin
-                isp_word_su <= fq_isp[fq_head[2:0]]; su_tag <= fq_tag[fq_head[2:0]];
-                t_x1<=fq_x1[fq_head[2:0]]; t_y1<=fq_y1[fq_head[2:0]]; t_z1<=fq_z1[fq_head[2:0]];
-                t_x2<=fq_x2[fq_head[2:0]]; t_y2<=fq_y2[fq_head[2:0]]; t_z2<=fq_z2[fq_head[2:0]];
-                t_x3<=fq_x3[fq_head[2:0]]; t_y3<=fq_y3[fq_head[2:0]]; t_z3<=fq_z3[fq_head[2:0]];
+            pq_push  = 1'b0;
+
+            // present a triangle to the streaming setup; pop fq when accepted.
+            // su_in_valid is assigned combinationally outside the always block.
+            if (su_in_valid && su_in_ready) begin
                 fq_head <= (fq_head==FIFO_N-1) ? 4'd0 : fq_head+4'd1;
                 fifo_pop = 1'b1;
-                isp_start <= 1'b1;
-                su_st <= SU_RUN;
             end
-            SU_RUN: if (isp_done) begin
-                if (isp_cull) begin
-                    cull_count <= cull_count + 1;   // culled: don't fill pend
-                end else begin
-                    pend_dx12<=w_dx12;pend_dx23<=w_dx23;pend_dx31<=w_dx31;pend_dx41<=w_dx41;
-                    pend_dy12<=w_dy12;pend_dy23<=w_dy23;pend_dy31<=w_dy31;pend_dy41<=w_dy41;
-                    pend_c1<=w_c1;pend_c2<=w_c2;pend_c3<=w_c3;pend_c4<=w_c4;
-                    pend_ddx<=w_ddx;pend_ddy<=w_ddy;pend_cinvw<=w_cinvw;
-                    pend_isp<=isp_word_su; pend_tag<=su_tag;
-                    pend_valid <= 1'b1;
-                    // tile-local bounding box, computed by isp_setup_min.
-                    pend_bx0 <= w_bx0; pend_bx1 <= w_bx1;
-                    pend_by0 <= w_by0; pend_by1 <= w_by1;
-                end
-                su_st <= SU_IDLE;
-            end
-            endcase
 
-            // ---- RASTER: pend_* -> active planes -> BOUNDING-BOX sweep ----
+            // retire: on out_valid, push non-culled triangles into the plane FIFO.
+            if (su_out_valid) begin
+                if (isp_cull) begin
+                    cull_count <= cull_count + 1;
+                end else begin
+                    pq_dx12[pq_tail[2:0]]<=w_dx12; pq_dx23[pq_tail[2:0]]<=w_dx23;
+                    pq_dx31[pq_tail[2:0]]<=w_dx31; pq_dx41[pq_tail[2:0]]<=w_dx41;
+                    pq_dy12[pq_tail[2:0]]<=w_dy12; pq_dy23[pq_tail[2:0]]<=w_dy23;
+                    pq_dy31[pq_tail[2:0]]<=w_dy31; pq_dy41[pq_tail[2:0]]<=w_dy41;
+                    pq_c1[pq_tail[2:0]]<=w_c1; pq_c2[pq_tail[2:0]]<=w_c2;
+                    pq_c3[pq_tail[2:0]]<=w_c3; pq_c4[pq_tail[2:0]]<=w_c4;
+                    pq_ddx[pq_tail[2:0]]<=w_ddx; pq_ddy[pq_tail[2:0]]<=w_ddy;
+                    pq_cinvw[pq_tail[2:0]]<=w_cinvw;
+                    pq_isp[pq_tail[2:0]]<=su_out_isp; pq_tag[pq_tail[2:0]]<=su_out_tag;
+                    pq_bx0[pq_tail[2:0]]<=w_bx0; pq_bx1[pq_tail[2:0]]<=w_bx1;
+                    pq_by0[pq_tail[2:0]]<=w_by0; pq_by1[pq_tail[2:0]]<=w_by1;
+                    pq_tail <= (pq_tail==PQ_N-1) ? 4'd0 : pq_tail+4'd1;
+                    pq_push  = 1'b1;
+                end
+            end
+
+            // ---- RASTER: pop plane FIFO -> active planes -> BOUNDING-BOX sweep ----
             // Only sweep the chunks/rows the triangle's tile-local bbox covers.
             // x bounds are chunk-aligned (down to a RAS_LANES-wide chunk); rows go
             // by0..by1 inclusive. The rasterizer's inside-test still gates writes.
+            pq_pop = 1'b0;
             case (rs_st)
-            RS_IDLE: if (pend_valid) begin
-                isp_dx12<=pend_dx12;isp_dx23<=pend_dx23;isp_dx31<=pend_dx31;isp_dx41<=pend_dx41;
-                isp_dy12<=pend_dy12;isp_dy23<=pend_dy23;isp_dy31<=pend_dy31;isp_dy41<=pend_dy41;
-                isp_c1<=pend_c1;isp_c2<=pend_c2;isp_c3<=pend_c3;isp_c4<=pend_c4;
-                isp_ddx_invw<=pend_ddx;isp_ddy_invw<=pend_ddy;isp_c_invw<=pend_cinvw;
-                isp_word<=pend_isp; tri_tag<=pend_tag;
-                pend_valid<=1'b0;               // free the handoff for setup
+            RS_IDLE: if (!pq_empty) begin
+                isp_dx12<=pq_dx12[pq_head[2:0]]; isp_dx23<=pq_dx23[pq_head[2:0]];
+                isp_dx31<=pq_dx31[pq_head[2:0]]; isp_dx41<=pq_dx41[pq_head[2:0]];
+                isp_dy12<=pq_dy12[pq_head[2:0]]; isp_dy23<=pq_dy23[pq_head[2:0]];
+                isp_dy31<=pq_dy31[pq_head[2:0]]; isp_dy41<=pq_dy41[pq_head[2:0]];
+                isp_c1<=pq_c1[pq_head[2:0]]; isp_c2<=pq_c2[pq_head[2:0]];
+                isp_c3<=pq_c3[pq_head[2:0]]; isp_c4<=pq_c4[pq_head[2:0]];
+                isp_ddx_invw<=pq_ddx[pq_head[2:0]]; isp_ddy_invw<=pq_ddy[pq_head[2:0]];
+                isp_c_invw<=pq_cinvw[pq_head[2:0]];
+                isp_word<=pq_isp[pq_head[2:0]]; tri_tag<=pq_tag[pq_head[2:0]];
+                pq_head <= (pq_head==PQ_N-1) ? 4'd0 : pq_head+4'd1;
+                pq_pop  = 1'b1;
                 tri_count<=tri_count+1;
                 // chunk-aligned x range + row range from the bbox
-                rbx0 <= pend_bx0 & 5'(~(RAS_LANES-1));
-                rbx1 <= pend_bx1 & 5'(~(RAS_LANES-1));
-                rby1 <= pend_by1;
-                ras_y <= pend_by0;
-                ras_x <= pend_bx0 & 5'(~(RAS_LANES-1));
+                rbx0 <= pq_bx0[pq_head[2:0]] & 5'(~(RAS_LANES-1));
+                rbx1 <= pq_bx1[pq_head[2:0]] & 5'(~(RAS_LANES-1));
+                rby1 <= pq_by1[pq_head[2:0]];
+                ras_y <= pq_by0[pq_head[2:0]];
+                ras_x <= pq_bx0[pq_head[2:0]] & 5'(~(RAS_LANES-1));
                 rs_st <= RS_RAS;
             end
             RS_RAS: begin
@@ -1162,6 +1234,7 @@ module peel_core import tsp_pkg::*; (
             // ---- FIFO count maintenance (single update; push/pop may coincide) ----
             fq_count <= fq_count + (fifo_push ? 5'd1 : 5'd0) - (fifo_pop ? 5'd1 : 5'd0);
             eq_count <= eq_count + (eq_push  ? 5'd1 : 5'd0) - (eq_pop   ? 5'd1 : 5'd0);
+            pq_count <= pq_count + (pq_push  ? 5'd1 : 5'd0) - (pq_pop   ? 5'd1 : 5'd0);
 
             // plane stream capture (runs regardless of FSM state)
             if (tsp_pvalid) begin
