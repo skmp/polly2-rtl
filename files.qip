@@ -42,6 +42,27 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/color_combiner.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/tex_mem.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/tsp_shade.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tile_engine_top.sv
+# --- Layer-peeling render core (peel_core) + mister_top (TOP_LEVEL_ENTITY) -------
+# Autonomous region/objlist walk + direct-DDR data cache, pipelined TSP shade
+# (blend + mip), and the unified PT+TL layer peel.
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/reg_file.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/region_array_parser.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/object_list_parser.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/isp_primitive_iterator.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/data_cache256.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/f2u8.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/tex_fetch_pp.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/tex_cache_4p.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/tsp_miplevel.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/tsp_shade_pp.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/tsp_blend.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/isp_min/isp_depth_cmp.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/isp_min/isp_depth_cmp_lp.sv
+# peel_core: the render core with the DDR controller + framebuffer injected as
+# ports. mister_top wires the real HPS Avalon backend; the sim wrapper (tb) wires
+# a faux behavioral backend.
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/peel_core.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/mister_top.sv
 # VRAM ROM init: under `SYNTHESIS, tri_setup_seq_top loads build/vram.mif via the
 # ram_init_file attribute (gsplat gauss_lut pattern). Generate it with
 # `make vectors` before compiling.

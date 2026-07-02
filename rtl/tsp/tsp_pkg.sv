@@ -80,6 +80,20 @@ package tsp_pkg;
         logic        dready;    // dout valid this cycle
     } ddr_rd_resp_t;
 
+    // ---- framebuffer pixel WRITE port (injected DDR-controller dependency) ----
+    // The peel_core streams each shaded tile's colour buffer out through this port,
+    // one 32-bit ARGB pixel per accepted cycle at a linear pixel index (y*640+x).
+    // Injected: the sim wrapper writes a behavioral fb[] array; mister_top packs
+    // pixels into 64-bit words and bursts them to the real DDR framebuffer region.
+    typedef struct packed {
+        logic        we;        // 1 = present a pixel this cycle (consumed when !busy)
+        logic [19:0] pix_idx;   // linear pixel index (y*640 + x), 0..307199
+        logic [31:0] argb;      // 32-bit ARGB colour
+    } fb_wr_req_t;
+    typedef struct packed {
+        logic        busy;      // 1 = cannot accept a pixel this cycle (hold)
+    } fb_wr_resp_t;
+
     // ---- cache client port (a 64-bit direct-mapped line cache) ----
     // request: client (tex_fetch) -> cache
     typedef struct packed {
