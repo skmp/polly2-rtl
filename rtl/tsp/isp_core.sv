@@ -159,10 +159,41 @@ module isp_core import tsp_pkg::*; (
         .param_base(param_base),.entry_type(it_etype),.entry(it_entry),.busy(it_busy),
         .trio(it_trio),.ack(it_ack),.dreq(pr_dreq),.dresp(pr_dresp));
 
-    // -------------------- depth/tag tile --------------------
+    // -------------------- depth/tag tile (M10K-backed) --------------------
+    // 32x32 tile, 8 banks (one per raster lane): bank = x[2:0], addr = {y,x[4:3]}
+    // (7 bits, 128 entries/bank). Each entry packs {depth[31:0], tag[31:0]} = 64b,
+    // so a whole 8-lane chunk is one addr across the 8 banks. Registered read
+    // (1-cycle latency) => the depth compare is pipelined one stage (see consumer).
     localparam integer TILE_W = 32, TILE_H = 32;
-    reg [31:0] dt_depth [0:TILE_W*TILE_H-1];   // invW depth per tile pixel
-    reg [31:0] dt_tag   [0:TILE_W*TILE_H-1];   // CoreTag per tile pixel
+    localparam integer TR_W = 64;              // {depth, tag} per lane
+    localparam integer NB   = RAS_LANES;       // 8 banks
+
+    // tile_ram controls are COMBINATIONAL (driven from pipeline/FSM state) so the
+    // RAM's internal registered read gives exactly 1-cycle latency: address valid
+    // in cycle N -> rdata valid N+1. (Registering these here would add an extra
+    // cycle of skew and the compare would read the WRONG chunk.)
+    reg  [NB-1:0]        tr_we;
+    reg  [7*NB-1:0]      tr_waddr;   // stage-B write-back address
+    reg  [7*NB-1:0]      tr_raddr;   // stage-A / CLEAR / FLUSH read address
+    reg  [TR_W*NB-1:0]   tr_wdata;
+    wire [TR_W*NB-1:0]   tr_rdata;
+
+    // Simple-dual-port: stage-A reads chunk N while stage-B writes chunk N-1 in
+    // the SAME cycle -> the streaming rasterizer keeps 8 pixels/clock.
+    tile_ram #(.WIDTH(TR_W), .NBANKS(NB)) u_tile (
+        .clk(clk), .we(tr_we), .waddr(tr_waddr), .wdata(tr_wdata),
+        .raddr(tr_raddr), .rdata(tr_rdata)
+    );
+
+    // pack a 7-bit bank address {y[4:0], x[4:3]} for all 8 banks (same addr/bank)
+    function automatic [7*NB-1:0] tr_pack_addr(input [4:0] y, input [4:0] xchunk);
+        integer b;
+        begin
+            tr_pack_addr = '0;
+            for (b = 0; b < NB; b = b + 1)
+                tr_pack_addr[7*b +: 7] = {y, xchunk[4:3]};
+        end
+    endfunction
 
     // -------------------- int -> float (tile origin, 0..2016) --------------------
     function automatic [31:0] i2f(input [15:0] v);
@@ -240,14 +271,28 @@ module isp_core import tsp_pkg::*; (
     wire [2:0] depth_mode = isp_word[31:29];
     wire       zwrite_dis = isp_word[26];
 
+    // ---- consumer stage A -> B pipeline registers (see always block) ----
+    // Stage A latches the raster result and issues the tile_ram read; stage B
+    // (next cycle) receives tr_rdata (old depth/tag chunk), runs the compares and
+    // writes back. b_* are the stage-B copies of the stage-A result fields.
+    reg                  b_valid;
+    reg [RAS_LANES-1:0]  b_inside;
+    reg [32*RAS_LANES-1:0] b_invw;
+    reg [4:0]            b_ox, b_oy;
+    reg [31:0]           b_tag;
+    reg [2:0]            b_mode;
+    reg                  b_zwdis;
+
+    // old depth per lane comes from the registered tile_ram read (bank b = lane b);
+    // low 32b of each 64b word is the tag, high 32b is the depth.
     wire [RAS_LANES-1:0] ras_pass;
     genvar gd;
     generate
         for (gd = 0; gd < RAS_LANES; gd = gd + 1) begin : dcmp
             isp_depth_cmp u_cmp (
-                .mode(depth_mode),
-                .nw  (ras_invw_flat[32*gd +: 32]),
-                .ob  (dt_depth[{ras_oy, ras_ox + 5'(gd)}]),
+                .mode(b_mode),
+                .nw  (b_invw[32*gd +: 32]),
+                .ob  (tr_rdata[TR_W*gd + 32 +: 32]),   // old depth (high half)
                 .pass(ras_pass[gd]));
         end
     endgenerate
@@ -256,7 +301,8 @@ module isp_core import tsp_pkg::*; (
     localparam S_IDLE=0, S_RA=1, S_STATE=2,
                S_OL_RUN=4,
                S_RA_ACK=9, S_DONE=10,
-               S_DRAIN=11, S_FLUSH_WR=12;
+               S_DRAIN=11, S_FLUSH_WR=12,
+               S_CLEAR_WR=13, S_FLUSH_RD=14;
     reg [3:0] st;
 
     localparam SU_IDLE=0, SU_RUN=1;              reg su_st;
@@ -292,16 +338,62 @@ module isp_core import tsp_pkg::*; (
     reg [4:0]  pend_bx0,pend_bx1,pend_by0,pend_by1;
 
     reg prim_seen;
+    // include !b_valid: the depth-cmp write-back pipeline is one cycle behind
+    // ras_out_valid, so the last chunk's write may still be in flight when
+    // rs_st returns to RS_IDLE. CLEAR/FLUSH must not touch the RAM until it lands.
     wire consumer_idle = eq_empty && (it_cst==IT_IDLE) && !it_busy
-                       && (su_st==SU_IDLE) && (rs_st==RS_IDLE) && !pend_valid;
+                       && (su_st==SU_IDLE) && (rs_st==RS_IDLE) && !pend_valid
+                       && !b_valid;
 
     reg [5:0] cur_tx, cur_ty;
     integer i, l;
     integer px, py;
-    reg [9:0]  fw_i;          // framebuffer-writeout pixel 0..1023
+    reg [6:0]  cl_i;          // CLEAR chunk-address counter 0..127
+    reg [6:0]  fw_ch;         // FLUSH chunk-address counter 0..127
+    reg [2:0]  fw_lane;       // FLUSH lane within chunk 0..7
+    reg        fl_prime;      // FLUSH: first read priming (unused placeholder)
 
     localparam integer NCHUNK = (TILE_W/RAS_LANES) * TILE_H;
     integer ras_inflight;
+
+    // ============ COMBINATIONAL tile_ram control (address valid this cycle) ============
+    // READ  port: stage A (raster consumer, on ras_out_valid) OR CLEAR/FLUSH read.
+    // WRITE port: stage B (depth-cmp write-back, on b_valid) OR CLEAR write.
+    // Presenting addresses combinationally makes the RAM's registered read give
+    // exactly 1-cycle latency, so stage B (next cycle) sees THIS chunk's old data.
+    integer cw;
+    always @(*) begin
+        tr_we    = '0;
+        tr_waddr = '0;
+        tr_raddr = '0;
+        tr_wdata = '0;
+
+        // ---- READ port ----
+        if (ras_out_valid)                 // stage A: read chunk being resolved
+            tr_raddr = tr_pack_addr(ras_oy, ras_ox);
+        else if (st == S_FLUSH_RD || st == S_FLUSH_WR)
+            tr_raddr = {NB{fw_ch}};        // FLUSH: hold chunk address
+
+        // ---- WRITE port ----
+        if (st == S_CLEAR_WR) begin        // CLEAR: background to all 8 banks
+            tr_we    = {NB{1'b1}};
+            tr_waddr = {NB{cl_i}};
+            for (cw = 0; cw < RAS_LANES; cw = cw + 1) begin
+                tr_wdata[TR_W*cw + 32 +: 32] = regs.isp_backgnd_d;
+                tr_wdata[TR_W*cw +: 32]      = regs.isp_backgnd_t;
+            end
+        end else if (b_valid) begin        // stage B: depth-cmp write-back
+            tr_waddr = tr_pack_addr(b_oy, b_ox);
+            for (cw = 0; cw < RAS_LANES; cw = cw + 1) begin
+                if (b_inside[cw] && ras_pass[cw]) begin
+                    tr_we[cw] = 1'b1;
+                    tr_wdata[TR_W*cw + 32 +: 32] =
+                        b_zwdis ? tr_rdata[TR_W*cw + 32 +: 32] : b_invw[32*cw +: 32];
+                    tr_wdata[TR_W*cw +: 32]      = b_tag;
+                end
+            end
+        end
+    end
 
     // -------------------- profiling counters (whole render) --------------------
     integer tri_count, cull_count, tri_seen;
@@ -322,7 +414,8 @@ module isp_core import tsp_pkg::*; (
             su_st<=SU_IDLE; rs_st<=RS_IDLE; pend_valid<=0; prim_seen<=0;
             fq_head<=0; fq_tail<=0; fq_count<=0;
             eq_head<=0; eq_tail<=0; eq_count<=0; it_cst<=IT_IDLE;
-            fw_i<=0; fbw_req.we<=1'b0;
+            cl_i<=0; fw_ch<=0; fw_lane<=0; fl_prime<=0; fbw_req.we<=1'b0;
+            b_valid<=1'b0;
             tri_count<=0; cull_count<=0; tri_seen<=0;
             cyc_setup_run<=0; cyc_su_wfetch<=0; cyc_su_wrast<=0;
             cyc_ras<=0; cyc_ras_drain<=0; cyc_ras_idle<=0; cyc_total<=0;
@@ -333,17 +426,23 @@ module isp_core import tsp_pkg::*; (
             eq_push = 1'b0;
             fbw_req.we <= 1'b0;   // default: no fb pixel (re-asserted in S_FLUSH_WR)
 
-            // -------- streamed rasterizer CONSUMER (runs every cycle) --------
+            // ================= streamed rasterizer CONSUMER (8 px/clock) =================
+            // Simple-dual-port tile_ram (addresses driven combinationally above):
+            // stage A presents the READ for chunk N (this cycle) and latches its
+            // result fields; stage B (next cycle, on b_valid) receives tr_rdata =
+            // chunk N's OLD data, the dcmp generate compares, and the combinational
+            // WRITE port writes back the passing lanes. Stage A read (chunk N+1) and
+            // stage B write (chunk N) share the cycle on the RAM's two ports.
+            b_valid <= 1'b0;
             if (ras_out_valid) begin
-                for (l = 0; l < RAS_LANES; l = l + 1) begin
-                    /* verilator lint_off WIDTH */
-                    if (ras_inside[l] && ras_pass[l]) begin
-                        if (!zwrite_dis)
-                            dt_depth[{27'd0,ras_oy}*TILE_W + {27'd0,ras_ox} + l] = ras_invw(l);
-                        dt_tag[{27'd0,ras_oy}*TILE_W + {27'd0,ras_ox} + l] = tri_tag;
-                    end
-                    /* verilator lint_on WIDTH */
-                end
+                b_valid  <= 1'b1;
+                b_inside <= ras_inside;
+                b_invw   <= ras_invw_flat;
+                b_ox     <= ras_ox;
+                b_oy     <= ras_oy;
+                b_tag    <= tri_tag;
+                b_mode   <= depth_mode;
+                b_zwdis  <= zwrite_dis;
             end
             ras_inflight <= ras_inflight + (ras_in_valid ? 1 : 0) - (ras_out_valid ? 1 : 0);
 
@@ -360,12 +459,10 @@ module isp_core import tsp_pkg::*; (
 
             S_STATE: begin
                 case (ra_out.state)
+                // CLEAR: write background {depth,tag} to all 128 chunk-words (all
+                // 8 banks at each address) - one address/cycle, 128 cycles.
                 RSTATE_CLEAR: if (consumer_idle && fq_empty) begin
-                    for (i = 0; i < TILE_W*TILE_H; i = i + 1) begin
-                        dt_depth[i] = regs.isp_backgnd_d;
-                        dt_tag[i]   = regs.isp_backgnd_t;
-                    end
-                    ra_ack.list_done <= 1'b1; st <= S_RA_ACK;
+                    cl_i <= 7'd0; st <= S_CLEAR_WR;
                 end
                 RSTATE_OP, RSTATE_PT, RSTATE_TR: begin
                     ol_list_ptr <= ra_out.list_ptr;
@@ -376,10 +473,18 @@ module isp_core import tsp_pkg::*; (
                 end
                 // FLUSH: stream the 32x32 tag buffer out to the framebuffer.
                 RSTATE_FLUSH: if (consumer_idle && fq_empty) begin
-                    fw_i <= 10'd0; st <= S_FLUSH_WR;
+                    fw_ch <= 7'd0; fw_lane <= 3'd0; fl_prime <= 1'b1;
+                    st <= S_FLUSH_RD;
                 end
                 default: begin ra_ack.list_done <= 1'b1; st <= S_RA_ACK; end
                 endcase
+            end
+
+            // CLEAR write loop: the combinational block writes background to all 8
+            // banks at address cl_i each cycle; here we just walk cl_i 0..127.
+            S_CLEAR_WR: begin
+                if (cl_i == 7'd127) begin ra_ack.list_done <= 1'b1; st <= S_RA_ACK; end
+                else cl_i <= cl_i + 7'd1;
             end
 
             S_OL_RUN: begin
@@ -404,28 +509,41 @@ module isp_core import tsp_pkg::*; (
                 ra_ack.list_done <= 1'b1; st <= S_RA_ACK;
             end
 
-            // stream tags out to the framebuffer, one pixel/cycle (held while
-            // fbw_resp.busy). fw_i walks 0..1023; off-screen pixels are skipped.
+            // FLUSH read: the combinational block presents chunk fw_ch's read
+            // address; tr_rdata is valid next cycle in S_FLUSH_WR.
+            S_FLUSH_RD: begin
+                fw_lane <= 3'd0;
+                st      <= S_FLUSH_WR;
+            end
+
+            // FLUSH writeout: emit the current chunk's 8 lanes (tags) one pixel/
+            // cycle. Chunk fw_ch covers: addr={y,x[4:3]} so y=fw_ch[6:2],
+            // x = {fw_ch[1:0], fw_lane}. Off-screen pixels skipped. (The comb block
+            // holds tr_raddr = fw_ch across all 8 lanes.)
             S_FLUSH_WR: begin
                 /* verilator lint_off WIDTH */
-                px = {26'd0, cur_tx}*32 + (fw_i % TILE_W);
-                py = {26'd0, cur_ty}*32 + (fw_i / TILE_W);
+                px = {26'd0, cur_tx}*32 + {fw_ch[1:0], fw_lane};   // x in tile
+                py = {26'd0, cur_ty}*32 + fw_ch[6:2];              // y in tile
                 /* verilator lint_on WIDTH */
                 if (px >= 640 || py >= 480) begin
-                    // off-screen: skip without a write
-                    if (fw_i == 10'd1023) begin ra_ack.list_done <= 1'b1; st <= S_RA_ACK; end
-                    else fw_i <= fw_i + 10'd1;
+                    // off-screen: skip without a write, advance lane/chunk
+                    if (fw_lane == 3'd7) begin
+                        if (fw_ch == 7'd127) begin ra_ack.list_done <= 1'b1; st <= S_RA_ACK; end
+                        else begin fw_ch <= fw_ch + 7'd1; st <= S_FLUSH_RD; end
+                    end else fw_lane <= fw_lane + 3'd1;
                 end else begin
                     fbw_req.we      <= 1'b1;
                     /* verilator lint_off WIDTH */
                     fbw_req.pix_idx <= py*640 + px;
                     /* verilator lint_on WIDTH */
-                    fbw_req.argb    <= dt_tag[fw_i];
+                    fbw_req.argb    <= tr_rdata[TR_W*fw_lane +: 32];   // tag (low 32b)
                     // advance only once the write is accepted
                     if (fbw_req.we && !fbw_resp.busy) begin
                         fbw_req.we <= 1'b0;
-                        if (fw_i == 10'd1023) begin ra_ack.list_done <= 1'b1; st <= S_RA_ACK; end
-                        else fw_i <= fw_i + 10'd1;
+                        if (fw_lane == 3'd7) begin
+                            if (fw_ch == 7'd127) begin ra_ack.list_done <= 1'b1; st <= S_RA_ACK; end
+                            else begin fw_ch <= fw_ch + 7'd1; st <= S_FLUSH_RD; end
+                        end else fw_lane <= fw_lane + 3'd1;
                     end
                 end
             end
@@ -547,7 +665,11 @@ module isp_core import tsp_pkg::*; (
                     ras_x <= ras_x + 5'(RAS_LANES);
                 end
             end
-            RS_DRAIN: if (ras_inflight == 0 && !ras_in_valid && !ras_out_valid)
+            // also wait for the depth-cmp write-back pipeline (b_valid) to land,
+            // else the NEXT triangle's stage-A read races this triangle's last
+            // stage-B write to the same word (RAW -> stale depth -> corruption).
+            RS_DRAIN: if (ras_inflight == 0 && !ras_in_valid && !ras_out_valid
+                          && !b_valid)
                 rs_st <= RS_IDLE;
             endcase
 
