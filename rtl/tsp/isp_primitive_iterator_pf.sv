@@ -117,6 +117,13 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
     // need_off_r stepping read plain registers, not a rd_shadow->multiply chain.
     reg  [8:0] rd_span_r;              // record span in vwords, registered at start
     reg  [4:0] rd_hdr_r, rd_stride_r;  // header words / per-vertex stride, registered
+    // ex_rec_bytes/ex_rec_words are ALSO constant for the whole entry (skip/shadow
+    // never change between records of an array entry) but were combinational (a
+    // by-3 multiply) gated into the ex_base/ex_po register write by the same
+    // end-of-record comparator. Register them at record start too, so that write is
+    // a plain add of a registered increment, not shadow->multiply->gated-write.
+    reg  [26:0] rd_rec_bytes_r;
+    reg  [20:0] rd_rec_words_r;
 
     wire [24:0] rd_base_vw  = rd_base[26:2];
     wire        rd_bank     = rd_base_vw[20];
@@ -221,9 +228,11 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
                     // register the record geometry (constant for the whole record)
                     // so the per-beat comparator / stepping never re-derive it from
                     // rd_shadow through a multiply.
-                    rd_span_r   <= ex_span_vw;
-                    rd_hdr_r    <= ex_hdr_words;
-                    rd_stride_r <= ex_stride_w;
+                    rd_span_r      <= ex_span_vw;
+                    rd_hdr_r       <= ex_hdr_words;
+                    rd_stride_r    <= ex_stride_w;
+                    rd_rec_bytes_r <= ex_rec_bytes;
+                    rd_rec_words_r <= ex_rec_words;
                     rst       <= R_REQ;
                 end
             end
@@ -278,8 +287,8 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
                     // advance expansion: next array record, or finish this entry
                     if (ex_array && ex_count != 5'd1) begin
                         ex_count <= ex_count - 5'd1;
-                        ex_base  <= ex_base + ex_rec_bytes;
-                        ex_po    <= ex_po   + ex_rec_words;
+                        ex_base  <= ex_base + rd_rec_bytes_r;
+                        ex_po    <= ex_po   + rd_rec_words_r;
                     end else begin
                         ex_active <= 1'b0;     // entry done expanding
                     end
