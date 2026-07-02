@@ -270,26 +270,35 @@ module isp_setup_min (
                 //      issue raw Cn = Ca - DX*YT and ddy*YT1
                 10: begin
                     C1a<=la_q; C2a<=lb_q; C3a<=lc_q; ddxXL1<=ld_q;
-                    tl1 <= istl(DX12,DY12); tl2 <= istl(DX23,DY23); tl3 <= istl(DX31,DY31);
+                    // TOP-LEFT fill rule: IsTopLeft must be evaluated on the SAME
+                    // oriented edges the rasterizer tests, i.e. the sgn-normalized
+                    // (DX,DY) - not the raw vertex deltas (raw ignores the winding
+                    // sgn and inverts direction, which mis-flags one winding and
+                    // leaves a seam at shared edges). tl set => top-left => no bias;
+                    // else bias C by -1 ULP so an on-edge pixel is excluded.
+                    tl1 <= istl(DX12, DY12);
+                    tl2 <= istl(DX23, DY23);
+                    tl3 <= istl(DX31, DY31);
                     // Cn = C_a - DX*YT = (-DX)*YT + C_a  (negate product via a)
                     L0(fneg32(DX12),YT1,la_q,0); // C1raw = C1a - DX12*YT1
                     L1(fneg32(DX23),YT2,lb_q,0); // C2raw
                     L2(fneg32(DX31),YT3,lc_q,0); // C3raw
                     L3(ddy,YT1,ZERO,0);         // ddy*YT1
                 end
-                // c11: apply top-left (Cn - (tl?0:1)) via lanes; zc0 = z1-ddx*XL1
+                // c11: apply top-left bias by INTEGER-decrementing the edge constant
+                //   by 1 ULP (add FC = 0 or -1 to the mantissa) - combinational, no
+                //   MAC pass; zc0 = z1 - ddx*XL1.
                 11: begin
                     ddyYT1<=ld_q;
                     ddx_invw<=ddx; ddy_invw<=ddy;
-                    // Cn_final = Cn_raw - (tl ? 0 : 1.0)
-                    L0(la_q, ONE, tl1?ZERO:ONE, 1);  // C1
-                    L1(lb_q, ONE, tl2?ZERO:ONE, 1);  // C2
-                    L2(lc_q, ONE, tl3?ZERO:ONE, 1);  // C3
-                    L3(Z1,  ONE, ddxXL1, 1);         // zc0 = z1 - ddx*XL1
+                    c1 <= tl1 ? la_q : (la_q - 32'd1);   // Cn - (tl?0:1 ULP)
+                    c2 <= tl2 ? lb_q : (lb_q - 32'd1);
+                    c3 <= tl3 ? lc_q : (lc_q - 32'd1);
+                    L3(Z1,  ONE, ddxXL1, 1);             // zc0 = z1 - ddx*XL1
                 end
-                // c12: store C1..C3; c_invw stage = zc0 - ddy*YT1
+                // c12: zc0 stored from c11's L3; c_invw stage = zc0 - ddy*YT1
                 12: begin
-                    c1<=la_q; c2<=lb_q; c3<=lc_q; zc0<=ld_q;
+                    zc0<=ld_q;
                     L0(ld_q, ONE, ddyYT1, 1);        // c_invw = zc0 - ddy*YT1
                 end
                 13: begin
