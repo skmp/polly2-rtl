@@ -303,6 +303,16 @@ module isp_core import tsp_pkg::*; (
     localparam integer NCHUNK = (TILE_W/RAS_LANES) * TILE_H;
     integer ras_inflight;
 
+    // -------------------- profiling counters (whole render) --------------------
+    integer tri_count, cull_count, tri_seen;
+    integer cyc_setup_run;   // isp_setup_min actively running (SU_RUN)
+    integer cyc_su_wfetch;   // setup idle: no triangle from fetch yet (fetch-bound)
+    integer cyc_su_wrast;    // setup idle: triangle ready but pend full (raster-bound)
+    integer cyc_ras;         // raster sweeping (RS_RAS)
+    integer cyc_ras_drain;   // raster draining (RS_DRAIN)
+    integer cyc_ras_idle;    // raster idle waiting on pend
+    integer cyc_total;       // total cycles from go to done
+
     always @(posedge clk) begin
         if (reset) begin
             st<=S_IDLE; done<=0; ra_start<=0; ol_start<=0; it_start<=0;
@@ -313,6 +323,9 @@ module isp_core import tsp_pkg::*; (
             fq_head<=0; fq_tail<=0; fq_count<=0;
             eq_head<=0; eq_tail<=0; eq_count<=0; it_cst<=IT_IDLE;
             fw_i<=0; fbw_req.we<=1'b0;
+            tri_count<=0; cull_count<=0; tri_seen<=0;
+            cyc_setup_run<=0; cyc_su_wfetch<=0; cyc_su_wrast<=0;
+            cyc_ras<=0; cyc_ras_drain<=0; cyc_ras_idle<=0; cyc_total<=0;
         end else begin
             done<=0; ra_start<=0; ol_start<=0; it_start<=0;
             isp_start<=0;
@@ -420,10 +433,31 @@ module isp_core import tsp_pkg::*; (
             S_RA_ACK: st <= S_RA;
 
             S_DONE: begin
+                $display("=== done: %0d triangles rasterized, %0d culled, %0d cycles ===",
+                         tri_count, cull_count, cyc_total);
+                $display("=== profile: setup_run=%0d su_wait_fetch=%0d su_wait_rast=%0d ras=%0d ras_drain=%0d ras_idle=%0d ===",
+                         cyc_setup_run, cyc_su_wfetch, cyc_su_wrast,
+                         cyc_ras, cyc_ras_drain, cyc_ras_idle);
+                if (tri_count + cull_count > 0)
+                    $display("=== per-setup: setup_run=%0d (over %0d setups incl %0d culled) ===",
+                             cyc_setup_run/(tri_count+cull_count), tri_count+cull_count, cull_count);
+                if (tri_count > 0)
+                    $display("=== per-triangle: setup_run=%0d su_wait_fetch=%0d su_wait_rast=%0d ras=%0d drain=%0d ===",
+                             cyc_setup_run/tri_count, cyc_su_wfetch/tri_count, cyc_su_wrast/tri_count,
+                             cyc_ras/tri_count, cyc_ras_drain/tri_count);
                 done<=1'b1; st<=S_IDLE;
             end
             default: st<=S_IDLE;
             endcase
+
+            // ---- profiling accumulation (whole render, go..done) ----
+            if (st != S_IDLE && st != S_DONE) cyc_total <= cyc_total + 1;
+            if (su_st==SU_RUN)          cyc_setup_run <= cyc_setup_run + 1;
+            else if (fq_empty)          cyc_su_wfetch <= cyc_su_wfetch + 1;
+            else if (pend_valid)        cyc_su_wrast  <= cyc_su_wrast  + 1;
+            if (rs_st==RS_RAS)          cyc_ras       <= cyc_ras + 1;
+            else if (rs_st==RS_DRAIN)   cyc_ras_drain <= cyc_ras_drain + 1;
+            else if (!pend_valid)       cyc_ras_idle  <= cyc_ras_idle + 1;
 
             // ======== ITERATOR CONSUMER: entry FIFO -> iterator -> tri FIFO ========
             eq_pop    = 1'b0;
@@ -449,6 +483,10 @@ module isp_core import tsp_pkg::*; (
                     it_ack.triangle_done <= 1'b1;
                     fq_tail  <= (fq_tail==FIFO_N-1) ? 4'd0 : fq_tail+4'd1;
                     fifo_push = 1'b1;
+                    tri_seen <= tri_seen + 1;
+                    if (tri_seen % 100 == 0)
+                        $display("[TILE %0d,%0d] TRI %0d tag=%08h isp=%08h",
+                            cur_tx, cur_ty, tri_seen, it_trio.tag, it_trio.isp);
                 end
                 if (prim_seen && !it_busy) it_cst <= IT_IDLE;
             end
@@ -468,7 +506,9 @@ module isp_core import tsp_pkg::*; (
                 su_st <= SU_RUN;
             end
             SU_RUN: if (isp_done) begin
-                if (!isp_cull) begin
+                if (isp_cull) begin
+                    cull_count <= cull_count + 1;
+                end else begin
                     pend_dx12<=w_dx12; pend_dx23<=w_dx23; pend_dx31<=w_dx31; pend_dx41<=w_dx41;
                     pend_dy12<=w_dy12; pend_dy23<=w_dy23; pend_dy31<=w_dy31; pend_dy41<=w_dy41;
                     pend_c1<=w_c1; pend_c2<=w_c2; pend_c3<=w_c3; pend_c4<=w_c4;
@@ -490,6 +530,7 @@ module isp_core import tsp_pkg::*; (
                 isp_ddx_invw<=pend_ddx; isp_ddy_invw<=pend_ddy; isp_c_invw<=pend_cinvw;
                 isp_word<=pend_isp; tri_tag<=pend_tag;
                 pend_valid <= 1'b0;
+                tri_count  <= tri_count + 1;
                 rbx0 <= pend_bx0 & 5'(~(RAS_LANES-1));
                 rbx1 <= pend_bx1 & 5'(~(RAS_LANES-1));
                 rby1 <= pend_by1;

@@ -13,8 +13,8 @@
 #include <cstring>
 
 static Vfrontend_isp_tb_top* dut;
-#define VRAM dut->rootp->frontend_isp_tb_top__DOT__vram
-#define FB   dut->rootp->frontend_isp_tb_top__DOT__fb
+#define VRAM dut->rootp->frontend_isp_tb_top__DOT__u_sim__DOT__vram
+#define FB   dut->rootp->frontend_isp_tb_top__DOT__u_sim__DOT__fb
 static void tick(){ dut->clk=0; dut->eval(); dut->clk=1; dut->eval(); }
 
 static uint8_t* load(const char* path, long* out_sz){
