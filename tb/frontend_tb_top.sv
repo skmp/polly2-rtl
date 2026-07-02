@@ -34,7 +34,7 @@ module frontend_tb_top import tsp_pkg::*; (
     // take a 32-byte-line address (byte>>5). Region array walk uses region_base;
     // param records use PARAM_BASE & 0xF00000 (refsw RenderTriangleStrip).
     wire [26:0] region_base = regs.region_base[26:0];
-    wire [26:0] param_base  = {regs.param_base[23:20], 23'd0}; // PARAM_BASE & 0xF00000
+    wire [26:0] param_base  = (regs.param_base[26:0] & 27'h0F00000); // PARAM_BASE & 0xF00000
     wire        region_v1   = (regs.fpu_param_cfg.region_header_type == 1'b0);
 
     // -------------------- 8 MB behavioral VRAM (1M x 64-bit) --------------------
