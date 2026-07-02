@@ -164,11 +164,6 @@ module frontend_tsp_lp_tb_top import tsp_pkg::*; (
     reg [31:0] dt_tag2  [0:TILE_W*TILE_H-1];   // last-rendered   (tagBufferB   / pb2)
     reg        dt_valid [0:TILE_W*TILE_H-1];   // staged-this-pass (tagStatus.valid)
     reg        dt_pt    [0:TILE_W*TILE_H-1];   // winning peel fragment came from PT list
-    // Opaque-depth snapshot: refsw2 keeps depthBufferA (the OP/background depth)
-    // intact between peel regions; each peel region's PASS-1 reference (zb2) is that
-    // depth, NOT the FLT_MAX a previous peel region left behind. We snapshot it once
-    // the OP result is known and copy it into zb2 on peel pass 1.
-    reg [31:0] dt_depth_op[0:TILE_W*TILE_H-1];
     reg [31:0] col_buf  [0:TILE_W*TILE_H-1];   // shaded ARGB per tile pixel
 
     localparam [31:0] FLT_MAX = 32'h7F7FFFFF;  // refsw PeelBuffers depth clear value
@@ -461,7 +456,6 @@ module frontend_tsp_lp_tb_top import tsp_pkg::*; (
     // ---- unified PT+TL layer-peel pass loop (TB-FSM; refsw do..while(MoreToDraw)) ----
     reg        more_to_draw;      // set by the raster consumer during a peel pass
     reg        op_shaded;         // OP shade (background/opaque -> col_buf) done this tile
-    reg        op_snapped;        // opaque-depth snapshot taken this tile (dt_depth_op)
     reg [31:0] pt_ptr_l, tr_ptr_l;// latched PT / TL list pointers for this tile
     reg        has_pt,  has_tr;   // this tile has a PT / TL list
     reg        peel_which;        // 0 = rasterizing PT list, 1 = TL list (this pass)
@@ -542,7 +536,7 @@ module frontend_tsp_lp_tb_top import tsp_pkg::*; (
             fq_head<=0; fq_tail<=0; fq_count<=0;
             eq_head<=0; eq_tail<=0; eq_count<=0; it_cst<=IT_IDLE;
             peeling<=1'b0; more_to_draw<=1'b0; peel_pass<=8'd0; op_shaded<=1'b0;
-            op_snapped<=1'b0; has_pt<=1'b0; has_tr<=1'b0; peel_which<=1'b0;
+            has_pt<=1'b0; has_tr<=1'b0; peel_which<=1'b0;
             for (i = 0; i < PC_N; i = i + 1) pc_valid[i] = 1'b0;
         end else begin
             done<=0; ra_start<=0; ol_start<=0; it_start<=0;
@@ -616,7 +610,6 @@ module frontend_tsp_lp_tb_top import tsp_pkg::*; (
                         dt_tag[i]   = regs.isp_backgnd_t;
                     end
                     op_shaded <= 1'b0;   // OP shade not yet run for this tile
-                    op_snapped <= 1'b0;  // opaque-depth snapshot invalid until first peel
                     has_pt <= 1'b0; has_tr <= 1'b0;   // PT/TL lists for this tile: none yet
                     ra_ack.list_done <= 1'b1; st <= S_RA_ACK;
                 end
@@ -721,16 +714,11 @@ module frontend_tsp_lp_tb_top import tsp_pkg::*; (
             // OP tags in dt_tag, but the OP shade already ran (col_buf holds it), so
             // dt_tag is only used as the peel pending tag from here on.
             S_PEEL_INIT: begin
-                peeling <= 1'b1;   // (pre-peel OP shade may have cleared it)
-                // Snapshot the opaque/background depth ONCE per tile, on the first
-                // peel region. Later peel regions on the same tile must reuse THIS
-                // snapshot as their pass-1 reference (dt_depth has been clobbered to
-                // FLT_MAX by the prior region's peel).
-                if (!op_snapped) begin
-                    for (i = 0; i < TILE_W*TILE_H; i = i + 1)
-                        dt_depth_op[i] = dt_depth[i];
-                    op_snapped <= 1'b1;
-                end
+                peeling   <= 1'b1;   // (pre-peel OP shade may have cleared it)
+                peel_pass <= 8'd0;   // reset the pass counter for THIS tile's peel
+                // refsw SetTagToMax(): tagBufferA(dt_tag) = 0xFFFFFFFF so pass-1 pb2
+                // (=copy of A) is 0xFFFFFFFF, not the OP tags. dt_depth still holds
+                // the OP depth -> pass-1 reference (copied in S_PEEL_BUF).
                 for (i = 0; i < TILE_W*TILE_H; i = i + 1)
                     dt_tag[i] = 32'hFFFFFFFF;
                 st <= S_PEEL_BUF;
@@ -743,12 +731,19 @@ module frontend_tsp_lp_tb_top import tsp_pkg::*; (
             // live), clear depthA to FLT_MAX + clear valid. Then rasterize BOTH the
             // PT list and the TL list into the same buffers this pass (PT first), so
             // PT and TL fragments sort together back-to-front.
+            // PeelBuffers(FLT_MAX,0): reference (zb2) <- live dt_depth, then clear
+            // dt_depth to FLT_MAX. On pass 1 dt_depth holds the OP/opaque result
+            // (the peel runs at FLUSH, after OP, and nothing clobbers dt_depth in
+            // between); later passes it holds the previous pass's closest layer. So
+            // copying live dt_depth every pass is correct - no snapshot needed.
             S_PEEL_BUF: begin
                 for (i = 0; i < TILE_W*TILE_H; i = i + 1) begin
-                    dt_depth2[i] = (peel_pass==8'd0) ? dt_depth_op[i] : dt_depth[i];
+                    dt_depth2[i] = dt_depth[i];
                     dt_tag2[i]   = dt_tag[i];
                     dt_depth[i]  = FLT_MAX;
                     dt_valid[i]  = 1'b0;
+                    dt_pt[i]     = 1'b0;   // clear per pass (else stale PT flag fires
+                                           // the alpha test on TR pixels)
                 end
                 more_to_draw <= 1'b0;
                 peel_pass <= peel_pass + 8'd1;
