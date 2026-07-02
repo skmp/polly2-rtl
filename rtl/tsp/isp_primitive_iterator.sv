@@ -32,6 +32,7 @@ module isp_primitive_iterator import tsp_pkg::*; (
     input                  reset,
     input                  start,          // 1-cycle: begin iterating `entry`
     input      [26:0]      param_base,     // PARAM_BASE & 0xF00000 (byte addr)
+    input                  intensity_shadow, // FPU_SHAD_SCALE.intensity_shadow
     input      entry_type_e    entry_type, // ENT_STRIP or ENT_TRI (ENT_QUAD n/a)
     input      objlist_entry_t entry,      // mask valid for STRIP; count for ARRAY
     output reg             busy,
@@ -65,11 +66,13 @@ module isp_primitive_iterator import tsp_pkg::*; (
 
     // ---- geometry (latched at start) ----
     reg [26:0] rec_base;      // byte addr of the CURRENT record (isp word)
-    reg [2:0]  skip_r; reg shadow_r; reg [5:0] mask_r;
+    reg [2:0]  skip_r; reg shadow_r; reg [5:0] mask_r; reg ishadow_r;
     reg [20:0] po_r;          // param_offs_in_words of the CURRENT record
     reg [4:0]  count_r;       // array: number of records (prims+1)
     reg [4:0]  prim_r;        // array: current record index 0..count-1
-    wire       two_vol   = shadow_r;
+    // two_volumes = shadow & ~intensity_shadow (refsw RenderTriangle*). When
+    // intensity_shadow is set, a shadow poly does NOT carry a 2nd tsp/tcw+verts.
+    wire       two_vol   = shadow_r & ~ishadow_r;
     wire [4:0] stride_w  = 5'd3 + skip_r * (two_vol ? 5'd2 : 5'd1);   // words/vertex
     wire [26:0] hdr_bytes = two_vol ? 27'd20 : 27'd12;
     wire [26:0] stride_bytes = {stride_w,2'b00};
@@ -141,6 +144,7 @@ module isp_primitive_iterator import tsp_pkg::*; (
                 rec_base <= param_base + {entry.param_offs_in_words,2'b00};
                 skip_r   <= entry.skip;
                 shadow_r <= entry.shadow;
+                ishadow_r <= intensity_shadow;
                 mask_r   <= entry.mask;
                 po_r     <= entry.param_offs_in_words;
                 count_r  <= entry.count;    // array only

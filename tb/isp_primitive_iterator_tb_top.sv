@@ -8,6 +8,7 @@ module isp_primitive_iterator_tb_top import tsp_pkg::*; (
     input      [20:0] entry_param_offs,
     input      [2:0]  entry_skip,
     input             entry_shadow,
+    input             intensity_shadow, // FPU_SHAD_SCALE.intensity_shadow
     input      [5:0]  entry_mask,
     input      [4:0]  entry_count,      // tri array: prims+1
     input             consume,          // pulse: ack.triangle_done
@@ -40,6 +41,7 @@ module isp_primitive_iterator_tb_top import tsp_pkg::*; (
     cache_resp256_t cresp;
     isp_primitive_iterator u_it (
         .clk(clk),.reset(reset),.start(start),.param_base(param_base),
+        .intensity_shadow(intensity_shadow),
         .entry_type(entry_type_e'(etype)),.entry(entry),
         .busy(busy),.trio(trio),.ack(ack),.creq(creq),.cresp(cresp));
 

@@ -97,6 +97,7 @@ static void run_case(const char* name, uint32_t base_words, uint32_t skip, bool 
     dut->entry_param_offs = base_words;   // param_offs_in_words (base is word-addr)
     dut->entry_skip = skip;
     dut->entry_shadow = two_vol ? 1 : 0;
+    dut->intensity_shadow = 0;            // two_vol = shadow & ~ishadow = shadow
     dut->entry_mask = mask;
     dut->entry_count = 0;
     dut->start=1; tick(); dut->start=0;
@@ -137,8 +138,18 @@ static void run_case(const char* name, uint32_t base_words, uint32_t skip, bool 
 
 // ---- triangle ARRAY: `count` separate records, each 3 verts, 1 triangle, ----
 // tag_offset=0, param_offs = that record's own word offset (refsw RenderTriangleArray).
-static void run_array(const char* name, uint32_t base_words, uint32_t skip, bool two_vol,
-                      uint32_t count, uint32_t isp0){
+// entry_shadow/ishadow are the entry+register bits; the PHYSICAL two_vol layout
+// the iterator must use = shadow & ~ishadow.
+static void run_array_s(const char* name, uint32_t base_words, uint32_t skip,
+                        bool shadow, bool ishadow, uint32_t count, uint32_t isp0);
+// back-compat: two_vol layout with ishadow=0 (so two_vol == shadow)
+static void run_array(const char* name, uint32_t base_words, uint32_t skip,
+                      bool two_vol, uint32_t count, uint32_t isp0){
+    run_array_s(name, base_words, skip, two_vol, /*ishadow*/false, count, isp0);
+}
+static void run_array_s(const char* name, uint32_t base_words, uint32_t skip,
+                        bool shadow, bool ishadow, uint32_t count, uint32_t isp0){
+    bool two_vol = shadow && !ishadow;
     dut->reset=1; dut->start=0; dut->consume=0; tick(); tick(); tick(); dut->reset=0;
     for(int i=0;i<300;i++) tick();
 
@@ -152,8 +163,9 @@ static void run_array(const char* name, uint32_t base_words, uint32_t skip, bool
         uint32_t isp = isp0 + r;            // distinct isp per record
         Vtx v[8]; for(int i=0;i<8;i++) v[i]={rnd(),rnd(),rnd()};
         build_record(rbase_words*4, isp, skip, two_vol, v);
-        // one triangle: v0,v1,v2 (no winding swap for arrays), tag_offset=0
-        uint32_t tag = core_tag((isp>>21)&1, two_vol?1:0, skip, rbase_words, 0);
+        // one triangle: v0,v1,v2 (no winding swap for arrays), tag_offset=0.
+        // CoreTag.shadow is the ENTRY shadow bit (not two_vol).
+        uint32_t tag = core_tag((isp>>21)&1, shadow?1:0, skip, rbase_words, 0);
         gold.push_back({isp, tag, v[0], v[1], v[2]});
     }
 
@@ -161,7 +173,8 @@ static void run_array(const char* name, uint32_t base_words, uint32_t skip, bool
     dut->etype = 1;                          // ENT_TRI
     dut->entry_param_offs = base_words;
     dut->entry_skip = skip;
-    dut->entry_shadow = two_vol ? 1 : 0;
+    dut->entry_shadow = shadow ? 1 : 0;
+    dut->intensity_shadow = ishadow ? 1 : 0;
     dut->entry_mask = 0;
     dut->entry_count = count;                // prims+1 already
     dut->start=1; tick(); dut->start=0;
@@ -232,6 +245,10 @@ int main(int argc,char**argv){
     run_array("arr_c4_skip0",   1100, 0, false, 4,  0x55550020);
     run_array("arr_c3_skip2",   1300, 2, false, 3,  0x55550030);
     run_array("arr_c2_twovol",  1500, 1, true,  2,  0x55550040);
+    // daytona bug: entry shadow=1 BUT intensity_shadow=1 -> two_vol=0 layout.
+    // (iterator must use shadow & ~intensity_shadow for the record stride.)
+    run_array_s("arr_shadow_ishadow", 1700, 3, /*shadow*/true, /*ishadow*/true, 3, 0x55550050);
+    run_array_s("arr_shadow_ishadow2",1900, 1, true, true, 5, 0x55550060);
     for(int t=0;t<20;t++){
         uint32_t count = 1 + (rnd()%6);
         uint32_t skip  = rnd()&3;

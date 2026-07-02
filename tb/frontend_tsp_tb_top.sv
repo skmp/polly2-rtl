@@ -120,6 +120,7 @@ module frontend_tsp_tb_top import tsp_pkg::*; (
     wire             it_busy;
     triangle_out_t   it_trio; triangle_ack_t it_ack;
     isp_primitive_iterator u_it (.clk(clk),.reset(reset),.start(it_start),
+        .intensity_shadow(regs.fpu_shad_scale.intensity_shadow),
         .param_base(param_base),.entry_type(it_etype),.entry(it_entry),.busy(it_busy),
         .trio(it_trio),.ack(it_ack),.creq(pr_creq),.cresp(pr_cresp));
 
