@@ -390,6 +390,9 @@ module frontend_tsp_pp_tb_top import tsp_pkg::*; (
     reg [9:0]  shp;
     reg [31:0] sh_tag, sh_invw;
     wire [5:0] sh_slot = sh_tag[8:3] ^ {3'b000, sh_tag[2:0]};
+    // combinational fields of the CURRENT pixel's tag (stage-0 streaming lookup)
+    wire [31:0] nx_tag  = dt_tag[slot_tsp][shp];
+    wire [5:0]  nx_slot = nx_tag[8:3] ^ {3'b000, nx_tag[2:0]};
     wire [20:0] sh_po   = sh_tag[23:3];
     wire [2:0]  sh_skip = sh_tag[26:24];
     wire [2:0]  sh_toff = sh_tag[2:0];
@@ -435,6 +438,7 @@ module frontend_tsp_pp_tb_top import tsp_pkg::*; (
     reg  [31:0]  pp_tsp, pp_tcw; reg pp_ptex, pp_pofs;
     reg  [31:0]  pp_ddx [0:9]; reg [31:0] pp_ddy [0:9]; reg [31:0] pp_c [0:9];
     wire         pp_stall, pp_out_valid; wire [9:0] pp_out_id; wire [31:0] pp_out_argb;
+    wire         pp_accept = pp_in_valid && !pp_stall;  // pipe consumes this edge
     tsp_shade_pp #(.IDW(10)) u_shade (
         .clk(clk),.reset(reset),
         .in_valid(pp_in_valid),.in_id(pp_in_id),.px(pp_px),.py(pp_py),.invw_in(pp_invw),
@@ -444,6 +448,7 @@ module frontend_tsp_pp_tb_top import tsp_pkg::*; (
         .out_valid(pp_out_valid),.out_id(pp_out_id),.out_argb(pp_out_argb),.stall(pp_stall),
         .tc_req(pp_tc_req),.tc_resp(pp_tc_resp),.vq_req(pp_vq_req),.vq_resp(pp_vq_resp));
 
+    localparam B_STREAM=14;
     localparam B_IDLE=0, B_GETSLOT=1, B_PIX=2, B_LOOK=3,
                B_FH_ISP=4, B_FH_ISPW=5, B_FH_TSPW=6, B_FH_TCWW=7,
                B_FV_RD=8, B_FV_W=9, B_RUN=10, B_PRESENT=11, B_DRAIN=12, B_WAITDROP=13;
@@ -695,27 +700,59 @@ module frontend_tsp_pp_tb_top import tsp_pkg::*; (
             B_GETSLOT: if (tsp_grant) begin
                 for (bj=0; bj<PC_N; bj=bj+1) pc_valid[bj] <= 1'b0;
                 shp<=10'd0; sh_out_n<=0;
+                tsp_tx <= slot_tx[tsp_gslot]; tsp_ty <= slot_ty[tsp_gslot];
+                tt_xbase <= i2f({10'd0, slot_tx[tsp_gslot]} * 16'd32);
+                tt_ybase <= i2f({10'd0, slot_ty[tsp_gslot]} * 16'd32);
                 $display("[TSP shade tile %0d,%0d slot%0d]", slot_tx[tsp_gslot], slot_ty[tsp_gslot], tsp_gslot);
-                st_b<=B_PIX;
+                st_b<=B_STREAM;
             end
 
-            B_PIX: begin
-                tsp_tx <= slot_tx[slot_tsp]; tsp_ty <= slot_ty[slot_tsp];
-                tt_xbase <= i2f({10'd0, slot_tx[slot_tsp]} * 16'd32);
-                tt_ybase <= i2f({10'd0, slot_ty[slot_tsp]} * 16'd32);
-                sh_tag  <= dt_tag[slot_tsp][shp];
-                sh_invw <= dt_depth[slot_tsp][shp];
-                st_b<=B_LOOK;
-            end
-
-            B_LOOK: begin
-                if (pc_valid[sh_slot] && pc_tag[sh_slot]==sh_tag) begin
-                    hit_count<=hit_count+1;
-                    cur_isp=pc_isp[sh_slot]; cur_tsp=pc_tsp[sh_slot]; cur_tcw=pc_tcw[sh_slot];
-                    for (bj=0;bj<10;bj=bj+1) begin cur_ddx[bj]=pc_ddx[sh_slot][bj]; cur_ddy[bj]=pc_ddy[sh_slot][bj]; cur_c[bj]=pc_c[sh_slot][bj]; end
-                    st_b<=B_PRESENT;
+            // STREAMING PRODUCER: plane-cache lookup is stage 0 of the shader
+            // pipeline. Each clock we look up pixel shp's tag COMBINATIONALLY and,
+            // on a hit, drive its planes/invw straight into tsp_shade_pp with
+            // in_valid - 1 pixel/clock. shp advances only when the pipe accepts
+            // (pp_accept), so a texel stall holds the pixel; a MISS pauses the
+            // stream to fetch the record + run tsp_setup (filling the cache), then
+            // re-enters B_STREAM at the same shp (now a hit).
+            // STREAMING PRODUCER (stage 0 = plane-cache lookup). `shp` is the NEXT
+            // pixel to LOAD; the pixel currently offered to the pipe lives in
+            // pp_in_id (with its planes in pp_*). We load a new pixel exactly once,
+            // when the pipe is free to take one (nothing offered yet, or the
+            // current offer was accepted this cycle) - so no pixel is presented
+            // twice. On load we advance shp. When the last pixel (id 1023) is
+            // accepted, drain. A cache MISS pauses the stream to fetch+setup, then
+            // re-enters B_STREAM at the same shp (now a hit). 1 pixel/clock on hits.
+            B_STREAM: begin
+                // NOTE: pp_in_valid defaults to 0 at the top of the block, so we
+                // must RE-ASSERT it every cycle we are holding an offered pixel.
+                if (pp_accept && pp_in_id == 10'd1023) begin
+                    // last pixel consumed: done offering (leave valid at its 0 dflt).
+                    st_b <= B_DRAIN;
+                end else if (!pp_in_valid || pp_accept) begin
+                    // pipe is free to accept a new pixel this cycle: look up shp.
+                    sh_invw <= dt_depth[slot_tsp][shp];
+                    if (pc_valid[nx_slot] && pc_tag[nx_slot]==nx_tag) begin
+                        // HIT: offer pixel shp, advance to the next.
+                        hit_count <= hit_count + 1;
+                        pp_in_valid <= 1'b1;
+                        pp_in_id <= shp; pp_px <= shp[4:0]; pp_py <= shp[9:5];
+                        pp_invw <= dt_depth[slot_tsp][shp];
+                        pp_tsp <= pc_tsp[nx_slot]; pp_tcw <= pc_tcw[nx_slot];
+                        pp_ptex <= pc_isp[nx_slot][ISP_TEXTURE_BIT];
+                        pp_pofs <= pc_isp[nx_slot][ISP_OFFSET_BIT];
+                        for (bj=0;bj<10;bj=bj+1) begin pp_ddx[bj]<=pc_ddx[nx_slot][bj]; pp_ddy[bj]<=pc_ddy[nx_slot][bj]; pp_c[bj]<=pc_c[nx_slot][bj]; end
+                        shp <= shp + 10'd1;
+                    end else begin
+                        // MISS: stop offering (valid stays 0), fetch + tsp_setup.
+                        miss_count<=miss_count+1;
+                        sh_tag <= nx_tag;
+                        f_rec<=param_base + {4'd0, nx_tag[23:3], 2'b00};
+                        st_b<=B_FH_ISP;
+                    end
                 end else begin
-                    miss_count<=miss_count+1; f_rec<=param_base + {4'd0, sh_po, 2'b00}; st_b<=B_FH_ISP;
+                    // holding an offered-but-not-yet-accepted pixel (pipe stalled):
+                    // re-assert valid + keep pp_* stable so the pixel isn't dropped.
+                    pp_in_valid <= 1'b1;
                 end
             end
             B_FH_ISP:  begin f_addr<=f_rec; f_go<=1'b1; st_b<=B_FH_ISPW; end
@@ -768,7 +805,7 @@ module frontend_tsp_pp_tb_top import tsp_pkg::*; (
             B_RUN: if (tsp_done) begin
                 pc_valid[sh_slot]=1'b1; pc_tag[sh_slot]=sh_tag;
                 pc_isp[sh_slot]=cur_isp; pc_tsp[sh_slot]=cur_tsp; pc_tcw[sh_slot]=cur_tcw;
-                st_b<=B_PRESENT;
+                st_b<=B_STREAM;   // re-lookup shp (now a hit) and resume streaming
             end
             B_PRESENT: if (!pp_stall) begin
                 pp_in_valid<=1'b1; pp_in_id<=shp; pp_px<=shp[4:0]; pp_py<=shp[9:5]; pp_invw<=sh_invw;
