@@ -46,23 +46,53 @@ module frontend_isp_tb_top import tsp_pkg::*; (
     reg [63:0] ra_do; reg ra_dv;
     assign ra_dresp.busy=1'b0; assign ra_dresp.dout=ra_do; assign ra_dresp.dready=ra_dv;
     always @(posedge clk) begin ra_dv<=0; if(ra_dreq.rd) begin ra_do<=vram[ra_dreq.addr[19:0]]; ra_dv<=1; end end
+    // objlist + param ports - BURST + latency model (each a single 64-bit channel
+    // via the shared arbiter): a read is accepted for RD_LAT dead cycles, then
+    // `burst` consecutive beats stream out one/cycle from incrementing addresses.
+    localparam integer RD_LAT = 8;
     // objlist port
     ddr_rd_req_t  ol_dreq; ddr_rd_resp_t ol_dresp;
+    reg ol_busy_d; reg [19:0] ol_word; reg [7:0] ol_beats, ol_lat;
     reg [63:0] ol_do; reg ol_dv;
-    assign ol_dresp.busy=1'b0; assign ol_dresp.dout=ol_do; assign ol_dresp.dready=ol_dv;
-    always @(posedge clk) begin ol_dv<=0; if(ol_dreq.rd) begin ol_do<=vram[ol_dreq.addr[19:0]]; ol_dv<=1; end end
+    assign ol_dresp.busy=ol_busy_d; assign ol_dresp.dout=ol_do; assign ol_dresp.dready=ol_dv;
+    always @(posedge clk) begin
+        ol_dv <= 1'b0;
+        if (reset) ol_busy_d <= 1'b0;
+        else if (!ol_busy_d) begin
+            if (ol_dreq.rd) begin ol_busy_d<=1'b1; ol_word<=ol_dreq.addr[19:0];
+                ol_beats<=ol_dreq.burst; ol_lat<=RD_LAT[7:0]; end
+        end else if (ol_lat != 0) ol_lat <= ol_lat - 8'd1;
+        else begin
+            ol_do<=vram[ol_word]; ol_dv<=1'b1; ol_word<=ol_word+20'd1;
+            if (ol_beats <= 8'd1) ol_busy_d <= 1'b0;
+            ol_beats <= ol_beats - 8'd1;
+        end
+    end
     // param port
     ddr_rd_req_t  pr_dreq; ddr_rd_resp_t pr_dresp;
+    reg pr_busy; reg [19:0] pr_word; reg [7:0] pr_beats, pr_lat;
     reg [63:0] pr_do; reg pr_dv;
-    assign pr_dresp.busy=1'b0; assign pr_dresp.dout=pr_do; assign pr_dresp.dready=pr_dv;
-    always @(posedge clk) begin pr_dv<=0; if(pr_dreq.rd) begin pr_do<=vram[pr_dreq.addr[19:0]]; pr_dv<=1; end end
+    assign pr_dresp.busy=pr_busy; assign pr_dresp.dout=pr_do; assign pr_dresp.dready=pr_dv;
+    always @(posedge clk) begin
+        pr_dv <= 1'b0;
+        if (reset) pr_busy <= 1'b0;
+        else if (!pr_busy) begin
+            if (pr_dreq.rd) begin pr_busy<=1'b1; pr_word<=pr_dreq.addr[19:0];
+                pr_beats<=pr_dreq.burst; pr_lat<=RD_LAT[7:0]; end
+        end else if (pr_lat != 0) pr_lat <= pr_lat - 8'd1;
+        else begin
+            pr_do<=vram[pr_word]; pr_dv<=1'b1; pr_word<=pr_word+20'd1;
+            if (pr_beats <= 8'd1) pr_busy <= 1'b0;
+            pr_beats <= pr_beats - 8'd1;
+        end
+    end
 
     // -------------------- caches --------------------
-    cache_req256_t ra_creq, ol_creq, pr_creq;
-    cache_resp256_t ra_cresp, ol_cresp, pr_cresp;
+    // Region parser keeps its 256-bit line cache; the OL parser and ISP iterator
+    // read DDR DIRECTLY (own line buffers / burst) via ol_dreq / pr_dreq.
+    cache_req256_t ra_creq;
+    cache_resp256_t ra_cresp;
     data_cache256 u_ra_c (.clk(clk),.reset(reset),.creq(ra_creq),.cresp(ra_cresp),.dreq(ra_dreq),.dresp(ra_dresp));
-    data_cache256 u_ol_c (.clk(clk),.reset(reset),.creq(ol_creq),.cresp(ol_cresp),.dreq(ol_dreq),.dresp(ol_dresp));
-    data_cache256 u_pr_c (.clk(clk),.reset(reset),.creq(pr_creq),.cresp(pr_cresp),.dreq(pr_dreq),.dresp(pr_dresp));
 
     // -------------------- parsers --------------------
     reg          ra_start;
@@ -78,7 +108,7 @@ module frontend_isp_tb_top import tsp_pkg::*; (
     prim_out_t   ol_prim; prim_ack_t ol_ack;
     object_list_parser u_ol (.clk(clk),.reset(reset),.start(ol_start),
         .list_ptr(ol_list_ptr),.busy(ol_busy),.done(ol_done),
-        .prim(ol_prim),.ack(ol_ack),.creq(ol_creq),.cresp(ol_cresp));
+        .prim(ol_prim),.ack(ol_ack),.dreq(ol_dreq),.dresp(ol_dresp));
 
     reg              it_start; objlist_entry_t it_entry; entry_type_e it_etype;
     wire             it_busy;
@@ -86,7 +116,7 @@ module frontend_isp_tb_top import tsp_pkg::*; (
     isp_primitive_iterator u_it (.clk(clk),.reset(reset),.start(it_start),
         .intensity_shadow(regs.fpu_shad_scale.intensity_shadow),
         .param_base(param_base),.entry_type(it_etype),.entry(it_entry),.busy(it_busy),
-        .trio(it_trio),.ack(it_ack),.creq(pr_creq),.cresp(pr_cresp));
+        .trio(it_trio),.ack(it_ack),.dreq(pr_dreq),.dresp(pr_dresp));
 
     // -------------------- depth/tag tile + 640x480 framebuffer --------------------
     localparam integer TILE_W = 32, TILE_H = 32;
@@ -109,6 +139,7 @@ module frontend_isp_tb_top import tsp_pkg::*; (
         end
     endfunction
 
+
     // -------------------- ISP triangle setup (as tile_engine_top) --------------------
     // isp_word_su feeds the SETUP unit (triangle N+1); isp_word is the ACTIVE
     // raster triangle's isp (N), used by the depth compare / tag write. They are
@@ -121,6 +152,7 @@ module frontend_isp_tb_top import tsp_pkg::*; (
     reg  [31:0] su_tag;                   // setup triangle's CoreTag
     reg  [31:0] tri_tag;                  // active (raster) triangle's CoreTag
     wire        isp_done, isp_sgn_neg, isp_cull;
+    wire [4:0]  w_bx0, w_bx1, w_by0, w_by1;   // tile-local bbox from setup
     wire [31:0] w_dx12,w_dx23,w_dx31,w_dx41, w_dy12,w_dy23,w_dy31,w_dy41;
     wire [31:0] w_c1,w_c2,w_c3,w_c4, w_ddx,w_ddy,w_cinvw;
 
@@ -135,7 +167,8 @@ module frontend_isp_tb_top import tsp_pkg::*; (
         .dx12(w_dx12), .dx23(w_dx23), .dx31(w_dx31), .dx41(w_dx41),
         .dy12(w_dy12), .dy23(w_dy23), .dy31(w_dy31), .dy41(w_dy41),
         .c1(w_c1), .c2(w_c2), .c3(w_c3), .c4(w_c4),
-        .ddx_invw(w_ddx), .ddy_invw(w_ddy), .c_invw(w_cinvw)
+        .ddx_invw(w_ddx), .ddy_invw(w_ddy), .c_invw(w_cinvw),
+        .bx0(w_bx0), .bx1(w_bx1), .by0(w_by0), .by1(w_by1)
     );
 
     // latched setup results (rasterizer consumes these)
@@ -145,15 +178,11 @@ module frontend_isp_tb_top import tsp_pkg::*; (
     reg [31:0] isp_ddx_invw, isp_ddy_invw, isp_c_invw;
 
     // -------------------- ISP rasterize (as tile_engine_top) --------------------
-    // HW depth does a full 32-px line/clock; on real fabric that's DSP-heavy, so
-    // synthesis keeps 8 lanes. In Verilator sim, use 32 (whole line/clock) so the
-    // raster sweep is 32 cyc/tri instead of 128 - matches HW depth throughput.
-`ifdef VERILATOR
-    localparam integer RAS_LANES = 32;
-`else
+    // 8 depth lanes/clock, matching the real FPGA (32 lanes is DSP-heavy). Sim
+    // models the same 8 lanes so cycle counts reflect hardware.
     localparam integer RAS_LANES = 8;
-`endif
     reg  [4:0]  ras_y, ras_x;
+    reg  [4:0]  rbx0, rbx1, rby1;   // active bbox sweep bounds (chunk-aligned x)
     // combinational: issue a chunk every raster-sweep cycle, in phase with
     // ras_x/y (a registered pulse would lag and drop the first chunk per tile).
     wire        ras_in_valid = (rs_st == RS_RAS);
@@ -206,15 +235,27 @@ module frontend_isp_tb_top import tsp_pkg::*; (
     // every region-state boundary the producer waits until the FIFO is empty AND
     // the consumer is idle (current state fully rastered) before advancing.
     localparam S_IDLE=0, S_RA=1, S_STATE=2,
-               S_OL_WAIT=4, S_ENTRY=5,
-               S_PRIM=7, S_OL_ACK=8,
+               S_OL_RUN=4,                 // producer: OL entries -> entry FIFO
                S_RA_ACK=9, S_DONE=10,
-               S_DRAIN=11;                 // barrier: wait consumer idle + FIFO empty
+               S_DRAIN=11;                 // barrier: wait consumer idle + FIFOs empty
     reg [3:0] st;
 
     // consumer sub-FSMs
     localparam SU_IDLE=0, SU_RUN=1;              reg su_st;
     localparam RS_IDLE=0, RS_RAS=1, RS_DRAIN=2;  reg [1:0] rs_st;
+
+    // ---- entry FIFO (object_list_parser -> iterator), depth 8 ----
+    // Decouples the OL parser (decode next entry) from the iterator (burst-read
+    // records). The OL parser keeps decoding entries ahead into eq while the
+    // iterator drains the current entry.
+    localparam integer EQ_N = 8;
+    reg [1:0]       eq_etype [0:EQ_N-1];
+    objlist_entry_t eq_entry [0:EQ_N-1];
+    reg [3:0] eq_head, eq_tail; reg [4:0] eq_count;
+    reg       eq_push, eq_pop;
+    wire eq_full  = (eq_count == EQ_N);
+    wire eq_empty = (eq_count == 0);
+    localparam IT_IDLE=0, IT_RUN=1; reg it_cst;   // iterator-consumer FSM
 
     // ---- triangle FIFO (producer -> consumer), depth 8 ----
     localparam integer FIFO_N = 8;
@@ -223,7 +264,7 @@ module frontend_isp_tb_top import tsp_pkg::*; (
     reg [31:0] fq_x1[0:FIFO_N-1], fq_y1[0:FIFO_N-1], fq_z1[0:FIFO_N-1];
     reg [31:0] fq_x2[0:FIFO_N-1], fq_y2[0:FIFO_N-1], fq_z2[0:FIFO_N-1];
     reg [31:0] fq_x3[0:FIFO_N-1], fq_y3[0:FIFO_N-1], fq_z3[0:FIFO_N-1];
-    reg [3:0]  fq_head, fq_tail;   // ring indices 0..FIFO_N-1
+    reg [3:0]  fq_head, fq_tail;   // ring indices 0..FIFO_N-1 (0..7)
     reg [4:0]  fq_count;
     reg        fifo_push, fifo_pop; // 1-cycle intents (reconciled into fq_count)
     wire fq_full  = (fq_count == FIFO_N);
@@ -236,10 +277,13 @@ module frontend_isp_tb_top import tsp_pkg::*; (
     reg [31:0] pend_c1,pend_c2,pend_c3,pend_c4;
     reg [31:0] pend_ddx,pend_ddy,pend_cinvw;
     reg [31:0] pend_isp, pend_tag;
+    reg [4:0]  pend_bx0,pend_bx1,pend_by0,pend_by1;  // tile-local bounding box
 
     reg prim_seen;   // iterator pulsed prim_done for the current entry
-    // consumer fully idle (nothing in setup, raster, pend handoff)
-    wire consumer_idle = (su_st==SU_IDLE) && (rs_st==RS_IDLE) && !pend_valid;
+    // consumer fully idle: entry FIFO empty, iterator idle & not busy, setup +
+    // raster + pend handoff all idle.
+    wire consumer_idle = eq_empty && (it_cst==IT_IDLE) && !it_busy
+                       && (su_st==SU_IDLE) && (rs_st==RS_IDLE) && !pend_valid;
 
     integer tri_count, cull_count, tri_seen;
     // profiling counters (cycles spent in each activity while walking entries)
@@ -271,6 +315,7 @@ module frontend_isp_tb_top import tsp_pkg::*; (
             tri_count<=0; cull_count<=0; tri_seen<=0; ras_inflight<=0;
             su_st<=SU_IDLE; rs_st<=RS_IDLE; pend_valid<=0; prim_seen<=0;
             fq_head<=0; fq_tail<=0; fq_count<=0;
+            eq_head<=0; eq_tail<=0; eq_count<=0; it_cst<=IT_IDLE;
             cyc_setup_run<=0; cyc_su_wait<=0; cyc_ras<=0; cyc_ras_drain<=0;
             cyc_ras_idle<=0; cyc_prim<=0;
             cyc_su_wfetch<=0; cyc_su_wrast<=0; cyc_fe_wait<=0;
@@ -278,6 +323,7 @@ module frontend_isp_tb_top import tsp_pkg::*; (
             done<=0; ra_start<=0; ol_start<=0; it_start<=0;
             isp_start<=0;
             ra_ack.list_done<=0; ol_ack.entry_done<=0; it_ack.triangle_done<=0;
+            eq_push = 1'b0;
 
             // -------- streamed rasterizer CONSUMER (runs every cycle) --------
             // A result chunk emerges LAT cycles after issue; write depth/tag for
@@ -326,7 +372,7 @@ module frontend_isp_tb_top import tsp_pkg::*; (
                     ol_start <= 1'b1;
                     t_xbase <= i2f({10'd0, cur_tx} * 16'd32);
                     t_ybase <= i2f({10'd0, cur_ty} * 16'd32);
-                    st <= S_OL_WAIT;
+                    st <= S_OL_RUN;
                 end
                 // FLUSH reads the whole tile buffer: BARRIER first.
                 RSTATE_FLUSH: if (consumer_idle && fq_empty) begin
@@ -344,43 +390,35 @@ module frontend_isp_tb_top import tsp_pkg::*; (
                 endcase
             end
 
-            // walk the object list, enqueueing triangles. On list end, BARRIER
-            // (S_DRAIN) before acking so the next state sees a drained tile buffer.
-            S_OL_WAIT: begin
-                if (ol_done) st<=S_DRAIN;
-                else if (ol_prim.entry_ready) st<=S_ENTRY;
-            end
-
-            S_ENTRY: begin
-                if (ol_prim.entry_type == ENT_STRIP || ol_prim.entry_type == ENT_TRI) begin
-                    it_entry <= ol_prim.entry;
-                    it_etype <= ol_prim.entry_type;
-                    it_start <= 1'b1;
-                    prim_seen <= 1'b0;
-                    st <= S_PRIM;
-                end else begin
-                    // quad array: skip for now
-                    ol_ack.entry_done <= 1'b1;
-                    st <= S_OL_ACK;
+            // S_OL_RUN: PRODUCER - push each OL entry into the entry FIFO (eq) and
+            // ack the OL parser so it decodes the next entry ahead. STRIP/TRI are
+            // queued; QUAD is skipped. On list end (ol_done) -> BARRIER (S_DRAIN).
+            // The iterator CONSUMER (it_cst) runs concurrently, popping eq into the
+            // triangle FIFO independent of `st`.
+            S_OL_RUN: begin
+                if (ol_done) st <= S_DRAIN;
+                else if (ol_prim.entry_ready && !ol_ack.entry_done) begin
+                    if (ol_prim.entry_type == ENT_STRIP ||
+                        ol_prim.entry_type == ENT_TRI) begin
+                        if (!eq_full) begin
+                            eq_etype[eq_tail[2:0]] <= ol_prim.entry_type;
+                            eq_entry[eq_tail[2:0]] <= ol_prim.entry;
+                            eq_tail <= (eq_tail==EQ_N-1) ? 4'd0 : eq_tail+4'd1;
+                            eq_push = 1'b1;
+                            ol_ack.entry_done <= 1'b1;
+                        end
+                    end else begin
+                        ol_ack.entry_done <= 1'b1;   // quad: skip (ack, don't queue)
+                    end
                 end
             end
 
-            // S_PRIM: PRODUCER only - drain the iterator's triangles into the FIFO
-            // (see the enqueue block below). When the iterator finished this entry
-            // (prim_seen) and its last triangle is enqueued, ack the entry and get
-            // the next one. The CONSUMER runs concurrently, independent of `st`.
-            S_PRIM: if (prim_seen) begin
-                ol_ack.entry_done <= 1'b1;
-                st <= S_OL_ACK;
-            end
-
-            // BARRIER at list end: wait for the FIFO to drain and the consumer to
-            // go idle (this state fully rastered) before letting region advance.
+            // BARRIER at list end: wait for the entry FIFO + iterator + triangle
+            // FIFO + setup/raster to all drain before letting region advance.
             S_DRAIN: if (fq_empty && consumer_idle) begin
                 ra_ack.list_done <= 1'b1; st <= S_RA_ACK;
             end
 
-            S_OL_ACK: st <= S_OL_WAIT;
             S_RA_ACK: st <= S_RA;
 
             S_DONE: begin
@@ -390,6 +428,12 @@ module frontend_isp_tb_top import tsp_pkg::*; (
                          cyc_prim, /*total via $time not avail*/ cyc_prim,
                          cyc_setup_run, cyc_su_wfetch, cyc_su_wrast, cyc_fe_wait,
                          cyc_ras, cyc_ras_drain, cyc_ras_idle);
+                // setup runs on EVERY triangle (rasterized + culled); divide its
+                // cycles by the total setups so the per-setup number is honest.
+                // The others (fetch/raster stalls) are per RASTERIZED triangle.
+                if (tri_count + cull_count > 0)
+                    $display("=== per-setup: setup_run=%0d (over %0d setups incl %0d culled) ===",
+                             cyc_setup_run/(tri_count+cull_count), tri_count+cull_count, cull_count);
                 if (tri_count > 0)
                     $display("=== per-triangle: setup_run=%0d su_wait_fetch=%0d su_wait_rast=%0d fe_wait=%0d ras=%0d drain=%0d ===",
                              cyc_setup_run/tri_count, cyc_su_wfetch/tri_count, cyc_su_wrast/tri_count,
@@ -408,11 +452,23 @@ module frontend_isp_tb_top import tsp_pkg::*; (
             else if (rs_st==RS_DRAIN)   cyc_ras_drain <= cyc_ras_drain + 1;
             else if (!pend_valid)       cyc_ras_idle  <= cyc_ras_idle + 1;
 
-            // ================= PRODUCER: iterator -> triangle FIFO =================
-            // Runs while walking an entry (st==S_PRIM). Push each triangle the
-            // iterator presents; stall (don't ack) when the FIFO is full.
+            // ======== ITERATOR CONSUMER: entry FIFO -> iterator -> tri FIFO ========
+            // Runs independent of `st`. IT_IDLE: pop an entry, start the iterator.
+            // IT_RUN: drain the iterator's triangles into the triangle FIFO (stall
+            // when full); on prim_done + iterator idle, return to IT_IDLE.
+            eq_pop    = 1'b0;
             fifo_push = 1'b0;
-            if (st == S_PRIM) begin
+            case (it_cst)
+            IT_IDLE: if (!eq_empty && !it_busy && !it_start) begin
+                it_entry <= eq_entry[eq_head[2:0]];
+                it_etype <= entry_type_e'(eq_etype[eq_head[2:0]]);
+                it_start <= 1'b1;
+                prim_seen <= 1'b0;
+                eq_head <= (eq_head==EQ_N-1) ? 4'd0 : eq_head+4'd1;
+                eq_pop  = 1'b1;
+                it_cst  <= IT_RUN;
+            end
+            IT_RUN: begin
                 if (it_trio.prim_done) prim_seen <= 1'b1;
                 if (it_trio.triangle_ready && !fq_full && !it_ack.triangle_done) begin
                     fq_isp[fq_tail[2:0]] <= it_trio.isp;
@@ -428,7 +484,9 @@ module frontend_isp_tb_top import tsp_pkg::*; (
                         $display("[TILE %0d,%0d] TRI %0d tag=%08h isp=%08h",
                             cur_tx, cur_ty, tri_seen, it_trio.tag, it_trio.isp);
                 end
+                if (prim_seen && !it_busy) it_cst <= IT_IDLE;   // entry finished
             end
+            endcase
 
             // ================= CONSUMER: FIFO -> setup -> raster =================
             // ---- SETUP: pop FIFO -> isp_setup_min -> pend_* ----
@@ -454,12 +512,19 @@ module frontend_isp_tb_top import tsp_pkg::*; (
                     pend_ddx<=w_ddx; pend_ddy<=w_ddy; pend_cinvw<=w_cinvw;
                     pend_isp<=isp_word_su; pend_tag<=su_tag;
                     pend_valid <= 1'b1;
+                    // tile-local bounding box, computed by isp_setup_min.
+                    pend_bx0 <= w_bx0; pend_bx1 <= w_bx1;
+                    pend_by0 <= w_by0; pend_by1 <= w_by1;
                 end
                 su_st <= SU_IDLE;
             end
             endcase
 
-            // ---- RASTER: pend_* -> active planes -> 32x32 sweep ----
+            // ---- RASTER: pend_* -> active planes -> BOUNDING-BOX sweep ----
+            // Only sweep the chunks/rows the triangle's tile-local bbox covers.
+            // x bounds are chunk-aligned (down to a RAS_LANES-wide chunk); rows go
+            // by0..by1 inclusive. The rasterizer's inside-test still gates writes,
+            // so this only skips rows/cols entirely outside the triangle.
             case (rs_st)
             RS_IDLE: if (pend_valid) begin
                 isp_dx12<=pend_dx12; isp_dx23<=pend_dx23; isp_dx31<=pend_dx31; isp_dx41<=pend_dx41;
@@ -469,13 +534,18 @@ module frontend_isp_tb_top import tsp_pkg::*; (
                 isp_word<=pend_isp; tri_tag<=pend_tag;
                 pend_valid <= 1'b0;             // free the handoff for setup
                 tri_count  <= tri_count + 1;
-                ras_y <= 5'd0; ras_x <= 5'd0;
+                // chunk-aligned x range + row range from the bbox
+                rbx0 <= pend_bx0 & 5'(~(RAS_LANES-1));
+                rbx1 <= pend_bx1 & 5'(~(RAS_LANES-1));
+                rby1 <= pend_by1;
+                ras_y <= pend_by0;
+                ras_x <= pend_bx0 & 5'(~(RAS_LANES-1));
                 rs_st <= RS_RAS;
             end
             RS_RAS: begin
-                if (ras_x == 5'(TILE_W - RAS_LANES)) begin
-                    ras_x <= 5'd0;
-                    if (ras_y == 5'(TILE_H - 1)) rs_st <= RS_DRAIN;
+                if (ras_x == rbx1) begin
+                    ras_x <= rbx0;
+                    if (ras_y == rby1) rs_st <= RS_DRAIN;
                     else ras_y <= ras_y + 5'd1;
                 end else begin
                     ras_x <= ras_x + 5'(RAS_LANES);
@@ -487,6 +557,7 @@ module frontend_isp_tb_top import tsp_pkg::*; (
 
             // ---- FIFO count maintenance (single update; push/pop may coincide) ----
             fq_count <= fq_count + (fifo_push ? 5'd1 : 5'd0) - (fifo_pop ? 5'd1 : 5'd0);
+            eq_count <= eq_count + (eq_push  ? 5'd1 : 5'd0) - (eq_pop   ? 5'd1 : 5'd0);
         end
     end
 endmodule

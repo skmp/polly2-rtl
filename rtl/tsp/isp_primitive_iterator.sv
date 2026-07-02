@@ -4,28 +4,36 @@
 // vertex from the parameter buffer. UV/color/offset/tsp/tcw are skipped here
 // (address arithmetic only); the plane cache re-decodes the full record later.
 //
-// Shared record-read engine (refsw decode_pvr_vertices, refsw_tile.cpp:293):
-// at a record base, isp is at +0 (tsp/tcw at +4/+8 present but unread); if
+// Shared record layout (refsw decode_pvr_vertices, refsw_tile.cpp:293): at a
+// record base, isp is at +0 (tsp/tcw at +4/+8 present but unread); if
 // two_volumes (=shadow) a second tsp1/tcw1 pair follows, so vertices start
-// hdr_bytes later. Vertex k begins at rec_base + hdr_bytes + k*stride_bytes:
-//   hdr_bytes    = 12 (+8 if two_volumes)
-//   stride_bytes = (3 + skip*(1+two_volumes)) * 4
-// Only the first 3 words (XYZ) of each vertex are read.
+// hdr_words later. Vertex k's XYZ are 3 CONTIGUOUS words at
+//   hdr_words + k*stride_w   (in 32-bit VIEW words from the record base)
+//   hdr_words = 3 (+2 if two_volumes) ; stride_w = 3 + skip*(1+two_volumes)
 //
 // STRIP  (refsw RenderTriangleStrip, refsw_lists.cpp:176): ONE record, up to 8
 //   vertices, up to 6 triangles. Triangle i exists iff mask[5-i] is set. Winding
 //   ALTERNATES with i: even i -> (v[i], v[i+1], v[i+2]); odd i -> (v[i+1], v[i],
-//   v[i+2]) (first two swapped => inverted winding). All triangles share the
-//   entry's param_offs; tag_offset = i.
-//
+//   v[i+2]). All triangles share the entry's param_offs; tag_offset = i.
 // TRI ARRAY (refsw RenderTriangleArray, refsw_lists.cpp:206): `count` (=prims+1)
-//   SEPARATE records, each a full record with 3 vertices. Each emits one
-//   triangle with tag_offset = 0 and param_offs = that record's own word offset
-//   (base advances by hdr_bytes + 3*stride_bytes per element).
+//   SEPARATE records, each 3 vertices, tag_offset=0, own param_offs.
+//
+// MEMORY: DIRECT DDR read port (dreq/dresp, single 64-bit channel via the shared
+// arbiter). A whole record is read in ONE BURST: the needed words (isp + each
+// vertex's XYZ) are picked out of the burst beat stream by view-word offset;
+// attribute gap words are streamed past and discarded. For a strip this reads
+// the entire strip (isp + up to 8 verts) as one DDR transaction, paying DDR
+// latency ONCE; the strip's triangles then emit from local storage (isp_r,
+// vslot[]) with no further memory traffic.
+//
+// 32-bit VIEW (refsw pvr_map32): a view-word q maps to physical 64-bit word
+// q[19:0], low half if bank q[20]==0 else high half. Consecutive view-words in a
+// bank = same half of consecutive physical words. A record is small and never
+// crosses the bank boundary, so bank is constant for the whole burst: we burst
+// `span` physical words from the record's base and take one half per beat.
 //
 // Handshake: triangle_ready (LEVEL) <-> triangle_done (1-cycle) per triangle;
-// prim_done (1-cycle) when the whole entry is exhausted. DI: injected 256-bit
-// param data cache (creq/cresp).
+// prim_done (1-cycle) when the whole entry is exhausted.
 //
 module isp_primitive_iterator import tsp_pkg::*; (
     input                  clk,
@@ -40,84 +48,11 @@ module isp_primitive_iterator import tsp_pkg::*; (
     output triangle_out_t  trio,
     input  triangle_ack_t  ack,
 
-    // injected 256-bit param data cache
-    output cache_req256_t  creq,
-    input  cache_resp256_t cresp
+    // direct DDR3 read port (64-bit beats, via shared arbiter)
+    output ddr_rd_req_t    dreq,
+    input  ddr_rd_resp_t   dresp
 );
     wire is_array = (entry_type != ENT_STRIP);
-
-    // ---- LINE-BUFFERED word reader with NEXT-LINE PREFETCH ----
-    // A record's isp + 3-8 vertices' XYZ are 21-25 words spanning a few 256-bit
-    // (8-word) lines, read in INCREASING address order.
-    //  * line buffer (lbuf): a word in the current line is served in 1 cycle.
-    //  * next-line prefetch (pf): whenever the cache is idle and pf doesn't
-    //    already hold lbuf+1, speculatively request lbuf+1 into pf. When the walk
-    //    crosses into that line, PROMOTE pf->lbuf with no cache access.
-    //
-    // A demand read (rd_go) is LATCHED into (dpend,dsel,dline) so it is never
-    // lost if the cache is momentarily busy with a prefetch. The shared
-    // data_cache256 is single-outstanding: cq_busy serializes all requests.
-    reg  [26:0] raddr; reg rd_go; reg [31:0] rword; reg rword_v; reg [2:0] rsel;
-    reg  [26:0] creq_laddr_r; reg creq_req_r;
-    assign creq.req   = creq_req_r;
-    assign creq.laddr = creq_laddr_r;
-
-    reg  [255:0] lbuf;  reg [21:0] lbuf_tag; reg lbuf_v;    // current line
-    reg  [255:0] pf;    reg [21:0] pf_tag;   reg pf_v;      // prefetched line+1
-    reg          cq_busy, cq_is_pf; reg [21:0] cq_line;     // outstanding request
-    reg          dpend; reg [21:0] dline; reg [2:0] dsel;   // latched demand read
-
-    always @(posedge clk) begin
-        rword_v    <= 1'b0;
-        creq_req_r <= 1'b0;
-
-        // (1) latch a new demand read
-        if (rd_go) begin dpend <= 1'b1; dline <= raddr[26:5]; dsel <= raddr[4:2]; end
-
-        // (2) a requested line arrives -> fill lbuf or pf
-        if (cresp.ack) begin
-            cq_busy <= 1'b0;
-            if (cq_is_pf) begin pf   <= cresp.rdata; pf_tag   <= cq_line; pf_v   <= 1'b1; end
-            else          begin lbuf <= cresp.rdata; lbuf_tag <= cq_line; lbuf_v <= 1'b1; end
-        end
-
-        // (3) service a pending demand from a buffer (combinational sources).
-        //     Use post-(2) buffer contents where a fill just landed this cycle.
-        if (dpend) begin
-            // current-line contents after any fill this cycle
-            reg [255:0] cl; reg [21:0] cl_tag; reg cl_v;
-            reg [255:0] pl; reg [21:0] pl_tag; reg pl_v;
-            cl = (cresp.ack && !cq_is_pf) ? cresp.rdata : lbuf;
-            cl_tag = (cresp.ack && !cq_is_pf) ? cq_line : lbuf_tag;
-            cl_v = (cresp.ack && !cq_is_pf) ? 1'b1 : lbuf_v;
-            pl = (cresp.ack && cq_is_pf) ? cresp.rdata : pf;
-            pl_tag = (cresp.ack && cq_is_pf) ? cq_line : pf_tag;
-            pl_v = (cresp.ack && cq_is_pf) ? 1'b1 : pf_v;
-
-            if (cl_v && cl_tag == dline) begin
-                rword <= cl[32*dsel +: 32]; rword_v <= 1'b1; dpend <= 1'b0;
-            end else if (pl_v && pl_tag == dline) begin
-                // promote prefetched line -> current
-                lbuf <= pl; lbuf_tag <= pl_tag; lbuf_v <= 1'b1; pf_v <= 1'b0;
-                rword <= pl[32*dsel +: 32]; rword_v <= 1'b1; dpend <= 1'b0;
-            end else if (!cq_busy && !(cresp.ack)) begin
-                // real miss (and the port is free): demand-request the line
-                creq_req_r <= 1'b1; creq_laddr_r <= {5'b0, dline};
-                cq_busy <= 1'b1; cq_is_pf <= 1'b0; cq_line <= dline;
-            end
-        end
-        // (4) opportunistic next-line prefetch when the port is idle and there is
-        //     no pending demand that will need the port this cycle.
-        else if (!cq_busy && !cresp.ack && lbuf_v
-                 && !(pf_v && pf_tag == lbuf_tag + 22'd1)) begin
-            creq_req_r <= 1'b1; creq_laddr_r <= {5'b0, (lbuf_tag + 22'd1)};
-            cq_busy <= 1'b1; cq_is_pf <= 1'b1; cq_line <= lbuf_tag + 22'd1;
-        end
-
-        if (reset) begin
-            creq_req_r<=0; lbuf_v<=0; pf_v<=0; cq_busy<=0; dpend<=0;
-        end
-    end
 
     // ---- geometry (latched at start) ----
     reg [26:0] rec_base;      // byte addr of the CURRENT record (isp word)
@@ -125,21 +60,20 @@ module isp_primitive_iterator import tsp_pkg::*; (
     reg [20:0] po_r;          // param_offs_in_words of the CURRENT record
     reg [4:0]  count_r;       // array: number of records (prims+1)
     reg [4:0]  prim_r;        // array: current record index 0..count-1
-    // two_volumes = shadow & ~intensity_shadow (refsw RenderTriangle*). When
-    // intensity_shadow is set, a shadow poly does NOT carry a 2nd tsp/tcw+verts.
+    // two_volumes = shadow & ~intensity_shadow (refsw RenderTriangle*).
     wire       two_vol   = shadow_r & ~ishadow_r;
     wire [4:0] stride_w  = 5'd3 + skip_r * (two_vol ? 5'd2 : 5'd1);   // words/vertex
-    wire [26:0] hdr_bytes = two_vol ? 27'd20 : 27'd12;
-    wire [26:0] stride_bytes = {stride_w,2'b00};
-    // array element size (record) = header + 3 vertices, in bytes and in words
-    wire [26:0] rec_bytes = hdr_bytes + 27'd3 * stride_bytes;
+    wire [4:0] hdr_words = two_vol ? 5'd5 : 5'd3;                     // isp,tsp,tcw(,+2)
+    wire [26:0] hdr_bytes = {22'b0, hdr_words, 2'b00};
+    wire [26:0] stride_bytes = {stride_w, 2'b00};
+    wire [26:0] rec_bytes = hdr_bytes + 27'd3 * stride_bytes;        // array record
     wire [20:0] rec_words = rec_bytes[22:2];
 
-    // how many vertices to read for the current record: strip needs all 8 (random
-    // access across its triangles), array needs just 3.
+    // vertices to read: strip needs 8 (random access across its triangles),
+    // array needs 3.
     wire [3:0]  nverts = is_array ? 4'd3 : 4'd8;
 
-    // vertex slot storage (up to 8 vertices' XYZ)
+    // vertex slot storage (up to 8 vertices' XYZ) + isp word
     xyz_t vslot [0:7];
     reg [31:0] isp_r;
 
@@ -154,32 +88,44 @@ module isp_primitive_iterator import tsp_pkg::*; (
     assign trio.tag            = tag_r;
     assign trio.prim_done      = pdone_r;
 
-    // ---- walk state ----
-    localparam S_IDLE  = 4'd0,
-               S_ISP    = 4'd1,   // issue read of isp word
-               S_ISPW   = 4'd2,   // wait isp word
-               S_VADDR  = 4'd3,   // compute this vertex's XYZ addr
-               S_VX     = 4'd4,   // issue X read
-               S_VXW    = 4'd5,   // capture X, issue Y read
-               S_VY     = 4'd6,   // capture Y, issue Z read
-               S_VZ     = 4'd7,   // capture Z
-               S_VNEXT  = 4'd8,   // advance vidx or move to emit
-               S_SEEK   = 4'd9,   // strip: seek s_i to next set mask bit
-               S_PRESENT= 4'd10,  // hold triangle_ready, wait triangle_done
-               S_NEXTREC= 4'd11,  // array: advance to the next record or finish
-               S_PDONE  = 4'd12;  // pulse prim_done
-    reg [3:0] st;
+    // ==================== burst record reader ====================
+    // rec_base view-word base + bank (constant over the small record).
+    wire [24:0] base_vw   = rec_base[26:2];      // 32-bit-VIEW word index
+    wire        rec_bank  = base_vw[20];
+    wire [19:0] base_phys = base_vw[19:0];        // physical 64-bit word of view base
+    // span (view-words) = last needed offset + 1 = hdr_words + (nverts-1)*stride_w + 3
+    wire [8:0]  span_vw   = {4'b0, hdr_words} + ({5'b0,(nverts-4'd1)} * {4'b0,stride_w}) + 9'd3;
 
-    reg [3:0] vidx;      // which vertex currently being fetched
-    reg [26:0] vaddr;    // running byte addr of the vertex's X word
-    reg [2:0]  s_i;      // strip triangle index 0..5
+    // needed-word walk (monotonic offsets): ni=0 -> isp@0; ni>=1 -> vertex
+    // (ni-1)/3, component (ni-1)%3, at offset hdr_words + vertex*stride_w + comp.
+    reg  [5:0]  ni;                 // needed-item index 0..(1+3*nverts-1)
+    wire [5:0]  n_last = 6'd1 + 6'd3 * {2'b0, nverts} - 6'd1;
+    wire        ni_isp = (ni == 6'd0);
+    wire [5:0]  ni_v   = ni - 6'd1;
+    wire [3:0]  ni_vx  = ni_v / 6'd3;
+    wire [1:0]  ni_cmp = ni_v % 6'd3;
+    wire [8:0]  need_off = ni_isp ? 9'd0
+                         : {4'b0, hdr_words} + ({5'b0, ni_vx} * {4'b0, stride_w})
+                                             + {7'b0, ni_cmp};
+
+    // burst engine
+    localparam R_IDLE=2'd0, R_REQ=2'd1, R_STREAM=2'd2;
+    reg [1:0]  rst;
+    reg [8:0]  beat;                // view-word offset of the incoming beat (0..span-1)
+    wire [31:0] beat_half = rec_bank ? dresp.dout[63:32] : dresp.dout[31:0];
+
+    reg        dreq_rd_r; reg [28:0] dreq_addr_r; reg [7:0] dreq_burst_r;
+    assign dreq.rd    = dreq_rd_r;
+    assign dreq.addr  = dreq_addr_r;
+    assign dreq.burst = dreq_burst_r;
+
+    reg [3:0]  nfilled;            // vertices fully captured so far (Z landed)
+    reg        rd_done;            // pulse: record fully read
 
     // strip vertex selection: winding alternates with i.
-    //   even i: v0=v[i],   v1=v[i+1]     odd i: v0=v[i+1], v1=v[i]   (v2=v[i+2])
     function automatic [3:0] va(input [2:0] i); va = {1'b0,i} + (i[0] ? 4'd1 : 4'd0); endfunction
     function automatic [3:0] vb(input [2:0] i); vb = {1'b0,i} + (i[0] ? 4'd0 : 4'd1); endfunction
 
-    // build the CoreTag for the triangle currently being presented.
     function automatic core_tag_t mk_tag(input [2:0] toff);
         mk_tag = '{ invalid:1'b0, pad:2'b00,
                     cache_bypass:isp_r[ISP_CACHEBYPASS_BIT],
@@ -187,13 +133,58 @@ module isp_primitive_iterator import tsp_pkg::*; (
                     param_offs_in_words:po_r, tag_offset:toff };
     endfunction
 
+    // ---- emit FSM ----
+    localparam S_IDLE   = 4'd0,
+               S_RSTART = 4'd1,   // kick off the record burst
+               S_SEEK   = 4'd2,   // strip: seek s_i to next set mask bit
+               S_PRESENT= 4'd3,   // hold triangle_ready, wait triangle_done
+               S_NEXTREC= 4'd4,   // array: advance to next record or finish
+               S_PDONE  = 4'd5;
+    reg [3:0] st;
+    reg [2:0] s_i;
+
     always @(posedge clk) begin
         if (reset) begin
-            st<=S_IDLE; busy<=0; tri_ready_r<=0; pdone_r<=0; rd_go<=0;
+            st<=S_IDLE; busy<=0; tri_ready_r<=0; pdone_r<=0;
+            rst<=R_IDLE; dreq_rd_r<=0; nfilled<=0; rd_done<=0;
         end else begin
             pdone_r <= 1'b0;
-            rd_go   <= 1'b0;
+            dreq_rd_r <= 1'b0;
+            rd_done <= 1'b0;
 
+            // ================= burst record reader =================
+            case (rst)
+            R_IDLE: ; // waits for S_RSTART to arm it
+            R_REQ: if (!dresp.busy) begin
+                dreq_rd_r    <= 1'b1;
+                dreq_addr_r  <= {4'b0011, 5'b0, base_phys};   // {tag, 25-bit phys word}
+                dreq_burst_r <= span_vw[7:0];                  // one beat per view-word
+                beat         <= 9'd0;
+                ni           <= 6'd0;
+                rst          <= R_STREAM;
+            end
+            R_STREAM: if (dresp.dready) begin
+                // pick out the needed word when this beat's offset matches.
+                if (beat == need_off) begin
+                    if (ni_isp) isp_r <= beat_half;
+                    else begin
+                        case (ni_cmp)
+                            2'd0:    vslot[ni_vx].x <= beat_half;
+                            2'd1:    vslot[ni_vx].y <= beat_half;
+                            default: vslot[ni_vx].z <= beat_half;  // 2'd2
+                        endcase
+                        if (ni_cmp == 2'd2) nfilled <= nfilled + 4'd1;
+                    end
+                    ni <= ni + 6'd1;
+                end
+                if (beat == span_vw - 9'd1) begin
+                    rst <= R_IDLE; rd_done <= 1'b1;   // burst complete
+                end else beat <= beat + 9'd1;
+            end
+            default: rst <= R_IDLE;
+            endcase
+
+            // ======================= emit FSM =======================
             case (st)
             S_IDLE: if (start) begin
                 rec_base <= param_base + {entry.param_offs_in_words,2'b00};
@@ -202,56 +193,51 @@ module isp_primitive_iterator import tsp_pkg::*; (
                 ishadow_r <= intensity_shadow;
                 mask_r   <= entry.mask;
                 po_r     <= entry.param_offs_in_words;
-                count_r  <= entry.count;    // array only
+                count_r  <= entry.count;
                 prim_r   <= 5'd0;
                 busy     <= 1'b1;
-                st       <= S_ISP;
+                st       <= S_RSTART;
             end
 
-            // ---- read the current record: isp + nverts vertices' XYZ ----
-            S_ISP:  begin raddr<=rec_base; rd_go<=1'b1; st<=S_ISPW; end
-            S_ISPW: if (rword_v) begin isp_r<=rword; vidx<=4'd0; st<=S_VADDR; end
-
-            S_VADDR: begin
-                vaddr <= rec_base + hdr_bytes + (vidx * stride_bytes);
-                st    <= S_VX;
-            end
-            S_VX:  begin raddr<=vaddr;          rd_go<=1'b1; st<=S_VXW; end
-            S_VXW: if (rword_v) begin vslot[vidx].x<=rword; raddr<=vaddr+27'd4; rd_go<=1'b1; st<=S_VY; end
-            S_VY:  if (rword_v) begin vslot[vidx].y<=rword; raddr<=vaddr+27'd8; rd_go<=1'b1; st<=S_VZ; end
-            S_VZ:  if (rword_v) begin vslot[vidx].z<=rword; st<=S_VNEXT; end
-            S_VNEXT: begin
-                if (vidx == nverts-4'd1) begin
-                    // record read complete
-                    if (is_array) begin
-                        // array: emit the single triangle (v0,v1,v2), tag_offset=0
-                        v0_r<=vslot[0]; v1_r<=vslot[1]; v2_r<=vslot[2];
-                        tag_r<=mk_tag(3'd0);
-                        st<=S_PRESENT;
-                    end else begin
-                        s_i<=3'd0; st<=S_SEEK;
-                    end
-                end else begin vidx<=vidx+4'd1; st<=S_VADDR; end
+            // kick off the burst for this record; emit waits on nfilled.
+            S_RSTART: begin
+                nfilled <= 4'd0;
+                rst     <= R_REQ;
+                s_i     <= 3'd0;
+                st      <= is_array ? S_PRESENT : S_SEEK;
             end
 
             // ---- STRIP: seek s_i to the next set mask bit (mask[5-i]) ----
+            // Wait until verts s_i..s_i+2 are captured (nfilled > s_i+2).
             S_SEEK: begin
-                if (mask_r[3'd5 - s_i]) begin
-                    v0_r <= vslot[va(s_i)]; v1_r <= vslot[vb(s_i)]; v2_r <= vslot[{1'b0,s_i}+4'd2];
-                    tag_r <= mk_tag(s_i);
-                    st <= S_PRESENT;
-                end else if (s_i == 3'd5) st <= S_PDONE;
-                else s_i <= s_i + 3'd1;
+                if (nfilled > {1'b0,s_i} + 4'd2) begin
+                    if (mask_r[3'd5 - s_i]) begin
+                        v0_r <= vslot[va(s_i)]; v1_r <= vslot[vb(s_i)];
+                        v2_r <= vslot[{1'b0,s_i}+4'd2];
+                        tag_r <= mk_tag(s_i);
+                        tri_ready_r <= 1'b1;
+                        st <= S_PRESENT;
+                    end else if (s_i == 3'd5) st <= S_PDONE;
+                    else s_i <= s_i + 3'd1;
+                end
             end
 
-            // present the triangle; on ack advance to the next triangle/record.
+            // present the triangle; on ack advance to next triangle/record.
             S_PRESENT: begin
-                tri_ready_r <= 1'b1;
-                if (ack.triangle_done) begin
-                    tri_ready_r <= 1'b0;
-                    if (is_array) st <= S_NEXTREC;
-                    else if (s_i == 3'd5) st <= S_PDONE;   // strip exhausted
-                    else begin s_i <= s_i + 3'd1; st <= S_SEEK; end
+                if (is_array && !tri_ready_r) begin
+                    if (nfilled >= 4'd3) begin
+                        v0_r<=vslot[0]; v1_r<=vslot[1]; v2_r<=vslot[2];
+                        tag_r<=mk_tag(3'd0);
+                        tri_ready_r <= 1'b1;
+                    end
+                end else begin
+                    tri_ready_r <= 1'b1;
+                    if (ack.triangle_done) begin
+                        tri_ready_r <= 1'b0;
+                        if (is_array) st <= S_NEXTREC;
+                        else if (s_i == 3'd5) st <= S_PDONE;
+                        else begin s_i <= s_i + 3'd1; st <= S_SEEK; end
+                    end
                 end
             end
 
@@ -260,9 +246,9 @@ module isp_primitive_iterator import tsp_pkg::*; (
                 if (prim_r == count_r - 5'd1) st <= S_PDONE;
                 else begin
                     prim_r   <= prim_r + 5'd1;
-                    rec_base <= rec_base + rec_bytes;      // next element's record
-                    po_r     <= po_r + rec_words;          // its own param offset
-                    st       <= S_ISP;
+                    rec_base <= rec_base + rec_bytes;
+                    po_r     <= po_r + rec_words;
+                    st       <= S_RSTART;
                 end
             end
 

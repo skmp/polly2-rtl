@@ -28,23 +28,29 @@ module object_list_parser_tb_top import tsp_pkg::*; (
     assign entry_mask        = prim.entry.mask;
     assign entry_count       = prim.entry.count;
 
-    cache_req256_t  creq;
-    cache_resp256_t cresp;
-    object_list_parser u_olp (
-        .clk(clk),.reset(reset),.start(start),.list_ptr(list_ptr),
-        .busy(busy),.done(done),.prim(prim),.ack(ack),.creq(creq),.cresp(cresp));
-
     ddr_rd_req_t  dreq;
     ddr_rd_resp_t dresp;
-    data_cache256 u_dc (.clk(clk),.reset(reset),.creq(creq),.cresp(cresp),
-        .dreq(dreq),.dresp(dresp));
+    object_list_parser u_olp (
+        .clk(clk),.reset(reset),.start(start),.list_ptr(list_ptr),
+        .busy(busy),.done(done),.prim(prim),.ack(ack),.dreq(dreq),.dresp(dresp));
 
-    // behavioral DDR (64-bit words), addr={4'b0011,wordidx[24:0]}.
+    // BURST + latency DDR model (matches tex_mem sim path / shared arbiter).
+    localparam integer RD_LAT = 8;
     (* verilator public_flat_rw *) reg [63:0] vram [0:65535];
+    reg busy_r; reg [15:0] word_r; reg [7:0] beats_r, lat_r;
     reg [63:0] dout_r; reg dready_r;
-    assign dresp.busy=1'b0; assign dresp.dout=dout_r; assign dresp.dready=dready_r;
+    assign dresp.busy=busy_r; assign dresp.dout=dout_r; assign dresp.dready=dready_r;
     always @(posedge clk) begin
-        dready_r<=0;
-        if (dreq.rd) begin dout_r<=vram[dreq.addr[15:0]]; dready_r<=1; end
+        dready_r <= 1'b0;
+        if (reset) busy_r <= 1'b0;
+        else if (!busy_r) begin
+            if (dreq.rd) begin busy_r<=1'b1; word_r<=dreq.addr[15:0];
+                beats_r<=dreq.burst; lat_r<=RD_LAT[7:0]; end
+        end else if (lat_r != 0) lat_r <= lat_r - 8'd1;
+        else begin
+            dout_r<=vram[word_r]; dready_r<=1'b1; word_r<=word_r+16'd1;
+            if (beats_r <= 8'd1) busy_r <= 1'b0;
+            beats_r <= beats_r - 8'd1;
+        end
     end
 endmodule

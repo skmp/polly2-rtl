@@ -5,22 +5,24 @@
 // (param_offs_in_words, skip, shadow, mask, count). It does NOT iterate strip
 // triangles or array elements, chase param_offs_in_words into the parameter
 // buffer, decode vertices, or build the ISP_BACKGND_T_type core tag - all of
-// that is the consumer's job (param_fetch, shared with the TSP plane cache's
-// miss path), using the raw mask/count this module exposes.
+// that is the consumer's job.
 //
 // Mirrors refsw RenderObjectList (refsw_lists.cpp) at the level of walking
-// entries and following links; RenderTriangleStrip/RenderTriangleArray/
-// RenderQuadArray's per-element iteration is left entirely to the consumer.
+// entries and following links.
 //
-// Object-list entry word E (32-bit). Bitfields are LSB-first (as in refsw's
-// structs, refsw_lists_regtypes.h):
+// Object-list entry word E (32-bit), bitfields LSB-first:
 //   Tstrip  : param_offs=E[20:0] skip=E[23:21] shadow=E[24] mask=E[30:25] is_not_ts=E[31]
 //   T/Qarray: param_offs=E[20:0] skip=E[23:21] shadow=E[24] prims=E[28:25] type=E[31:29]
 //   Link    : next_ptr_words=E[23:2] end_of_list=E[28] type=E[31:29]
 // type 0b111=link, 0b100=tri array, 0b101=quad array. bit31==0 => triangle strip.
-// count (array) = prims+1 (refsw's `obj.tarray.prims + 1`).
 //
-// DI: the VRAM read port is the INJECTED 256-bit data cache (creq/cresp).
+// MEMORY: DIRECT DDR read port (dreq/dresp, single 64-bit channel via the shared
+// arbiter). Reads 8 WORDS AT A TIME: a 256-bit line (8 view-words = 8 physical
+// beats, same bank) is fetched as one burst into a 2-line sliding window
+// (win0=current, win1=prefetched next). Entries are walked as a sequential
+// address stream (base+=4), so a single 8-word burst covers 8 entries and the
+// walk streams entry words ~1/cycle; a link jump is a rare cold refill.
+//
 // Handshake: prim.entry_ready (LEVEL, stable) <-> ack.entry_done (1-cycle pulse).
 //
 module object_list_parser import tsp_pkg::*; (
@@ -34,15 +36,76 @@ module object_list_parser import tsp_pkg::*; (
     output prim_out_t      prim,
     input  prim_ack_t       ack,
 
-    // injected 256-bit data cache (object-list region only)
-    output cache_req256_t  creq,
-    input  cache_resp256_t cresp
+    // direct DDR3 read port (64-bit beats, via shared arbiter)
+    output ddr_rd_req_t    dreq,
+    input  ddr_rd_resp_t   dresp
 );
-    // ---- 32-bit word reader over the 256-bit line cache ----
-    reg  [26:0] raddr; reg rd_go; reg [31:0] rword; reg rword_v; reg [2:0] rsel;
-    reg  [26:0] creq_laddr_r; reg creq_req_r;
-    assign creq.req   = creq_req_r;
-    assign creq.laddr = creq_laddr_r;
+    // ============ 8-word (256-bit) line reader: 2-line window + prefetch ============
+    // rd_go with a byte address (raddr) returns the word NEXT cycle in
+    // rword/rword_v on a resident line. Each miss fetches a whole 256-bit line
+    // (burst=8) into win0 (demand) or win1 (prefetch of win0+1).
+    reg  [26:0] raddr; reg rd_go; reg [31:0] rword; reg rword_v;
+    reg  [255:0] win0; reg [21:0] w0_tag; reg w0_v;
+    reg  [255:0] win1; reg [21:0] w1_tag; reg w1_v;
+    reg          dpend; reg [21:0] dline; reg [2:0] dsel;
+
+    localparam F_IDLE=2'd0, F_MISS=2'd1, F_FILL=2'd2;
+    reg [1:0]   fst;
+    reg [21:0]  f_line; reg f_is_pf; reg [2:0] f_beat; reg [255:0] f_acc;
+    wire        f_bank    = f_line[17];
+    wire [19:0] f_wofs_b  = {f_line[16:0], 3'b000};
+    wire [28:0] f_base_wd = {9'b0, f_wofs_b};
+    wire [31:0] f_half    = f_bank ? dresp.dout[63:32] : dresp.dout[31:0];
+
+    reg        dreq_rd_r; reg [28:0] dreq_addr_r; reg [7:0] dreq_burst_r;
+    assign dreq.rd    = dreq_rd_r;
+    assign dreq.addr  = dreq_addr_r;
+    assign dreq.burst = dreq_burst_r;
+
+    always @(posedge clk) begin
+        rword_v   <= 1'b0;
+        dreq_rd_r <= 1'b0;
+
+        if (rd_go) begin dpend <= 1'b1; dline <= raddr[26:5]; dsel <= raddr[4:2]; end
+
+        if (dpend) begin
+            if (w0_v && w0_tag == dline) begin
+                rword <= win0[32*dsel +: 32]; rword_v <= 1'b1; if (!rd_go) dpend <= 1'b0;
+            end else if (w1_v && w1_tag == dline) begin
+                win0 <= win1; w0_tag <= w1_tag; w0_v <= 1'b1; w1_v <= 1'b0;
+                rword <= win1[32*dsel +: 32]; rword_v <= 1'b1; if (!rd_go) dpend <= 1'b0;
+            end
+        end
+
+        case (fst)
+        F_IDLE: begin
+            if (dpend && !(w0_v && w0_tag==dline) && !(w1_v && w1_tag==dline)) begin
+                f_line <= dline; f_is_pf <= 1'b0; f_beat <= 3'd0; w1_v <= 1'b0;
+                fst <= F_MISS;
+            end else if (w0_v && !(w1_v && w1_tag == w0_tag + 22'd1)) begin
+                f_line <= w0_tag + 22'd1; f_is_pf <= 1'b1; f_beat <= 3'd0;
+                fst <= F_MISS;
+            end
+        end
+        F_MISS: if (!dresp.busy) begin
+            dreq_rd_r    <= 1'b1;
+            dreq_addr_r  <= {4'b0011, f_base_wd[24:0]};
+            dreq_burst_r <= 8'd8;                       // 8 words at a time
+            fst          <= F_FILL;
+        end
+        F_FILL: if (dresp.dready) begin
+            f_acc[32*f_beat +: 32] <= f_half;
+            if (f_beat == 3'd7) begin
+                if (f_is_pf) begin win1 <= { f_half, f_acc[223:0] }; w1_tag <= f_line; w1_v <= 1'b1; end
+                else          begin win0 <= { f_half, f_acc[223:0] }; w0_tag <= f_line; w0_v <= 1'b1; end
+                fst <= F_IDLE;
+            end else f_beat <= f_beat + 3'd1;
+        end
+        default: fst <= F_IDLE;
+        endcase
+
+        if (reset) begin w0_v<=0; w1_v<=0; dpend<=0; fst<=F_IDLE; dreq_rd_r<=0; end
+    end
 
     // ---- entry output regs ----
     reg             e_ready_r;
@@ -66,18 +129,9 @@ module object_list_parser import tsp_pkg::*; (
 
     always @(posedge clk) begin
         if (reset) begin
-            st<=S_IDLE; busy<=0; done<=0; creq_req_r<=0; rword_v<=0; e_ready_r<=0;
+            st<=S_IDLE; busy<=0; done<=0; rd_go<=0; e_ready_r<=0;
         end else begin
-            done<=0; creq_req_r<=0; rword_v<=0;
-
-            // word-read sub-engine
-            if (rd_go) begin
-                creq_req_r   <= 1'b1;
-                creq_laddr_r <= raddr[26:5];
-                rsel         <= raddr[4:2];
-                rd_go        <= 1'b0;
-            end
-            if (cresp.ack) begin rword <= cresp.rdata[32*rsel +: 32]; rword_v <= 1'b1; end
+            done<=0; rd_go<=0;
 
             case (st)
             S_IDLE: if (start) begin base<=list_ptr; busy<=1; st<=S_RDENT; end
@@ -103,17 +157,11 @@ module object_list_parser import tsp_pkg::*; (
                             shadow:ent[24], mask:6'd0, count:{1'b0,ent[28:25]}+5'd1 };
                         st <= S_PRESENT;
                     end
-                    // unhandled type (e.g. modifier-volume/sprite entries): SKIP
-                    // it and continue the list, matching refsw RenderObjectList
-                    // (its default prints a warning + breaks; only end_of_list
-                    // stops). Terminating here would drop all following entries
-                    // (e.g. doa2's environment after an inline unhandled entry).
-                    default: st<=S_RDENT;
+                    default: st<=S_RDENT;              // unhandled: skip & continue
                     endcase
                 end
             end
 
-            // ---- present the entry, wait for the consumer to finish it ----
             S_PRESENT: begin
                 e_ready_r <= 1'b1;
                 if (ack.entry_done) begin

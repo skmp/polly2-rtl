@@ -36,12 +36,48 @@ module isp_setup_min (
     output reg [31:0] dx12, output reg [31:0] dx23, output reg [31:0] dx31, output reg [31:0] dx41,
     output reg [31:0] dy12, output reg [31:0] dy23, output reg [31:0] dy31, output reg [31:0] dy41,
     output reg [31:0] c1,   output reg [31:0] c2,   output reg [31:0] c3,   output reg [31:0] c4,
-    output reg [31:0] ddx_invw, output reg [31:0] ddy_invw, output reg [31:0] c_invw
+    output reg [31:0] ddx_invw, output reg [31:0] ddy_invw, output reg [31:0] c_invw,
+    // tile-local raster bounding box (5-bit, clamped 0..31), latched with `done`.
+    // bx1/by1 are the inclusive max chunk/row edges (ceil), bx0/by0 the min.
+    output reg [4:0]  bx0, output reg [4:0] bx1, output reg [4:0] by0, output reg [4:0] by1
 );
     localparam [31:0] ONE = 32'h3f800000, ZERO = 32'd0, NEG1 = 32'hbf800000;
 
     // ---------------- vertex holders ----------------
     reg [31:0] X1,Y1,Z1,X2,Y2,Z2,X3,Y3,Z3,XB,YB;
+
+    // ---------------- tile-local bounding box ----------------
+    // float -> signed integer (floor toward -inf) for screen coords (0..2047).
+    function automatic signed [15:0] f2i_floor(input [31:0] f);
+        integer e, sh; reg signed [31:0] mag;
+        begin
+            e = f[30:23] - 127;
+            if (f[30:23] == 8'd0 || e < 0) mag = 0;         // |v| < 1 -> 0
+            else begin
+                sh = 23 - e;
+                if (sh <= 0) mag = {8'b0, 1'b1, f[22:0]} <<< (-sh);
+                else         mag = {8'b0, 1'b1, f[22:0]} >>> sh;
+            end
+            // floor toward -inf: a negative value with dropped fraction rounds down
+            f2i_floor = f[31] ? -mag[15:0] : mag[15:0];
+        end
+    endfunction
+    function automatic [4:0] clamp5(input signed [15:0] v);
+        begin
+            if (v < 0)       clamp5 = 5'd0;
+            else if (v > 31) clamp5 = 5'd31;
+            else             clamp5 = v[4:0];
+        end
+    endfunction
+    // tile-local (screen - tile origin) integer coords of the 3 verts
+    wire signed [15:0] ob   = f2i_floor(XB);
+    wire signed [15:0] obY  = f2i_floor(YB);
+    wire signed [15:0] lX1 = f2i_floor(X1)-ob, lX2 = f2i_floor(X2)-ob, lX3 = f2i_floor(X3)-ob;
+    wire signed [15:0] lY1 = f2i_floor(Y1)-obY, lY2 = f2i_floor(Y2)-obY, lY3 = f2i_floor(Y3)-obY;
+    wire signed [15:0] bxmin = (lX1<lX2?(lX1<lX3?lX1:lX3):(lX2<lX3?lX2:lX3));
+    wire signed [15:0] bxmax = (lX1>lX2?(lX1>lX3?lX1:lX3):(lX2>lX3?lX2:lX3));
+    wire signed [15:0] bymin = (lY1<lY2?(lY1<lY3?lY1:lY3):(lY2<lY3?lY2:lY3));
+    wire signed [15:0] bymax = (lY1>lY2?(lY1>lY3?lY1:lY3):(lY2>lY3?lY2:lY3));
 
     // ---------------- scratchpad ----------------
     // diffs
@@ -250,7 +286,14 @@ module isp_setup_min (
                 default: st<=FIN;
                 endcase
             end
-            FIN: begin done<=1; st<=LOAD; end
+            FIN: begin
+                done<=1; st<=LOAD;
+                // latch the tile-local bbox (min floor, max +1 ceil), clamped 0..31
+                bx0 <= clamp5(bxmin);
+                bx1 <= clamp5(bxmax + 16'sd1);
+                by0 <= clamp5(bymin);
+                by1 <= clamp5(bymax + 16'sd1);
+            end
             endcase
         end
     end
