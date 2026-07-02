@@ -107,22 +107,49 @@ module isp_setup_streamed (
     // holds the result of the op this same slot issued exactly 4 clocks ago. No
     // per-slot result latch is needed (the interleave self-aligns, L==NS).
 
-    // ---------------- 4 reciprocals (one per slot, pipelined 3-cycle) ----------------
-    // Each slot owns a reciprocal so slots never contend; all are pipelined.
+    // ---------------- 1 SHARED reciprocal (pipelined 3-cycle) ----------------
+    // The FSM services exactly one slot per clock (sl == phase) and requests a
+    // reciprocal only inside the cyc==5 branch, so AT MOST ONE rc_req is asserted
+    // per clock across all slots. A single fully-pipelined fp_rcp_fast (accepts one
+    // x/clock, result 3 clocks later) therefore serves all 4 slots with ZERO
+    // contention and no throughput loss (was 4 units -> now 1). The result is routed
+    // back to the requesting slot via a 3-stage {valid,slot} shift register matching
+    // the pipe latency; back-to-back requests from different slots are handled since
+    // each stage carries its own slot id.
     reg        rc_req[0:NS-1]; reg [31:0] rc_in[0:NS-1];
-    wire       rc_ack[0:NS-1]; wire [31:0] rc_y[0:NS-1];
     reg        rc_done[0:NS-1]; reg [31:0] inv_reg[0:NS-1];
-    genvar gs;
-    generate
-      for (gs=0; gs<NS; gs=gs+1) begin : rcp
-        fp_rcp_fast u_rcp (.clk(clk),.reset(reset),.stall(1'b0),
-            .in_valid(rc_req[gs]),.x(rc_in[gs]),.out_valid(rc_ack[gs]),.y(rc_y[gs]));
-        always @(posedge clk) begin
-            if (reset || rc_req[gs]) rc_done[gs] <= 1'b0;
-            else if (rc_ack[gs])     begin rc_done[gs] <= 1'b1; inv_reg[gs] <= rc_y[gs]; end
+
+    // one-hot -> shared request: only one rc_req is ever high, so OR/mux is safe.
+    wire        rc_req_any = rc_req[0] | rc_req[1] | rc_req[2] | rc_req[3];
+    wire [1:0]  rc_req_slot = rc_req[1] ? 2'd1 : rc_req[2] ? 2'd2 : rc_req[3] ? 2'd3 : 2'd0;
+    wire [31:0] rc_req_x    = rc_req[0] ? rc_in[0] : rc_req[1] ? rc_in[1]
+                            : rc_req[2] ? rc_in[2] : rc_in[3];
+    wire        rc_ack; wire [31:0] rc_y;
+    fp_rcp_fast u_rcp (.clk(clk),.reset(reset),.stall(1'b0),
+        .in_valid(rc_req_any),.x(rc_req_x),.out_valid(rc_ack),.y(rc_y));
+
+    // 3-stage pipeline of the requesting slot id, tracking the in-flight request
+    // through the reciprocal so rc_ack can be attributed to the right slot. (Kept
+    // as a shift register even though the fp_rcp_fast valid pipe already tracks
+    // validity, so the slot id stays aligned with rc_ack.)
+    reg [1:0] rc_slot_p [0:2];
+    integer rp;
+    always @(posedge clk) begin
+        rc_slot_p[0] <= rc_req_slot;
+        rc_slot_p[1] <= rc_slot_p[0];
+        rc_slot_p[2] <= rc_slot_p[1];
+    end
+    // capture the shared result into the requesting slot's inv_reg / rc_done.
+    // rc_done clears on a fresh request for that slot (mirrors the old per-slot reset).
+    integer gsq;
+    always @(posedge clk) begin
+        for (gsq=0; gsq<NS; gsq=gsq+1) begin
+            if (reset || rc_req[gsq]) rc_done[gsq] <= 1'b0;
+            else if (rc_ack && rc_slot_p[2]==gsq[1:0]) begin
+                rc_done[gsq] <= 1'b1; inv_reg[gsq] <= rc_y;
+            end
         end
-      end
-    endgenerate
+    end
 
     // ---------------- sign / helper functions (identical to isp_setup_min) --------
     function fzero(input [31:0] f); fzero=(f[30:0]==31'd0); endfunction
