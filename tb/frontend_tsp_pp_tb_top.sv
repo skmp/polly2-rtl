@@ -455,6 +455,13 @@ module frontend_tsp_pp_tb_top import tsp_pkg::*; (
     reg [3:0] st_b;
     localparam [2:0] FLD_X=0, FLD_Y=1, FLD_Z=2, FLD_UV16=3, FLD_U=4, FLD_V=5, FLD_COL=6, FLD_OFS=7;
     integer sh_out_n, miss_count, hit_count, bj;
+    // TSP-engine cycle breakdown (whole run)
+    integer cyc_b_total;   // cycles st_b is doing shade work (not idle/getslot)
+    integer cyc_b_present; // offering a pixel & accepted (throughput cycles)
+    integer cyc_b_stall;   // offering but pipe stalled (texture fetch busy)
+    integer cyc_b_miss;    // in the miss fetch/setup path (B_FH_*/B_FV_*/B_RUN)
+    integer cyc_b_drain;   // B_DRAIN waiting for the pipe to empty
+    integer cyc_b_idle;    // B_IDLE/B_GETSLOT/B_WAITDROP (no granted slot)
 
     // ===================================================================
     // WRITEOUT STAGE (engine C): finds a SL_WRRDY slot, copies col_buf -> fb.
@@ -676,9 +683,24 @@ module frontend_tsp_pp_tb_top import tsp_pkg::*; (
         if (reset) begin
             st_b<=B_IDLE; tsp_start<=0; pp_in_valid<=0; f_go<=0; tsp_fin<=0;
             sh_out_n<=0; miss_count<=0; hit_count<=0;
+            cyc_b_total<=0; cyc_b_present<=0; cyc_b_stall<=0; cyc_b_miss<=0;
+            cyc_b_drain<=0; cyc_b_idle<=0;
             for (bj=0; bj<PC_N; bj=bj+1) pc_valid[bj] <= 1'b0;
         end else begin
             tsp_start<=0; pp_in_valid<=0; f_go<=0; tsp_fin<=0;
+
+            // ---- TSP-engine cycle breakdown ----
+            if (st_b==B_IDLE || st_b==B_GETSLOT || st_b==B_WAITDROP)
+                cyc_b_idle <= cyc_b_idle + 1;
+            else begin
+                cyc_b_total <= cyc_b_total + 1;
+                if (st_b==B_DRAIN)          cyc_b_drain   <= cyc_b_drain + 1;
+                else if (st_b==B_STREAM) begin
+                    if (pp_accept)          cyc_b_present <= cyc_b_present + 1;
+                    else if (pp_in_valid)   cyc_b_stall   <= cyc_b_stall + 1;
+                end
+                else                        cyc_b_miss    <= cyc_b_miss + 1; // FH_/FV_/RUN
+            end
 
             // shade pipeline consumer -> col_buf[slot_tsp]
             if (pp_out_valid && !pp_stall) begin
@@ -842,6 +864,9 @@ module frontend_tsp_pp_tb_top import tsp_pkg::*; (
                 end else if (isp_finished && !isp_grant && !tsp_grant &&
                          slot_state[0]==SL_FREE && slot_state[1]==SL_FREE && slot_state[2]==SL_FREE) begin
                     $display("=== done ===");
+                    $display("=== TSP engine: total=%0d present=%0d stall=%0d miss=%0d drain=%0d idle=%0d (hits=%0d misses=%0d) ===",
+                             cyc_b_total, cyc_b_present, cyc_b_stall, cyc_b_miss,
+                             cyc_b_drain, cyc_b_idle, hit_count, miss_count);
                     done<=1'b1; st_c<=C_IDLE;
                 end
             end
