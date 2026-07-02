@@ -53,12 +53,13 @@ module tex_fetch_pp import tsp_pkg::*; (
     wire mipmapped=tcw_r_f[31];
     wire [5:0] palsel=tcw_r_f[26:21];
 
-    // address gen (combinational, off the latched request)
-    wire [28:0] ta_byte; wire [5:0] ta_fbpp; wire [19:0] ta_off;
+    // address gen (combinational, off the latched request). fbpp_shr is the byte-
+    // offset shift amount (unused here; byte_addr already folds it in).
+    wire [28:0] ta_byte; wire [2:0] ta_fbpp_shr; wire [19:0] ta_off;
     tex_addr u_ta (
         .tcw_addr(tcw_addr),.vq(vq),.scan(scan),.stride_sel(strdsel),.mipmapped(mipmapped),.pixfmt(pixfmt),
         .texu(texu),.texv(texv),.miplevel(mip_r),.text_ctrl(tc_r),.u(u_r),.v(v_r),
-        .byte_addr(ta_byte),.fbpp(ta_fbpp),.offset(ta_off));
+        .byte_addr(ta_byte),.fbpp_shr(ta_fbpp_shr),.offset(ta_off));
 
     // palette ROM placeholder (ARGB8888) - matches tex_fetch
     (* rom_style = "block" *) reg [31:0] pal_rom [0:255];

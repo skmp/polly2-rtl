@@ -32,7 +32,7 @@ module tex_addr (
     input  [10:0] v,            // texel v
 
     output [28:0] byte_addr,    // DDR3 byte address of the covering 64-bit word
-    output [5:0]  fbpp,         // effective bits-per-pixel (for sub-word select)
+    output [2:0]  fbpp_shr,     // byte-offset RIGHT-shift of (off<<1); see below
     output [19:0] offset        // linear texel offset (for sub-word lane select)
 );
     // pal formats force ScanOrder/StrideSel to 0 (refsw)
@@ -40,10 +40,17 @@ module tex_addr (
     wire scan_e   = scan       & ~is_pal;
     wire strd_e   = stride_sel & ~is_pal;
 
-    // bits per pixel
-    wire [5:0] rv = (pixfmt==3'd6) ? 6'd8 : (pixfmt==3'd5) ? 6'd4 : 6'd16;
-    // VQ: 8*2 / (64/rv) = 16*rv/64 = rv/4
-    assign fbpp = vq ? (rv >> 2) : (rv << 1);   // refsw: rv*2 non-VQ
+    // Byte-offset scale as an UNSIGNED SHIFT AMOUNT instead of a bits-per-pixel value.
+    // refsw's byte offset is off*fbpp/16 with fbpp = (vq ? rv/4 : rv*2), rv in
+    // {4,8,16} - always a power of two, so off*fbpp/16 == off << (log2(fbpp) - 4).
+    // That exponent ranges -4..+1; to keep it a NON-NEGATIVE (sign-free) shift we
+    // pre-scale off by 2 and always shift RIGHT: off*fbpp/16 == (off<<1) >> fbpp_shr,
+    // with fbpp_shr = 5 - log2(fbpp), which is 0..5 for every format:
+    //   pixfmt: 16bpp rv=16, pal8 rv=8, pal4 rv=4;  log2(rv) = 4/3/2.
+    //   non-VQ: log2(fbpp)=log2(rv)+1 -> fbpp_shr = 4-log2(rv) -> {16bpp:0, pal8:1, pal4:2}
+    //   VQ    : log2(fbpp)=log2(rv)-2 -> fbpp_shr = 7-log2(rv) -> {16bpp:3, pal8:4, pal4:5}
+    wire [2:0] log2rv = (pixfmt==3'd6) ? 3'd3 : (pixfmt==3'd5) ? 3'd2 : 3'd4;
+    assign fbpp_shr = vq ? (3'd7 - log2rv) : (3'd4 - log2rv);
 
     // mip-adjusted texture size: (8<<TexU) >> MipLevel (refsw TexStride/sizeU).
     wire [12:0] size_mip = (13'd8 << texu) >> miplevel;
@@ -116,10 +123,12 @@ module tex_addr (
     // base address (bytes)
     wire [28:0] base = ({8'd0, tcw_addr} << 3) + (vq ? 29'd2048 : 29'd0); // 256*4*2
 
-    // Full (UNMASKED) byte address = base + offset*fbpp/16, matching refsw's
-    // emu_vram index. Consumers derive the 64-bit word (byte_addr>>3) and the
-    // byte-within-word (byte_addr[2:0]) - the latter is needed to pick the VQ
-    // index byte / sub-word lane, so it must NOT be masked away here.
-    wire [40:0] byte_off = (off_full * fbpp) >> 4;   // = offset*fbpp/16
+    // Full (UNMASKED) byte address = base + (offset*fbpp/16), matching refsw's
+    // emu_vram index. fbpp is a power of two, so this is a pure shift; encoded
+    // sign-free as (off<<1) >> fbpp_shr (see fbpp_shr above). Consumers derive the
+    // 64-bit word (byte_addr>>3) and the byte-within-word (byte_addr[2:0]) - the
+    // latter is needed to pick the VQ index byte / sub-word lane, so it must NOT be
+    // masked away here.
+    wire [40:0] byte_off = ({17'd0, off_full} << 1) >> fbpp_shr;
     assign byte_addr = base + byte_off[28:0];
 endmodule
