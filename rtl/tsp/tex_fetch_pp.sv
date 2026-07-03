@@ -76,25 +76,30 @@ module tex_fetch_pp import tsp_pkg::*; (
     wire [SW-1:0] in_side = { in_textured, in_pixfmt, in_scan, ta_off[3:0], ta_byte[2:0],
                               in_vq, ta_byte[2:0], in_tcw_addr, in_palsel };
 
-    // fifo depths. Must have headroom for the whole in-flight window; a VQ pixel
-    // occupies tc, then vp, then vq before completing, so gate issue on ALL having room.
-    localparam integer FD = 16, FAW = 4;
+    // fifo depths. A VQ pixel occupies tc, THEN vp, THEN vq before completing. The
+    // hazard: tc acks fire on the DATA cache's schedule (cannot be deferred), so if the
+    // VQ cache stalls (miss-fill) while tc keeps acking, every outstanding tc entry
+    // drains into vp AT ONCE. So vp MUST be able to hold every in-flight tc entry, and
+    // vq every in-flight vp entry. We enforce ONE occupancy invariant on issue:
+    //   tc_cnt + vp_cnt + vq_cnt < CAP
+    // i.e. the TOTAL entries anywhere in the tc->vp->vq chain is bounded, and each FIFO
+    // is sized to CAP so the worst-case redistribution (all in one FIFO) never overflows.
+    localparam integer FD = 32, FAW = 5;    // each FIFO holds up to CAP entries
+    localparam integer CAP = 24;            // max total entries in flight (< FD, margin)
 
     // fifo_tc: side data for tc requests in flight (issue order).
     reg  [SW-1:0] tcf [0:FD-1];
     reg  [FAW-1:0] tc_h, tc_t; reg [FAW:0] tc_cnt;
 
     // ============ ISSUE ============
-    // Accept only when the data cache is ready AND every downstream FIFO has room, so
-    // no in-flight entry is ever dropped (which would deadlock the corner-join upstream).
-    wire tc_room;   // forward refs, assigned once all fifo counts exist
-    wire vp_room;
-    wire vq_room;
-    assign in_ready   = tc_resp.ready && tc_room && vp_room && vq_room;
+    // Accept only when the data cache is ready AND the whole tc->vp->vq chain has room
+    // for one more (total-occupancy invariant), so no in-flight entry is ever dropped
+    // even if the VQ cache stalls while tc acks stream in.
+    wire vp_room;   // forward ref (needs vp_cnt/vq_cnt)
+    assign in_ready   = tc_resp.ready && vp_room;
     wire   accept     = in_valid && in_ready;
     assign tc_req.req   = accept;                    // every accepted pixel reads tc
     assign tc_req.waddr = { 3'b0, ta_byte[28:3] };   // 64-bit word addr = byte>>3
-    assign tc_room = (tc_cnt < FD-2);
     wire tc_push = accept;
     wire tc_pop  = tc_resp.ack;
 
@@ -108,14 +113,30 @@ module tex_fetch_pp import tsp_pkg::*; (
     wire [7:0]    vq_byte   = tc_memtel[8*tc_vqbsel +: 8];
     wire [28:0]   vq_addr   = {8'd0, tc_taddr} + {21'd0, vq_byte};
 
-    // ---- VQ-PENDING FIFO: a VQ tc-ack derives a vq codebook address, but the vq cache
-    // may not be ready THIS cycle (it could be filling). We cannot defer the tc ack, so
-    // we buffer {vq_addr, side} here and issue the vq_req later, gated on vq_resp.ready.
-    // This decouples the two streaming caches. ----
+    // ============ IN-ORDER COMPLETION QUEUE ============
+    // A mixed VQ / non-VQ stream (consecutive pixels can differ in tcw) MUST still emit
+    // results in ISSUE ORDER - a fast non-VQ pixel may not overtake an earlier in-flight
+    // VQ pixel (2 cache trips). We record, per issue position (ring index), the side data
+    // + a "done" flag + the resolved memtel. Cache results mark their slot done whenever
+    // they land (tc for non-VQ, vq for VQ); a COMPLETION POINTER `cp` drains slots in
+    // strict issue order, so output order == issue order regardless of tc/vq timing.
+    //
+    //  tcf[] (below) is the issue-order side-data ring (write index = issue position).
+    //  slot_done[i] / slot_mem[i] : set when position i's final memtel is known.
+    //  cp : next issue position to emit (drains when slot_done[cp]).
+    reg           slot_done [0:FD-1];
+    reg  [63:0]   slot_mem  [0:FD-1];
+    reg  [FAW-1:0] cp;                             // completion pointer (issue order)
+    reg  [FAW:0]   oc_cnt;                         // outstanding (issued, not completed)
+
+    // ---- VQ-PENDING FIFO: a VQ tc-ack derives a vq codebook address; the vq cache may
+    // be filling, so buffer {vq_addr, issue_pos, side} and issue vq_req when ready. ----
     reg  [28:0]   vpf_addr [0:FD-1];
-    reg  [SW-1:0] vpf_side [0:FD-1];
+    reg  [FAW-1:0] vpf_pos [0:FD-1];               // issue position of this vq entry
     reg  [FAW-1:0] vp_h, vp_t; reg [FAW:0] vp_cnt;
-    assign vp_room = (vp_cnt < FD-2);
+    // total-occupancy invariant: bound tc+vp+vq so no single FIFO can overflow even
+    // if the whole chain redistributes into one FIFO during a stall.
+    assign vp_room = ((tc_cnt + vp_cnt + vq_cnt) < CAP);
     wire vp_ne   = (vp_cnt != 0);
     wire vp_push = tc_pop && tc_is_vq;            // a VQ tc-ack enqueues a pending vq req
     // issue the head pending vq req when the vq cache can accept it
@@ -123,15 +144,14 @@ module tex_fetch_pp import tsp_pkg::*; (
     assign vq_req.waddr = vpf_addr[vp_h];
     wire vp_pop  = vq_req.req;                     // pending entry consumed on issue
 
-    // fifo_vq: side data for vq requests ISSUED (awaiting vq ack), in issue order
-    reg  [SW-1:0] vqf [0:FD-1];
+    // fifo_vq: issue-position of vq requests ISSUED (awaiting vq ack), in issue order
+    reg  [FAW-1:0] vqf_pos [0:FD-1];
     reg  [FAW-1:0] vq_h, vq_t; reg [FAW:0] vq_cnt;
-    assign vq_room = (vq_cnt < FD-2);
-    wire vq_push = vq_req.req;                      // push side when the vq req is issued
+    wire vq_push = vq_req.req;                      // push when the vq req is issued
     wire vq_pop  = vq_resp.ack;
 
-    wire nonvq_to_decode = tc_pop && !tc_is_vq;   // non-VQ textured OR non-textured
-    wire vq_to_decode    = vq_pop;
+    // completion drains slot cp when it has an outstanding entry whose memtel is known
+    wire cp_ready = (oc_cnt != 0) && slot_done[cp];
 
     // ============ DECODE stage register ============
     reg        d_v;
@@ -161,41 +181,61 @@ module tex_fetch_pp import tsp_pkg::*; (
     tex_decode u_dec (.pixfmt(d_pixfmt),.scan(d_scan),.memtel(d_memtel),
                       .offset_lo(d_off_lo),.pal_argb(d_pal_argb),.argb(dec_argb));
 
+    integer ri;
     always @(posedge clk) begin
         if (reset) begin
             tc_h<=0; tc_t<=0; tc_cnt<=0;
             vp_h<=0; vp_t<=0; vp_cnt<=0;
             vq_h<=0; vq_t<=0; vq_cnt<=0;
+            cp<=0; oc_cnt<=0;
             d_v<=0; out_valid<=0;
+            for (ri=0; ri<FD; ri=ri+1) slot_done[ri] <= 1'b0;
         end else begin
             out_valid <= 1'b0;
 
-            // fifo_tc
-            if (tc_push) begin tcf[tc_t] <= in_side; tc_t <= tc_t + 1'b1; end
-            if (tc_pop)  tc_h <= tc_h + 1'b1;
+            // ---- ISSUE: allocate an issue-order slot; mark not-done ----
+            if (tc_push) begin
+                tcf[tc_t] <= in_side; slot_done[tc_t] <= 1'b0; tc_t <= tc_t + 1'b1;
+            end
+
+            // ---- TC ack (in issue order at tc_h): non-VQ resolves its slot now; VQ
+            //      enqueues a pending vq req carrying its issue position. ----
+            if (tc_pop) begin
+                if (tc_is_vq) begin
+                    // handled by the vq path; slot stays not-done until vq ack
+                end else begin
+                    slot_done[tc_h] <= 1'b1; slot_mem[tc_h] <= tc_memtel;
+                end
+                tc_h <= tc_h + 1'b1;
+            end
             tc_cnt <= tc_cnt + (tc_push?1:0) - (tc_pop?1:0);
 
-            // vq-pending FIFO (buffers derived vq address until the vq cache is ready)
-            if (vp_push) begin vpf_addr[vp_t] <= vq_addr; vpf_side[vp_t] <= tc_side; vp_t <= vp_t + 1'b1; end
+            // ---- vq-pending FIFO (address + issue position) ----
+            if (vp_push) begin
+                vpf_addr[vp_t] <= vq_addr; vpf_pos[vp_t] <= tc_h; vp_t <= vp_t + 1'b1;
+            end
             if (vp_pop)  vp_h <= vp_h + 1'b1;
             vp_cnt <= vp_cnt + (vp_push?1:0) - (vp_pop?1:0);
 
-            // fifo_vq: side data captured when the vq req is actually ISSUED
-            if (vq_push) begin vqf[vq_t] <= vpf_side[vp_h]; vq_t <= vq_t + 1'b1; end
-            if (vq_pop)  vq_h <= vq_h + 1'b1;
+            // ---- fifo_vq: carry issue position of each issued vq req ----
+            if (vq_push) begin vqf_pos[vq_t] <= vpf_pos[vp_h]; vq_t <= vq_t + 1'b1; end
+            if (vq_pop) begin
+                slot_done[vqf_pos[vq_h]] <= 1'b1;
+                slot_mem [vqf_pos[vq_h]] <= vq_resp.rdata;   // codebook word replaces memtel
+                vq_h <= vq_h + 1'b1;
+            end
             vq_cnt <= vq_cnt + (vq_push?1:0) - (vq_pop?1:0);
 
-            // feed decode (vq ack wins the workload-impossible collision)
+            // ---- COMPLETION: drain slot cp IN ISSUE ORDER when its memtel is known ----
             d_v <= 1'b0;
-            if (vq_to_decode) begin
-                d_memtel <= vq_resp.rdata;
-                d_side   <= vqf[vq_h];
+            if (cp_ready) begin
+                d_memtel <= slot_mem[cp];
+                d_side   <= tcf[cp];
                 d_v      <= 1'b1;
-            end else if (nonvq_to_decode) begin
-                d_memtel <= tc_memtel;
-                d_side   <= tc_side;
-                d_v      <= 1'b1;
+                cp <= cp + 1'b1;
             end
+            // oc_cnt = issued - completed
+            oc_cnt <= oc_cnt + (tc_push?1:0) - (cp_ready?1:0);
 
             // decode output (non-textured -> argb 0)
             if (d_v) begin

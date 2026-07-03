@@ -35,15 +35,22 @@ static void apply_cfg(const Cfg&g){
     dut->pp_texture=g.pp_texture; dut->pp_offset=g.pp_offset;
 }
 
-struct Pix { uint8_t px, py; uint32_t invw; };
+struct Pix { uint8_t px, py; uint32_t invw; uint32_t tcw=0, tsp=0; uint8_t ovr=0; };
 
 int total=0, fails=0;
+
+// apply a per-pixel tcw/tsp override on top of the batch cfg (for mixed streams)
+static void apply_px(const Cfg&g, const Pix&p){
+    dut->tcw = p.ovr ? p.tcw : g.tcw;
+    dut->tsp = p.ovr ? p.tsp : g.tsp;
+}
 
 static void run_batch(const char* name, const Cfg&g, std::vector<Pix>&pix){
     // --- serial reference: argb per pixel ---
     std::vector<uint32_t> ref(pix.size());
     apply_cfg(g);
     for(size_t i=0;i<pix.size();i++){
+        apply_px(g, pix[i]);
         dut->px=pix[i].px; dut->py=pix[i].py; dut->invw_in=pix[i].invw;
         dut->ref_req=1; tick(); dut->ref_req=0;
         int guard=0;
@@ -67,6 +74,7 @@ static void run_batch(const char* name, const Cfg&g, std::vector<Pix>&pix){
         bool stalled = dut->pp_stall;
         bool present = (in_i < pix.size()) && !stalled;
         if(present){
+            apply_px(g, pix[in_i]);
             dut->px=pix[in_i].px; dut->py=pix[in_i].py; dut->invw_in=pix[in_i].invw;
             dut->pp_in_id=(uint16_t)in_i;
             dut->pp_in_valid=1;
@@ -175,6 +183,59 @@ int main(int argc,char**argv){
         auto p=mkpix(300);
         Cfg g=mkcfg(0x28000000 /*pixfmt=5 PAL4*/, 0x00002000 /*bilinear*/, 1, 0);
         run_batch("tex_pal4_bilin", g, p);
+    }
+
+    // ---- MIXED stream: per-pixel tcw alternates VQ / non-VQ / palette. This is the
+    // real doa2-style case where consecutive pixels differ in VQ-ness, exercising the
+    // fetcher's IN-ORDER completion queue (a fast non-VQ pixel must not overtake an
+    // earlier in-flight VQ pixel). ----
+    {
+        auto p=mkpix(400);
+        for(size_t i=0;i<p.size();i++){
+            p[i].ovr=1;
+            switch(i%4){
+                case 0: p[i].tcw=0x40000000; p[i].tsp=0x00000000; break; // VQ 1555 point
+                case 1: p[i].tcw=0x00000000; p[i].tsp=0x00002000; break; // non-VQ bilinear
+                case 2: p[i].tcw=0x30000000; p[i].tsp=0x00000000; break; // PAL8 point
+                case 3: p[i].tcw=0x40000000; p[i].tsp=0x00002000; break; // VQ bilinear
+            }
+        }
+        Cfg g=mkcfg(0,0,1,0);
+        run_batch("tex_mixed", g, p);
+    }
+    // ---- HIGH-MISS mixed stress: LARGE plane gradients so consecutive pixels land on
+    // wildly different cache lines -> constant tc AND vq misses (concurrent fills),
+    // mixed VQ/non-VQ. This is the scene-like condition (big UV gradients) the small-
+    // gradient batches above never exercise, and the one that deadlocked doa2. ----
+    // big-gradient cfg builder (scattered addresses -> frequent misses)
+    auto mkbig=[&](uint32_t tcw,uint32_t tsp)->Cfg{
+        Cfg g; memset(&g,0,sizeof(g));
+        for(int k=0;k<10;k++){
+            g.ddx[k]=0x41000000 | (rnd()&0x007fffff);
+            g.ddy[k]=0x41000000 | (rnd()&0x007fffff);
+            g.c[k]  =0x40000000 | (rnd()&0x007fffff);
+        }
+        g.tcw=tcw; g.tsp=tsp; g.pp_texture=1; return g;
+    };
+    // high-miss but UNIFORM (isolates cache miss path from VQ/non-VQ mixing)
+    { auto p=mkpix(600); run_batch("hm_vq",    mkbig(0x40000000,0x00002000), p); }
+    { auto p=mkpix(600); run_batch("hm_nonvq", mkbig(0x00000000,0x00002000), p); }
+    { auto p=mkpix(600); run_batch("hm_pal8",  mkbig(0x30000000,0x00000000), p); }
+    // high-miss MIXED
+    {
+        std::vector<Pix> p;
+        for(int i=0;i<600;i++){
+            Pix q; q.px=rnd()&31; q.py=rnd()&31;
+            q.invw=0x3f000000 | (rnd()&0x007fffff);
+            q.ovr=1;
+            switch(i%3){
+                case 0: q.tcw=0x40000000; q.tsp=0x00002000; break;
+                case 1: q.tcw=0x00000000; q.tsp=0x00002000; break;
+                case 2: q.tcw=0x30000000; q.tsp=0x00000000; break;
+            }
+            p.push_back(q);
+        }
+        run_batch("tex_highmiss_mixed", mkbig(0,0x00002000), p);
     }
 
     printf("tsp_shade_pp: %d/%d passed\n", total-fails, total);
