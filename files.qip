@@ -60,6 +60,9 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/f2u8.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/tex_fetch_pp.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/tex_cache_4p.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/tex_cache_4p_1c.sv
+# 4-read-port single-copy registered-M10K texture/VQ cache actually instantiated by
+# peel_core (u_tc4 / u_vq4). Must precede peel_core.
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/tex_cache_4p_1c.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/tsp_miplevel.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/delay_ram.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/tsp_shade_pp.sv
