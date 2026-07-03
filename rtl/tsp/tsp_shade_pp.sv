@@ -15,11 +15,10 @@
 //
 // Stages (fill latency ~ 3 + 4 + 1 + Ttex + 1 + 1):
 //   RCP  : W = 1/invW                         (fp_rcp_fast, 3 clocks)
-//   INTERP (4 substages, 10 planes in ||):
+//   INTERP (3 substages, 10 planes in ||):
 //     i1 : ddx*x , ddy*y                       (fp_mul_i5)
-//     i2 : + (ddx*x + ddy*y)                    (fp_add24)
-//     i3 : + c                                  (fp_add24)
-//     i4 : * W  -> attr[0..9]                   (fp_mul16)
+//     i2 : ddx*x + ddy*y + c                    (fp_add3_24, fused 3-way: 1 stage)
+//     i3 : * W  -> attr[0..9]                   (fp_mul16)
 //   UV   : attr(U,V) -> 4 texel corners + frac  (tex_uv2texel)  ; pack base/ofs
 //   TEX  : 4 || tex_fetch_pp (t00,t01,t10,t11)  ; STALLS on cache miss
 //   FILT : bilinear/nearest blend               (tex_filter)
@@ -153,38 +152,36 @@ module tsp_shade_pp import tsp_pkg::*; #(
     wire [4:0]  rc_py = d_py[RCPLAT-1];
 
     // ==============================================================
-    // STAGE INTERP: 10 planes, 4 substages. attr = (ddx*x+ddy*y+c)*W
+    // STAGE INTERP: 10 planes, 3 substages. attr = (ddx*x + ddy*y + c) * W
     // ==============================================================
-    // i1 regs: products; i2: +; i3: +c; i4: *W -> attr
+    // i1: products (ddx*x, ddy*y), carry c/W;  i2 (FUSED 3-way add): ddx*x+ddy*y+c;
+    // i3: *W -> attr. The old separate i2(+)/i3(+c) stages are folded into one
+    // fp_add3_24 (single align+normalize) -> one fewer interp substage.
     reg [31:0] i1_prx [0:9], i1_pry [0:9];   // ddx*x, ddy*y
     reg [31:0] i1_c   [0:9], i1_W;
-    reg [31:0] i2_sum [0:9], i2_c [0:9], i2_W;
-    reg [31:0] i3_sum [0:9], i3_W;
-    reg [31:0] i4_attr[0:9];
-    // valid + payload shift through the 4 interp substages
-    reg        v1,v2,v3,v4;
-    reg [4:0]  px1,px2,px3,px4, py1,py2,py3,py4;
-    reg [31:0] tsp1,tsp2,tsp3,tsp4, tcw1,tcw2,tcw3,tcw4;
-    reg [4:0]  tcc1,tcc2,tcc3,tcc4;
-    reg        ptx1,ptx2,ptx3,ptx4, pof1,pof2,pof3,pof4;
-    reg [IDW-1:0] id1,id2,id3,id4;
+    reg [31:0] i2_sum [0:9], i2_W;           // fused sum (x+y+c), W carried
+    reg [31:0] i3_attr[0:9];                 // sum*W (was i4_attr)
+    // valid + payload shift through the 3 interp substages
+    reg        v1,v2,v3;
+    reg [4:0]  px1,px2,px3, py1,py2,py3;
+    reg [31:0] tsp1,tsp2,tsp3, tcw1,tcw2,tcw3;
+    reg [4:0]  tcc1,tcc2,tcc3;
+    reg        ptx1,ptx2,ptx3, pof1,pof2,pof3;
+    reg [IDW-1:0] id1,id2,id3;
 
     // combinational units per plane, driven by the appropriate stage regs
     wire [31:0] mprx [0:9], mpry [0:9];       // ddx*x, ddy*y (i1 inputs)
-    wire [31:0] asum [0:9];                   // i2: prx+pry
-    wire [31:0] asc  [0:9];                   // i3: sum + c
-    wire [31:0] mattr[0:9];                   // i4: sum3 * W
+    wire [31:0] asum3[0:9];                   // i2: prx+pry+c (fused 3-way)
+    wire [31:0] mattr[0:9];                   // i3: sum3 * W
     generate
       for (gi=0; gi<10; gi=gi+1) begin : plane
         // i1: RCP-aligned planes * pixel coord
         fp_mul_i5 mx (.f(rcp_ddx[gi]), .k(rc_px), .y(mprx[gi]));
         fp_mul_i5 my (.f(rcp_ddy[gi]), .k(rc_py), .y(mpry[gi]));
-        // i2: prx + pry
-        fp_add24 a2 (.a(i1_prx[gi]), .b_in(i1_pry[gi]), .sub(1'b0), .y(asum[gi]));
-        // i3: sum + c
-        fp_add24 a3 (.a(i2_sum[gi]), .b_in(i2_c[gi]),   .sub(1'b0), .y(asc[gi]));
-        // i4: sum3 * W
-        fp_mul16 m4 (.a(i3_sum[gi]), .b(i3_W), .y(mattr[gi]));
+        // i2: fused (ddx*x) + (ddy*y) + c in one align/normalize
+        fp_add3_24 a23 (.a(i1_prx[gi]), .b(i1_pry[gi]), .c(i1_c[gi]), .y(asum3[gi]));
+        // i3: sum3 * W
+        fp_mul16 m4 (.a(i2_sum[gi]), .b(i2_W), .y(mattr[gi]));
       end
     endgenerate
 
@@ -209,10 +206,10 @@ module tsp_shade_pp import tsp_pkg::*; #(
         .miplevel(mip_lvl));
 
     // carry the computed mip level through the interp substages to the UV/TEX stage
-    reg [3:0] mip1, mip2, mip3, mip4;
+    reg [3:0] mip1, mip2, mip3;
 
     always @(posedge clk) begin
-        if (reset) begin v1<=0;v2<=0;v3<=0;v4<=0; end
+        if (reset) begin v1<=0;v2<=0;v3<=0; end
         else if (en) begin
             // i1: capture products; carry c and W
             for (k=0;k<10;k=k+1) begin
@@ -223,32 +220,27 @@ module tsp_shade_pp import tsp_pkg::*; #(
             tcc1<=d_tc[RCPLAT-1]; ptx1<=d_ptx[RCPLAT-1]; pof1<=d_pof[RCPLAT-1];
             id1<=d_id[RCPLAT-1];
 
-            // i2: prx+pry; carry c, W
-            for (k=0;k<10;k=k+1) begin i2_sum[k]<=asum[k]; i2_c[k]<=i1_c[k]; end
+            // i2 (FUSED): prx+pry+c in one step; carry W
+            for (k=0;k<10;k=k+1) i2_sum[k]<=asum3[k];
             i2_W<=i1_W; v2<=v1; mip2<=mip1;
             px2<=px1;py2<=py1;tsp2<=tsp1;tcw2<=tcw1;tcc2<=tcc1;ptx2<=ptx1;pof2<=pof1;id2<=id1;
 
-            // i3: sum + c; carry W
-            for (k=0;k<10;k=k+1) i3_sum[k]<=asc[k];
-            i3_W<=i2_W; v3<=v2; mip3<=mip2;
+            // i3: sum3 * W -> attr
+            for (k=0;k<10;k=k+1) i3_attr[k]<=mattr[k];
+            v3<=v2; mip3<=mip2;
             px3<=px2;py3<=py2;tsp3<=tsp2;tcw3<=tcw2;tcc3<=tcc2;ptx3<=ptx2;pof3<=pof2;id3<=id2;
-
-            // i4: sum3 * W -> attr
-            for (k=0;k<10;k=k+1) i4_attr[k]<=mattr[k];
-            v4<=v3; mip4<=mip3;
-            px4<=px3;py4<=py3;tsp4<=tsp3;tcw4<=tcw3;tcc4<=tcc3;ptx4<=ptx3;pof4<=pof3;id4<=id3;
         end
     end
 
     // ==============================================================
     // STAGE UV: attr(U,V) -> corners + fracs; pack base/offset colours
     // ==============================================================
-    wire [2:0] u_texv=tsp4[2:0], u_texu=tsp4[5:3];
-    wire u_clampv=tsp4[15],u_clampu=tsp4[16],u_flipv=tsp4[17],u_flipu=tsp4[18];
+    wire [2:0] u_texv=tsp3[2:0], u_texu=tsp3[5:3];
+    wire u_clampv=tsp3[15],u_clampu=tsp3[16],u_flipv=tsp3[17],u_flipu=tsp3[18];
     wire [10:0] c00u,c00v,c01u,c01v,c10u,c10v,c11u,c11v; wire [7:0] ufr,vfr;
     tex_uv2texel u_uv (
-        .u(i4_attr[0]), .v(i4_attr[1]), .texu(u_texu), .texv(u_texv),
-        .miplevel(mip4),
+        .u(i3_attr[0]), .v(i3_attr[1]), .texu(u_texu), .texv(u_texv),
+        .miplevel(mip3),
         .clampu(u_clampu),.clampv(u_clampv),.flipu(u_flipu),.flipv(u_flipv),
         .c00u(c00u),.c00v(c00v),.c01u(c01u),.c01v(c01v),
         .c10u(c10u),.c10v(c10v),.c11u(c11u),.c11v(c11v),.ufrac(ufr),.vfrac(vfr));
@@ -257,7 +249,7 @@ module tsp_shade_pp import tsp_pkg::*; #(
     wire [7:0] u8a [2:9];
     generate
       for (gi = 2; gi <= 9; gi = gi + 1) begin : cvt
-        f2u8 u_c (.f(i4_attr[gi]), .u(u8a[gi]));
+        f2u8 u_c (.f(i3_attr[gi]), .u(u8a[gi]));
       end
     endgenerate
 
@@ -269,13 +261,13 @@ module tsp_shade_pp import tsp_pkg::*; #(
     always @(posedge clk) begin
         if (reset) vU<=0;
         else if (en) begin
-            vU<=v4;
+            vU<=v3;
             U00u<=c00u;U00v<=c00v;U01u<=c01u;U01v<=c01v;
             U10u<=c10u;U10v<=c10v;U11u<=c11u;U11v<=c11v;Uuf<=ufr;Uvf<=vfr;
             U_base<={u8a[5],u8a[4],u8a[3],u8a[2]};
             U_ofs <={u8a[9],u8a[8],u8a[7],u8a[6]};
-            U_tsp<=tsp4; U_tcw<=tcw4; U_tc<=tcc4; U_ptx<=ptx4; U_pof<=pof4; U_id<=id4;
-            U_mip<=mip4;
+            U_tsp<=tsp3; U_tcw<=tcw3; U_tc<=tcc3; U_ptx<=ptx3; U_pof<=pof3; U_id<=id3;
+            U_mip<=mip3;
         end
     end
 

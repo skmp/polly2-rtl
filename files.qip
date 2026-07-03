@@ -20,6 +20,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/mister/ddram.sv
 # 16-bit-mantissa mult / ~24-bit add / cheap 1/x, pipelined for 100MHz.
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/isp_min/fp_mul16.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/isp_min/fp_add24.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/isp_min/fp_add3_24.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/isp_min/fp_rcp_fast.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/isp_min/fp_mul_i5.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/isp_min/mac16.sv
