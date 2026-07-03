@@ -12,8 +12,8 @@
 // refsw:
 //   src_blend = BlendCoefs<SrcInstr,false>(src,dst)
 //   dst_blend = BlendCoefs<DstInstr,true >(src,dst)
-//   out.c = min( (src.c*to256(src_blend.c) + dst.c*to256(dst_blend.c)) >> 8, 255 )
-// to256(v) = v + (v>>7).
+//   out.c = min( (src.c*src_blend.c + dst.c*dst_blend.c) >> 8, 255 )
+// Raw 8-bit coefficients, >>8 (no 8->9 *256/256 scaling); ~1 LSB low vs refsw.
 //
 // SrcSelect/DstSelect (secondary accumulation buffer) are NOT modelled here (we
 // keep a single accumulation buffer); they are passed through for completeness
@@ -50,11 +50,6 @@ module tsp_blend (
     // effective src color after alpha-test clamp
     wire [7:0] cs_a = c_a, cs_r = s_r, cs_g = s_g, cs_b = s_b;
 
-    // v + (v>>7)  (0..255 -> 0..256 scale)
-    function [8:0] to256(input [7:0] v);
-        to256 = {1'b0, v} + {2'b0, v[7]};
-    endfunction
-
     // BlendCoefs: select the per-channel coefficient for one instruction.
     //  instr>>1 : 0 zero, 1 other-color, 2 src-alpha, 3 dst-alpha
     //  instr&1  : invert (255 - coef)
@@ -86,13 +81,15 @@ module tsp_blend (
     wire [31:0] dc = blend_coefs(dst_instr, 1'b1,
                                  cs_a,cs_r,cs_g,cs_b, d_a,d_r,d_g,d_b);
 
-    // per-channel: min( (src*to256(sc) + dst*to256(dc)) >> 8, 255 )
+    // per-channel: min( (src*scoef + dst*dcoef) >> 8, 255 ), raw 8-bit coefs
+    // (no 8->9 to256 scaling; >>8 divides by 256). The two coefficients are
+    // independent per blend mode, so this stays a genuine two-product sum.
     function [7:0] mix(input [7:0] sv, input [7:0] scoef, input [7:0] dv, input [7:0] dcoef);
-        reg [24:0] acc;
+        reg [16:0] acc;
         begin
-            acc = sv * to256(scoef) + dv * to256(dcoef);
+            acc = sv * scoef + dv * dcoef;   // 8x8 + 8x8, max 255*255*2 = 130050
             acc = acc >> 8;
-            mix = (acc > 25'd255) ? 8'd255 : acc[7:0];
+            mix = (acc > 17'd255) ? 8'd255 : acc[7:0];
         end
     endfunction
 

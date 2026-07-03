@@ -5,16 +5,19 @@
 #include <cstdio>
 #include <cstdint>
 
-static int u8_256(int v){return v+(v>>7);}
+static int sat8(int r){return r<0?0:(r>255?255:r);}
+// delta-form combine, matches color_combiner: r = sub + ((mA-sub)*w8) >> 8
+// raw 8-bit weight, arithmetic >>8, saturate. (No u8_256 *256/256 scaling.)
+static int comb(int mA,int sub,int w8){ int d=mA-sub; return sat8(sub + ((d*w8)>>8)); }
 static uint32_t g_combiner(bool tex,bool ofs,int si,uint32_t base,uint32_t textel,uint32_t offset){
     if(!tex) return base;
-    auto B=[&](uint32_t c,int i){return (c>>(8*i))&0xFF;};
+    auto B=[&](uint32_t c,int i){return (int)((c>>(8*i))&0xFF);};
     int r[4];
     for(int i=0;i<4;i++) r[i]=B(base,i);
-    if(si==0){ for(int i=0;i<4;i++) r[i]=B(textel,i); }
-    else if(si==1){ for(int i=0;i<3;i++) r[i]=B(textel,i)*u8_256(B(base,i))/256; r[3]=B(textel,3); }
-    else if(si==2){ int tb=u8_256(B(textel,3)); int cb=256-tb; for(int i=0;i<3;i++) r[i]=(B(textel,i)*tb+B(base,i)*cb)/256; r[3]=B(base,3);}
-    else { for(int i=0;i<4;i++) r[i]=B(textel,i)*u8_256(B(base,i))/256; }
+    if(si==0){ for(int i=0;i<4;i++) r[i]=B(textel,i); }                              // replace
+    else if(si==1){ for(int i=0;i<3;i++) r[i]=comb(B(textel,i),0,B(base,i)); r[3]=B(textel,3); } // modulate rgb, a=tex
+    else if(si==2){ for(int i=0;i<3;i++) r[i]=comb(B(textel,i),B(base,i),B(textel,3)); r[3]=B(base,3);} // mix, a=base
+    else { for(int i=0;i<4;i++) r[i]=comb(B(textel,i),0,B(base,i)); }                // modulate all
     if(ofs){ for(int i=0;i<3;i++){ r[i]=r[i]+B(offset,i); if(r[i]>255)r[i]=255; } }
     return (r[3]<<24)|(r[2]<<16)|(r[1]<<8)|r[0];
 }

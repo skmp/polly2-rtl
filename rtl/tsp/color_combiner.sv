@@ -22,21 +22,16 @@ module color_combiner (
     // channel accessors (i: 0=B[7:0] 1=G[15:8] 2=R[23:16] 3=A[31:24])
     function [7:0] ch(input [31:0] c, input [1:0] i);
         ch = c[8*i +: 8]; endfunction
-    // u8_256(v) = v + (v>>7)
-    function [8:0] u8_256(input [7:0] v);
-        u8_256 = {1'b0,v} + {8'b0, v[7]}; endfunction
     function [7:0] sat_add(input [7:0] a, input [7:0] b);
         reg [8:0] s; begin s = {1'b0,a}+{1'b0,b}; sat_add = s[8]?8'hFF:s[7:0]; end endfunction
 
-    // DSP-folded per-channel combine: ONE 9x9-signed multiply of the form
-    //   out = sub + ((mA - sub) * w8) >> 8   with the *256/256 scaling done as
-    //   a conditional add of (mA-sub) when the raw weight's top bit is set
-    //   (see tex_filter for the same trick). Keeping the multiplier operand to
-    //   8 raw bits (not the 9-bit u8_256 result = 256) lets it fit the DSP 9x9
-    //   signed mode instead of consuming an 18x18 lane.
+    // Per-channel combine: ONE signed multiply, delta form (no 8->9 weight).
+    //   out = sub + ((mA - sub) * w8) >> 8   with raw 8-bit weight w8 (0..255).
     //   si1/si3 (modulate): mA=textel, sub=0,    w8=base.ch    -> t*bw/256
     //   si2 (mix/lerp):     mA=textel, sub=base,  w8=textel.a   -> base+(t-b)*ta/256
     //   si0 (replace): bypass -> textel
+    // Raw >>8 (not *256/256): the far end is approached as sub+(mA-sub)*255/256,
+    // ~1 LSB short of exact mA - standard 8-bit modulate.
     function [7:0] comb_ch(input [1:0] i);
         reg [7:0]  t,b, sub, mA, w8;
         reg signed [9:0]  d; reg signed [17:0] m; reg signed [10:0] r;
@@ -47,8 +42,7 @@ module color_combiner (
               default: begin mA=t; sub=8'd0; w8=b; end                        // modulate
             endcase
             d = $signed({2'b0,mA}) - $signed({2'b0,sub});
-            m = d * $signed({1'b0,w8});          // 9x9 signed mul (raw 8-bit weight)
-            if (w8[7]) m = m + d;                // + d*w8[7]  == *256/256 top bit
+            m = d * $signed({1'b0,w8});          // signed multiply (raw 8-bit weight)
             r = $signed({3'b0,sub}) + $signed(m >>> 8);
             r = (r<0) ? 11'sd0 : (r>255) ? 11'sd255 : r;
             case (shadinstr)
