@@ -68,19 +68,27 @@ module tsp_setup_min (
     fp_rcp_fast u_rcp (.clk(clk),.reset(reset),.stall(1'b0),.in_valid(rc_req),.x(rc_in),
                        .out_valid(rc_ack),.y(rc_y));
 
-    // ---------------- attribute multipliers: 3 per context ----------------
-    // ctxA
-    reg  [31:0] Aza,Azb,Azc; reg signed [8:0] Aca,Acb,Acc; reg [31:0] Aua,Aub,Auc; reg A_uv;
-    wire [31:0] Ac9a,Ac9b,Ac9c, Auva,Auvb,Auvc;
-    fp_mul_c9 Amca(.f(Aza),.k(Aca),.y(Ac9a)); fp_mul_c9 Amcb(.f(Azb),.k(Acb),.y(Ac9b)); fp_mul_c9 Amcc(.f(Azc),.k(Acc),.y(Ac9c));
-    fp_mul16  Amua(.a(Aza),.b(Aua),.y(Auva));  fp_mul16  Amub(.a(Azb),.b(Aub),.y(Auvb));  fp_mul16  Amuc(.a(Azc),.b(Auc),.y(Auvc));
-    wire [31:0] Apa1=A_uv?Auva:Ac9a, Apa2=A_uv?Auvb:Ac9b, Apa3=A_uv?Auvc:Ac9c;
-    // ctxB
-    reg  [31:0] Bza,Bzb,Bzc; reg signed [8:0] Bca,Bcb,Bcc; reg [31:0] Bua,Bub,Buc; reg B_uv;
-    wire [31:0] Bc9a,Bc9b,Bc9c, Buva,Buvb,Buvc;
-    fp_mul_c9 Bmca(.f(Bza),.k(Bca),.y(Bc9a)); fp_mul_c9 Bmcb(.f(Bzb),.k(Bcb),.y(Bc9b)); fp_mul_c9 Bmcc(.f(Bzc),.k(Bcc),.y(Bc9c));
-    fp_mul16  Bmua(.a(Bza),.b(Bua),.y(Buva));  fp_mul16  Bmub(.a(Bzb),.b(Bub),.y(Buvb));  fp_mul16  Bmuc(.a(Bzc),.b(Buc),.y(Buvc));
-    wire [31:0] Bpa1=B_uv?Buva:Bc9a, Bpa2=B_uv?Buvb:Bc9b, Bpa3=B_uv?Buvc:Bc9c;
+    // ---------------- SHARED attribute multipliers: ONE per kind ----------------
+    // The attribute "prime" (z*attr for the 3 vertices of a plane) previously used 6
+    // multipliers per context (3 fp_mul_c9 + 3 fp_mul16), 12 DSPs total, though c9
+    // (colour) and mul16 (uv) are mutually exclusive per plane and each product is
+    // used once. Instead: ONE shared fp_mul_c9 + ONE shared fp_mul16, and a serial
+    // prime sequencer that computes the 3 vertex products over 3 cycles into the
+    // launching context's Apa/Bpa registers. 12 attr DSPs -> 2. The prime overlaps
+    // the other context's plane chain, so the cycle cost is small.
+    //   pm_z / pm_k / pm_u : the operands presented to the shared muls this cycle.
+    reg  [31:0]       pm_z;             // z of the vertex being primed
+    reg  signed [8:0] pm_k;             // colour channel (c9 path)
+    reg  [31:0]       pm_u;             // uv float (mul16 path)
+    reg               pm_uv;            // 1 = uv plane (use mul16), 0 = colour (c9)
+    wire [31:0] pm_c9, pm_mul;
+    fp_mul_c9 u_amc (.f(pm_z), .k(pm_k), .y(pm_c9));
+    fp_mul16  u_amu (.a(pm_z), .b(pm_u), .y(pm_mul));
+    wire [31:0] pm_prod = pm_uv ? pm_mul : pm_c9;   // this cycle's z*attr product
+
+    // per-context primed vertex products (filled by the serial prime sequencer)
+    reg  [31:0] Apa1,Apa2,Apa3;
+    reg  [31:0] Bpa1,Bpa2,Bpa3;
 
     function [31:0] fneg32(input [31:0] f); fneg32={~f[31],f[30:0]}; endfunction
     function signed [8:0] chan(input [31:0] c, input [1:0] ch);
@@ -90,25 +98,25 @@ module tsp_setup_min (
     function plane_en(input [3:0] i);
         plane_en=(i<=1)?tex_r:(i<=5)?1'b1:ofs_en_r; endfunction
 
-    // set ctxA attribute mults for plane pl
-    task setA(input [3:0] pl); reg [31:0]c1r,c2r,c3r; reg[1:0]chn; begin
-        Aza<=Z1;Azb<=Z2;Azc<=Z3;
-        if(pl<=1)begin A_uv<=1;
-            if(pl==0)begin Aua<=U1;Aub<=U2;Auc<=U3; end else begin Aua<=V1;Aub<=V2;Auc<=V3; end
-        end else begin A_uv<=0; chn=pl[1:0]-2'd2;
-            if(pl<=5)begin c1r=g_r?COL1:COL3; c2r=g_r?COL2:COL3; c3r=COL3; end
-            else     begin c1r=g_r?OFS1:OFS3; c2r=g_r?OFS2:OFS3; c3r=OFS3; end
-            Aca<=chan(c1r,chn);Acb<=chan(c2r,chn);Acc<=chan(c3r,chn);
-        end end
-    endtask
-    task setB(input [3:0] pl); reg [31:0]c1r,c2r,c3r; reg[1:0]chn; begin
-        Bza<=Z1;Bzb<=Z2;Bzc<=Z3;
-        if(pl<=1)begin B_uv<=1;
-            if(pl==0)begin Bua<=U1;Bub<=U2;Buc<=U3; end else begin Bua<=V1;Bub<=V2;Buc<=V3; end
-        end else begin B_uv<=0; chn=pl[1:0]-2'd2;
-            if(pl<=5)begin c1r=g_r?COL1:COL3; c2r=g_r?COL2:COL3; c3r=COL3; end
-            else     begin c1r=g_r?OFS1:OFS3; c2r=g_r?OFS2:OFS3; c3r=OFS3; end
-            Bca<=chan(c1r,chn);Bcb<=chan(c2r,chn);Bcc<=chan(c3r,chn);
+    // ---- serial attribute prime ----
+    // A prime request stages the 3 per-vertex operands for plane `pl` (uv floats or
+    // colour channels), then the sequencer feeds them one-per-cycle through the shared
+    // mul and latches the 3 products into the requesting context's Apa/Bpa regs.
+    reg [31:0] pz1,pz2,pz3;             // vertex z (always Z1..Z3)
+    reg        p_isuv;                  // plane kind
+    reg [31:0] pu1,pu2,pu3;             // uv floats (uv plane)
+    reg signed [8:0] pk1,pk2,pk3;       // colour channels (colour plane)
+    // stage the operands for plane pl into the prime holding regs (combinational
+    // select of the sources; done the cycle a prime is requested).
+    task load_prime(input [3:0] pl); reg [31:0]c1r,c2r,c3r; reg[1:0]chn; begin
+        pz1<=Z1; pz2<=Z2; pz3<=Z3;
+        if (pl<=1) begin p_isuv<=1'b1;
+            if (pl==0) begin pu1<=U1;pu2<=U2;pu3<=U3; end
+            else       begin pu1<=V1;pu2<=V2;pu3<=V3; end
+        end else begin p_isuv<=1'b0; chn=pl[1:0]-2'd2;
+            if (pl<=5) begin c1r=g_r?COL1:COL3; c2r=g_r?COL2:COL3; c3r=COL3; end
+            else       begin c1r=g_r?OFS1:OFS3; c2r=g_r?OFS2:OFS3; c3r=OFS3; end
+            pk1<=chan(c1r,chn); pk2<=chan(c2r,chn); pk3<=chan(c3r,chn);
         end end
     endtask
 
@@ -121,6 +129,15 @@ module tsp_setup_min (
     localparam LOAD=0,GEO=1,RUN=2,FIN=3;
     reg [1:0] fsm; reg [3:0] gc; reg [3:0] nextp;
     reg emitA, emitB;   // stage-6 emit flags resolved after both contexts
+
+    // ---- prime sequencer (runs EVERY clock, on the combinational shared muls, so it
+    // overlaps the stretched RUN body). prime_st: 0=idle, 1..3 = presenting/latching
+    // vertex 1..3, 4 = done (products ready in the target context's Apa/Bpa).
+    reg [2:0] prime_st;
+    reg       prime_ctx;   // 0 = target ctxA, 1 = target ctxB
+    reg [3:0] prime_pl;    // plane being primed (-> Api/Bpi when launched)
+    wire prime_idle = (prime_st == 3'd0);
+    wire prime_rdy  = (prime_st == 3'd5);
 
     // The mac16 lanes are a 2-stage (mul|add) pipeline for timing; stretch each
     // logical step to MAC_PH clocks so the scheduled body (which reads lane
@@ -137,6 +154,34 @@ module tsp_setup_min (
             // phase counter: only LOAD runs every clock; GEO/RUN are stretched.
             if (fsm==GEO || fsm==RUN) phase <= (phase==MAC_PH-1) ? 2'd0 : phase+2'd1;
             else                      phase <= 2'd0;
+
+            // ---- SERIAL ATTRIBUTE PRIME (runs EVERY clock during RUN) ----
+            // The shared muls are combinational, so this advances one vertex/clock
+            // independent of the mac `phase` stretch, overlapping the plane chains.
+            // Steps: 1->present v1; 2->present v2 + latch v1; 3->present v3 + latch v2;
+            // 4->latch v3, done (products in the target ctx's Apa/Bpa, held until the
+            // launcher consumes them and sets prime_st back to 0).
+            case (prime_st)
+                3'd1: begin
+                    pm_z<=pz1; pm_k<=pk1; pm_u<=pu1; pm_uv<=p_isuv;   // present v1
+                    prime_st<=3'd2;
+                end
+                3'd2: begin
+                    pm_z<=pz2; pm_k<=pk2; pm_u<=pu2;                  // present v2
+                    if (!prime_ctx) Apa1<=pm_prod; else Bpa1<=pm_prod; // latch v1
+                    prime_st<=3'd3;
+                end
+                3'd3: begin
+                    pm_z<=pz3; pm_k<=pk3; pm_u<=pu3;                  // present v3
+                    if (!prime_ctx) Apa2<=pm_prod; else Bpa2<=pm_prod; // latch v2
+                    prime_st<=3'd4;
+                end
+                3'd4: begin
+                    if (!prime_ctx) Apa3<=pm_prod; else Bpa3<=pm_prod; // latch v3
+                    prime_st<=3'd5;                                    // products ready
+                end
+                default: ; // 0 idle, 5 ready
+            endcase
 
             if (fsm==LOAD || body)
             case (fsm)
@@ -204,12 +249,29 @@ module tsp_setup_min (
                 if (emitA) begin o_ddx<=Addx;o_ddy<=Addy;o_c<=l1q; plane_idx<=Api; plane_valid<=1; end
                 else if (emitB) begin o_ddx<=Bddx;o_ddy<=Bddy;o_c<=l3q; plane_idx<=Bpi; plane_valid<=1; end
 
-                // ---- launcher: fill an idle context with the next enabled plane ----
-                if (nextp<=4'd9) begin
+                // ---- launcher: prime the next enabled plane on the shared muls, then
+                // launch it into an idle context.
+                //   (a) prime_rdy -> launch primed plane into its target ctx, free prime.
+                //   (b) prime_idle + planes remain + a ctx free -> request a prime for
+                //       nextp targeting that ctx (load operands, prime_st<=1).
+                // Stage 0 consumes Apa/Bpa in one cycle; the next prime is gated on
+                // prime_idle (re-entered only after launch) so it never clobbers a live
+                // prime. FIN only when all planes emitted, both ctx idle, prime idle.
+                if (prime_rdy) begin
+                    if (!prime_ctx) begin Api<=prime_pl; Ast<=0; end
+                    else            begin Bpi<=prime_pl; Bst<=0; end
+                    prime_st<=3'd0;
+                end else if (prime_idle && nextp<=4'd9) begin
                     if (!plane_en(nextp)) nextp<=nextp+1;
-                    else if (Ast==7 && !emitA) begin setA(nextp); Api<=nextp; Ast<=0; nextp<=nextp+1; end
-                    else if (Bst==7 && !emitB) begin setB(nextp); Bpi<=nextp; Bst<=0; nextp<=nextp+1; end
-                end else if (Ast==7 && Bst==7) fsm<=FIN;
+                    else if (Ast==7 && !emitA) begin
+                        load_prime(nextp); prime_ctx<=1'b0; prime_pl<=nextp;
+                        prime_st<=3'd1; nextp<=nextp+1;
+                    end
+                    else if (Bst==7 && !emitB) begin
+                        load_prime(nextp); prime_ctx<=1'b1; prime_pl<=nextp;
+                        prime_st<=3'd1; nextp<=nextp+1;
+                    end
+                end else if (nextp>4'd9 && prime_idle && Ast==7 && Bst==7) fsm<=FIN;
             end
 
             FIN: begin done<=1; fsm<=LOAD; end
