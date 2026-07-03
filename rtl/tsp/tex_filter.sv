@@ -8,7 +8,10 @@
 // the >>8 divides by 256. No u8_256 (0..256) weight and no conditional +d - the
 // far endpoint is approached as p + (q-p)*255/256 (standard 8-bit bilinear,
 // <=~1 LSB short of exact q).
-//   Rows: a=lerp(t00,t01,uf) [v+1], b=lerp(t10,t11,uf) [v+0], out=lerp(b,a,vf).
+// ufrac/vfrac are the FRACTIONS of the base sample: w=0 stays at the u+0/v+0
+// corner, w->255 approaches u+1/v+1. Since lerp(p,q,w) weights toward q, the
+// u+0 corner must be p and the u+1 corner q:
+//   Rows: a=lerp(t01,t00,uf) [v+1], b=lerp(t11,t10,uf) [v+0], out=lerp(b,a,vf).
 //   Corners: t00=(u+1,v+1) t01=(u+0,v+1) t10=(u+1,v+0) t11=(u+0,v+0).
 // If ignore_texa: out.a = 255.
 //
@@ -38,9 +41,9 @@ module tex_filter (
     function [7:0] blend(input [1:0] i);
         reg [7:0] a,b;
         begin
-            a = lerp(ch(t00,i), ch(t01,i), ufrac);   // v+1 row, along u
-            b = lerp(ch(t10,i), ch(t11,i), ufrac);   // v+0 row, along u
-            blend = lerp(b, a, vfrac);               // along v
+            a = lerp(ch(t01,i), ch(t00,i), ufrac);   // v+1 row, along u (p=u+0 -> q=u+1)
+            b = lerp(ch(t11,i), ch(t10,i), ufrac);   // v+0 row, along u (p=u+0 -> q=u+1)
+            blend = lerp(b, a, vfrac);               // along v  (p=v+0 -> q=v+1)
         end
     endfunction
 

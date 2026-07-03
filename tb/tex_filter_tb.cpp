@@ -15,9 +15,9 @@ static uint32_t g_filter(int fm,bool ita,int ufrac,int vfrac,uint32_t t00,uint32
     else {
         int r[4];
         for(int i=0;i<4;i++){
-            int a=lerp8(ch(t00,i),ch(t01,i),ufrac);   // v+1 row along u: p=t00,q=t01
-            int b=lerp8(ch(t10,i),ch(t11,i),ufrac);   // v+0 row along u: p=t10,q=t11
-            r[i]=lerp8(b,a,vfrac);                    // along v: p=b,q=a
+            int a=lerp8(ch(t01,i),ch(t00,i),ufrac);   // v+1 row along u: p=u+0(t01),q=u+1(t00)
+            int b=lerp8(ch(t11,i),ch(t10,i),ufrac);   // v+0 row along u: p=u+0(t11),q=u+1(t10)
+            r[i]=lerp8(b,a,vfrac);                    // along v: p=v+0(b),q=v+1(a)
         }
         out=(r[3]<<24)|(r[2]<<16)|(r[1]<<8)|r[0];
     }
