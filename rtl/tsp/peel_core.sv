@@ -138,9 +138,9 @@ module peel_core import tsp_pkg::*; (
     // distinct-line misses serialize (the pipe stalls while any corner is busy).
     cache_req_t   pp_tc_req [0:3], pp_vq_req [0:3];
     cache_resp_t  pp_tc_resp[0:3], pp_vq_resp[0:3];
-    tex_cache_4p u_tc4 (.clk(clk),.reset(reset),.creq(pp_tc_req),.cresp(pp_tc_resp),
+    tex_cache_4p_1c u_tc4 (.clk(clk),.reset(reset),.creq(pp_tc_req),.cresp(pp_tc_resp),
         .dreq(tex_dreq[0]),.dresp(tex_dresp[0]));
-    tex_cache_4p u_vq4 (.clk(clk),.reset(reset),.creq(pp_vq_req),.cresp(pp_vq_resp),
+    tex_cache_4p_1c u_vq4 (.clk(clk),.reset(reset),.creq(pp_vq_req),.cresp(pp_vq_resp),
         .dreq(tex_dreq[1]),.dresp(tex_dresp[1]));
 
     // -------------------- parsers --------------------
@@ -593,6 +593,46 @@ module peel_core import tsp_pkg::*; (
         .stall(pp_stall),
         .tc_req(pp_tc_req),.tc_resp(pp_tc_resp),.vq_req(pp_vq_req),.vq_resp(pp_vq_resp));
 
+`ifndef SYNTHESIS
+    // -------- tsp_shade_pp INPUT DUMP (sim only) --------------------------------------
+    // Dumps every pixel ACCEPTED by the shader (pp_in_valid && !pp_stall) with all of its
+    // inputs, so the exact per-pixel stream feeding tsp_shade_pp can be diffed against the
+    // serial reference / refsw. Enabled at runtime with +shadedump[=<file>] (default file
+    // shade_pp_input.log); zero cost otherwise. One header + one CSV-ish line per accept:
+    //   seq id px py invw tsp tcw text_ctrl ptex pofs ddx[0..9] ddy[0..9] c[0..9]
+    integer      sd_fd = 0;
+    reg          sd_en = 1'b0;
+    reg [1023:0] sd_name;
+    integer      sd_seq = 0;
+    integer      sd_i;
+    initial begin
+        if ($value$plusargs("shadedump=%s", sd_name)) sd_en = 1'b1;
+        else if ($test$plusargs("shadedump")) begin sd_en = 1'b1; sd_name = "shade_pp_input.log"; end
+        if (sd_en) begin
+            sd_fd = $fopen(sd_name, "w");
+            $fwrite(sd_fd, "# tsp_shade_pp input dump: one line per accepted pixel\n");
+            $fwrite(sd_fd, "# seq id px py invw tsp tcw text_ctrl ptex pofs ddx0..9 ddy0..9 c0..9\n");
+        end
+    end
+    always @(posedge clk) begin
+        if (!reset && sd_en && pp_in_valid && !pp_stall) begin
+            $fwrite(sd_fd, "%0d %0d %0d %0d %08x %08x %08x %02x %0d %0d",
+                    sd_seq, pp_in_id, pp_px, pp_py, pp_invw, pp_tsp, pp_tcw,
+                    regs.text_control[4:0], pp_ptex, pp_pofs);
+            for (sd_i = 0; sd_i < 10; sd_i = sd_i + 1) $fwrite(sd_fd, " %08x", pp_ddx[sd_i]);
+            for (sd_i = 0; sd_i < 10; sd_i = sd_i + 1) $fwrite(sd_fd, " %08x", pp_ddy[sd_i]);
+            for (sd_i = 0; sd_i < 10; sd_i = sd_i + 1) $fwrite(sd_fd, " %08x", pp_c[sd_i]);
+            $fwrite(sd_fd, "\n");
+            sd_seq = sd_seq + 1;
+        end
+    end
+    final if (sd_en && sd_fd != 0) begin
+        $fflush(sd_fd);
+        $fclose(sd_fd);
+        $display("[peel_core] tsp_shade_pp input dump: %0d pixels written to %0s", sd_seq, sd_name);
+    end
+`endif
+
     // -------- blend unit: the very end of the TSP pipeline (refsw BlendingUnit) --------
     // The blend RMW now lives INSIDE u_col (color_tile_buffer): a 2-stage pipeline
     // over the M10K color buffer.
@@ -874,6 +914,25 @@ module peel_core import tsp_pkg::*; (
     // off-screen (nothing to write -> skip immediately).
     wire fw_pix_consumed = (st==S_FLUSH_WR) &&
                            ( (fw_onscreen && !fbw_resp.busy) || !fw_onscreen );
+
+`ifndef SYNTHESIS
+    // -------- FRAMEBUFFER-WRITE dump (sim only): the FINAL output, screen (x,y,argb) as
+    // actually written. Reconstructing an image from this vs the BMP isolates whether any
+    // weave lives in FLUSH/scanout (fb writes already blocky) or in the BMP writer (fb
+    // writes smooth). +fbdump[=<file>] (default fb_writes.log). ----
+    integer      fbd_fd = 0; reg fbd_en = 1'b0; reg [1023:0] fbd_name; integer fbd_n = 0;
+    initial begin
+        if ($value$plusargs("fbdump=%s", fbd_name)) fbd_en=1'b1;
+        else if ($test$plusargs("fbdump")) begin fbd_en=1'b1; fbd_name="fb_writes.log"; end
+        if (fbd_en) begin fbd_fd=$fopen(fbd_name,"w"); $fwrite(fbd_fd,"# x y argb (tile tx,ty fw_i)\n"); end
+    end
+    always @(posedge clk) if (!reset && fbd_en && fbw_req.we && fw_pix_consumed) begin
+        $fwrite(fbd_fd, "%0d %0d %08x %0d %0d %0d\n", fw_px, fw_py, col_rd_argb, cur_tx, cur_ty, fw_i);
+        fbd_n = fbd_n + 1;
+    end
+    final if (fbd_en && fbd_fd!=0) begin $fflush(fbd_fd); $fclose(fbd_fd);
+        $display("[peel_core] framebuffer writes: %0d -> %0s", fbd_n, fbd_name); end
+`endif
 
     // ============ COMBINATIONAL buffer request ports (valid THIS cycle) ============
     // Drive u_peel / u_col's typed request ports from the FSM + pipeline state. The

@@ -82,93 +82,137 @@ module tex_fetch_pp import tsp_pkg::*; (
     wire [SW-1:0] in_side = { in_textured, in_pixfmt, in_scan, ta_off[3:0], ta_byte[2:0],
                               in_vq, ta_byte[2:0], in_tcw_addr, in_palsel };
 
-    // fifo depths. A VQ pixel occupies tc, THEN vp, THEN vq before completing. The
-    // hazard: tc acks fire on the DATA cache's schedule (cannot be deferred), so if the
-    // VQ cache stalls (miss-fill) while tc keeps acking, every outstanding tc entry
-    // drains into vp AT ONCE. So vp MUST be able to hold every in-flight tc entry, and
-    // vq every in-flight vp entry. We enforce ONE occupancy invariant on issue:
-    //   tc_cnt + vp_cnt + vq_cnt < CAP
-    // i.e. the TOTAL entries anywhere in the tc->vp->vq chain is bounded, and each FIFO
-    // is sized to CAP so the worst-case redistribution (all in one FIFO) never overflows.
-    localparam integer FD = 32, FAW = 5;    // each FIFO holds up to CAP entries
-    localparam integer CAP = 24;            // max total entries in flight (< FD, margin)
+`ifndef SYNTHESIS
+    // -------- tex_addr VECTOR DUMP (sim only) -----------------------------------------
+    // One line per accepted texel request. Captures tex_addr INPUTS (tcw fields, texu/
+    // texv, mip, u, v) and OUTPUTS (byte_addr, fbpp_shr, offset) so tex_addr can be
+    // regression-tested standalone: given the inputs it must reproduce byte_addr/offset.
+    // A twiddle/offset bug shows here as a byte_addr that doesn't match a correct twop().
+    // Enabled with +texdump[=<file>] (default tex_vectors.log). Guarded so only ONE of
+    // the 4 corner fetchers writes (avoids 4x duplicate files clobbering each other):
+    // the caller passes +texdump and every corner opens the SAME name in APPEND, but to
+    // keep lines coherent we only dump when this instance won the open (fd!=0).
+    integer      txd_fd = 0;
+    reg          txd_en = 1'b0;
+    reg [1023:0] txd_name;
+    integer      txd_seq = 0;
+    initial begin
+        if ($value$plusargs("texdump=%s", txd_name)) txd_en = 1'b1;
+        else if ($test$plusargs("texdump")) begin txd_en = 1'b1; txd_name = "tex_vectors.log"; end
+        if (txd_en) begin
+            // append mode: all 4 corner instances share one file (interleaved but each
+            // line is self-contained: it carries its own u,v). Header written once by
+            // whichever instance opens first (harmless if repeated).
+            txd_fd = $fopen(txd_name, "a");
+        end
+    end
+    always @(posedge clk) begin
+        if (!reset && txd_en && accept && in_textured) begin
+            $fwrite(txd_fd, "%08x %0d %0d %0d %0d %0d %0d %0d %0d %0d  %07x %0d %05x\n",
+                    tcw, in_vq, in_scan, in_strdsel, in_mipmapped, in_pixfmt,
+                    in_texu, in_texv, u, v,
+                    ta_byte, ta_fbpp_shr, ta_off);
+            txd_seq = txd_seq + 1;
+        end
+    end
+    final if (txd_en && txd_fd != 0) begin $fflush(txd_fd); $fclose(txd_fd); end
+`endif
 
-    // fifo_tc: side data for tc requests in flight (issue order).
-    reg  [SW-1:0] tcf [0:FD-1];
-    reg  [FAW-1:0] tc_h, tc_t; reg [FAW:0] tc_cnt;
-
-    // ============ ISSUE ============
-    // Accept only when the data cache is ready AND the whole tc->vp->vq chain has room
-    // for one more (total-occupancy invariant), so no in-flight entry is ever dropped
-    // even if the VQ cache stalls while tc acks stream in.
-    wire vp_room;   // forward ref (needs vp_cnt/vq_cnt)
-    assign in_ready   = tc_resp.ready && vp_room;
-    wire   accept     = in_valid && in_ready;
-    assign tc_req.req   = accept;                    // every accepted pixel reads tc
-    assign tc_req.waddr = { 3'b0, ta_byte[28:3] };   // 64-bit word addr = byte>>3
-    wire tc_push = accept;
-    wire tc_pop  = tc_resp.ack;
-
-    // ============ TC-ACK -> VQ or DECODE ============
-    wire [SW-1:0] tc_side   = tcf[tc_h];
-    wire          tc_txd    = tc_side[42];
-    wire          tc_is_vq  = tc_side[30] && tc_txd;   // non-textured never chains vq
-    wire [2:0]    tc_vqbsel = tc_side[29:27];
-    wire [20:0]   tc_taddr  = tc_side[26:6];
-    wire [63:0]   tc_memtel = tc_resp.rdata;
-    wire [7:0]    vq_byte   = tc_memtel[8*tc_vqbsel +: 8];
-    wire [28:0]   vq_addr   = {8'd0, tc_taddr} + {21'd0, vq_byte};
-
-    // ============ IN-ORDER COMPLETION QUEUE ============
-    // A mixed VQ / non-VQ stream (consecutive pixels can differ in tcw) MUST still emit
-    // results in ISSUE ORDER - a fast non-VQ pixel may not overtake an earlier in-flight
-    // VQ pixel (2 cache trips). We record, per issue position (ring index), the side data
-    // + a "done" flag + the resolved memtel. Cache results mark their slot done whenever
-    // they land (tc for non-VQ, vq for VQ); a COMPLETION POINTER `cp` drains slots in
-    // strict issue order, so output order == issue order regardless of tc/vq timing.
+    // ============================================================================
+    // FIXED-LATENCY PIPELINE (no FIFO, no reorder). Assumes the injected caches reply with
+    // 1-CYCLE latency and HOLD internally on a miss: a request presented while resp.ready
+    // is accepted and its {data} arrives the NEXT cycle; a miss simply keeps resp.ready low
+    // until the fill completes (the fetcher never sees a NOT_OK, only a late accept). Every
+    // pixel - VQ or not - traverses the SAME stages, so results leave in ISSUE ORDER at
+    // 1 pixel/clock:
     //
-    //  tcf[] (below) is the issue-order side-data ring (write index = issue position).
-    //  slot_done[i] / slot_mem[i] : set when position i's final memtel is known.
-    //  cp : next issue position to emit (drains when slot_done[cp]).
-    reg           slot_done [0:FD-1];
-    reg  [63:0]   slot_mem  [0:FD-1];
-    reg  [FAW-1:0] cp;                             // completion pointer (issue order)
-    reg  [FAW:0]   oc_cnt;                         // outstanding (issued, not completed)
+    //   T0 : present tc_req (data cache) ; accepted when tc_resp.ready
+    //   T1 : tc_resp.rdata is the tc word. If this pixel is VQ, present vq_req NOW (its
+    //        codebook address is derived from the tc word this cycle). NON-VQ presents no
+    //        vq_req -> the VQ cache is never polluted (matched-delay bubble through T2).
+    //   T2 : vq_resp.rdata is the codebook word (VQ only); non-VQ carries its tc word.
+    //   D  : tex_decode -> argb -> out_valid
+    //
+    // ONE global clock-enable `adv` shifts the whole pipe together, so there is never a
+    // second in-flight result to buffer. It stalls when a stage needs a cache accept it
+    // can't get this cycle (miss-fill: resp.ready low) or when out_ready is low.
+    // ============================================================================
 
-    // ---- VQ-PENDING FIFO: a VQ tc-ack derives a vq codebook address; the vq cache may
-    // be filling, so buffer {vq_addr, issue_pos, side} and issue vq_req when ready. ----
-    reg  [28:0]   vpf_addr [0:FD-1];
-    reg  [FAW-1:0] vpf_pos [0:FD-1];               // issue position of this vq entry
-    reg  [FAW-1:0] vp_h, vp_t; reg [FAW:0] vp_cnt;
-    // total-occupancy invariant: bound tc+vp+vq so no single FIFO can overflow even
-    // if the whole chain redistributes into one FIFO during a stall.
-    assign vp_room = ((tc_cnt + vp_cnt + vq_cnt) < CAP);
-    wire vp_ne   = (vp_cnt != 0);
-    wire vp_push = tc_pop && tc_is_vq;            // a VQ tc-ack enqueues a pending vq req
-    // issue the head pending vq req when the vq cache can accept it
-    assign vq_req.req   = vp_ne && vq_resp.ready;
-    assign vq_req.waddr = vpf_addr[vp_h];
-    wire vp_pop  = vq_req.req;                     // pending entry consumed on issue
+    // stage registers. The pixel enters T1 the cycle its tc word LANDS (one cycle after
+    // accept), so T1 always holds {side, tc word} that agree. T0 (t0_*) is the 1-cycle
+    // latch between accept and tc-landing.
+    //   T0 : accepted, tc read in flight   (t0_v/t0_s)
+    //   T1 : tc word landed + held         (t1_v/t1_s/t1_mem); if VQ, issue vq_req here
+    //   T2 : vq word landed (VQ) / tc word (non-VQ)  (t2_v/t2_s/t2_mem)
+    //   D  : decode
+    reg          t0_v, t1_v, t2_v;
+    reg [SW-1:0] t0_s, t1_s, t2_s;
+    reg [63:0]   t0_mem;                        // HELD tc word for the T0 pixel (captured
+                                                //   the cycle it lands, so a downstream
+                                                //   stall never loses it)
+    reg          t0_dv;                         // t0_mem valid (tc word captured)
+    reg [63:0]   t1_mem;                        // HELD tc word for the T1 pixel
+    reg [63:0]   t2_mem;                        // HELD resolved word (tc for non-VQ; vq
+                                                //   codebook word once its read completes)
+    reg          t2_dv;                         // t2_mem holds this pixel's final word
 
-    // fifo_vq: issue-position of vq requests ISSUED (awaiting vq ack), in issue order
-    reg  [FAW-1:0] vqf_pos [0:FD-1];
-    reg  [FAW-1:0] vq_h, vq_t; reg [FAW:0] vq_cnt;
-    wire vq_push = vq_req.req;                      // push when the vq req is issued
-    wire vq_pop  = vq_resp.ack;
+    // T1 pixel VQ-ness + its derived codebook address (from the HELD tc word).
+    wire         t1_isvq   = t1_s[30] && t1_s[42];
+    wire [2:0]   t1_vqbsel = t1_s[29:27];
+    wire [20:0]  t1_taddr  = t1_s[26:6];
+    wire [7:0]   t1_vqbyte = t1_mem[8*t1_vqbsel +: 8];
+    wire [28:0]  t1_vqaddr = {8'd0, t1_taddr} + {21'd0, t1_vqbyte};
+    wire         t2_isvq   = t2_s[30] && t2_s[42];
 
-    // completion drains slot cp when it has an outstanding entry whose memtel is known
-    // AND the consumer can take a result (out_ready). When out_ready is low the slot
-    // stays parked; the cache trips still land (they can't be deferred) but the emit
-    // side holds, so this corner cannot overrun the downstream corner-join FIFO while a
-    // sibling corner is still filling.
-    wire cp_ready = (oc_cnt != 0) && slot_done[cp] && out_ready;
+    // ---- PER-STAGE ADVANCE. Two 1-cycle caches (tc, vq) each hold `ready` low + stop
+    //      acking during their own miss-fill. Cache rdata/ack is valid only the cycle after
+    //      accept, so each stage CAPTURES its result the instant it lands (independent of a
+    //      downstream stall) and advances only into a free successor. Computed output-first.
+    //
+    //   D  : drains when out_ready (tied high by the lockstep join, kept general).
+    //   T2 : holds the VQ result. Captures vq word when vq_resp.ack lands (VQ); non-VQ has no
+    //        2nd trip and is "done" on entry. Advances to D when done + D free.
+    //   T1 : issues the VQ read; advances to T2 when its vq_req is ACCEPTED (vq_resp.ready)
+    //        - or immediately for non-VQ - and T2 free.
+    //   T0 : captures the tc word (tc_resp.ack); advances to T1 when captured + T1 free.
+    //   in : accept when T0 free and the tc cache ready.
+    wire d_adv   = out_ready;
+    wire d_free  = !d_v || d_adv;
 
-    // ============ DECODE stage register ============
+    // T2 result "here": non-VQ done on entry (t2_dv set at load); VQ when vq word captured
+    // (t2_dv) or landing this cycle (vq_resp.ack). t2_word = the resolved memtel.
+    wire t2_here  = t2_dv || (t2_v && t2_isvq && vq_resp.ack);
+    wire [63:0] t2_word = t2_dv ? t2_mem : vq_resp.rdata;
+    wire t2_adv   = t2_v && t2_here && d_free;
+    wire t2_free  = !t2_v || t2_adv;
+
+    wire vq_need  = t1_v && t1_isvq;
+    wire t1_okvq  = !vq_need || vq_resp.ready;                 // VQ read accepted this cycle
+    wire t1_adv   = t1_v && t1_okvq && t2_free;
+    wire t1_free  = !t1_v || t1_adv;
+
+    // T0's tc word is "here" if already captured (t0_dv) or landing this cycle (tc_resp.ack).
+    wire t0_here  = t0_dv || (t0_v && tc_resp.ack);
+    wire [63:0] t0_word = t0_dv ? t0_mem : tc_resp.rdata;
+    wire t0_adv   = t0_v && t0_here && t1_free;
+    wire t0_free  = !t0_v || t0_adv;
+
+    // ---- T0 issue: accept a new pixel when T0 is free and the tc cache is ready. ----
+    assign in_ready   = t0_free && tc_resp.ready;
+    wire   accept     = in_valid && in_ready;
+    assign tc_req.req   = accept;
+    assign tc_req.waddr = { 3'b0, ta_byte[28:3] };
+
+    // ---- T1 vq issue: the T1 pixel, if VQ, reads its codebook word from the HELD tc word,
+    //      but only when it can also advance (T2 free) so the vq word lands into a free T2. ----
+    assign vq_req.req   = vq_need && t2_free && vq_resp.ready;
+    assign vq_req.waddr = t1_vqaddr;
+
+    // ============ DECODE stage (fed from T2) ============
     reg        d_v;
     reg [63:0] d_memtel;
     reg [SW-1:0] d_side;
 
-    // palette ROM placeholder (ARGB8888) - matches tex_fetch
     (* rom_style = "block" *) reg [31:0] pal_rom [0:255];
     integer pri;
     initial for (pri=0; pri<256; pri=pri+1)
@@ -191,67 +235,51 @@ module tex_fetch_pp import tsp_pkg::*; (
     tex_decode u_dec (.pixfmt(d_pixfmt),.scan(d_scan),.memtel(d_memtel),
                       .offset_lo(d_off_lo),.pal_argb(d_pal_argb),.argb(dec_argb));
 
-    integer ri;
     always @(posedge clk) begin
         if (reset) begin
-            tc_h<=0; tc_t<=0; tc_cnt<=0;
-            vp_h<=0; vp_t<=0; vp_cnt<=0;
-            vq_h<=0; vq_t<=0; vq_cnt<=0;
-            cp<=0; oc_cnt<=0;
-            d_v<=0; out_valid<=0;
-            for (ri=0; ri<FD; ri=ri+1) slot_done[ri] <= 1'b0;
+            t0_v<=0; t0_dv<=0; t1_v<=0; t2_v<=0; t2_dv<=0; d_v<=0; out_valid<=0;
+            // clear the payload/data regs too so a cold (post-reset) pipeline can never
+            // decode an X/garbage side word into the first few results.
+            t0_s<=0; t1_s<=0; t2_s<=0; d_side<=0;
+            t0_mem<=0; t1_mem<=0; t2_mem<=0; d_memtel<=0; argb<=0;
         end else begin
-            out_valid <= 1'b0;
+            // ---- in -> T0 : accept a new pixel. Its tc read is now in flight; t0_dv=0 until
+            //      the tc word lands (captured below). ----
+            if (accept)      begin t0_v <= 1'b1; t0_s <= in_side; t0_dv <= 1'b0; end
+            else if (t0_adv)       t0_v <= 1'b0;
 
-            // ---- ISSUE: allocate an issue-order slot; mark not-done ----
-            if (tc_push) begin
-                tcf[tc_t] <= in_side; slot_done[tc_t] <= 1'b0; tc_t <= tc_t + 1'b1;
+            // ---- T0 tc capture: the tc word lands the cycle after accept; grab + HOLD it
+            //      regardless of any downstream stall so it is never lost. (Skipped when T0
+            //      is advancing this cycle - then t0_word feeds T1 directly.) ----
+            if (t0_v && !t0_dv && tc_resp.ack && !t0_adv) begin
+                t0_mem <= tc_resp.rdata; t0_dv <= 1'b1;
             end
 
-            // ---- TC ack (in issue order at tc_h): non-VQ resolves its slot now; VQ
-            //      enqueues a pending vq req carrying its issue position. ----
-            if (tc_pop) begin
-                if (tc_is_vq) begin
-                    // handled by the vq path; slot stays not-done until vq ack
-                end else begin
-                    slot_done[tc_h] <= 1'b1; slot_mem[tc_h] <= tc_memtel;
-                end
-                tc_h <= tc_h + 1'b1;
-            end
-            tc_cnt <= tc_cnt + (tc_push?1:0) - (tc_pop?1:0);
+            // ---- T0 -> T1 : carry side + the (held or just-landed) tc word (t1_s/t1_mem
+            //      agree). ----
+            if (t0_adv)      begin t1_v <= 1'b1; t1_s <= t0_s; t1_mem <= t0_word; end
+            else if (t1_adv)       t1_v <= 1'b0;
 
-            // ---- vq-pending FIFO (address + issue position) ----
-            if (vp_push) begin
-                vpf_addr[vp_t] <= vq_addr; vpf_pos[vp_t] <= tc_h; vp_t <= vp_t + 1'b1;
-            end
-            if (vp_pop)  vp_h <= vp_h + 1'b1;
-            vp_cnt <= vp_cnt + (vp_push?1:0) - (vp_pop?1:0);
+            // ---- T1 -> T2 : load T2. non-VQ is DONE immediately (t2_dv=1, word = tc word);
+            //      VQ has issued its vq read this cycle -> awaits its ack (t2_dv=0). ----
+            if (t1_adv)      begin t2_v <= 1'b1; t2_s <= t1_s; t2_mem <= t1_mem;
+                                   t2_dv <= !(t1_s[30] && t1_s[42]); end   // done unless VQ
+            else if (t2_adv)       t2_v <= 1'b0;
 
-            // ---- fifo_vq: carry issue position of each issued vq req ----
-            if (vq_push) begin vqf_pos[vq_t] <= vpf_pos[vp_h]; vq_t <= vq_t + 1'b1; end
-            if (vq_pop) begin
-                slot_done[vqf_pos[vq_h]] <= 1'b1;
-                slot_mem [vqf_pos[vq_h]] <= vq_resp.rdata;   // codebook word replaces memtel
-                vq_h <= vq_h + 1'b1;
+            // ---- T2 vq capture: the VQ codebook word lands the cycle after its read was
+            //      accepted; grab + HOLD it regardless of a downstream stall. (Skipped when
+            //      T2 is advancing this cycle - then t2_word feeds DECODE directly.) ----
+            if (t2_v && t2_isvq && !t2_dv && vq_resp.ack && !t2_adv) begin
+                t2_mem <= vq_resp.rdata; t2_dv <= 1'b1;
             end
-            vq_cnt <= vq_cnt + (vq_push?1:0) - (vq_pop?1:0);
 
-            // ---- COMPLETION: drain slot cp IN ISSUE ORDER when its memtel is known ----
-            d_v <= 1'b0;
-            if (cp_ready) begin
-                d_memtel <= slot_mem[cp];
-                d_side   <= tcf[cp];
-                d_v      <= 1'b1;
-                cp <= cp + 1'b1;
-            end
-            // oc_cnt = issued - completed
-            oc_cnt <= oc_cnt + (tc_push?1:0) - (cp_ready?1:0);
+            // ---- T2 -> DECODE : the resolved word (tc for non-VQ, vq codebook for VQ). ----
+            if (t2_adv)      begin d_v <= 1'b1; d_side <= t2_s; d_memtel <= t2_word; end
+            else if (d_adv)        d_v <= 1'b0;
 
-            // decode output (non-textured -> argb 0)
-            if (d_v) begin
-                argb      <= d_txd ? dec_argb : 32'h00000000;
-                out_valid <= 1'b1;
-            end
+            // ---- DECODE -> OUT ----
+            out_valid <= d_v && d_adv;
+            if (d_v && d_adv) argb <= d_txd ? dec_argb : 32'h00000000;
         end
     end
 endmodule

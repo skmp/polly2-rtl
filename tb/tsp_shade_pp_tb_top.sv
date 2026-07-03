@@ -92,8 +92,8 @@ module tsp_shade_pp_tb_top import tsp_pkg::*; (
     `DDRBURST(pd) `DDRBURST(pq)
     cache_req_t  pp_tc_req [0:3], pp_vq_req [0:3];
     cache_resp_t pp_tc_resp[0:3], pp_vq_resp[0:3];
-    tex_cache_4p u_pd (.clk(clk),.reset(reset),.creq(pp_tc_req),.cresp(pp_tc_resp),.dreq(pd_dreq),.dresp(pd_dresp));
-    tex_cache_4p u_pq (.clk(clk),.reset(reset),.creq(pp_vq_req),.cresp(pp_vq_resp),.dreq(pq_dreq),.dresp(pq_dresp));
+    tex_cache_4p_1c u_pd (.clk(clk),.reset(reset),.creq(pp_tc_req),.cresp(pp_tc_resp),.dreq(pd_dreq),.dresp(pd_dresp));
+    tex_cache_4p_1c u_pq (.clk(clk),.reset(reset),.creq(pp_vq_req),.cresp(pp_vq_resp),.dreq(pq_dreq),.dresp(pq_dresp));
 
     tsp_shade_pp #(.IDW(10)) u_pp (
         .clk(clk),.reset(reset),

@@ -287,6 +287,41 @@ module tsp_shade_pp import tsp_pkg::*; #(
     end
 
 
+`ifndef SYNTHESIS
+    // -------- tex_uv2texel VECTOR DUMP (sim only) -------------------------------------
+    // One line per accepted textured pixel at the UV stage. Captures the tex_uv2texel
+    // INPUTS (interpolated U/V float, texu/texv/mip, clamp/flip) and its OUTPUTS (the 4
+    // bilinear corner texel coords + ufrac/vfrac). This is a complete, self-contained
+    // regression vector for tex_uv2texel: given the inputs, tex_uv2texel must reproduce
+    // the corners+fracs. Enabled with +uvdump[=<file>] (default uv_vectors.log).
+    //   fields: seq id attrU attrV tsp tcw mip ptx  c00u c00v c01u c01v c10u c10v c11u c11v ufrac vfrac
+    integer      uvd_fd = 0;
+    reg          uvd_en = 1'b0;
+    reg [1023:0] uvd_name;
+    integer      uvd_seq = 0;
+    initial begin
+        if ($value$plusargs("uvdump=%s", uvd_name)) uvd_en = 1'b1;
+        else if ($test$plusargs("uvdump")) begin uvd_en = 1'b1; uvd_name = "uv_vectors.log"; end
+        if (uvd_en) begin
+            uvd_fd = $fopen(uvd_name, "w");
+            $fwrite(uvd_fd, "# tex_uv2texel vectors: one line per accepted textured pixel\n");
+            $fwrite(uvd_fd, "# seq id attrU attrV tsp tcw mip ptx c00u c00v c01u c01v c10u c10v c11u c11v ufrac vfrac\n");
+        end
+    end
+    always @(posedge clk) begin
+        if (!reset && uvd_en && v3 && en && ptx3) begin
+            $fwrite(uvd_fd, "%0d %0d %08x %08x %08x %08x %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d\n",
+                    uvd_seq, id3, i3_attr[0], i3_attr[1], tsp3, tcw3, mip3, ptx3,
+                    c00u, c00v, c01u, c01v, c10u, c10v, c11u, c11v, ufr, vfr);
+            uvd_seq = uvd_seq + 1;
+        end
+    end
+    final if (uvd_en && uvd_fd != 0) begin
+        $fflush(uvd_fd); $fclose(uvd_fd);
+        $display("[tsp_shade_pp] tex_uv2texel vectors: %0d pixels -> %0s", uvd_seq, uvd_name);
+    end
+`endif
+
     // ==============================================================
     // STAGE TEX: 4 STREAMING tex_fetch_pp (one per bilinear corner). Every valid UV
     // pixel is presented as a request; the fetchers accept it when the shared cache is
@@ -305,16 +340,17 @@ module tsp_shade_pp import tsp_pkg::*; #(
     assign cu[3]=U11u; assign cv[3]=U11v;
     generate
       for (gi=0; gi<4; gi=gi+1) begin : tf
-        // per-corner output backpressure: hold this corner's completion when its result
-        // FIFO is (near) full. A corner that races ahead of a still-filling sibling then
-        // parks its results in its own slot ring instead of overrunning rf. The behind
-        // corner is never full, so it keeps advancing until res_v fires and drains all 4.
+        // The 4 corner fetchers are now a FIXED-LATENCY pipeline over the 1-cycle cache
+        // (tex_cache_4p_1c), which freezes ALL 4 ports together on a miss-fill. All four
+        // therefore run in perfect lockstep and emit tf_ov SIMULTANEOUSLY, in issue order.
+        // No per-corner reordering is possible, so out_ready is tied high (no back-pressure)
+        // and the corner-join is a plain simultaneous capture (below).
         tex_fetch_pp u_tf (
             .clk(clk),.reset(reset),
             .in_valid(tex_start),.in_textured(U_ptx),.in_ready(tf_ready[gi]),
             .u(cu[gi]),.v(cv[gi]),.miplevel(U_mip),
             .tsp(U_tsp),.tcw(U_tcw),.text_ctrl(U_tc),
-            .out_ready(~rf_full4[gi]),
+            .out_ready(1'b1),
             .out_valid(tf_ov[gi]),.argb(tf_argb[gi]),
             .tc_req(tc_req[gi]),.tc_resp(tc_resp[gi]),
             .vq_req(vq_req[gi]),.vq_resp(vq_resp[gi]));
@@ -322,45 +358,15 @@ module tsp_shade_pp import tsp_pkg::*; #(
     endgenerate
     assign uv_wants_fetch = vU;                  // any valid UV pixel needs a fetch slot
 
-    // ---- CORNER JOIN: the 4 corner fetchers finish OUT OF STEP on multi-line-miss
-    // pixels (the shared 4p cache fills one line at a time, so corner acks stagger).
-    // Buffer each corner's result in a small per-corner FIFO and only present a
-    // completed texel-group (res_v) when ALL FOUR corners have a result available.
-    // Each fetcher emits in issue order, so the FIFO heads always belong to the same
-    // pixel. ----
-    localparam integer RFD = 8, RFAW = 3;
-    reg  [31:0]  rf [0:3][0:RFD-1];
-    reg  [RFAW-1:0] rf_h [0:3], rf_t [0:3];
-    reg  [RFAW:0]   rf_cnt [0:3];
-    wire [3:0] rf_ne;                            // per-corner "has >=1 result"
-    wire [3:0] rf_full4;                          // per-corner "too full to accept more"
-    generate
-      for (gi=0; gi<4; gi=gi+1) begin : rfne
-        assign rf_ne[gi]    = (rf_cnt[gi] != 0);
-        // leave >=2 slots so an in-flight (issued, not yet landed) result never overflows
-        assign rf_full4[gi] = (rf_cnt[gi] >= RFD-2);
-      end
-    endgenerate
-    wire res_v = &rf_ne;                         // all 4 corners have a result
-    assign rf_room = ~|rf_full4;                  // all corners have headroom
-    wire [31:0] cj0 = rf[0][rf_h[0]];
-    wire [31:0] cj1 = rf[1][rf_h[1]];
-    wire [31:0] cj2 = rf[2][rf_h[2]];
-    wire [31:0] cj3 = rf[3][rf_h[3]];
-    integer cjn;
-    always @(posedge clk) begin
-        if (reset) begin
-            for (cjn=0;cjn<4;cjn=cjn+1) begin rf_h[cjn]<=0; rf_t[cjn]<=0; rf_cnt[cjn]<=0; end
-        end else begin
-            for (cjn=0;cjn<4;cjn=cjn+1) begin
-                // push this corner's result when it fires
-                if (tf_ov[cjn]) begin rf[cjn][rf_t[cjn]] <= tf_argb[cjn]; rf_t[cjn] <= rf_t[cjn] + 1'b1; end
-                // pop all four heads together when a group completes
-                if (res_v)      rf_h[cjn] <= rf_h[cjn] + 1'b1;
-                rf_cnt[cjn] <= rf_cnt[cjn] + (tf_ov[cjn]?1:0) - (res_v?1:0);
-            end
-        end
-    end
+    // ---- CORNER JOIN (lockstep): all 4 corners emit the same cycle (tf_ov[0..3] identical),
+    // in issue order, so the four texels this cycle belong to ONE pixel. No FIFO / no
+    // back-pressure - just take the 4 argb directly. res_v = the (shared) emit strobe. ----
+    wire res_v = tf_ov[0];
+    assign rf_room = 1'b1;                        // no corner FIFO -> never a room stall
+    wire [31:0] cj0 = tf_argb[0];
+    wire [31:0] cj1 = tf_argb[1];
+    wire [31:0] cj2 = tf_argb[2];
+    wire [31:0] cj3 = tf_argb[3];
 
     // ---- in-order FILT payload FIFO: pushed on issue (tex_start), popped on result
     //      (tf_ov[0]; all 4 corners' out_valid are identical since lockstep). ----
@@ -449,6 +455,35 @@ module tsp_shade_pp import tsp_pkg::*; #(
     wire [31:0] comb_col;
     color_combiner u_cc (.pp_texture(T_ptx_r),.pp_offset(T_pof_r),.shadinstr(c_shad),
                          .base(F_base),.textel(F_textel),.offset(F_ofs),.col(comb_col));
+`ifndef SYNTHESIS
+    // -------- OUTPUT-side dump: emitted (id, argb) IN OUTPUT ORDER. Compared against the
+    // UV-stage input dump's id sequence to detect any miss/hit-timing REORDER or offset:
+    // for an in-order pipeline out_id[k] must equal the k-th issued id. A mismatch means
+    // a cache-miss delay offset a texel/payload against the wrong pixel. Same +uvdump gate.
+    integer      ovd_fd = 0;
+    reg          ovd_en = 1'b0;
+    reg [1023:0] ovd_name;
+    integer      ovd_seq = 0;
+    initial begin
+        if ($value$plusargs("uvdump=%s", ovd_name)) begin ovd_en=1'b1; ovd_name="uv_out.log"; end
+        else if ($test$plusargs("uvdump")) begin ovd_en=1'b1; ovd_name="uv_out.log"; end
+        if (ovd_en) begin
+            ovd_fd = $fopen(ovd_name, "w");
+            $fwrite(ovd_fd, "# out order: seq out_id out_argb (ptx bit of the pixel)\n");
+        end
+    end
+    always @(posedge clk) begin
+        if (!reset && ovd_en && vF) begin
+            $fwrite(ovd_fd, "%0d %0d %08x %0d\n", ovd_seq, F_id, comb_col, T_ptx_r);
+            ovd_seq = ovd_seq + 1;
+        end
+    end
+    final if (ovd_en && ovd_fd != 0) begin
+        $fflush(ovd_fd); $fclose(ovd_fd);
+        $display("[tsp_shade_pp] output-order dump: %0d pixels -> %0s", ovd_seq, ovd_name);
+    end
+`endif
+
     // COMB advances on vF (a FILT result), decoupled from the front's `en`.
     always @(posedge clk) begin
         if (reset) out_valid<=0;
