@@ -102,8 +102,11 @@ package tsp_pkg;
     } cache_req_t;
     // response: cache -> client
     typedef struct packed {
-        logic        ack;       // 1-cycle response strobe
+        logic        ack;       // 1-cycle response strobe (result valid this cycle)
         logic [63:0] rdata;     // 64-bit line
+        logic        ready;     // STREAMING cache (tex_cache_4p): 1 = can accept a new
+                                //   req this cycle (backpressure). Plain tex_cache (the
+                                //   serial lp path) leaves this 1 when idle / unused.
     } cache_resp_t;
 
     // (The 256-bit line data-cache client port cache_req256_t/cache_resp256_t was
