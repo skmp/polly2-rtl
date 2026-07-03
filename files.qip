@@ -74,6 +74,13 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/color_tile_buffer.sv
 # valid mirrors stay in logic for the hit test + 1-cyc invalidate). Must precede
 # peel_core (instantiated there).
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/plane_cache.sv
+# peel_core FIFOs: three read disciplines. fifo_pq = registered 1-cyc read (plane
+# FIFO, M10K); fifo_fq = FWFT combinational head via registered prefetch (triangle
+# FIFO, M10K); fifo_eq = combinational zero-latency head (entry FIFO, logic). Must
+# precede peel_core (instantiated there).
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/fifo_pq.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/fifo_fq.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/fifo_eq.sv
 # peel_core: the render core with the DDR controller + framebuffer injected as
 # ports. mister_top wires the real HPS Avalon backend; the sim wrapper (tb) wires
 # a faux behavioral backend.

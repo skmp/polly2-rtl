@@ -254,6 +254,24 @@ fp: | $(BUILD)
 	  --Mdir $(BUILD)/obj_fpprims -o fp_prims_tb
 	./$(BUILD)/obj_fpprims/fp_prims_tb
 
+# ---- FIFO unit tests (randomized push/pop vs reference queue model) ----
+fifo_pq: | $(BUILD)
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module fifo_pq \
+	  rtl/tsp/fifo_pq.sv $(CWD)/tb/fifo_pq_tb.cpp \
+	  --Mdir $(BUILD)/obj_fifopq -o fifo_pq_tb
+	./$(BUILD)/obj_fifopq/fifo_pq_tb
+fifo_fq: | $(BUILD)
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module fifo_fq \
+	  rtl/tsp/fifo_fq.sv $(CWD)/tb/fifo_fq_tb.cpp \
+	  --Mdir $(BUILD)/obj_fifofq -o fifo_fq_tb
+	./$(BUILD)/obj_fifofq/fifo_fq_tb
+fifo_eq: | $(BUILD)
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module fifo_eq \
+	  rtl/tsp/fifo_eq.sv $(CWD)/tb/fifo_eq_tb.cpp \
+	  --Mdir $(BUILD)/obj_fifoeq -o fifo_eq_tb
+	./$(BUILD)/obj_fifoeq/fifo_eq_tb
+fifos: fifo_pq fifo_fq fifo_eq
+
 # ---- combinational setup TB (bit-exact) ----
 sim: vectors
 	+$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module tri_setup_top \
