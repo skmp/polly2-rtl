@@ -30,6 +30,11 @@
 //   in_textured : 0 = non-textured pixel (flows through, argb forced to 0)
 //   in_ready    : the fetcher can accept it this clock (== cache can accept a tc req)
 //   out_valid   : argb corresponds to a completed fetch this clock (in issue order)
+//   out_ready   : the consumer can accept a result this clock (BACKPRESSURE). When low,
+//                 the completion pointer holds and results stay parked in the slot ring;
+//                 the tc->vp->vq cache trips continue (acks cannot be deferred). Required
+//                 so a corner that races ahead of its siblings (their cache still filling)
+//                 cannot overrun the downstream corner-join FIFO.
 //
 module tex_fetch_pp import tsp_pkg::*; (
     input             clk,
@@ -43,6 +48,7 @@ module tex_fetch_pp import tsp_pkg::*; (
     input      [31:0] tsp,
     input      [31:0] tcw,
     input      [4:0]  text_ctrl,
+    input             out_ready,    // consumer backpressure (see PROTOCOL above)
     output reg        out_valid,
     output reg [31:0] argb,
 
@@ -151,7 +157,11 @@ module tex_fetch_pp import tsp_pkg::*; (
     wire vq_pop  = vq_resp.ack;
 
     // completion drains slot cp when it has an outstanding entry whose memtel is known
-    wire cp_ready = (oc_cnt != 0) && slot_done[cp];
+    // AND the consumer can take a result (out_ready). When out_ready is low the slot
+    // stays parked; the cache trips still land (they can't be deferred) but the emit
+    // side holds, so this corner cannot overrun the downstream corner-join FIFO while a
+    // sibling corner is still filling.
+    wire cp_ready = (oc_cnt != 0) && slot_done[cp] && out_ready;
 
     // ============ DECODE stage register ============
     reg        d_v;

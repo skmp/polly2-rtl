@@ -305,11 +305,16 @@ module tsp_shade_pp import tsp_pkg::*; #(
     assign cu[3]=U11u; assign cv[3]=U11v;
     generate
       for (gi=0; gi<4; gi=gi+1) begin : tf
+        // per-corner output backpressure: hold this corner's completion when its result
+        // FIFO is (near) full. A corner that races ahead of a still-filling sibling then
+        // parks its results in its own slot ring instead of overrunning rf. The behind
+        // corner is never full, so it keeps advancing until res_v fires and drains all 4.
         tex_fetch_pp u_tf (
             .clk(clk),.reset(reset),
             .in_valid(tex_start),.in_textured(U_ptx),.in_ready(tf_ready[gi]),
             .u(cu[gi]),.v(cv[gi]),.miplevel(U_mip),
             .tsp(U_tsp),.tcw(U_tcw),.text_ctrl(U_tc),
+            .out_ready(~rf_full4[gi]),
             .out_valid(tf_ov[gi]),.argb(tf_argb[gi]),
             .tc_req(tc_req[gi]),.tc_resp(tc_resp[gi]),
             .vq_req(vq_req[gi]),.vq_resp(vq_resp[gi]));
