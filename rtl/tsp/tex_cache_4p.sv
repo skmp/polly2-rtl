@@ -147,10 +147,25 @@ module tex_cache_4p import tsp_pkg::*; (
                     (t_v[3] && !t_hit[3]) ? 3'd3 : 3'b100;
 
     integer k;
+
+`ifndef SYNTHESIS
+    // ---- TEX-stage hit-parallelism stats ----
+    // Per TEST cycle that presents at least one active lookup, bin by how many of
+    // the (up to 4) active ports hit the cache THAT cycle: hit4 = all four corners
+    // resident, ... hit0 = every active port missed. Only counted while S_RUN is
+    // actually consuming t_* (t_v gate below), so freeze/fill cycles don't inflate.
+    integer stat_hit [0:4];               // stat_hit[n] = #cycles with n port-hits
+    integer stat_n;                       // total binned (active-lookup) cycles
+`endif
+
     always @(posedge clk) begin
         if (reset) begin
             st <= S_RST; rd_r <= 0; rst_i <= 0;
             for (i=0;i<4;i=i+1) begin ack_r[i]<=0; q_v[i]<=0; t_v[i]<=0; end
+`ifndef SYNTHESIS
+            for (i=0;i<5;i=i+1) stat_hit[i] <= 0;
+            stat_n <= 0;
+`endif
         end else begin
             for (i=0;i<4;i=i+1) ack_r[i] <= 1'b0;
             rd_r <= 1'b0;
@@ -180,6 +195,17 @@ module tex_cache_4p import tsp_pkg::*; (
                 for (i=0;i<4;i=i+1) if (t_hit[i]) begin
                     rdata_r[i] <= t_word[i]; ack_r[i] <= 1'b1; q_v[i] <= 1'b0;
                 end
+`ifndef SYNTHESIS
+                // TEX stat: bin this TEST cycle by how many active ports hit. Only
+                // count cycles that actually presented a lookup (>=1 t_v set).
+                if (t_v[0] || t_v[1] || t_v[2] || t_v[3]) begin
+                    stat_hit[(t_hit[0]?1:0)+(t_hit[1]?1:0)
+                            +(t_hit[2]?1:0)+(t_hit[3]?1:0)]
+                        <= stat_hit[(t_hit[0]?1:0)+(t_hit[1]?1:0)
+                                   +(t_hit[2]?1:0)+(t_hit[3]?1:0)] + 1;
+                    stat_n <= stat_n + 1;
+                end
+`endif
                 if (!fm[2]) begin
                     // a miss: latch its line and go fill. Freeze the TEST pipeline
                     // (t_v cleared) so nothing re-tests against stale reads while the
@@ -236,4 +262,11 @@ module tex_cache_4p import tsp_pkg::*; (
             endcase
         end
     end
+
+`ifndef SYNTHESIS
+    final begin
+        $display("=== TEX$ %m: %0d lookup-cycles: HIT4=%0d HIT3=%0d HIT2=%0d HIT1=%0d HIT0=%0d ===",
+                 stat_n, stat_hit[4], stat_hit[3], stat_hit[2], stat_hit[1], stat_hit[0]);
+    end
+`endif
 endmodule

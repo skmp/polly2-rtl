@@ -126,5 +126,6 @@ int main(int argc,char**argv){
     printf("finished in %ld cycles\n", cyc);
 
     write_bmp(out_path, 640, 480);
+    dut->final();   // flush RTL `final` blocks (TEX$ stats etc.)
     return 0;
 }
