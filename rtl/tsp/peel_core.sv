@@ -1176,6 +1176,26 @@ module peel_core import tsp_pkg::*; (
     reg          md_en = 1'b0;
     initial if ($test$plusargs("missdump")) md_en = 1'b1;
 
+    // -------- +spandump : capture the TSP-INPUT buffer per shade pass --------------------
+    // Dumps the {valid,tag,invW,pt} the spanner reads for every tile pixel (0..1023) of a
+    // pass into spanner_input_<N>.bin, plus a per-pass header {shade_mode,xbase,ybase,
+    // param_base,intensity_shadow,npix,tx,ty}. These are the exact IN vectors spanner_v2
+    // consumes, so its standalone TB can replay real menu2/doa2 tiles. Filled as the
+    // spanner walks (L1 carry, id order) and flushed at P_DONE. Off unless +spandump.
+    reg           spd_en = 1'b0;
+    integer       spd_n  = 0;             // pass counter -> filename index
+    reg           cap_valid [0:1023];
+    reg  [31:0]   cap_tag   [0:1023];
+    reg  [31:0]   cap_invw  [0:1023];
+    reg           cap_pt    [0:1023];
+    initial if ($test$plusargs("spandump")) spd_en = 1'b1;
+    // write a 32-bit word as TEXT (one 8-hex-digit token per line). A binary %c dump is
+    // NOT usable: Verilator's $fwrite("%c",..) silently drops any 0x00 byte, which
+    // desyncs a packed stream full of zero bytes (tags/invW/valid). Text is unambiguous.
+    task automatic spd_wr32(input integer fd, input [31:0] w);
+        $fwrite(fd, "%08x\n", w);
+    endtask
+
     integer      fbd_fd = 0; reg fbd_en = 1'b0; reg [1023:0] fbd_name; integer fbd_n = 0;
     initial begin
         if ($value$plusargs("fbdump=%s", fbd_name)) fbd_en=1'b1;
@@ -1934,6 +1954,15 @@ module peel_core import tsp_pkg::*; (
                         sinvwb <= sh_depth_o;
                         satb   <= sh_pt_o;
                         sstaged<= spn_A_stg;
+`ifndef SYNTHESIS
+                        // +spandump: capture pixel sida's TSP input (id order, once/px).
+                        if (spd_en) begin
+                            cap_valid[sida] <= sh_valid_o;
+                            cap_tag  [sida] <= sh_tag_o;
+                            cap_invw [sida] <= sh_depth_o;
+                            cap_pt   [sida] <= sh_pt_o;
+                        end
+`endif
                     end else begin
                         svb <= 1'b0;
                     end
@@ -2081,6 +2110,34 @@ module peel_core import tsp_pkg::*; (
                 tsp_tag  <= ~tsp_tag;
 `ifndef SYNTHESIS
                 pc_span <= pc_span + 1;
+                // +spandump: flush this pass's captured TSP-input buffer to
+                // spanner_input_<spd_n>.txt (TEXT: one 8-hex-digit word per line; header
+                // of 9 words then 1024 records of {valid,tag,invw,pt}).
+                if (spd_en) begin : spd_flush
+                    integer spf; integer si; string spname;
+                    spname = $sformatf("spanner_input_%0d.txt", spd_n);
+                    spf = $fopen(spname, "w");
+                    if (spf != 0) begin
+                        spd_wr32(spf, 32'h53504E31);                 // magic "SPN1"
+                        spd_wr32(spf, {31'd0, shade_mode});
+                        spd_wr32(spf, spn_xbase);
+                        spd_wr32(spf, spn_ybase);
+                        spd_wr32(spf, {5'd0, param_base});
+                        spd_wr32(spf, {31'd0, regs.fpu_shad_scale.intensity_shadow});
+                        spd_wr32(spf, 32'd1024);                     // npix
+                        spd_wr32(spf, {26'd0, spn_tx});
+                        spd_wr32(spf, {26'd0, spn_ty});
+                        for (si = 0; si < 1024; si = si + 1) begin
+                            spd_wr32(spf, {31'd0, cap_valid[si]});
+                            spd_wr32(spf, cap_tag[si]);
+                            spd_wr32(spf, cap_invw[si]);
+                            spd_wr32(spf, {31'd0, cap_pt[si]});
+                        end
+                        $fclose(spf);
+                        $display("[peel_core] spandump: pass %0d -> %0s", spd_n, spname);
+                    end
+                    spd_n = spd_n + 1;
+                end
 `endif
                 spn <= P_IDLE;
             end

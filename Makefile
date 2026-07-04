@@ -172,6 +172,18 @@ frontendtsplp: | $(BUILD)
 	  $(CWD)/tb/frontend_tsp_lp_tb.cpp --Mdir $(BUILD)/obj_frontendtsplp -o tb
 	./$(BUILD)/obj_frontendtsplp/tb $(DUMP)
 
+# spanner_v2 standalone check: replays captured TSP-input vectors
+# (spanner_test_vectors/spanner_input_<N>.txt + vram.bin) through spanner_v2 and
+# compares span emission + triangle_setups writes against a C++ golden. ARGS lets you
+# pass "<dir> <first> <count>" (default: spanner_test_vectors 0 8).
+spannerv2: | $(BUILD)
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ --public-flat-rw \
+	  --top-module spanner_v2_tb_top \
+	  $(TSP_RTL) tb/spanner_v2_tb_top.sv tb/sim_ddr_fb.sv \
+	  $(wildcard rtl/isp_min/*.sv) \
+	  $(CWD)/tb/spanner_v2_tb.cpp --Mdir $(BUILD)/obj_spannerv2 -o tb
+	./$(BUILD)/obj_spannerv2/tb $(ARGS)
+
 # front-end + ISP + TSP, TRIPLE-BUFFERED: 3 concurrent tile stages (ISP / TSP /
 # writeout) on rotating buffers -> shaded_pp_<name>.bmp.
 frontendtsppp: | $(BUILD)
