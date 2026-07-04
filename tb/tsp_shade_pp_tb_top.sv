@@ -48,12 +48,31 @@ module tsp_shade_pp_tb_top import tsp_pkg::*; (
     // ---- behavioral VRAM shared by all caches (64-bit physical view) ----
     (* verilator public_flat_rw *) reg [63:0] vram [0:1048575];
 
-    // a DDR read port stub factory (1-cycle, never busy)
+    // a DDR read port stub factory (1-cycle, never busy) - single-beat (serial path)
     `define DDRPORT(NM) \
         ddr_rd_req_t NM``_dreq; ddr_rd_resp_t NM``_dresp; \
         reg [63:0] NM``_do; reg NM``_dv; \
         assign NM``_dresp.busy=1'b0; assign NM``_dresp.dout=NM``_do; assign NM``_dresp.dready=NM``_dv; \
         always @(posedge clk) begin NM``_dv<=0; if(NM``_dreq.rd) begin NM``_do<=vram[NM``_dreq.addr[19:0]]; NM``_dv<=1; end end
+
+    // a BURST DDR read port (latched, RD_LAT latency, `burst` consecutive dready beats).
+    // Matches the tex_cache_4p fill contract (frontend_tsp_pp_tb_top's reader).
+    `define DDRBURST(NM) \
+        ddr_rd_req_t NM``_dreq; ddr_rd_resp_t NM``_dresp; \
+        reg NM``_busy; reg [19:0] NM``_word; reg [7:0] NM``_beats, NM``_lat; \
+        reg [63:0] NM``_do; reg NM``_dv; reg NM``_pend; reg [28:0] NM``_pa; reg [7:0] NM``_pb; \
+        assign NM``_dresp.busy=NM``_busy||NM``_pend; assign NM``_dresp.dout=NM``_do; assign NM``_dresp.dready=NM``_dv; \
+        always @(posedge clk) begin \
+            NM``_dv<=0; \
+            if(reset) begin NM``_busy<=0; NM``_pend<=0; end \
+            else begin \
+                if(NM``_dreq.rd) begin NM``_pend<=1; NM``_pa<=NM``_dreq.addr; NM``_pb<=NM``_dreq.burst; end \
+                if(!NM``_busy) begin \
+                    if(NM``_pend) begin NM``_busy<=1; NM``_word<=NM``_pa[19:0]; NM``_beats<=NM``_pb; NM``_lat<=8'd8; NM``_pend<=NM``_dreq.rd; end \
+                end else if(NM``_lat!=0) NM``_lat<=NM``_lat-8'd1; \
+                else begin NM``_do<=vram[NM``_word]; NM``_dv<=1; NM``_word<=NM``_word+20'd1; if(NM``_beats<=8'd1) NM``_busy<=0; NM``_beats<=NM``_beats-8'd1; end \
+            end \
+        end
 
     // ---- serial reference: tsp_shade + 2 caches ----
     `DDRPORT(rd) `DDRPORT(rq)
@@ -68,19 +87,13 @@ module tsp_shade_pp_tb_top import tsp_pkg::*; (
         .pp_texture(pp_texture),.pp_offset(pp_offset),
         .tc_req(rd_creq),.tc_resp(rd_cresp),.vq_req(rq_creq),.vq_resp(rq_cresp));
 
-    // ---- pipelined dut: tsp_shade_pp + 4 corner pairs (8 caches) ----
-    `DDRPORT(p0d) `DDRPORT(p0q) `DDRPORT(p1d) `DDRPORT(p1q)
-    `DDRPORT(p2d) `DDRPORT(p2q) `DDRPORT(p3d) `DDRPORT(p3q)
+    // ---- pipelined dut: tsp_shade_pp + TWO 4-port streaming caches (data + VQ),
+    //      exactly as peel_core wires it. Each 4p cache has one burst DDR port. ----
+    `DDRBURST(pd) `DDRBURST(pq)
     cache_req_t  pp_tc_req [0:3], pp_vq_req [0:3];
     cache_resp_t pp_tc_resp[0:3], pp_vq_resp[0:3];
-    tex_cache u_p0d (.clk(clk),.reset(reset),.creq(pp_tc_req[0]),.cresp(pp_tc_resp[0]),.dreq(p0d_dreq),.dresp(p0d_dresp));
-    tex_cache u_p0q (.clk(clk),.reset(reset),.creq(pp_vq_req[0]),.cresp(pp_vq_resp[0]),.dreq(p0q_dreq),.dresp(p0q_dresp));
-    tex_cache u_p1d (.clk(clk),.reset(reset),.creq(pp_tc_req[1]),.cresp(pp_tc_resp[1]),.dreq(p1d_dreq),.dresp(p1d_dresp));
-    tex_cache u_p1q (.clk(clk),.reset(reset),.creq(pp_vq_req[1]),.cresp(pp_vq_resp[1]),.dreq(p1q_dreq),.dresp(p1q_dresp));
-    tex_cache u_p2d (.clk(clk),.reset(reset),.creq(pp_tc_req[2]),.cresp(pp_tc_resp[2]),.dreq(p2d_dreq),.dresp(p2d_dresp));
-    tex_cache u_p2q (.clk(clk),.reset(reset),.creq(pp_vq_req[2]),.cresp(pp_vq_resp[2]),.dreq(p2q_dreq),.dresp(p2q_dresp));
-    tex_cache u_p3d (.clk(clk),.reset(reset),.creq(pp_tc_req[3]),.cresp(pp_tc_resp[3]),.dreq(p3d_dreq),.dresp(p3d_dresp));
-    tex_cache u_p3q (.clk(clk),.reset(reset),.creq(pp_vq_req[3]),.cresp(pp_vq_resp[3]),.dreq(p3q_dreq),.dresp(p3q_dresp));
+    tex_cache_4p_1c u_pd (.clk(clk),.reset(reset),.creq(pp_tc_req),.cresp(pp_tc_resp),.dreq(pd_dreq),.dresp(pd_dresp));
+    tex_cache_4p_1c u_pq (.clk(clk),.reset(reset),.creq(pp_vq_req),.cresp(pp_vq_resp),.dreq(pq_dreq),.dresp(pq_dresp));
 
     tsp_shade_pp #(.IDW(10)) u_pp (
         .clk(clk),.reset(reset),
@@ -89,6 +102,8 @@ module tsp_shade_pp_tb_top import tsp_pkg::*; (
         .tsp(tsp),.tcw(tcw),.text_ctrl(text_ctrl),
         .pp_texture(pp_texture),.pp_offset(pp_offset),
         .out_valid(pp_out_valid),.out_id(pp_out_id),.out_argb(pp_out_argb),
+        .out_tsp(pp_out_tsp),
         .stall(pp_stall),
         .tc_req(pp_tc_req),.tc_resp(pp_tc_resp),.vq_req(pp_vq_req),.vq_resp(pp_vq_resp));
+    wire [31:0] pp_out_tsp;   // unused by this bench
 endmodule

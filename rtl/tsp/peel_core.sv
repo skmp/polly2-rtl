@@ -138,9 +138,9 @@ module peel_core import tsp_pkg::*; (
     // distinct-line misses serialize (the pipe stalls while any corner is busy).
     cache_req_t   pp_tc_req [0:3], pp_vq_req [0:3];
     cache_resp_t  pp_tc_resp[0:3], pp_vq_resp[0:3];
-    tex_cache_4p u_tc4 (.clk(clk),.reset(reset),.creq(pp_tc_req),.cresp(pp_tc_resp),
+    tex_cache_4p_1c u_tc4 (.clk(clk),.reset(reset),.creq(pp_tc_req),.cresp(pp_tc_resp),
         .dreq(tex_dreq[0]),.dresp(tex_dresp[0]));
-    tex_cache_4p u_vq4 (.clk(clk),.reset(reset),.creq(pp_vq_req),.cresp(pp_vq_resp),
+    tex_cache_4p_1c u_vq4 (.clk(clk),.reset(reset),.creq(pp_vq_req),.cresp(pp_vq_resp),
         .dreq(tex_dreq[1]),.dresp(tex_dresp[1]));
 
     // -------------------- parsers --------------------
@@ -381,8 +381,9 @@ module peel_core import tsp_pkg::*; (
     // in the plane_cache module (u_pc). cache_bypass is deliberately IGNORED (always
     // cache). Miss -> param fetch (GetFpuEntry) + tsp_setup_min; per entry: 10 planes
     // {ddx,ddy,c} + the record's isp/tsp/tcw words. The wide plane payload lives in
-    // M10K (registered read -> SH_LOOK is a 2-cycle lookup: present read, then sample
-    // hit + payload); the small tag/valid mirrors stay in logic for the hit test +
+    // M10K (registered read -> the plane-cache lookup is a 1-cycle registered read,
+    // pipelined as stage L1->L2 of the streaming shade producer: L1 presents the read,
+    // L2 samples hit + payload); the small tag/valid mirror stays in logic for the
     // single-cycle invalidate. cur_* is the live working entry (feeds tsp_shade); the
     // whole cur_* bundle is committed to the cache in one write at TSP_RUN.
     // ==================================================================
@@ -407,14 +408,14 @@ module peel_core import tsp_pkg::*; (
 
     // plane_cache control (typed ports; driven by the shade FSM)
     reg          pc_inval;                 // clear all valid (S_SHADE_START, 1-cyc reg)
-    reg          pc_lu_req;                // lookup (COMBINATIONAL: st==SH_LOOK)
+    reg          pc_lu_req;                // lookup (COMBINATIONAL: streaming stage L1)
     reg          pc_wr_req;                // commit (TSP_RUN, 1-cyc reg)
     wire         pc_rd_valid, pc_hit;
     wire [31:0]  pc_o_isp, pc_o_tsp, pc_o_tcw;
     wire [319:0] pc_o_ddx, pc_o_ddy, pc_o_c;
     plane_cache #(.NENT(PC_N), .SLOTW(6)) u_pc (
         .clk(clk), .reset(reset), .inval(pc_inval),
-        .lu_req(pc_lu_req), .lu_slot(sh_slot), .lu_tag(sh_tag),
+        .lu_req(pc_lu_req), .lu_slot(pc_lu_slot_c), .lu_tag(pc_lu_tag_c),
         .rd_valid(pc_rd_valid), .hit(pc_hit),
         .o_isp(pc_o_isp), .o_tsp(pc_o_tsp), .o_tcw(pc_o_tcw),
         .o_ddx(pc_o_ddx), .o_ddy(pc_o_ddy), .o_c(pc_o_c),
@@ -424,12 +425,33 @@ module peel_core import tsp_pkg::*; (
     );
 
     // shade-pass state
-    reg [9:0]  shp;           // current tile pixel 0..1023
+    reg [9:0]  shp;           // next tile pixel 0..1023 to ISSUE into the stream
     reg [9:0]  fw_i;          // framebuffer-writeout pixel 0..1023
-    reg [31:0] sh_tag;        // that pixel's CoreTag
-    reg [31:0] sh_invw;       // that pixel's depth-buffer invW
+    reg [31:0] sh_tag;        // the MISS pixel's CoreTag (drives the fetch + cache write)
+    reg [31:0] sh_invw;       // the MISS pixel's depth-buffer invW (fed to the shader)
+    reg [9:0]  sh_id;         // the MISS pixel's tile index (fed to the shader)
+
+    // ---- STREAMING shade producer pipeline registers (SH_PRESENT) ----
+    // Two register stages feed tsp_shade_pp at 1 pixel/clock in the all-hit case:
+    //   L0 issue -> {va,ida}   : a peel-buffer read was presented last cycle for ida
+    //   L1 lookup -> {vb,idb..} : a plane-cache read was presented last cycle for idb
+    //   L2 present (combinational) : pc_hit/pc_o_* resolve idb -> tsp_shade_pp
+    reg        va;            // stage A occupied (peel read in flight for ida)
+    reg [9:0]  ida;
+    reg        vb;            // stage B occupied (cache read in flight for idb)
+    reg [9:0]  idb;
+    reg [31:0] tagb;          // idb's CoreTag (for the present + a possible miss)
+    reg [31:0] invwb;         // idb's depth-buffer invW
+    reg        iss_more;      // still pixels left to ISSUE at L0 (shp<=1023)
+
     // slot: param_offs low bits XOR tag_offset (strip triangles share param_offs)
     wire [5:0] sh_slot = sh_tag[8:3] ^ {3'b000, sh_tag[2:0]};
+
+    // plane-cache lookup address for THIS cycle (pipelined; see the request block).
+    // The read port is driven from L1 (a fresh peel result) or, while a present is
+    // stalled on a texture miss, re-driven for stage B to hold pc_hit/pc_o_* alive.
+    reg  [31:0] pc_lu_tag_c;
+    wire [5:0]  pc_lu_slot_c = pc_lu_tag_c[8:3] ^ {3'b000, pc_lu_tag_c[2:0]};
     // CoreTag fields (ISP_BACKGND_T layout)
     wire [20:0] sh_po   = sh_tag[23:3];
     wire [2:0]  sh_skip = sh_tag[26:24];
@@ -539,13 +561,15 @@ module peel_core import tsp_pkg::*; (
     );
 
     // -------------------- TSP shade (FULLY PIPELINED, 1 pixel/clock) --------------------
-    // The producer FSM presents a resolved pixel (planes from the plane cache +
-    // its tsp/tcw/isp flags) on pp_in_valid; tsp_shade_pp streams results out on
-    // pp_out_valid, carrying the pixel index (0..1023) as the id so the consumer
-    // can write col_buf[out_id]. pp_stall (any texel fetcher busy) freezes the
-    // pipe; the producer holds while stalled.
+    // The streaming producer presents a resolved pixel (planes from the plane cache
+    // on a hit, or from cur_* on a just-fetched miss) on pp_in_valid; tsp_shade_pp
+    // streams results out on pp_out_valid, carrying the pixel index (0..1023) as the
+    // id so the consumer can write col_buf[out_id]. pp_stall (any texel fetcher busy)
+    // freezes the pipe; the producer holds the presented pixel while stalled.
+    // The pp_* inputs are driven COMBINATIONALLY (see the pp-input mux) so a pixel can
+    // be presented the same cycle its planes resolve (no extra latch stage).
     reg          pp_in_valid;
-    reg  [9:0]   pp_in_id;       // = pixel index shp
+    reg  [9:0]   pp_in_id;
     reg  [4:0]   pp_px, pp_py;
     reg  [31:0]  pp_invw;
     reg  [31:0]  pp_tsp, pp_tcw; reg pp_ptex, pp_pofs;
@@ -568,6 +592,46 @@ module peel_core import tsp_pkg::*; (
         .out_tsp(pp_out_tsp),
         .stall(pp_stall),
         .tc_req(pp_tc_req),.tc_resp(pp_tc_resp),.vq_req(pp_vq_req),.vq_resp(pp_vq_resp));
+
+`ifndef SYNTHESIS
+    // -------- tsp_shade_pp INPUT DUMP (sim only) --------------------------------------
+    // Dumps every pixel ACCEPTED by the shader (pp_in_valid && !pp_stall) with all of its
+    // inputs, so the exact per-pixel stream feeding tsp_shade_pp can be diffed against the
+    // serial reference / refsw. Enabled at runtime with +shadedump[=<file>] (default file
+    // shade_pp_input.log); zero cost otherwise. One header + one CSV-ish line per accept:
+    //   seq id px py invw tsp tcw text_ctrl ptex pofs ddx[0..9] ddy[0..9] c[0..9]
+    integer      sd_fd = 0;
+    reg          sd_en = 1'b0;
+    reg [1023:0] sd_name;
+    integer      sd_seq = 0;
+    integer      sd_i;
+    initial begin
+        if ($value$plusargs("shadedump=%s", sd_name)) sd_en = 1'b1;
+        else if ($test$plusargs("shadedump")) begin sd_en = 1'b1; sd_name = "shade_pp_input.log"; end
+        if (sd_en) begin
+            sd_fd = $fopen(sd_name, "w");
+            $fwrite(sd_fd, "# tsp_shade_pp input dump: one line per accepted pixel\n");
+            $fwrite(sd_fd, "# seq id px py invw tsp tcw text_ctrl ptex pofs ddx0..9 ddy0..9 c0..9\n");
+        end
+    end
+    always @(posedge clk) begin
+        if (!reset && sd_en && pp_in_valid && !pp_stall) begin
+            $fwrite(sd_fd, "%0d %0d %0d %0d %08x %08x %08x %02x %0d %0d",
+                    sd_seq, pp_in_id, pp_px, pp_py, pp_invw, pp_tsp, pp_tcw,
+                    regs.text_control[4:0], pp_ptex, pp_pofs);
+            for (sd_i = 0; sd_i < 10; sd_i = sd_i + 1) $fwrite(sd_fd, " %08x", pp_ddx[sd_i]);
+            for (sd_i = 0; sd_i < 10; sd_i = sd_i + 1) $fwrite(sd_fd, " %08x", pp_ddy[sd_i]);
+            for (sd_i = 0; sd_i < 10; sd_i = sd_i + 1) $fwrite(sd_fd, " %08x", pp_c[sd_i]);
+            $fwrite(sd_fd, "\n");
+            sd_seq = sd_seq + 1;
+        end
+    end
+    final if (sd_en && sd_fd != 0) begin
+        $fflush(sd_fd);
+        $fclose(sd_fd);
+        $display("[peel_core] tsp_shade_pp input dump: %0d pixels written to %0s", sd_seq, sd_name);
+    end
+`endif
 
     // -------- blend unit: the very end of the TSP pipeline (refsw BlendingUnit) --------
     // The blend RMW now lives INSIDE u_col (color_tile_buffer): a 2-stage pipeline
@@ -598,8 +662,10 @@ module peel_core import tsp_pkg::*; (
                S_OL_RUN=4,                 // producer: OL entries -> entry FIFO
                S_RA_ACK=9, S_DONE=10,
                S_DRAIN=11,                 // barrier: wait consumer idle + FIFOs empty
-               // shade pass (FLUSH): producer walks pixels, feeds tsp_shade_pp
-               SH_PIX=16, SH_LOOK=17,
+               // shade pass (FLUSH): the STREAMING shade producer (see SH_PRESENT).
+               // SH_MPRES presents a cache-MISS-resolved pixel (planes from cur_*)
+               // after the FH_*/FV_*/TSP_RUN fetch, then restarts the stream.
+               SH_MPRES=16,
                FH_ISP=18, FH_ISPW=19, FH_TSPW=20, FH_TCWW=21,
                FV_RD=22, FV_W=23,
                TSP_RUN=24, SH_PRESENT=25, SH_DRAIN=26, SH_OUT=27,
@@ -610,10 +676,7 @@ module peel_core import tsp_pkg::*; (
                // M10K bulk-op walks over the peel RAM ports (128 chunk addrs each):
                S_CLEAR_WR=34,              // CLEAR: write {bg_depth, bg_tag} chunks
                S_PEEL_BUF_RUN=35,          // PeelBuffers RMW walk (read A -> write B)
-               // shade producer: 1-cycle peel-RAM read latency for pixel shp
-               SH_RD=36,
-               S_FLUSH_RD=37,              // FLUSH: prime col-RAM read of pixel fw_i
-               SH_LOOK2=38;                // plane-cache registered-read result cycle
+               S_FLUSH_RD=37;              // FLUSH: prime col-RAM read of pixel fw_i
     reg [5:0] st;
 
     // consumer sub-FSM (setup is now the streamed pipeline u_isp -> pq FIFO)
@@ -650,6 +713,22 @@ module peel_core import tsp_pkg::*; (
     reg        shade_mode;
     reg [5:0]  shade_ret;
     integer    sh_pending;   // pixels presented this shade sub-phase (PEEL skips some)
+
+    // ---- STREAMING shade producer control (combinational; see SH_PRESENT) ----
+    wire sh_streaming  = (st == SH_PRESENT);
+    // stage A carries a pixel that IS shaded this pass (PEEL skips !sh_valid_o pixels).
+    // sh_valid_o is the peel result for ida (the read presented last cycle).
+    wire sh_A_staged   = va && (shade_mode ? sh_valid_o : 1'b1);
+    // stage B resolved this cycle: pc_hit / pc_o_* correspond to idb (read last cycle).
+    wire sh_present_v   = sh_streaming && vb && pc_hit;     // a hit ready to present
+    wire sh_present_acc = sh_present_v && !pp_stall;        // accepted by the shader
+    wire sh_miss        = sh_streaming && vb && !pc_hit;    // B is a plane-cache miss
+    // advance the front unless a hit present is stalled or B is a miss (miss -> fetch).
+    wire sh_adv         = sh_streaming && !sh_miss && !(sh_present_v && pp_stall);
+    // SH_MPRES: the miss-resolved pixel (idb) is being presented from cur_*; it is
+    // accepted when the shader isn't stalled. On accept we return to SH_PRESENT, so
+    // this is the cycle to re-present ida's peel read (stage A survived the fetch).
+    wire sh_mpres_acc   = (st == SH_MPRES) && !pp_stall;
 
     // ---- entry FIFO (object_list_parser -> iterator), depth 8 ----
     localparam integer EQ_N = 8;
@@ -800,7 +879,7 @@ module peel_core import tsp_pkg::*; (
     integer pc_sh_tex_stall;    // SH_PRESENT && pp_stall: blocked on texture fetch
     integer pc_sh_setup_wait;   // TSP_RUN: waiting on tsp_setup_min (plane-cache MISS)
     integer pc_sh_fetch;        // FH_*/FV_*: fetching vertex params from DDR (miss)
-    integer pc_sh_look;         // SH_PIX/SH_RD/SH_LOOK/SH_LOOK2: plane-cache lookup
+    integer pc_sh_look;         // SH_PRESENT frozen/fill: front lookup, not presenting
     integer pc_sh_drain;        // SH_DRAIN: shade pipe drain
     integer pc_sh_none;         // not in a shade sub-phase this clock
     // top-level phase view (whole-core, mutually exclusive by `st` group)
@@ -836,6 +915,25 @@ module peel_core import tsp_pkg::*; (
     wire fw_pix_consumed = (st==S_FLUSH_WR) &&
                            ( (fw_onscreen && !fbw_resp.busy) || !fw_onscreen );
 
+`ifndef SYNTHESIS
+    // -------- FRAMEBUFFER-WRITE dump (sim only): the FINAL output, screen (x,y,argb) as
+    // actually written. Reconstructing an image from this vs the BMP isolates whether any
+    // weave lives in FLUSH/scanout (fb writes already blocky) or in the BMP writer (fb
+    // writes smooth). +fbdump[=<file>] (default fb_writes.log). ----
+    integer      fbd_fd = 0; reg fbd_en = 1'b0; reg [1023:0] fbd_name; integer fbd_n = 0;
+    initial begin
+        if ($value$plusargs("fbdump=%s", fbd_name)) fbd_en=1'b1;
+        else if ($test$plusargs("fbdump")) begin fbd_en=1'b1; fbd_name="fb_writes.log"; end
+        if (fbd_en) begin fbd_fd=$fopen(fbd_name,"w"); $fwrite(fbd_fd,"# x y argb (tile tx,ty fw_i)\n"); end
+    end
+    always @(posedge clk) if (!reset && fbd_en && fbw_req.we && fw_pix_consumed) begin
+        $fwrite(fbd_fd, "%0d %0d %08x %0d %0d %0d\n", fw_px, fw_py, col_rd_argb, cur_tx, cur_ty, fw_i);
+        fbd_n = fbd_n + 1;
+    end
+    final if (fbd_en && fbd_fd!=0) begin $fflush(fbd_fd); $fclose(fbd_fd);
+        $display("[peel_core] framebuffer writes: %0d -> %0s", fbd_n, fbd_name); end
+`endif
+
     // ============ COMBINATIONAL buffer request ports (valid THIS cycle) ============
     // Drive u_peel / u_col's typed request ports from the FSM + pipeline state. The
     // buffer modules own the RAM ports, the compare, the RMW write-data and the
@@ -845,8 +943,16 @@ module peel_core import tsp_pkg::*; (
     always @(*) begin
         // ---- peel buffer ----
         pb_ra_valid    = ras_out_valid;               // stage-A read (chunk resolved)
-        pb_shrd_valid  = (st == SH_PIX);              // shade single-pixel read
-        pb_shrd_id     = shp;
+        // STREAMING shade: L0 presents a peel read every advance cycle (id=shp, the
+        // pixel being issued). When a present is held (texture stall) the front freezes
+        // but we RE-present ida's read so stage A's peel result stays alive on sh_*.
+        // On a cache MISS the front leaves SH_PRESENT to fetch (sh_streaming drops), so
+        // stage A's peel result is lost; as we RETURN (SH_MPRES accept, sh_mpres_acc),
+        // re-present ida's read so sh_* is fresh the cycle we re-enter SH_PRESENT.
+        if (sh_streaming)      begin pb_shrd_valid = (sh_adv ? iss_more : va);
+                                     pb_shrd_id    = (sh_adv ? shp : ida); end
+        else if (sh_mpres_acc) begin pb_shrd_valid = va; pb_shrd_id = ida; end
+        else                   begin pb_shrd_valid = 1'b0; pb_shrd_id = ida; end
         pb_clr_valid   = (st == S_CLEAR_WR);          // CLEAR walk write
         pb_clr_addr    = cl_i;
         pb_bufrd_valid = (st == S_PEEL_BUF_RUN);      // PeelBuffers read-ahead
@@ -856,20 +962,77 @@ module peel_core import tsp_pkg::*; (
         // (stage-B write is driven by the b_valid port directly on u_peel)
 
         // ---- color buffer ----
-        cb_ca_valid = pp_out_valid && !pp_stall;      // blend stage CA read (out_id)
+        // STREAMING shade pipe: pp_out_valid is a clean 1-cycle pulse INDEPENDENT of
+        // pp_stall (the back-end drains while the front may be stalled on a texture
+        // miss). Consume it whenever high - gating on !pp_stall would drop results that
+        // emerge during a miss (the old frozen-pipe contract no longer holds).
+        cb_ca_valid = pp_out_valid;                   // blend stage CA read (out_id)
         cb_ca_id    = pp_out_id;
         cb_fl_valid = (st == S_FLUSH_RD || st == S_FLUSH_WR);   // FLUSH read (fw_i)
         cb_fl_id    = fw_i;
 
-        // ---- plane cache: lookup presented while st==SH_LOOK so u_pc registers the
-        // read at the SH_LOOK->SH_LOOK2 edge (hit/o_* valid IN SH_LOOK2). ----
-        pc_lu_req = (st == SH_LOOK);
+        // ---- plane cache lookup (STREAMING) ----
+        // On an advance cycle L1 looks up the pixel whose peel result is on sh_* now
+        // (stage A, tag = sh_tag_o), if it is shaded this pass. While a present is
+        // held on a texture stall we instead RE-issue stage B's lookup so pc_hit/pc_o_*
+        // stay valid for the pixel we're re-presenting. (u_peel and u_pc are separate
+        // RAMs, so the peel read and the cache read both fire every cycle.)
+        if (sh_streaming && !sh_adv && vb) begin       // present held: hold stage B
+            pc_lu_req   = 1'b1;
+            pc_lu_tag_c = tagb;
+        end else if (sh_streaming && sh_adv && sh_A_staged) begin
+            pc_lu_req   = 1'b1;
+            pc_lu_tag_c = sh_tag_o;
+        end else begin
+            pc_lu_req   = 1'b0;
+            pc_lu_tag_c = sh_tag_o;
+        end
+    end
+
+    // ---- pp-input mux: drive tsp_shade_pp's inputs COMBINATIONALLY ----
+    // HIT  (SH_PRESENT): planes straight from the plane cache (pc_o_*), id/invw from
+    //                    the stage-B pipeline registers.
+    // MISS (SH_MPRES)  : planes from cur_* (just fetched + committed), id/invw the
+    //                    latched miss context. pp_in_valid is held while in either
+    //                    present state until the shader accepts (!pp_stall).
+    integer pj;
+    always @(*) begin
+        if (st == SH_MPRES) begin
+            pp_in_valid = 1'b1;
+            pp_in_id    = sh_id;
+            pp_invw     = sh_invw;
+            pp_tsp      = cur_tsp;
+            pp_tcw      = cur_tcw;
+            pp_ptex     = cur_isp[ISP_TEXTURE_BIT];
+            pp_pofs     = cur_isp[ISP_OFFSET_BIT];
+            for (pj = 0; pj < 10; pj = pj + 1) begin
+                pp_ddx[pj] = cur_ddx[pj];
+                pp_ddy[pj] = cur_ddy[pj];
+                pp_c[pj]   = cur_c[pj];
+            end
+        end else begin                                 // HIT stream (or idle => valid=0)
+            pp_in_valid = sh_present_v;
+            pp_in_id    = idb;
+            pp_invw     = invwb;
+            pp_tsp      = pc_o_tsp;
+            pp_tcw      = pc_o_tcw;
+            pp_ptex     = pc_o_isp[ISP_TEXTURE_BIT];
+            pp_pofs     = pc_o_isp[ISP_OFFSET_BIT];
+            for (pj = 0; pj < 10; pj = pj + 1) begin
+                pp_ddx[pj] = pc_o_ddx[32*pj +: 32];
+                pp_ddy[pj] = pc_o_ddy[32*pj +: 32];
+                pp_c[pj]   = pc_o_c  [32*pj +: 32];
+            end
+        end
+        pp_px = pp_in_id[4:0];
+        pp_py = pp_in_id[9:5];
     end
 
     always @(posedge clk) begin
         if (reset) begin
             st<=S_IDLE; done<=0; ra_start<=0; ol_start<=0;
-            tsp_start<=0; pp_in_valid<=0; f_go<=0;
+            tsp_start<=0; f_go<=0;
+            va<=1'b0; vb<=1'b0; iss_more<=1'b0;
             ra_ack.list_done<=0; ol_ack.entry_done<=0; it_ack.triangle_done<=0;
             tri_count<=0; cull_count<=0; miss_count<=0; hit_count<=0; tri_seen<=0;
             sh_out_n<=0; ras_inflight<=0;
@@ -892,7 +1055,7 @@ module peel_core import tsp_pkg::*; (
             cl_i<='0; pb_i<='0; pb_rd<='0; pb_pipe<=1'b0; first_peel<=1'b0;
             pc_inval<=1'b0; pc_wr_req<=1'b0;
             // (plane cache valid bits are cleared by u_pc's own reset; pc_lu_req is
-            //  combinational, driven from st==SH_LOOK)
+            //  combinational, driven by the streaming shade pipeline)
         end else begin
 `ifndef SYNTHESIS
             // -------- performance counters: charge THIS clock to its buckets --------
@@ -911,12 +1074,15 @@ module peel_core import tsp_pkg::*; (
 
                 // TSP / shade engine (by top FSM `st`, shade sub-phases only)
                 if (st == SH_PRESENT) begin
+                    if      (sh_present_v && pp_stall) pc_sh_tex_stall <= pc_sh_tex_stall + 1;
+                    else if (sh_present_acc)           pc_sh_present   <= pc_sh_present   + 1;
+                    else                               pc_sh_look      <= pc_sh_look      + 1; // fill/lookup
+                end else if (st == SH_MPRES) begin
                     if (pp_stall) pc_sh_tex_stall <= pc_sh_tex_stall + 1;
                     else          pc_sh_present    <= pc_sh_present    + 1;
                 end else if (st == TSP_RUN)                       pc_sh_setup_wait <= pc_sh_setup_wait + 1;
                 else if (st==FH_ISP||st==FH_ISPW||st==FH_TSPW||st==FH_TCWW||
                          st==FV_RD||st==FV_W)                     pc_sh_fetch <= pc_sh_fetch + 1;
-                else if (st==SH_PIX||st==SH_RD||st==SH_LOOK||st==SH_LOOK2) pc_sh_look <= pc_sh_look + 1;
                 else if (st==SH_DRAIN)                            pc_sh_drain <= pc_sh_drain + 1;
                 else                                              pc_sh_none  <= pc_sh_none  + 1;
 
@@ -926,7 +1092,7 @@ module peel_core import tsp_pkg::*; (
                 else if (st==S_FLUSH_RD||st==S_FLUSH_WR)          pc_top_flush   <= pc_top_flush   + 1;
                 else if (st==S_OL_RUN)                            pc_top_ol      <= pc_top_ol      + 1;
                 else if (st==S_DRAIN)                             pc_top_barrier <= pc_top_barrier + 1;
-                else if (st==SH_PIX||st==SH_RD||st==SH_LOOK||st==SH_LOOK2||
+                else if (st==SH_MPRES||
                          st==SH_PRESENT||st==SH_DRAIN||st==TSP_RUN||
                          st==FH_ISP||st==FH_ISPW||st==FH_TSPW||st==FH_TCWW||
                          st==FV_RD||st==FV_W)                     pc_top_shade   <= pc_top_shade   + 1;
@@ -937,7 +1103,7 @@ module peel_core import tsp_pkg::*; (
             end
 `endif
             done<=0; ra_start<=0; ol_start<=0;
-            tsp_start<=0; pp_in_valid<=0; f_go<=0;
+            tsp_start<=0; f_go<=0;
             ra_ack.list_done<=0; ol_ack.entry_done<=0; it_ack.triangle_done<=0;
             eq_push = 1'b0;
             pc_inval<=1'b0; pc_wr_req<=1'b0;  // 1-cyc strobes (pc_lu_req is combi)
@@ -986,7 +1152,7 @@ module peel_core import tsp_pkg::*; (
             // as drained. Stage CB (cb_valid): cr_rdata = OLD col_buf[id] = dst, the
             // blend runs combinationally, and the combi block writes col_ram[id].
             cb_valid <= 1'b0;
-            if (pp_out_valid && !pp_stall) begin
+            if (pp_out_valid) begin                    // clean pulse; NOT gated on stall
                 cb_valid <= 1'b1;
                 cb_id    <= pp_out_id;
                 cb_argb  <= pp_out_argb;
@@ -1225,57 +1391,65 @@ module peel_core import tsp_pkg::*; (
             S_SHADE_START: begin
                 pc_inval <= 1'b1;             // clear the plane cache (1-cyc bulk)
                 shp <= 10'd0; sh_out_n <= 0; sh_pending <= 0;
-                st <= SH_PIX;
+                // prime the streaming front: nothing in flight yet, all 1024 to issue.
+                va <= 1'b0; vb <= 1'b0; iss_more <= 1'b1;
+                st <= SH_PRESENT;
             end
 
-            // PRODUCER: resolve pixel shp's planes (plane cache; miss = fetch +
-            // tsp_setup) then present it to the pipelined shader. The CONSUMER
-            // (blend stages CA/CB) writes results into col_ram by id. In PEEL mode,
-            // pixels not staged this pass (dt_valid==0) are skipped.
-            //
-            // The peel buffers are now M10K (registered read): SH_PIX only PRESENTS
-            // u_peel presents the read of pixel shp's chunk while st==SH_PIX (the
-            // pb_shrd_valid port); SH_RD (next cycle) samples u_peel's sh_valid_o /
-            // sh_tag_o / sh_depth_o for that pixel. shp does not change between SH_PIX
-            // and SH_RD, so the pixel the buffer resolves is stable.
-            SH_PIX: st <= SH_RD;
+            // ================= STREAMING shade PRODUCER (1 px/clk good case) =========
+            // Three overlapping stages feed tsp_shade_pp, gated together by sh_adv:
+            //   L0 issue   : present the peel-buffer read of shp (pb_shrd_* combi); shp++
+            //   L1 lookup  : peel result for ida on sh_* -> present the plane-cache read
+            //                of its tag (pc_lu_* combi); PEEL-skip !sh_valid_o pixels
+            //   L2 present : pc_hit/pc_o_* resolve idb -> drive tsp_shade_pp (pp mux)
+            // A cache MISS at L2 freezes the front (sh_adv=0) and branches to the fetch
+            // subroutine (FH_*/FV_*/TSP_RUN); on return SH_MPRES presents idb from cur_*.
+            // A texture-stall present holds the front in place (sh_adv=0) but re-issues
+            // both in-flight reads (see the request block) so sh_*/pc_* stay alive.
+            SH_PRESENT: begin
+                if (sh_adv) begin
+                    // ---- L2 present: a hit was accepted this cycle (sh_adv guarantees
+                    //      !(sh_present_v && pp_stall), so a valid hit IS taken). ----
+                    if (sh_present_v) hit_count <= hit_count + 1;
 
-            SH_RD: begin
-                if (shade_mode && !sh_valid_o) begin
-                    // skip: nothing staged for this pixel this pass
-                    if (shp == 10'd1023) st <= SH_DRAIN;
-                    else begin shp <= shp + 10'd1; st <= SH_PIX; end
-                end else begin
-                    sh_tag     <= sh_tag_o;
-                    sh_invw    <= sh_depth_o;
-                    sh_pending <= sh_pending + 1;
-                    st <= SH_LOOK;
-                end
-            end
-
-            // plane-cache lookup by the full tag (cache_bypass ignored). M10K payload
-            // is registered-read: pc_lu_req is asserted COMBINATIONALLY while
-            // st==SH_LOOK (see the buffer-request block), so u_pc registers the read
-            // at the SH_LOOK->SH_LOOK2 edge and hit/o_* are valid IN SH_LOOK2.
-            SH_LOOK: st <= SH_LOOK2;
-
-            SH_LOOK2: begin
-                if (pc_hit) begin
-                    hit_count <= hit_count + 1;
-                    cur_isp = pc_o_isp;
-                    cur_tsp = pc_o_tsp;
-                    cur_tcw = pc_o_tcw;
-                    for (j = 0; j < 10; j = j + 1) begin
-                        cur_ddx[j] = pc_o_ddx[32*j +: 32];
-                        cur_ddy[j] = pc_o_ddy[32*j +: 32];
-                        cur_c[j]   = pc_o_c  [32*j +: 32];
+                    // ---- L1 -> L2: stage A's resolved pixel enters stage B (its
+                    //      plane-cache read was presented THIS cycle -> pc_* next cyc).
+                    //      PEEL-skipped pixels (!sh_A_staged) drop as a bubble. ----
+                    if (sh_A_staged) begin
+                        vb    <= 1'b1;
+                        idb   <= ida;
+                        tagb  <= sh_tag_o;
+                        invwb <= sh_depth_o;
+                        sh_pending <= sh_pending + 1;
+                    end else begin
+                        vb <= 1'b0;
                     end
-                    st <= SH_PRESENT;
-                end else begin
+
+                    // ---- L0 -> L1: issue the next pixel's peel read (presented THIS
+                    //      cycle via pb_shrd_*), advance shp, retire iss_more at 1023. ----
+                    if (iss_more) begin
+                        va  <= 1'b1;
+                        ida <= shp;
+                        if (shp == 10'd1023) iss_more <= 1'b0;
+                        else                 shp <= shp + 10'd1;
+                    end else begin
+                        va <= 1'b0;
+                    end
+
+                    // ---- drain: front empty and nothing left to issue -> done. ----
+                    if (!iss_more && !va && !sh_A_staged) st <= SH_DRAIN;
+                end else if (sh_miss) begin
+                    // ---- L2 miss: freeze the front, latch idb's context, fetch. The
+                    //      slot fields derive from the `sh_tag` reg, but f_rec must use
+                    //      tagb NOW (sh_tag updates next cycle). ----
                     miss_count <= miss_count + 1;
-                    f_rec <= param_base + {4'd0, sh_po, 2'b00};
+                    sh_tag  <= tagb;                 // drives sh_po/sh_toff/... for fetch
+                    sh_invw <= invwb;                // idb's depth (fed to the shader)
+                    sh_id   <= idb;                  // idb's tile index (fed to the shader)
+                    f_rec   <= param_base + {4'd0, tagb[23:3], 2'b00};
                     st <= FH_ISP;
                 end
+                // else: hit-present held on a texture stall -> hold (front re-issues).
             end
 
             // ---- param record fetch (refsw GetFpuEntry / decode_pvr_vertices) ----
@@ -1371,39 +1545,20 @@ module peel_core import tsp_pkg::*; (
             // cache in one write (pc_wr_req; u_pc's write ports are wired to sh_tag +
             // cur_*). cur_* is complete by tsp_done (setup emits all planes first).
             TSP_RUN: if (tsp_done) begin
-                pc_wr_req <= 1'b1;
-                st <= SH_PRESENT;
+                pc_wr_req <= 1'b1;            // commit the fetched entry to the cache
+                st <= SH_MPRES;
             end
 
-            // present pixel shp to the pipelined shader, HOLDING the inputs stable
-            // and pp_in_valid asserted until the pipe actually accepts it
-            // (pp_in_valid && !pp_stall). Advancing on the mere absence of stall in
-            // the *previous* cycle races the pipe: a stall rising the cycle
-            // pp_in_valid goes high would drop the pixel. So drive & hold here, and
-            // only advance once accepted.
-            SH_PRESENT: begin
-                pp_in_valid <= 1'b1;   // override the top-of-block default (hold)
-                pp_in_id    <= shp;
-                pp_px       <= shp[4:0];
-                pp_py       <= shp[9:5];
-                pp_invw     <= sh_invw;
-                pp_tsp      <= cur_tsp;
-                pp_tcw      <= cur_tcw;
-                pp_ptex     <= cur_isp[ISP_TEXTURE_BIT];
-                pp_pofs     <= cur_isp[ISP_OFFSET_BIT];
-                for (j = 0; j < 10; j = j + 1) begin
-                    pp_ddx[j] <= cur_ddx[j];
-                    pp_ddy[j] <= cur_ddy[j];
-                    pp_c[j]   <= cur_c[j];
-                end
-                // accepted this cycle iff the pixel we're already driving is taken.
-                // pp_in_valid reflects the PREVIOUS cycle's assertion; accept when
-                // it was high and the pipe isn't stalled now.
-                if (pp_in_valid && !pp_stall) begin
-                    pp_in_valid <= 1'b0;      // consumed; stop driving this pixel
-                    if (shp == 10'd1023) st <= SH_DRAIN;
-                    else begin shp <= shp + 10'd1; st <= SH_PIX; end
-                end
+            // MISS PRESENT: the plane cache was just filled for idb; present that pixel
+            // straight from cur_* (the pp-input mux drives pp_in_valid=1 while here).
+            // Hold until the shader accepts (!pp_stall), then RETURN to the stream.
+            // The request block re-presents ida's peel read on this accepting cycle
+            // (sh_mpres_acc), so stage A's sh_* is fresh when we re-enter SH_PRESENT.
+            // Stage B is now empty (idb consumed): vb<=0; stage A (va/ida) survived the
+            // fetch and resumes at L1 next cycle.
+            SH_MPRES: if (!pp_stall) begin
+                vb <= 1'b0;                  // idb consumed (miss already counted)
+                st <= SH_PRESENT;
             end
 
             // all presented pixels drained: return to the caller (shade_ret).

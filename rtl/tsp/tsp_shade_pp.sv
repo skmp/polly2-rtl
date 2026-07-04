@@ -70,11 +70,26 @@ module tsp_shade_pp import tsp_pkg::*; #(
     genvar gi;
 
     // ==============================================================
-    // global stall: any texel fetcher busy freezes the whole pipe.
+    // FLOW CONTROL. The front (RCP..UV) is a rigid fixed-latency block gated by one
+    // clock-enable `en`. The TEX stage is now a set of STREAMING fetchers over the
+    // pipelined tex_cache_4p: they accept a pixel every cycle and only deassert
+    // in_ready during a genuine cache miss-fill. So the ONLY stall source is a texture
+    // cache miss - `en` freezes the whole front while a textured UV-stage pixel cannot
+    // be accepted by the fetchers. Non-textured pixels never stall.
+    //
+    // The variable fetch latency is absorbed by carrying the per-pixel FILT payload in
+    // an in-order FIFO (pl_*), popped when the fetchers emit a result (tf_ov). FILT and
+    // downstream advance on tf_ov, decoupled from the front's `en`.
     // ==============================================================
-    wire [3:0] tf_busy;
-    assign stall = |tf_busy;
-    wire en = ~stall;                 // pipeline clock-enable
+    wire [3:0] tf_ready;              // per-corner "can accept" (== cache ready)
+    wire       fetch_ready = &tf_ready;
+    // stall the front only when a TEXTURED UV pixel is waiting and the fetch can't take
+    // it. (vU/U_ptx defined in the UV stage below.)
+    wire       uv_wants_fetch;        // = vU (forward ref; assigned in UV stage)
+    wire       rf_room;               // corner result FIFOs have space (forward ref)
+    wire       pl_room;               // payload FIFO has space (forward ref)
+    assign stall = uv_wants_fetch && (!fetch_ready || !rf_room || !pl_room);
+    wire en = ~stall;                 // front pipeline clock-enable
 
     // ==============================================================
     // helper: per-pixel config bundle that rides through the pipe
@@ -272,18 +287,49 @@ module tsp_shade_pp import tsp_pkg::*; #(
     end
 
 
+`ifndef SYNTHESIS
+    // -------- tex_uv2texel VECTOR DUMP (sim only) -------------------------------------
+    // One line per accepted textured pixel at the UV stage. Captures the tex_uv2texel
+    // INPUTS (interpolated U/V float, texu/texv/mip, clamp/flip) and its OUTPUTS (the 4
+    // bilinear corner texel coords + ufrac/vfrac). This is a complete, self-contained
+    // regression vector for tex_uv2texel: given the inputs, tex_uv2texel must reproduce
+    // the corners+fracs. Enabled with +uvdump[=<file>] (default uv_vectors.log).
+    //   fields: seq id attrU attrV tsp tcw mip ptx  c00u c00v c01u c01v c10u c10v c11u c11v ufrac vfrac
+    integer      uvd_fd = 0;
+    reg          uvd_en = 1'b0;
+    reg [1023:0] uvd_name;
+    integer      uvd_seq = 0;
+    initial begin
+        if ($value$plusargs("uvdump=%s", uvd_name)) uvd_en = 1'b1;
+        else if ($test$plusargs("uvdump")) begin uvd_en = 1'b1; uvd_name = "uv_vectors.log"; end
+        if (uvd_en) begin
+            uvd_fd = $fopen(uvd_name, "w");
+            $fwrite(uvd_fd, "# tex_uv2texel vectors: one line per accepted textured pixel\n");
+            $fwrite(uvd_fd, "# seq id attrU attrV tsp tcw mip ptx c00u c00v c01u c01v c10u c10v c11u c11v ufrac vfrac\n");
+        end
+    end
+    always @(posedge clk) begin
+        if (!reset && uvd_en && v3 && en && ptx3) begin
+            $fwrite(uvd_fd, "%0d %0d %08x %08x %08x %08x %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d\n",
+                    uvd_seq, id3, i3_attr[0], i3_attr[1], tsp3, tcw3, mip3, ptx3,
+                    c00u, c00v, c01u, c01v, c10u, c10v, c11u, c11v, ufr, vfr);
+            uvd_seq = uvd_seq + 1;
+        end
+    end
+    final if (uvd_en && uvd_fd != 0) begin
+        $fflush(uvd_fd); $fclose(uvd_fd);
+        $display("[tsp_shade_pp] tex_uv2texel vectors: %0d pixels -> %0s", uvd_seq, uvd_name);
+    end
+`endif
+
     // ==============================================================
-    // STAGE TEX: 4 parallel tex_fetch_pp. They accept a request when the
-    // UV stage presents a valid textured pixel (vU && U_ptx) that has not yet
-    // been issued. While any is busy, `stall` is asserted (freezing all pipe
-    // regs), so the request lines stay stable and no new UV pixel advances.
-    //
-    // tex_issued tracks that the current UV-stage pixel's fetch has already been
-    // launched, so we don't re-issue it on the completion cycle (when the pipe
-    // briefly un-stalls but the same pixel is still in the UV register).
+    // STAGE TEX: 4 STREAMING tex_fetch_pp (one per bilinear corner). Every valid UV
+    // pixel is presented as a request; the fetchers accept it when the shared cache is
+    // ready (fetch_ready) and the front advances (en) on that same accept. Results
+    // stream out later (tf_ov) IN ORDER; the per-pixel FILT payload rides an in-order
+    // FIFO (pl_*) popped on tf_ov so it re-aligns with the arriving texels.
     // ==============================================================
-    reg tex_issued;
-    wire tex_start = vU & U_ptx & ~tex_issued;   // launch a fetch this clock
+    wire tex_start = vU & en;                    // a pixel is issued to the fetchers
     wire [31:0] tf_argb [0:3];
     wire [3:0]  tf_ov;
     // corner (u,v) select per fetcher
@@ -294,45 +340,91 @@ module tsp_shade_pp import tsp_pkg::*; #(
     assign cu[3]=U11u; assign cv[3]=U11v;
     generate
       for (gi=0; gi<4; gi=gi+1) begin : tf
+        // The 4 corner fetchers are now a FIXED-LATENCY pipeline over the 1-cycle cache
+        // (tex_cache_4p_1c), which freezes ALL 4 ports together on a miss-fill. All four
+        // therefore run in perfect lockstep and emit tf_ov SIMULTANEOUSLY, in issue order.
+        // No per-corner reordering is possible, so out_ready is tied high (no back-pressure)
+        // and the corner-join is a plain simultaneous capture (below).
         tex_fetch_pp u_tf (
             .clk(clk),.reset(reset),
-            .in_valid(tex_start),
+            .in_valid(tex_start),.in_textured(U_ptx),.in_ready(tf_ready[gi]),
             .u(cu[gi]),.v(cv[gi]),.miplevel(U_mip),
             .tsp(U_tsp),.tcw(U_tcw),.text_ctrl(U_tc),
-            .out_valid(tf_ov[gi]),.argb(tf_argb[gi]),.busy(tf_busy[gi]),
+            .out_ready(1'b1),
+            .out_valid(tf_ov[gi]),.argb(tf_argb[gi]),
             .tc_req(tc_req[gi]),.tc_resp(tc_resp[gi]),
             .vq_req(vq_req[gi]),.vq_resp(vq_resp[gi]));
       end
     endgenerate
+    assign uv_wants_fetch = vU;                  // any valid UV pixel needs a fetch slot
 
-    // tex_issued: set when a fetch launches; cleared when the pipe advances
-    // (en=1) past this UV pixel. `stall` (=|tf_busy) keeps en=0 until the
-    // fetchers finish, so between launch and completion the pipe is frozen.
+    // ---- CORNER JOIN (lockstep): all 4 corners emit the same cycle (tf_ov[0..3] identical),
+    // in issue order, so the four texels this cycle belong to ONE pixel. No FIFO / no
+    // back-pressure - just take the 4 argb directly. res_v = the (shared) emit strobe. ----
+    wire res_v = tf_ov[0];
+    assign rf_room = 1'b1;                        // no corner FIFO -> never a room stall
+    wire [31:0] cj0 = tf_argb[0];
+    wire [31:0] cj1 = tf_argb[1];
+    wire [31:0] cj2 = tf_argb[2];
+    wire [31:0] cj3 = tf_argb[3];
+
+    // ---- in-order FILT payload FIFO: pushed on issue (tex_start), popped on result
+    //      (tf_ov[0]; all 4 corners' out_valid are identical since lockstep). ----
+    localparam integer PLW = 32+32+32+5+1+1+8+8+IDW;  // base,ofs,tsp,tc,ptx,pof,uf,vf,id
+    wire [PLW-1:0] pl_in = { U_base, U_ofs, U_tsp, U_tc, U_ptx, U_pof, Uuf, Uvf, U_id };
+    // Depth must cover the WHOLE fetch in-flight window (worst case VQ: tc + vp + vq
+    // FIFOs in series + cache/decode latency, ~50), else the payload wraps and ids
+    // misalign with texels. 64 + a room gate on the front keeps it safe.
+    localparam integer PLD = 64, PLAW = 6;
+    reg  [PLW-1:0] plf [0:PLD-1];
+    reg  [PLAW-1:0] pl_h, pl_t; reg [PLAW:0] pl_cnt;
+    wire pl_push = tex_start;
+    wire pl_pop  = res_v;                // pop payload when the corner-join completes
+    wire [PLW-1:0] pl_out = plf[pl_h];
+    assign pl_room = (pl_cnt < PLD-4);   // headroom for in-flight issues
     always @(posedge clk) begin
-        if (reset) tex_issued <= 1'b0;
-        else if (tex_start)   tex_issued <= 1'b1;   // launched (during stall)
-        else if (en)          tex_issued <= 1'b0;   // advanced to the next pixel
+        if (reset) begin pl_h<=0; pl_t<=0; pl_cnt<=0; end
+        else begin
+            if (pl_push) begin plf[pl_t] <= pl_in; pl_t <= pl_t + 1'b1; end
+            if (pl_pop)  pl_h <= pl_h + 1'b1;
+            pl_cnt <= pl_cnt + (pl_push?1:0) - (pl_pop?1:0);
+        end
     end
+    // unpack the popped payload (aligned with tf_argb this cycle)
+    wire [31:0]    P_base = pl_out[PLW-1              -: 32];
+    wire [31:0]    P_ofs  = pl_out[PLW-1-32           -: 32];
+    wire [31:0]    P_tsp  = pl_out[PLW-1-64           -: 32];
+    wire [4:0]     P_tc   = pl_out[PLW-1-96           -: 5];
+    wire           P_ptx  = pl_out[PLW-1-101];
+    wire           P_pof  = pl_out[PLW-1-102];
+    wire [7:0]     P_uf   = pl_out[PLW-1-103          -: 8];
+    wire [7:0]     P_vf   = pl_out[PLW-1-111          -: 8];
+    wire [IDW-1:0] P_id   = pl_out[IDW-1              : 0];
 
-    // TEX-stage output register: capture the 4 corners as the pixel advances.
-    // Because the pipe stalls while any fetcher is busy, when en finally rises
-    // the fetch results (tf_argb) are valid and the UV payload is still present.
+    // ==============================================================
+    // STAGE T: CAPTURE the 4 corner texels + the popped payload the cycle a fetch
+    // result arrives (res_v). This registered capture avoids a same-cycle cross-block
+    // read of the fetcher's registered argb outputs (which races the filter's
+    // combinational recompute). Everything downstream reads these T_* regs.
+    // ==============================================================
     reg        vT;
     reg [31:0] T_c0,T_c1,T_c2,T_c3;
-    reg [31:0] T_base,T_ofs,T_tsp; reg [4:0] T_tc;
-    reg        T_ptx,T_pof; reg [7:0] T_uf,T_vf; reg [IDW-1:0] T_id;
+    reg [31:0] T_base,T_ofs,T_tsp; reg [7:0] T_uf,T_vf;
+    reg        T_ptx,T_pof; reg [IDW-1:0] T_id;
     always @(posedge clk) begin
         if (reset) vT<=0;
-        else if (en) begin
-            vT<=vU;
-            T_c0<=tf_argb[0]; T_c1<=tf_argb[1]; T_c2<=tf_argb[2]; T_c3<=tf_argb[3];
-            T_base<=U_base; T_ofs<=U_ofs; T_tsp<=U_tsp; T_tc<=U_tc;
-            T_ptx<=U_ptx; T_pof<=U_pof; T_uf<=Uuf; T_vf<=Uvf; T_id<=U_id;
+        else begin
+            vT <= res_v;
+            if (res_v) begin
+                T_c0<=cj0; T_c1<=cj1; T_c2<=cj2; T_c3<=cj3;
+                T_base<=P_base; T_ofs<=P_ofs; T_tsp<=P_tsp; T_uf<=P_uf; T_vf<=P_vf;
+                T_ptx<=P_ptx; T_pof<=P_pof; T_id<=P_id;
+            end
         end
     end
 
     // ==============================================================
-    // STAGE FILT: bilinear/nearest blend
+    // STAGE FILT: bilinear/nearest blend from the captured T_* regs.
     // ==============================================================
     wire [1:0] f_filt = T_tsp[14:13];
     wire       f_bilinear = (f_filt != 2'd0);
@@ -346,11 +438,13 @@ module tsp_shade_pp import tsp_pkg::*; #(
     reg [IDW-1:0] F_id;
     always @(posedge clk) begin
         if (reset) vF<=0;
-        else if (en) begin
-            vF<=vT;
-            F_textel <= T_ptx ? t_filt : 32'h00000000;
-            F_base<=T_base; F_ofs<=T_ofs; F_tsp<=T_tsp;
-            T_ptx_r<=T_ptx; T_pof_r<=T_pof; F_id<=T_id;
+        else begin
+            vF <= vT;
+            if (vT) begin
+                F_textel <= T_ptx ? t_filt : 32'h00000000;
+                F_base<=T_base; F_ofs<=T_ofs; F_tsp<=T_tsp;
+                T_ptx_r<=T_ptx; T_pof_r<=T_pof; F_id<=T_id;
+            end
         end
     end
 
@@ -361,13 +455,45 @@ module tsp_shade_pp import tsp_pkg::*; #(
     wire [31:0] comb_col;
     color_combiner u_cc (.pp_texture(T_ptx_r),.pp_offset(T_pof_r),.shadinstr(c_shad),
                          .base(F_base),.textel(F_textel),.offset(F_ofs),.col(comb_col));
+`ifndef SYNTHESIS
+    // -------- OUTPUT-side dump: emitted (id, argb) IN OUTPUT ORDER. Compared against the
+    // UV-stage input dump's id sequence to detect any miss/hit-timing REORDER or offset:
+    // for an in-order pipeline out_id[k] must equal the k-th issued id. A mismatch means
+    // a cache-miss delay offset a texel/payload against the wrong pixel. Same +uvdump gate.
+    integer      ovd_fd = 0;
+    reg          ovd_en = 1'b0;
+    reg [1023:0] ovd_name;
+    integer      ovd_seq = 0;
+    initial begin
+        if ($value$plusargs("uvdump=%s", ovd_name)) begin ovd_en=1'b1; ovd_name="uv_out.log"; end
+        else if ($test$plusargs("uvdump")) begin ovd_en=1'b1; ovd_name="uv_out.log"; end
+        if (ovd_en) begin
+            ovd_fd = $fopen(ovd_name, "w");
+            $fwrite(ovd_fd, "# out order: seq out_id out_argb (ptx bit of the pixel)\n");
+        end
+    end
+    always @(posedge clk) begin
+        if (!reset && ovd_en && vF) begin
+            $fwrite(ovd_fd, "%0d %0d %08x %0d\n", ovd_seq, F_id, comb_col, T_ptx_r);
+            ovd_seq = ovd_seq + 1;
+        end
+    end
+    final if (ovd_en && ovd_fd != 0) begin
+        $fflush(ovd_fd); $fclose(ovd_fd);
+        $display("[tsp_shade_pp] output-order dump: %0d pixels -> %0s", ovd_seq, ovd_name);
+    end
+`endif
+
+    // COMB advances on vF (a FILT result), decoupled from the front's `en`.
     always @(posedge clk) begin
         if (reset) out_valid<=0;
-        else if (en) begin
-            out_valid<=vF;
-            out_argb <=comb_col;
-            out_id   <=F_id;
-            out_tsp  <=F_tsp;   // aligned with out_argb (blend unit lives in the caller)
+        else begin
+            out_valid <= vF;
+            if (vF) begin
+                out_argb <=comb_col;
+                out_id   <=F_id;
+                out_tsp  <=F_tsp;   // aligned with out_argb (blend in the caller)
+            end
         end
     end
 endmodule

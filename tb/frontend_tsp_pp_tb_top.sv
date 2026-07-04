@@ -137,9 +137,9 @@ module frontend_tsp_pp_tb_top import tsp_pkg::*; (
     // read; distinct-line misses serialize (the pipe stalls while any corner busy).
     cache_req_t   pp_tc_req [0:3], pp_vq_req [0:3];
     cache_resp_t  pp_tc_resp[0:3], pp_vq_resp[0:3];
-    tex_cache_4p u_tc4 (.clk(clk),.reset(reset),.creq(pp_tc_req),.cresp(pp_tc_resp),
+    tex_cache_4p_1c u_tc4 (.clk(clk),.reset(reset),.creq(pp_tc_req),.cresp(pp_tc_resp),
         .dreq(tex_dreq[0]),.dresp(tex_dresp[0]));
-    tex_cache_4p u_vq4 (.clk(clk),.reset(reset),.creq(pp_vq_req),.cresp(pp_vq_resp),
+    tex_cache_4p_1c u_vq4 (.clk(clk),.reset(reset),.creq(pp_vq_req),.cresp(pp_vq_resp),
         .dreq(tex_dreq[1]),.dresp(tex_dresp[1]));
 
     // -------------------- parsers --------------------

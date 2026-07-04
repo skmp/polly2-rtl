@@ -191,6 +191,19 @@ tspshadepp: | $(BUILD)
 	  $(CWD)/tb/tsp_shade_pp_tb.cpp --Mdir $(BUILD)/obj_tspshadepp -o tb
 	./$(BUILD)/obj_tspshadepp/tb
 
+# tsp_shade_pp REPLAY: feed the exact recorded per-pixel shade input stream (shade_pp_
+# input.log from peel_core +shadedump) through serial vs pipelined over REAL scene VRAM.
+# Isolates shade/cache-path bugs on genuine data. Args: LOG=<input.log> VRAMBIN=<vram.bin>
+LOG      ?= shade_pp_input.log
+VRAMBIN  ?= dumps/vram_menu2.bin
+tspshadereplay: | $(BUILD)
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ --public-flat-rw \
+	  --top-module tsp_shade_pp_tb_top \
+	  $(TSP_RTL) tb/tsp_shade_pp_tb_top.sv \
+	  $(wildcard rtl/isp_min/*.sv) \
+	  $(CWD)/tb/tsp_shade_pp_replay_tb.cpp --Mdir $(BUILD)/obj_tspshadereplay -o tb
+	./$(BUILD)/obj_tspshadereplay/tb $(LOG) $(VRAMBIN)
+
 # streamed rasterizer consume-path equivalence vs serial (bit-exact tile diff).
 rasterstream: | $(BUILD)
 	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ --public-flat-rw \
