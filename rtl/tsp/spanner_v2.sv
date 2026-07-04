@@ -67,6 +67,7 @@ module spanner_v2 import tsp_pkg::*; #(
     output reg [31:0]           sp_invw [0:3], // per-covered-pixel invW (lanes 0..rep-1)
     output reg [3:0]            sp_shmask,   // per-covered-lane shade-valid
     output reg                  sp_at,       // PT alpha-test enable (run-start lane)
+    input                       sp_ready,    // span consumer (expander) can accept this cycle
 
     // ---- DDR client for the internal record_fetcher ----
     output ddr_rd_req_t         dreq,
@@ -201,7 +202,9 @@ module spanner_v2 import tsp_pkg::*; #(
     // emit can commit when: if it ALLOCATES (new tag), the setup FIFO has room. A same-tag
     // reuse never needs the FIFO. When it can't, the WHOLE pipeline freezes (COAL + EMIT).
     wire emit_stall_fifo = needs_alloc && sf_full;
-    wire pipe_stall      = emit_stall_fifo;   // freezes both stages this cycle
+    // also freeze if the span consumer (expander) can't accept the span this emit produces
+    wire emit_stall_span = t_valid && !sp_ready;
+    wire pipe_stall      = emit_stall_fifo | emit_stall_span;   // freezes both stages
 
     // ---- COAL advance: sg_x steps by run_rep; group exhausted when it crosses the group ----
     wire [SLOTW-1:0] sg_x_next   = sg_x + { {(SLOTW-3){1'b0}}, run_rep };

@@ -164,7 +164,7 @@ module spanner_v2_tb_top import tsp_pkg::*; (
         .ts_isp(ts_isp), .ts_tsp(ts_tsp), .ts_tcw(ts_tcw),
         .ts_ddx(ts_ddx), .ts_ddy(ts_ddy), .ts_c(ts_c),
         .sp_we(sp_we), .sp_idx(sp_idx), .sp_id(sp_id), .sp_rep(sp_rep),
-        .sp_invw(sp_invw), .sp_shmask(sp_shmask), .sp_at(sp_at),
+        .sp_invw(sp_invw), .sp_shmask(sp_shmask), .sp_at(sp_at), .sp_ready(1'b1),
         .dreq(ddr_req), .dresp(ddr_resp)
     );
 endmodule

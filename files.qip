@@ -88,6 +88,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/span_buffer.sv
 # Groundwork for the spanner_v2->peel_core integration; not yet instantiated.
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/span_buffer_v2.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/triangle_setups.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/span_expander.sv
 # 64-entry TSP plane cache banked into M10K (wide payload word/entry; small tag +
 # valid mirrors stay in logic for the hit test + 1-cyc invalidate). Must precede
 # peel_core (instantiated there).
