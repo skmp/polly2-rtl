@@ -424,7 +424,10 @@ module peel_core import tsp_pkg::*; (
             // shade single-pixel read (consumer half only)
             .sh_rd_valid(ti_cons && pb_shrd_valid), .sh_rd_id(pb_shrd_id),
             .sh_valid(sh_valid_h[gti]), .sh_tag(sh_tag_h[gti]), .sh_depth(sh_depth_h[gti]),
-            .sh_pt(sh_pt_h[gti])
+            .sh_pt(sh_pt_h[gti]),
+            // 4-wide aligned read (spanner_v2) - tied off until the spanner integration
+            .rd4_valid(1'b0), .rd4_group('0),
+            .g4_valid(), .g4_tag(), .g4_invw(), .g4_pt()
         );
       end
     endgenerate

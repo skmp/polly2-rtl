@@ -83,6 +83,11 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/color_tile_buffer.sv
 # cache miss latency absorbed here); the TSP reader drains it at a guaranteed 1px/clk.
 # Ping-ponged per pass. Must precede peel_core (instantiated there).
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/span_buffer.sv
+# span_buffer_v2 (thin {id,rep,invw,shmask,at}) + triangle_setups (id-indexed planes):
+# the spanner_v2 handoff pair (planes held once per triangle, span references by id).
+# Groundwork for the spanner_v2->peel_core integration; not yet instantiated.
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/span_buffer_v2.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/triangle_setups.sv
 # 64-entry TSP plane cache banked into M10K (wide payload word/entry; small tag +
 # valid mirrors stay in logic for the hit test + 1-cyc invalidate). Must precede
 # peel_core (instantiated there).
