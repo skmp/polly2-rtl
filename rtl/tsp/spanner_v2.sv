@@ -255,7 +255,7 @@ module spanner_v2 import tsp_pkg::*; #(
     wire             tsp_done, tsp_pvalid;
     wire [3:0]       tsp_pidx;
     wire [31:0]      tsp_pddx, tsp_pddy, tsp_pc;
-    tsp_setup_min u_tsp (
+    tsp_setup_stream u_tsp (
         .clk(clk), .reset(reset), .start(tsp_start), .done(tsp_done),
         .gouraud(f_gouraud), .texture(f_texture), .offset(f_offset),
         .x1(fv_x[0]),.y1(fv_y[0]),.z1(fv_z[0]),

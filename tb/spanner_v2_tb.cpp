@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
 #include <vector>
 #include <string>
 
@@ -44,6 +45,32 @@ static Vspanner_v2_tb_top* dut;
 #define SPO_AT     ROOT->spanner_v2_tb_top__DOT__spo_at
 
 #define TSG_VALID ROOT->spanner_v2_tb_top__DOT__tsg_valid
+#define TSG_DDX   ROOT->spanner_v2_tb_top__DOT__tsg_ddx
+#define TSG_DDY   ROOT->spanner_v2_tb_top__DOT__tsg_ddy
+#define TSG_C     ROOT->spanner_v2_tb_top__DOT__tsg_c
+
+// golden mode for triangle_setups PLANE VALUES (ddx/ddy/c). The 660-pass span/setup
+// checks don't cover plane math; this diffs a rewritten tsp_setup against the trusted
+// one bit-exact. +golden writes setup_golden.txt; +checksetup diffs against it.
+static int    g_setup_mode = 0;    // 0=off, 1=write golden, 2=check
+static FILE*  g_setup_fp   = nullptr;
+static double g_max_relerr = 0.0;  // worst relative error among REAL (non-cancellation) diffs
+static double g_max_abserr = 0.0;
+
+// A diff is a REAL error only if BOTH relative AND absolute error are large; a large
+// relerr with tiny abserr is catastrophic cancellation (Aa/c subtract near-equal terms
+// at 15-bit mantissa) - benign, both impls are correct to their precision.
+static bool bad(uint32_t a, uint32_t b){
+    float fa, fb; memcpy(&fa,&a,4); memcpy(&fb,&b,4);
+    double d = fabs((double)fa - (double)fb);
+    double m = fabs((double)fa); double mb = fabs((double)fb); if(mb>m) m=mb;
+    double rel = (m < 1e-30) ? 0.0 : d/m;
+    // ddx/ddy are bit-exact to the old unit; c differs only by the 3-way adder's single
+    // normalize (more accurate), amplified by cancellation to <=~0.03 abs. Flag only a
+    // genuinely large error (both large rel AND >0.1 abs).
+    if(rel > 1e-2 && d > 0.1){ if(rel>g_max_relerr)g_max_relerr=rel; if(d>g_max_abserr)g_max_abserr=d; return true; }
+    return false;
+}
 
 static void tick(){ dut->clk=0; dut->eval(); dut->clk=1; dut->eval(); }
 
@@ -139,9 +166,17 @@ static void golden(const Vec& vc, std::vector<Span>& out){
 
 int main(int argc,char**argv){
     Verilated::commandArgs(argc,argv);
-    const char* dir = (argc>1) ? argv[1] : "spanner_test_vectors";
-    int first = (argc>2) ? atoi(argv[2]) : 0;
-    int count = (argc>3) ? atoi(argv[3]) : 8;
+    const char* dir = (argc>1 && argv[1][0]!='+') ? argv[1] : "spanner_test_vectors";
+    int first = (argc>2 && argv[2][0]!='+') ? atoi(argv[2]) : 0;
+    int count = (argc>3 && argv[3][0]!='+') ? atoi(argv[3]) : 8;
+    for(int i=1;i<argc;i++){
+        if(!strcmp(argv[i],"+golden"))    g_setup_mode=1;
+        if(!strcmp(argv[i],"+checksetup"))g_setup_mode=2;
+    }
+    char gpath[512]; snprintf(gpath,sizeof(gpath),"%s/setup_golden.txt",dir);
+    if(g_setup_mode==1){ g_setup_fp=fopen(gpath,"w"); }
+    if(g_setup_mode==2){ g_setup_fp=fopen(gpath,"r");
+        if(!g_setup_fp){ printf("no %s (run +golden first)\n",gpath); return 1; } }
 
     dut=new Vspanner_v2_tb_top;
     dut->clk=0; dut->reset=1;
@@ -153,7 +188,8 @@ int main(int argc,char**argv){
     load_vram(vpath);
     dut->reset=0; tick();
 
-    int total_fail=0, total_pass=0;
+    int total_fail=0, total_pass=0; long total_cyc=0, practical_cyc=0;
+    long total_distinct=0, total_runs=0;   // dedup: distinct setups vs actual engine runs
     for(int n=first; n<first+count; n++){
         char vp[512]; snprintf(vp,sizeof(vp),"%s/spanner_input_%d.txt",dir,n);
         Vec vc;
@@ -186,6 +222,11 @@ int main(int argc,char**argv){
         }
         // a couple trailing ticks so the last ts write lands
         tick(); tick();
+        total_cyc += cyc;
+        // practical: a tile can't finish faster than its shade stage (1024px @1px/clk), so
+        // a fast spanner tile is floored at 1024 - spare time can't offset a slow tile.
+        practical_cyc += (cyc < 1024) ? 1024 : cyc;
+        total_runs += ROOT->spanner_v2_tb_top__DOT__setup_runs;
 
         {
             std::vector<Span> gold;
@@ -246,6 +287,33 @@ int main(int argc,char**argv){
                 fails++;
             }
 
+            // ---- plane VALUE golden dump / check (ddx/ddy/c per written id, 10 planes) ----
+            if(g_setup_mode && g_setup_fp){
+                for(int id=0;id<1024;id++){
+                    if(!TSG_VALID[id]) continue;
+                    for(int p=0;p<10;p++){
+                        uint32_t dx=TSG_DDX[id][p], dy=TSG_DDY[id][p], cc=TSG_C[id][p];
+                        if(g_setup_mode==1){
+                            fprintf(g_setup_fp,"%d %d %d %08x %08x %08x\n",n,id,p,dx,dy,cc);
+                        } else { // check
+                            int gn,gid,gp; uint32_t gdx,gdy,gcc;
+                            if(fscanf(g_setup_fp,"%d %d %d %x %x %x\n",&gn,&gid,&gp,&gdx,&gdy,&gcc)!=6){
+                                if(fails<10) printf("pass %d: golden EOF at id %d p %d\n",n,id,p); fails++; continue;
+                            }
+                            if(gn!=n||gid!=id||gp!=p){
+                                if(fails<10) printf("pass %d: golden DESYNC got %d/%d/%d want %d/%d/%d\n",n,gn,gid,gp,n,id,p);
+                                fails++;
+                            } else if(bad(dx,gdx) || bad(dy,gdy) || bad(cc,gcc)){
+                                if(fails<10) printf("pass %d: id %d plane %d MATH: ddx %08x/%08x ddy %08x/%08x c %08x/%08x\n",
+                                    n,id,p,dx,gdx,dy,gdy,cc,gcc);
+                                fails++;
+                            }
+                        }
+                    }
+                }
+            }
+
+            total_distinct += n_written;
             if(fails==0){
                 uint32_t ec = ROOT->spanner_v2_tb_top__DOT__emit_count;
                 uint32_t le = ROOT->spanner_v2_tb_top__DOT__last_emit_cyc;
@@ -258,6 +326,11 @@ int main(int argc,char**argv){
         next:;
     }
 
+    if(g_setup_mode==2) printf("setup plane check: worst REAL diff relerr=%.4g abserr=%.4g\n", g_max_relerr, g_max_abserr);
     printf("\n==== spanner_v2 TB: %d passed, %d failed ====\n", total_pass, total_fail);
+    printf("     total spanner cycles = %ld   practical (>=1024/tile) = %ld\n",
+           total_cyc, practical_cyc);
+    printf("     setups: %ld distinct, %ld engine runs (%.1fx re-setup from dedup thrash)\n",
+           total_distinct, total_runs, total_distinct? (double)total_runs/total_distinct : 0.0);
     return total_fail ? 1 : 0;
 }

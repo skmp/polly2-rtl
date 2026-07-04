@@ -113,14 +113,16 @@ module spanner_v2_tb_top import tsp_pkg::*; (
 
     // instrumentation: count emitted spans + cycles the DUT is busy (C++ reads these to
     // separate SPANGEN emit rate from the setup-drain tail).
+    (* verilator public_flat_rw *) reg [31:0] setup_runs;   // ts_we pulses (incl re-setups)
     (* verilator public_flat_rw *) reg [31:0] emit_count;
     (* verilator public_flat_rw *) reg [31:0] busy_cycles;
     (* verilator public_flat_rw *) reg [31:0] last_emit_cyc;   // busy_cycles at the last sp_we
     always @(posedge clk) begin
-        if (reset || start) begin emit_count <= 0; busy_cycles <= 0; last_emit_cyc <= 0; end
+        if (reset || start) begin emit_count <= 0; busy_cycles <= 0; last_emit_cyc <= 0; setup_runs <= 0; end
         else begin
             if (busy) busy_cycles <= busy_cycles + 1;
             if (sp_we) begin emit_count <= emit_count + 1; last_emit_cyc <= busy_cycles; end
+            if (ts_we) setup_runs <= setup_runs + 1;
         end
     end
     always @(posedge clk) begin
