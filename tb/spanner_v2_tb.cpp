@@ -246,7 +246,13 @@ int main(int argc,char**argv){
                 fails++;
             }
 
-            if(fails==0){ printf("pass %d: OK  (%zu spans, %d setups, cyc=%ld)\n",n,gold.size(),n_written,cyc); total_pass++; }
+            if(fails==0){
+                uint32_t ec = ROOT->spanner_v2_tb_top__DOT__emit_count;
+                uint32_t le = ROOT->spanner_v2_tb_top__DOT__last_emit_cyc;
+                printf("pass %d: OK  (%zu spans, %d setups, cyc=%ld | spangen: %u spans by cyc %u -> %.2f cyc/span)\n",
+                       n,gold.size(),n_written,cyc, ec, le, ec? (double)le/ec : 0.0);
+                total_pass++;
+            }
             else        { printf("pass %d: %d FAILURES (cyc=%ld)\n",n,fails,cyc); total_fail++; }
         }
         next:;

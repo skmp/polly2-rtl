@@ -201,11 +201,28 @@ module spanner_v2 import tsp_pkg::*; #(
     // (g_ready), and the pipeline isn't frozen.
     wire coal_fires = sg_active && g_ready && !pipe_stall;
 
-    // ============================ FSM 2: SETUP ============================
-    // Drains the setup FIFO: {id,tag} -> record_fetcher -> tsp_setup_min -> ts write.
-    localparam SU_IDLE=2'd0, SU_FETCH=2'd1, SU_SETUP=2'd2, SU_WRITE=2'd3;
-    reg [1:0]        su_st;
-    reg [SLOTW-1:0]  su_id;
+    // ============================ SETUP path (streaming, no serial FSM) ============================
+    // Three independent stages, each fed continuously, so the record fetch of triangle
+    // N+1 OVERLAPS the plane setup of triangle N (they were serial before: ~144 fetch +
+    // ~257 setup = ~400 cyc/triangle back-to-back):
+    //   FETCH  : pop the setup FIFO into record_fetcher whenever it is free.
+    //   pend_* : 1-deep skid holding the decoded record until tsp_setup_min is free
+    //            (frees the fetcher to start the next fetch).
+    //   SETUP  : latch pend_* into cur_*/fv_* (held stable for the whole run) + start
+    //            tsp_setup_min; on tsp_done pulse ts_pend -> ts_we write.
+    reg              fetch_busy;    // a fetch is in flight (fx_start..fx_done)
+    reg [SLOTW-1:0]  fx_id;         // the in-flight fetch's setup id
+    reg              pend_v;        // pend_* holds a decoded record awaiting setup
+    reg [SLOTW-1:0]  pend_id;
+    reg [31:0]       pend_isp, pend_tsp, pend_tcw;
+    reg [31:0]       pend_x[0:2], pend_y[0:2], pend_z[0:2];
+    reg [31:0]       pend_u[0:2], pend_v3[0:2], pend_col[0:2], pend_ofs[0:2];
+    reg              su_run;        // tsp_setup_min busy (tsp_start..tsp_done)
+    reg              ts_pend;       // write triangle_setups this cycle (cycle after tsp_done)
+    reg [SLOTW-1:0]  su_id;         // the active setup's id (write target)
+`ifndef SYNTHESIS
+    integer          su_dbg_cyc;   // +sutrace cycle counter
+`endif
 
     // record_fetcher (demand only; FIFOs front & back hide its latency, no prefetch)
     reg              fx_start;
@@ -282,7 +299,7 @@ module spanner_v2 import tsp_pkg::*; #(
         rd_group  = { rd_next_x[SLOTW-1:2], 2'b00 };
 
         // ----- SETUP -> triangle_setups write -----
-        ts_we  = (su_st == SU_WRITE);
+        ts_we  = ts_pend;
         ts_id  = su_id;
         ts_isp = cur_isp;
         ts_tsp = cur_tsp;
@@ -302,7 +319,8 @@ module spanner_v2 import tsp_pkg::*; #(
             slot_valid <= '0;
             fwd0_valid <= 1'b0; fwd1_valid <= 1'b0;
             sf_wp <= '0; sf_rp <= '0;
-            su_st <= SU_IDLE; fx_start <= 1'b0; tsp_start <= 1'b0;
+            fetch_busy <= 1'b0; pend_v <= 1'b0; su_run <= 1'b0; ts_pend <= 1'b0;
+            fx_start <= 1'b0; tsp_start <= 1'b0;
         end else begin
             fx_start  <= 1'b0;
             tsp_start <= 1'b0;
@@ -373,46 +391,89 @@ module spanner_v2 import tsp_pkg::*; #(
                 sf_wp <= sf_wp + 1'b1;
             end
 
-            // =================== FSM 2: SETUP ===================
-            case (su_st)
-            SU_IDLE: if (!sf_empty) begin
-                su_id  <= sf_head[SF_W-1:32];
-                fx_tag <= sf_head[31:0];
-                fx_start <= 1'b1;
-                sf_rp  <= sf_rp + 1'b1;    // pop
-                su_st  <= SU_FETCH;
+            // =================== SETUP path (streaming stages) ===================
+`ifndef SYNTHESIS
+            su_dbg_cyc <= start ? 0 : su_dbg_cyc + 1;
+            if ($test$plusargs("sutrace")) begin
+                if (!fetch_busy && !pend_v && !sf_empty)
+                    $display("[SU c%0d] FETCH issue tag=%08x id=%0d", su_dbg_cyc, sf_head[31:0], sf_head[SF_W-1:32]);
+                if (fetch_busy && fx_done)      $display("[SU c%0d] FETCH done id=%0d", su_dbg_cyc, fx_id);
+                if (!su_run && !ts_pend && (pend_v || fx_done))
+                                                $display("[SU c%0d] SETUP start id=%0d", su_dbg_cyc, fx_done ? fx_id : pend_id);
+                if (su_run && tsp_done)         $display("[SU c%0d] SETUP done id=%0d", su_dbg_cyc, su_id);
+                if (ts_pend)                    $display("[SU c%0d] WRITE id=%0d", su_dbg_cyc, su_id);
             end
-            SU_FETCH: if (fx_done) begin
-                cur_isp <= fx_isp; cur_tsp <= fx_tsp; cur_tcw <= fx_tcw;
+`endif
+            // ---- FETCH issue: pop the FIFO into the fetcher whenever it is free and the
+            // pend skid is empty (the skid frees when setup accepts, so fetch N+1 runs
+            // DURING setup N). fetch_busy covers the fx_start..fx_busy visibility gap.
+            if (!fetch_busy && !pend_v && !sf_empty) begin
+                fx_tag     <= sf_head[31:0];
+                fx_id      <= sf_head[SF_W-1:32];
+                fx_start   <= 1'b1;
+                sf_rp      <= sf_rp + 1'b1;    // pop
+                fetch_busy <= 1'b1;
+            end
+
+            // ---- FETCH complete -> pend skid (or straight into setup if it is idle) ----
+            if (fetch_busy && fx_done) begin
+                fetch_busy <= 1'b0;
+                pend_v     <= 1'b1;
+                pend_id    <= fx_id;
+                pend_isp <= fx_isp; pend_tsp <= fx_tsp; pend_tcw <= fx_tcw;
                 for (q = 0; q < 3; q = q + 1) begin
-                    fv_x[q]<=fx_x[q]; fv_y[q]<=fx_y[q]; fv_z[q]<=fx_z[q];
-                    fv_u[q]<=fx_u[q]; fv_v[q]<=fx_v[q];
-                    fv_col[q]<=fx_col[q]; fv_ofs[q]<=fx_ofs[q];
+                    pend_x[q]<=fx_x[q]; pend_y[q]<=fx_y[q]; pend_z[q]<=fx_z[q];
+                    pend_u[q]<=fx_u[q]; pend_v3[q]<=fx_v[q];
+                    pend_col[q]<=fx_col[q]; pend_ofs[q]<=fx_ofs[q];
+                end
+            end
+
+            // ---- SETUP accept: whenever tsp_setup_min is idle (and the previous write
+            // retired), latch the pending record into cur_*/fv_* (held stable for the whole
+            // run) and start. Bypass: accept straight off fx_done the same cycle. ----
+            if (!su_run && !ts_pend && (pend_v || fx_done)) begin
+                if (pend_v) begin
+                    cur_isp <= pend_isp; cur_tsp <= pend_tsp; cur_tcw <= pend_tcw;
+                    for (q = 0; q < 3; q = q + 1) begin
+                        fv_x[q]<=pend_x[q]; fv_y[q]<=pend_y[q]; fv_z[q]<=pend_z[q];
+                        fv_u[q]<=pend_u[q]; fv_v[q]<=pend_v3[q];
+                        fv_col[q]<=pend_col[q]; fv_ofs[q]<=pend_ofs[q];
+                    end
+                    su_id  <= pend_id;
+                    pend_v <= 1'b0;
+                end else begin  // fx_done bypass (skid empty, setup idle)
+                    cur_isp <= fx_isp; cur_tsp <= fx_tsp; cur_tcw <= fx_tcw;
+                    for (q = 0; q < 3; q = q + 1) begin
+                        fv_x[q]<=fx_x[q]; fv_y[q]<=fx_y[q]; fv_z[q]<=fx_z[q];
+                        fv_u[q]<=fx_u[q]; fv_v[q]<=fx_v[q];
+                        fv_col[q]<=fx_col[q]; fv_ofs[q]<=fx_ofs[q];
+                    end
+                    su_id  <= fx_id;
+                    pend_v <= 1'b0;   // consumed in flight, skid stays empty
                 end
                 acc_ddx <= '0; acc_ddy <= '0; acc_c <= '0;
                 tsp_start <= 1'b1;
-                su_st <= SU_SETUP;
+                su_run <= 1'b1;
             end
-            SU_SETUP: begin
-                // collect streamed planes
-                if (tsp_pvalid) begin
-                    acc_ddx[32*tsp_pidx +: 32] <= tsp_pddx;
-                    acc_ddy[32*tsp_pidx +: 32] <= tsp_pddy;
-                    acc_c  [32*tsp_pidx +: 32] <= tsp_pc;
-                end
-                if (tsp_done) su_st <= SU_WRITE;
+
+            // ---- SETUP run: collect streamed planes; done -> 1-cycle write pulse ----
+            if (tsp_pvalid) begin
+                acc_ddx[32*tsp_pidx +: 32] <= tsp_pddx;
+                acc_ddy[32*tsp_pidx +: 32] <= tsp_pddy;
+                acc_c  [32*tsp_pidx +: 32] <= tsp_pc;
             end
-            SU_WRITE: begin
-                // ts_we asserted combinationally this cycle (writes triangle_setups[su_id])
-                su_st <= SU_IDLE;
+            if (su_run && tsp_done) begin
+                su_run  <= 1'b0;
+                ts_pend <= 1'b1;      // ts_we fires (combinational) next cycle
+            end else if (ts_pend) begin
+                ts_pend <= 1'b0;
             end
-            endcase
 
             // =================== busy / done ===================
-            // done when SPANGEN drained (not walking, EMIT stage empty) AND setup FIFO
-            // empty AND setup engine idle. Guard on !start so a fresh pass isn't cleared.
+            // done when SPANGEN drained (not walking, EMIT stage empty) AND the whole
+            // setup path is drained (FIFO, fetch, skid, setup run, write pulse).
             if (busy && !start && !sg_active && !t_valid && sf_empty
-                && (su_st == SU_IDLE) && !fx_busy)
+                && !fetch_busy && !pend_v && !su_run && !ts_pend)
                 busy <= 1'b0;
         end
     end

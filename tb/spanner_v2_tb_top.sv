@@ -96,6 +96,33 @@ module spanner_v2_tb_top import tsp_pkg::*; (
     (* verilator public_flat_rw *) reg [31:0] spo_invw3 [0:NSLOT-1];
     (* verilator public_flat_rw *) reg [3:0]  spo_shmask[0:NSLOT-1];
     (* verilator public_flat_rw *) reg        spo_at    [0:NSLOT-1];
+`ifndef SYNTHESIS
+    // +ddrtrace: log every DDR read request + data-ready window with a cycle stamp, to
+    // audit the record_fetcher's burst behaviour.
+    integer ddr_cyc;
+    always @(posedge clk) begin
+        ddr_cyc <= (reset || start) ? 0 : ddr_cyc + 1;
+        if ($test$plusargs("ddrtrace")) begin
+            if (ddr_req.rd)
+                $display("[DDR c%0d] RD addr=%07x burst=%0d", ddr_cyc, ddr_req.addr, ddr_req.burst);
+            if (ddr_resp.dready)
+                $display("[DDR c%0d]   beat", ddr_cyc);
+        end
+    end
+`endif
+
+    // instrumentation: count emitted spans + cycles the DUT is busy (C++ reads these to
+    // separate SPANGEN emit rate from the setup-drain tail).
+    (* verilator public_flat_rw *) reg [31:0] emit_count;
+    (* verilator public_flat_rw *) reg [31:0] busy_cycles;
+    (* verilator public_flat_rw *) reg [31:0] last_emit_cyc;   // busy_cycles at the last sp_we
+    always @(posedge clk) begin
+        if (reset || start) begin emit_count <= 0; busy_cycles <= 0; last_emit_cyc <= 0; end
+        else begin
+            if (busy) busy_cycles <= busy_cycles + 1;
+            if (sp_we) begin emit_count <= emit_count + 1; last_emit_cyc <= busy_cycles; end
+        end
+    end
     always @(posedge clk) begin
         if (sp_we) begin
             spo_valid [sp_idx] <= 1'b1;
