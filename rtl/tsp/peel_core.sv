@@ -1015,6 +1015,21 @@ module peel_core import tsp_pkg::*; (
     integer pc_shwait;          // ISP stalled on the u_taginvw credit (S_PEEL_BUF)
     integer pc_post_stall;      // reader stalled on the u_col credit (R_POST)
     integer pc_op_ff;           // OP-region shade fire-and-forgets (count of requests)
+    // ---- ISP-ALONE breakdown: cycles where ISP is busy but SPANNER and TSP are BOTH idle
+    // (occ==I, the non-overlapped ISP work), partitioned by which `st` phase ISP is in. This
+    // tells us where the un-overlappable ISP time goes: CLEAR/PeelBuffers M10K walks vs OL
+    // parse vs barrier vs credit-stall vs setup/other. Indices:
+    localparam integer IA_CLEAR=0, IA_PEELBUF=1, IA_OL=2, IA_BARRIER=3,
+                       IA_SHWAIT=4, IA_SETUP=5, IA_OTHER=6, IA_N=7;
+    integer pc_isp_alone [0:IA_N-1];
+    // ---- RS_IDLE breakdown: the raster consumer sits in RS_IDLE (pc_ras_idle) whenever the
+    // plane FIFO has no triangle to raster. Partition those cycles by the top `st` phase to
+    // see WHY raster is idle: CLEAR/PeelBuffers M10K walks, OL parse, barrier, shade-wait
+    // credit, or genuinely overlapped with the spanner/reader shading a prior pass (RI_SHADE
+    // = good idle - raster done, downstream still busy). Same index scheme + a SHADE bucket.
+    localparam integer RI_CLEAR=0, RI_PEELBUF=1, RI_OL=2, RI_BARRIER=3, RI_SHWAIT=4,
+                       RI_SHADE=5, RI_OTHER=6, RI_N=7;
+    integer pc_ras_idle_by [0:RI_N-1];
 `endif
 
     // ---- COMBINATIONAL framebuffer-write (VIDEO-OUT / FLUSH), valid/ready ----
@@ -1157,6 +1172,8 @@ module peel_core import tsp_pkg::*; (
             for (pc_i=0; pc_i<8; pc_i=pc_i+1) pc_occ[pc_i]<=0;
             pc_isp_busy<=0; pc_spn_busy<=0; pc_tsp_busy<=0;
             pc_shwait<=0; pc_post_stall<=0; pc_op_ff<=0;
+            for (pc_i=0; pc_i<IA_N; pc_i=pc_i+1) pc_isp_alone[pc_i]<=0;
+            for (pc_i=0; pc_i<RI_N; pc_i=pc_i+1) pc_ras_idle_by[pc_i]<=0;
             pc_hand<=0; pc_span<=0; pc_drain<=0; pc_blend<=0; pc_swrite<=0;
             pc_prefetch<=0; pc_pf_hit<=0; pc_pf_wasted<=0;
             pc_m_promote<=0; pc_m_waithit<=0; pc_m_waitmiss<=0; pc_m_cold<=0;
@@ -1243,6 +1260,30 @@ module peel_core import tsp_pkg::*; (
                     // stalls: ISP on the u_taginvw credit; reader on the u_col credit.
                     if (st==S_PEEL_BUF && ti_ready[htile]) pc_shwait <= pc_shwait + 1;
                     if (tsp_st==R_POST && col_full[tsp_col]) pc_post_stall <= pc_post_stall + 1;
+                    // ISP-ALONE breakdown (occ==I: ISP busy, spanner+reader BOTH idle). Classify
+                    // by top `st`. e_isp only sets for the M10K walks / OL / raster / setup, so
+                    // this partitions the non-overlapped ISP work into its actual sinks.
+                    if (e_isp && !e_spn && !e_tsp) begin
+                        if      (st==S_CLEAR_WR)                  pc_isp_alone[IA_CLEAR]   <= pc_isp_alone[IA_CLEAR]   + 1;
+                        else if (st==S_PEEL_BUF_RUN)              pc_isp_alone[IA_PEELBUF] <= pc_isp_alone[IA_PEELBUF] + 1;
+                        else if (st==S_OL_RUN)                    pc_isp_alone[IA_OL]      <= pc_isp_alone[IA_OL]      + 1;
+                        else if (st==S_DRAIN)                     pc_isp_alone[IA_BARRIER] <= pc_isp_alone[IA_BARRIER] + 1;
+                        else if (st==S_PEEL_BUF && ti_ready[htile]) pc_isp_alone[IA_SHWAIT] <= pc_isp_alone[IA_SHWAIT] + 1;
+                        else if (su_busy || rs_st!=RS_IDLE)       pc_isp_alone[IA_SETUP]   <= pc_isp_alone[IA_SETUP]   + 1;
+                        else                                      pc_isp_alone[IA_OTHER]   <= pc_isp_alone[IA_OTHER]   + 1;
+                    end
+                    // RS_IDLE breakdown: raster consumer idle (pc_ras_idle), by top `st`. A
+                    // SHADE bucket separates GOOD idle (raster done, spanner/reader still
+                    // shading a prior pass -> overlapped) from the serial M10K-walk/barrier idle.
+                    if (rs_st==RS_IDLE) begin
+                        if      (st==S_CLEAR_WR)                    pc_ras_idle_by[RI_CLEAR]   <= pc_ras_idle_by[RI_CLEAR]   + 1;
+                        else if (st==S_PEEL_BUF_RUN)                pc_ras_idle_by[RI_PEELBUF] <= pc_ras_idle_by[RI_PEELBUF] + 1;
+                        else if (st==S_OL_RUN)                      pc_ras_idle_by[RI_OL]      <= pc_ras_idle_by[RI_OL]      + 1;
+                        else if (st==S_DRAIN)                       pc_ras_idle_by[RI_BARRIER] <= pc_ras_idle_by[RI_BARRIER] + 1;
+                        else if (st==S_PEEL_BUF && ti_ready[htile]) pc_ras_idle_by[RI_SHWAIT]  <= pc_ras_idle_by[RI_SHWAIT]  + 1;
+                        else if (e_spn || e_tsp)                    pc_ras_idle_by[RI_SHADE]   <= pc_ras_idle_by[RI_SHADE]   + 1;
+                        else                                        pc_ras_idle_by[RI_OTHER]   <= pc_ras_idle_by[RI_OTHER]   + 1;
+                    end
                 end
             end
 `endif
@@ -1622,6 +1663,17 @@ module peel_core import tsp_pkg::*; (
                     pc_ras_active, (pc_ras_active*100)/(pc_total?pc_total:1),
                     pc_ras_pop, pc_ras_drain,
                     pc_ras_idle, (pc_ras_idle*100)/(pc_total?pc_total:1));
+                // WHY is raster IDLE? Partition RS_IDLE by top `st`. %% is of the IDLE total.
+                // SHADE = overlapped (good: raster done, spanner/reader still shading); the
+                // rest is serial ISP overhead with no downstream running.
+                $display("     IDLE by phase: CLEAR=%0d(%0d%%) PEELBUF=%0d(%0d%%) OL=%0d(%0d%%) BARRIER=%0d(%0d%%) SHWAIT=%0d(%0d%%) SHADE-overlap=%0d(%0d%%) OTHER=%0d(%0d%%)",
+                    pc_ras_idle_by[RI_CLEAR],   (pc_ras_idle_by[RI_CLEAR]*100)  /(pc_ras_idle?pc_ras_idle:1),
+                    pc_ras_idle_by[RI_PEELBUF], (pc_ras_idle_by[RI_PEELBUF]*100)/(pc_ras_idle?pc_ras_idle:1),
+                    pc_ras_idle_by[RI_OL],      (pc_ras_idle_by[RI_OL]*100)     /(pc_ras_idle?pc_ras_idle:1),
+                    pc_ras_idle_by[RI_BARRIER], (pc_ras_idle_by[RI_BARRIER]*100)/(pc_ras_idle?pc_ras_idle:1),
+                    pc_ras_idle_by[RI_SHWAIT],  (pc_ras_idle_by[RI_SHWAIT]*100) /(pc_ras_idle?pc_ras_idle:1),
+                    pc_ras_idle_by[RI_SHADE],   (pc_ras_idle_by[RI_SHADE]*100)  /(pc_ras_idle?pc_ras_idle:1),
+                    pc_ras_idle_by[RI_OTHER],   (pc_ras_idle_by[RI_OTHER]*100)  /(pc_ras_idle?pc_ras_idle:1));
                 // NOTE: single-bucket classifier (reader wins when both busy), so these
                 // are LOWER bounds on the spanner's work when it overlaps the reader; the
                 // ENGINES/OCCUPANCY cross-tab below is the non-collapsed truth.
@@ -1655,6 +1707,17 @@ module peel_core import tsp_pkg::*; (
                 $display("     I+S=%0d  I+T=%0d  S+T=%0d  ALL3=%0d (%0d%%)",
                     pc_occ[6], pc_occ[5], pc_occ[3],
                     pc_occ[7], (pc_occ[7]*100)/(pc_total?pc_total:1));
+                // ISP-ALONE (occ==I) breakdown: where the non-overlapped ISP time goes. %% is
+                // of the ISP-alone total (pc_occ[4]), so the buckets sum to ~100%%.
+                $display("     ISP-ALONE=%0d (%0d%% of total): CLEAR=%0d(%0d%%) PEELBUF=%0d(%0d%%) OL=%0d(%0d%%) BARRIER=%0d(%0d%%) SHWAIT=%0d(%0d%%) SETUP/RAS=%0d(%0d%%) OTHER=%0d",
+                    pc_occ[4], (pc_occ[4]*100)/(pc_total?pc_total:1),
+                    pc_isp_alone[IA_CLEAR],   (pc_isp_alone[IA_CLEAR]*100)  /(pc_occ[4]?pc_occ[4]:1),
+                    pc_isp_alone[IA_PEELBUF], (pc_isp_alone[IA_PEELBUF]*100)/(pc_occ[4]?pc_occ[4]:1),
+                    pc_isp_alone[IA_OL],      (pc_isp_alone[IA_OL]*100)     /(pc_occ[4]?pc_occ[4]:1),
+                    pc_isp_alone[IA_BARRIER], (pc_isp_alone[IA_BARRIER]*100)/(pc_occ[4]?pc_occ[4]:1),
+                    pc_isp_alone[IA_SHWAIT],  (pc_isp_alone[IA_SHWAIT]*100) /(pc_occ[4]?pc_occ[4]:1),
+                    pc_isp_alone[IA_SETUP],   (pc_isp_alone[IA_SETUP]*100)  /(pc_occ[4]?pc_occ[4]:1),
+                    pc_isp_alone[IA_OTHER]);
                 $display("     stalls: ISP-on-taginvw=%0d (%0d%%)  TSP-on-ucol=%0d (%0d%%)  OP_ff=%0d",
                     pc_shwait,     (pc_shwait*100)/(pc_total?pc_total:1),
                     pc_post_stall, (pc_post_stall*100)/(pc_total?pc_total:1),
