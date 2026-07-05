@@ -236,6 +236,9 @@ package tsp_pkg;
         xyz_t          v0, v1, v2;       // the triangle's 3 vertices (XYZ only)
         core_tag_t     tag;              // this triangle's CoreTag (CoreTagFromDesc:
                                          // isp.CacheBypass/shadow/skip/param_offs + i)
+        logic          is_pt;            // list-membership: this triangle came from the PT
+                                         // list (not TL). Per-triangle so PT and TL can flow
+                                         // back-to-back through the FIFOs (drives dt_pt).
         logic          prim_done;        // 1-cycle: whole strip entry finished
     } triangle_out_t;
     typedef struct packed {

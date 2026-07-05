@@ -31,6 +31,8 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
     input                  entry_valid,      // an entry is available
     input      entry_type_e    entry_type,   // ENT_STRIP or ENT_TRI
     input      objlist_entry_t entry,        // mask (STRIP) / count (ARRAY)
+    input                  entry_pt,         // list-kind: this entry is from the PT list
+                                             // (carried through to trio.is_pt per-triangle)
     output reg             entry_ack,        // 1-cycle: consumed the entry
     output                 busy,             // LEVEL: iterator has work in flight
                                              // (records read/being read/emitting).
@@ -49,6 +51,7 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
     // Each buffer holds one record's fetched data + the emit-relevant geometry.
     xyz_t      vslot [0:1][0:7];       // [buf][vertex] XYZ
     reg [31:0] b_isp   [0:1];          // isp word
+    reg        b_pt    [0:1];          // list-kind (PT) of this record, -> trio.is_pt
     reg [5:0]  b_mask  [0:1];          // strip mask
     reg [2:0]  b_skip  [0:1];
     reg        b_shadow[0:1];
@@ -65,6 +68,7 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
     reg        ex_active;              // an entry is being expanded by the reader
     reg        ex_array;
     reg [2:0]  ex_skip;   reg ex_shadow;   reg [5:0] ex_mask;
+    reg        ex_ispt;                // list-kind of the entry being expanded
     reg [20:0] ex_po;                  // running param_offs of the next record
     reg [26:0] ex_base;                // running byte base of the next record
     reg [4:0]  ex_count;               // records remaining (array); 1 for strip
@@ -162,6 +166,7 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
     core_tag_t tag_r;
     assign trio.triangle_ready = tri_ready_r;
     assign trio.isp            = b_isp[em_buf];
+    assign trio.is_pt          = b_pt[em_buf];
     assign trio.v0 = v0_r; assign trio.v1 = v1_r; assign trio.v2 = v2_r;
     assign trio.tag            = tag_r;
     assign trio.prim_done      = 1'b0;   // not used by isp_core-pf path (drained instead)
@@ -211,6 +216,7 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
                         ex_array  <= (entry_type != ENT_STRIP);
                         ex_skip   <= entry.skip;
                         ex_shadow <= entry.shadow;
+                        ex_ispt   <= entry_pt;      // list-kind, held for all this entry's records
                         ex_mask   <= entry.mask;
                         ex_po     <= entry.param_offs_in_words;
                         ex_base   <= param_base + {entry.param_offs_in_words, 2'b00};
@@ -279,6 +285,7 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
                     b_mask [rd_buf] <= rd_mask;
                     b_skip [rd_buf] <= rd_skip;
                     b_shadow[rd_buf]<= rd_shadow;
+                    b_pt   [rd_buf] <= ex_ispt;  // list-kind constant across an entry's records
                     b_po   [rd_buf] <= rd_po;
                     b_array[rd_buf] <= rd_array;
                     b_done [rd_buf] <= 1'b1;

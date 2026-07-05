@@ -86,6 +86,7 @@ module isp_primitive_iterator import tsp_pkg::*; (
     assign trio.isp            = isp_r;
     assign trio.v0 = v0_r; assign trio.v1 = v1_r; assign trio.v2 = v2_r;
     assign trio.tag            = tag_r;
+    assign trio.is_pt          = 1'b0;   // non-pf path: no PT/TL peel list-kind
     assign trio.prim_done      = pdone_r;
 
     // ==================== burst record reader ====================

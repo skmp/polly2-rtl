@@ -163,6 +163,7 @@ module isp_core import tsp_pkg::*; (
         .intensity_shadow(regs.fpu_shad_scale.intensity_shadow),
         .param_base(param_base),
         .entry_valid(it_entry_valid),.entry_type(it_etype),.entry(it_entry),
+        .entry_pt(1'b0),   // isp_core: tag-only path, no PT/TL peel list-kind
         .entry_ack(it_entry_ack),.busy(it_pf_busy),
         .trio(it_trio),.ack(it_ack),.dreq(pr_dreq),.dresp(pr_dresp));
 
@@ -238,14 +239,14 @@ module isp_core import tsp_pkg::*; (
     isp_setup_streamed u_isp (
         .clk(clk), .reset(reset),
         .in_valid(su_in_valid), .in_ready(su_in_ready),
-        .isp_word(fq_isp[fq_head[2:0]]), .in_tag(fq_tag[fq_head[2:0]]),
+        .isp_word(fq_isp[fq_head[2:0]]), .in_tag(fq_tag[fq_head[2:0]]), .in_pt(1'b0),
         .x1(fq_x1[fq_head[2:0]]), .y1(fq_y1[fq_head[2:0]]), .z1(fq_z1[fq_head[2:0]]),
         .x2(fq_x2[fq_head[2:0]]), .y2(fq_y2[fq_head[2:0]]), .z2(fq_z2[fq_head[2:0]]),
         .x3(fq_x3[fq_head[2:0]]), .y3(fq_y3[fq_head[2:0]]), .z3(fq_z3[fq_head[2:0]]),
         .xbase(t_xbase), .ybase(t_ybase),
         .busy(su_busy),
         .out_ready(!pq_full),
-        .out_valid(su_out_valid), .out_tag(su_out_tag), .out_isp(su_out_isp),
+        .out_valid(su_out_valid), .out_tag(su_out_tag), .out_pt(/*unused*/), .out_isp(su_out_isp),
         .sgn_neg(isp_sgn_neg), .cull(isp_cull),
         .dx12(w_dx12), .dx23(w_dx23), .dx31(w_dx31), .dx41(w_dx41),
         .dy12(w_dy12), .dy23(w_dy23), .dy31(w_dy31), .dy41(w_dy41),

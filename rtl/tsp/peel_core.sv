@@ -173,11 +173,13 @@ module peel_core import tsp_pkg::*; (
     // having entries streamed into it again (idle -> busy as new entries arrive).
     wire             it_entry_valid, it_entry_ack, it_pf_busy;
     objlist_entry_t  it_entry; entry_type_e it_etype;   // combinational eq head
+    reg              it_entry_pt;                       // combinational eq head list-kind (PT)
     triangle_out_t   it_trio; triangle_ack_t it_ack;
     isp_primitive_iterator_pf u_it (.clk(clk),.reset(reset),
         .intensity_shadow(regs.fpu_shad_scale.intensity_shadow),
         .param_base(param_base),
         .entry_valid(it_entry_valid),.entry_type(it_etype),.entry(it_entry),
+        .entry_pt(it_entry_pt),
         .entry_ack(it_entry_ack),.busy(it_pf_busy),
         .trio(it_trio),.ack(it_ack),.dreq(pr_dreq),.dresp(pr_dresp));
 
@@ -260,6 +262,7 @@ module peel_core import tsp_pkg::*; (
     reg  [5:0]  spn_tx, spn_ty;
     reg  [31:0] spn_xbase, spn_ybase;
     reg  [31:0] tri_tag;                   // active (raster) triangle's CoreTag
+    reg         tri_is_pt;                 // active (raster) triangle's list-kind (PT)
     wire        isp_sgn_neg, isp_cull;
     wire [4:0]  w_bx0, w_bx1, w_by0, w_by1;   // tile-local bbox from setup
     wire [31:0] w_dx12,w_dx23,w_dx31,w_dx41, w_dy12,w_dy23,w_dy31,w_dy41;
@@ -272,6 +275,7 @@ module peel_core import tsp_pkg::*; (
     //   su_busy      : any slot in flight (barrier).
     wire        su_in_valid, su_in_ready, su_out_valid, su_busy;
     wire [31:0] su_out_tag, su_out_isp;
+    wire        su_out_pt;    // list-kind (PT) of the retiring triangle
     // gate on fq_out_valid (the head entry is loaded in the output register), not
     // just !fq_empty: the M10K read that fills fq_out lags a pushed entry by a cycle.
     assign su_in_valid = fq_out_valid && (pq_count <= 5'd4);
@@ -279,14 +283,14 @@ module peel_core import tsp_pkg::*; (
     isp_setup_streamed u_isp (
         .clk(clk), .reset(reset),
         .in_valid(su_in_valid), .in_ready(su_in_ready),
-        .isp_word(fq_out[FF_ISP +:32]), .in_tag(fq_out[FF_TAG +:32]),
+        .isp_word(fq_out[FF_ISP +:32]), .in_tag(fq_out[FF_TAG +:32]), .in_pt(fq_out[FF_PT]),
         .x1(fq_out[FF_X1 +:32]), .y1(fq_out[FF_Y1 +:32]), .z1(fq_out[FF_Z1 +:32]),
         .x2(fq_out[FF_X2 +:32]), .y2(fq_out[FF_Y2 +:32]), .z2(fq_out[FF_Z2 +:32]),
         .x3(fq_out[FF_X3 +:32]), .y3(fq_out[FF_Y3 +:32]), .z3(fq_out[FF_Z3 +:32]),
         .xbase(t_xbase), .ybase(t_ybase),
         .busy(su_busy),
         .out_ready(!pq_full),
-        .out_valid(su_out_valid), .out_tag(su_out_tag), .out_isp(su_out_isp),
+        .out_valid(su_out_valid), .out_tag(su_out_tag), .out_pt(su_out_pt), .out_isp(su_out_isp),
         .sgn_neg(isp_sgn_neg), .cull(isp_cull),
         .dx12(w_dx12), .dx23(w_dx23), .dx31(w_dx31), .dx41(w_dx41),
         .dy12(w_dy12), .dy23(w_dy23), .dy31(w_dy31), .dy41(w_dy41),
@@ -352,7 +356,7 @@ module peel_core import tsp_pkg::*; (
     reg [2:0]              b_mode;
     reg                    b_zwdis;
     reg                    b_peeling;   // carry the peel/opaque select into stage B
-    reg                    b_which;     // peel_which snapshot (PT list => dt_pt=1)
+    reg                    b_which;     // per-triangle is_pt (tri_is_pt) snapshot (PT => dt_pt=1)
 
     // ---- peel + color tile buffers (own the RAM ports + access-pattern enforcement) ----
     peel_tile_buffer #(.LANES(RAS_LANES)) u_peel (
@@ -831,6 +835,7 @@ module peel_core import tsp_pkg::*; (
     localparam integer EQ_N = 8;
     reg [1:0]       eq_etype [0:EQ_N-1];
     objlist_entry_t eq_entry [0:EQ_N-1];
+    reg             eq_ispt  [0:EQ_N-1];   // per-entry list-kind (PT), tagged at push
     reg [3:0] eq_head, eq_tail; reg [4:0] eq_count;
     reg       eq_push, eq_pop;
     wire eq_full  = (eq_count == EQ_N);
@@ -842,6 +847,7 @@ module peel_core import tsp_pkg::*; (
     always @(*) begin
         it_entry = eq_entry[eq_head[2:0]];
         it_etype = entry_type_e'(eq_etype[eq_head[2:0]]);
+        it_entry_pt = eq_ispt[eq_head[2:0]];
     end
     assign it_entry_valid = !eq_empty;
 
@@ -857,11 +863,12 @@ module peel_core import tsp_pkg::*; (
     // head. Push into the slot being (re)loaded is BYPASSED from the write data, since
     // no_rw_check M10K returns OLD data on a same-address same-cycle read+write.
     localparam integer FIFO_N = 8;
-    localparam integer FQ_W = 352;   // 11 * 32
+    localparam integer FQ_W = 353;   // 11 * 32 + 1 (is_pt)
     localparam integer FF_ISP=0,  FF_TAG=32,
                        FF_X1=64,  FF_Y1=96,  FF_Z1=128,
                        FF_X2=160, FF_Y2=192, FF_Z2=224,
-                       FF_X3=256, FF_Y3=288, FF_Z3=320;
+                       FF_X3=256, FF_Y3=288, FF_Z3=320,
+                       FF_PT=352;    // list-kind (PT) bit
     (* ramstyle = "M10K, no_rw_check" *) reg [FQ_W-1:0] fq_ram [0:FIFO_N-1];
     reg [FQ_W-1:0] fq_out;         // registered head entry (FWFT output register)
     reg            fq_out_valid;   // fq_out holds a valid head entry
@@ -872,6 +879,7 @@ module peel_core import tsp_pkg::*; (
     // assemble the push word from the iterator's triangle
     wire [FQ_W-1:0] fq_wrw;
     assign fq_wrw[FF_ISP +:32] = it_trio.isp;  assign fq_wrw[FF_TAG +:32] = it_trio.tag;
+    assign fq_wrw[FF_PT]       = it_trio.is_pt;
     assign fq_wrw[FF_X1  +:32] = it_trio.v0.x; assign fq_wrw[FF_Y1 +:32] = it_trio.v0.y;
     assign fq_wrw[FF_Z1  +:32] = it_trio.v0.z;
     assign fq_wrw[FF_X2  +:32] = it_trio.v1.x; assign fq_wrw[FF_Y2 +:32] = it_trio.v1.y;
@@ -892,13 +900,14 @@ module peel_core import tsp_pkg::*; (
     // push and pop never target the same address in the same cycle (pop only fires when
     // !pq_empty -> head!=tail; push is blocked by out_ready=!pq_full when head==tail),
     // so no_rw_check is safe. Only the small head/tail/count control stays in logic.
-    localparam integer PQ_W = 564;   // 17*32 + 4*5
+    localparam integer PQ_W = 565;   // 17*32 + 4*5 + 1 (is_pt)
     localparam integer QF_DX12=0,  QF_DX23=32,  QF_DX31=64,  QF_DX41=96;
     localparam integer QF_DY12=128,QF_DY23=160, QF_DY31=192, QF_DY41=224;
     localparam integer QF_C1=256,  QF_C2=288,   QF_C3=320,   QF_C4=352;
     localparam integer QF_DDX=384, QF_DDY=416,  QF_CINVW=448;
     localparam integer QF_ISP=480, QF_TAG=512;
     localparam integer QF_BX0=544, QF_BX1=549,  QF_BY0=554,  QF_BY1=559;   // 5b each
+    localparam integer QF_PT=564;    // list-kind (PT) bit
     (* ramstyle = "M10K, no_rw_check" *) reg [PQ_W-1:0] pq_ram [0:PQ_N-1];
     reg [PQ_W-1:0] pq_rdw;            // registered read word (valid the cycle after pop)
     reg [3:0]  pq_head, pq_tail;
@@ -918,6 +927,7 @@ module peel_core import tsp_pkg::*; (
     assign pq_wrw[QF_DDX  +: 32] = w_ddx;  assign pq_wrw[QF_DDY  +: 32] = w_ddy;
     assign pq_wrw[QF_CINVW+: 32] = w_cinvw;
     assign pq_wrw[QF_ISP  +: 32] = su_out_isp; assign pq_wrw[QF_TAG +: 32] = su_out_tag;
+    assign pq_wrw[QF_PT]         = su_out_pt;
     assign pq_wrw[QF_BX0  +:  5] = w_bx0;  assign pq_wrw[QF_BX1  +:  5] = w_bx1;
     assign pq_wrw[QF_BY0  +:  5] = w_by0;  assign pq_wrw[QF_BY1  +:  5] = w_by1;
 
@@ -1324,7 +1334,8 @@ module peel_core import tsp_pkg::*; (
                 b_mode   <= depth_mode;
                 b_zwdis  <= zwrite_dis;
                 b_peeling<= peeling;
-                b_which  <= peel_which;
+                b_which  <= tri_is_pt;   // per-triangle list-kind (threaded via fq/pq), NOT the
+                                         // live peel_which reg -> safe when PT+TL coexist in-flight
             end
             // Stage B side effects on peel_core state, from u_peel's echoed results
             // (b_pass_lp / b_more are already masked by inside & peeling in u_peel):
@@ -1507,13 +1518,33 @@ module peel_core import tsp_pkg::*; (
             // The iterator CONSUMER (it_cst) runs concurrently, popping eq into the
             // triangle FIFO independent of `st`.
             S_OL_RUN: begin
-                if (ol_done) st <= S_DRAIN;
+                if (ol_done) begin
+                    // PT->TL MERGE: within a peel pass, chain the TL list DIRECTLY onto the PT
+                    // list (no S_DRAIN between) - both stream into eq/iterator/setup/pq back-to-
+                    // back and raster in FIFO order (PT before TL), each triangle carrying its
+                    // own is_pt bit (eq_ispt). This removes one full raster-drain barrier per
+                    // pass. Only the end of the TL list (or a non-peel list) hits S_DRAIN.
+                    if (peeling && peel_which==1'b0 && has_tr) begin
+                        peel_which  <= 1'b1;             // now queuing the TL list
+                        ol_list_ptr <= tr_ptr_l; ol_start <= 1'b1;
+                        // stay in S_OL_RUN; the TL entries push behind the PT entries in eq
+`ifndef SYNTHESIS
+                        if ($test$plusargs("mergetrace")) $display("[PT->TL MERGE] tile(%0d,%0d) has_pt=%b has_tr=%b", cur_tx, cur_ty, has_pt, has_tr);
+`endif
+                    end else begin
+`ifndef SYNTHESIS
+                        if ($test$plusargs("mergetrace") && peeling) $display("[S_DRAIN peel] tile(%0d,%0d) peel_which=%b has_pt=%b has_tr=%b", cur_tx, cur_ty, peel_which, has_pt, has_tr);
+`endif
+                        st <= S_DRAIN;
+                    end
+                end
                 else if (ol_prim.entry_ready && !ol_ack.entry_done) begin
                     if (ol_prim.entry_type == ENT_STRIP ||
                         ol_prim.entry_type == ENT_TRI) begin
                         if (!eq_full) begin
                             eq_etype[eq_tail[2:0]] <= ol_prim.entry_type;
                             eq_entry[eq_tail[2:0]] <= ol_prim.entry;
+                            eq_ispt [eq_tail[2:0]] <= (peel_which==1'b0);  // list-kind tag
                             eq_tail <= (eq_tail==EQ_N-1) ? 4'd0 : eq_tail+4'd1;
                             eq_push = 1'b1;
                             ol_ack.entry_done <= 1'b1;
@@ -1530,14 +1561,11 @@ module peel_core import tsp_pkg::*; (
             //  - peel: run the peel shade sub-phase, then decide whether to peel again.
             S_DRAIN: if (fq_empty && consumer_idle) begin
                 if (peeling) begin
-                    // Unified peel: after the PT list, rasterize the TL list into the
-                    // same half (both lists build this pass's staged frags) BEFORE the
-                    // shade, so they sort together.
-                    if (peel_which==1'b0 && has_tr) begin
-                        peel_which <= 1'b1;
-                        ol_list_ptr <= tr_ptr_l; ol_start <= 1'b1;
-                        st <= S_OL_RUN;
-                    end else begin
+                    // Both the PT and TL lists of this pass have already been rastered into
+                    // the same u_taginvw[htile]/u_peel (the PT->TL chain in S_OL_RUN streamed
+                    // them back-to-back with no barrier between). This single barrier ensures
+                    // raster fully drained before the NEXT pass's PeelBuffers walks u_peel.
+                    begin
                         // PEEL pass fully rastered into u_taginvw[htile]. HAND it to TSP
                         // (set the ready credit) and RUN AHEAD: flip htile so the next
                         // pass rasters into the OTHER half while TSP shades this one.
@@ -2122,6 +2150,7 @@ module peel_core import tsp_pkg::*; (
                 isp_ddx_invw<=pq_rdw[QF_DDX +:32]; isp_ddy_invw<=pq_rdw[QF_DDY +:32];
                 isp_c_invw<=pq_rdw[QF_CINVW +:32];
                 isp_word<=pq_rdw[QF_ISP +:32]; tri_tag<=pq_rdw[QF_TAG +:32];
+                tri_is_pt<=pq_rdw[QF_PT];
                 tri_count<=tri_count+1;
                 // chunk-aligned x range + row range from the bbox
                 rbx0 <= pq_rdw[QF_BX0 +:5] & 5'(~(RAS_LANES-1));

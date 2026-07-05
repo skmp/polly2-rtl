@@ -35,6 +35,7 @@ module isp_setup_streamed (
     output            in_ready,
     input      [31:0] isp_word,
     input      [31:0] in_tag,     // opaque payload carried through with the triangle
+    input             in_pt,      // list-kind (PT) payload carried through with the triangle
     input      [31:0] x1, input [31:0] y1, input [31:0] z1,
     input      [31:0] x2, input [31:0] y2, input [31:0] z2,
     input      [31:0] x3, input [31:0] y3, input [31:0] z3,
@@ -47,6 +48,7 @@ module isp_setup_streamed (
     input             out_ready,
     output reg        out_valid,
     output reg [31:0] out_tag,     // in_tag of the retiring triangle
+    output reg        out_pt,      // in_pt of the retiring triangle
     output reg [31:0] out_isp,     // isp_word of the retiring triangle
     output reg        sgn_neg,
     output reg        cull,
@@ -71,6 +73,7 @@ module isp_setup_streamed (
     reg [31:0] XB[0:NS-1],YB[0:NS-1]             /* synthesis ramstyle = "logic" */;
     reg [31:0] ISPW[0:NS-1];
     reg [31:0] TAG[0:NS-1];       // opaque payload carried through
+    reg        PT [0:NS-1];       // list-kind (PT) payload carried through
 
     // ---------------- per-slot scratchpad ----------------
     reg [31:0] d_X1X3[0:NS-1],d_Y2Y3[0:NS-1],d_Y1Y3[0:NS-1],d_X2X3[0:NS-1];
@@ -246,7 +249,7 @@ module isp_setup_streamed (
                 if (accept) begin
                     X1[sl]<=x1;Y1[sl]<=y1;Z1[sl]<=z1; X2[sl]<=x2;Y2[sl]<=y2;Z2[sl]<=z2;
                     X3[sl]<=x3;Y3[sl]<=y3;Z3[sl]<=z3; XB[sl]<=xbase; YB[sl]<=ybase;
-                    ISPW[sl]<=isp_word; TAG[sl]<=in_tag;
+                    ISPW[sl]<=isp_word; TAG[sl]<=in_tag; PT[sl]<=in_pt;
                     // c0: area diffs (a - c via sub, b=ONE)
                     L0(x1,ONE,x3,1); L1(y2,ONE,y3,1); L2(y1,ONE,y3,1); L3(x2,ONE,x3,1);
                     cyc[sl] <= 5'd1; slot_busy[sl] <= 1'b1;
@@ -386,6 +389,7 @@ module isp_setup_streamed (
                     if (out_ready) begin
                         out_valid <= 1'b1;
                         out_tag   <= TAG[sl];
+                        out_pt    <= PT[sl];
                         out_isp   <= ISPW[sl];
                         sgn_neg   <= o_sgnneg[sl];
                         cull      <= o_cull[sl];
