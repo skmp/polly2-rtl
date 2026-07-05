@@ -222,11 +222,6 @@ module peel_core import tsp_pkg::*; (
     reg  [CHUNK_AW-1:0]    pb_bufrd_addr;
     reg                    pb_bufwr_valid;      // PeelBuffers delayed write
     reg  [CHUNK_AW-1:0]    pb_bufwr_addr;
-    reg                    pb_shrd_valid;       // shade single-pixel read
-    reg  [9:0]             pb_shrd_id;
-    wire                   sh_valid_o;          // <- staged bit  (1-cyc after shrd)
-    wire [31:0]            sh_tag_o, sh_depth_o;
-    wire                   sh_pt_o;             // <- PT-list-won bit (blend alpha-test)
     wire [RAS_LANES-1:0]   b_pass_lp;           // per-lane peel accept (for dt_pt)
     wire [RAS_LANES-1:0]   b_more;              // per-lane MoreToDraw
     wire [RAS_LANES-1:0]   b_we;                // per-lane stage-B accept (-> u_taginvw)
@@ -264,7 +259,6 @@ module peel_core import tsp_pkg::*; (
     // handed-off tile coords (ti_tx/ti_ty).
     reg  [5:0]  spn_tx, spn_ty;
     reg  [31:0] spn_xbase, spn_ybase;
-    reg         pc_cold;                   // force plane-cache inval on the first pass
     reg  [31:0] tri_tag;                   // active (raster) triangle's CoreTag
     wire        isp_sgn_neg, isp_cull;
     wire [4:0]  w_bx0, w_bx1, w_by0, w_by1;   // tile-local bbox from setup
@@ -402,9 +396,14 @@ module peel_core import tsp_pkg::*; (
     reg          tsp_col;               // TSP u_col blend half (per tile)
     wire         tag_prod = htile;       // half ISP raster/CLEAR writes
     wire         tag_cons = tsp_tag;     // half TSP shade reads
-    wire         sh_valid_h [0:1];
-    wire         sh_pt_h    [0:1];
-    wire [31:0]  sh_tag_h   [0:1], sh_depth_h [0:1];
+    // spanner_v2 drives the 4-wide aligned read (declared here; driven in the spanner region)
+    wire        spv_rd_valid;
+    wire [9:0]  spv_rd_group;
+    // per-half 4-wide aligned read outputs; the spanner consumes the CONSUMER half (tsp_tag)
+    wire [3:0]  g4_valid_h [0:1];
+    wire [31:0] g4_tag_h   [0:1][0:3];
+    wire [31:0] g4_invw_h  [0:1][0:3];
+    wire [3:0]  g4_pt_h    [0:1];
     genvar gti;
     generate
       for (gti = 0; gti < 2; gti = gti + 1) begin : gtibuf
@@ -421,20 +420,16 @@ module peel_core import tsp_pkg::*; (
             .clr_depth(regs.isp_backgnd_d), .clr_tag(regs.isp_backgnd_t),
             // PeelBuffers valid-clear walk (producer half; mirrors u_peel's pb write)
             .pbc_valid(ti_prod && pb_bufwr_valid), .pbc_addr(pb_bufwr_addr),
-            // shade single-pixel read (consumer half only)
-            .sh_rd_valid(ti_cons && pb_shrd_valid), .sh_rd_id(pb_shrd_id),
-            .sh_valid(sh_valid_h[gti]), .sh_tag(sh_tag_h[gti]), .sh_depth(sh_depth_h[gti]),
-            .sh_pt(sh_pt_h[gti]),
-            // 4-wide aligned read (spanner_v2) - tied off until the spanner integration
-            .rd4_valid(1'b0), .rd4_group('0),
-            .g4_valid(), .g4_tag(), .g4_invw(), .g4_pt()
+            // single-pixel shade read retired: spanner_v2 uses the 4-wide port
+            .sh_rd_valid(1'b0), .sh_rd_id(10'd0),
+            .sh_valid(), .sh_tag(), .sh_depth(), .sh_pt(),
+            // 4-wide aligned read (spanner_v2), driven on the CONSUMER half only
+            .rd4_valid(ti_cons && spv_rd_valid), .rd4_group(spv_rd_group),
+            .g4_valid(g4_valid_h[gti]), .g4_tag(g4_tag_h[gti]),
+            .g4_invw(g4_invw_h[gti]), .g4_pt(g4_pt_h[gti])
         );
       end
     endgenerate
-    assign sh_valid_o = sh_valid_h[tsp_tag];
-    assign sh_tag_o   = sh_tag_h  [tsp_tag];
-    assign sh_depth_o = sh_depth_h[tsp_tag];
-    assign sh_pt_o    = sh_pt_h   [tsp_tag];
 
     // ---- PING-PONG color buffer (2 halves): TSP blend fills the half of the tile it
     // is shading (col_prod = tsp_half); the decoupled video-out engine drains col_vo.
@@ -465,52 +460,50 @@ module peel_core import tsp_pkg::*; (
     assign col_rd_argb    = col_rd_argb_h[col_prod];   // blend dst (CA)
     wire [31:0] vo_rd_argb = col_rd_argb_h[col_vo];    // VO flush pixel
 
-    // ============ SPANNER -> TSP ping-pong span buffers (resolved shade inputs) ======
-    // The spanner (spn FSM) resolves every pixel's planes (plane/setup cache + prefetch)
-    // and WRITES the full tsp_shade_pp input into spn_buf[spn_prod]. The trivial TSP
-    // reader drains spn_buf[tsp_rd] at 1 px/clk. Per-half ready credit sb_ready[h] (set
-    // by the spanner when a pass's buffer is complete, cleared by TSP when drained) +
-    // per-half metadata (mode/last/postonly/coords) - same handshake shape as u_taginvw.
-    reg          spn_prod;               // half the spanner writes (per pass)
-    reg          tsp_rd;                 // half the TSP reader drains (per pass)
-    reg  [1:0]   sb_ready;               // per-half: spanner done, awaiting TSP
-    reg          sb_last [0:1];          // per-half: tile's final shade -> post color
-    reg          sb_post [0:1];          // per-half: post-only (OP-only FLUSH, no shade)
-    reg  [5:0]   sb_tx [0:1], sb_ty [0:1];
-    // spanner write port (combinational drive from the spn FSM below)
-    reg          sbw_we;
-    reg  [9:0]   sbw_addr;
-    reg          sbw_shade;
-    reg          sbw_at;                 // PT alpha-test enable
-    reg  [31:0]  sbw_invw, sbw_tsp, sbw_tcw;
-    reg          sbw_ptex, sbw_pofs;
-    reg  [31:0]  sbw_ddx [0:9], sbw_ddy [0:9], sbw_c [0:9];
-    // TSP reader read port
-    reg  [9:0]   sbr_addr;
-    wire         sbr_shade [0:1];
-    wire         sbr_at [0:1];
-    wire [31:0]  sbr_invw [0:1], sbr_tsp [0:1], sbr_tcw [0:1];
-    wire         sbr_ptex [0:1], sbr_pofs [0:1];
-    wire [31:0]  sbr_ddx [0:1][0:9], sbr_ddy [0:1][0:9], sbr_c [0:1][0:9];
-    genvar gsb;
-    generate
-      for (gsb = 0; gsb < 2; gsb = gsb + 1) begin : gspanbuf
-        wire sb_is_prod = (spn_prod == gsb[0]);
-        span_buffer #(.DEPTH(TILE_W*TILE_H)) u_span (
-            .clk(clk),
-            .we(sb_is_prod && sbw_we), .waddr(sbw_addr),
-            .w_shade(sbw_shade), .w_at(sbw_at), .w_invw(sbw_invw),
-            .w_ptex(sbw_ptex), .w_pofs(sbw_pofs),
-            .w_tsp(sbw_tsp), .w_tcw(sbw_tcw),
-            .w_ddx(sbw_ddx), .w_ddy(sbw_ddy), .w_c(sbw_c),
-            .raddr(sbr_addr),
-            .r_shade(sbr_shade[gsb]), .r_at(sbr_at[gsb]), .r_invw(sbr_invw[gsb]),
-            .r_ptex(sbr_ptex[gsb]), .r_pofs(sbr_pofs[gsb]),
-            .r_tsp(sbr_tsp[gsb]), .r_tcw(sbr_tcw[gsb]),
-            .r_ddx(sbr_ddx[gsb]), .r_ddy(sbr_ddy[gsb]), .r_c(sbr_c[gsb])
-        );
-      end
-    endgenerate
+    // ============ SPANNER_v2 -> TSP shared DENSE span RING ==========================
+    // spanner_v2 writes shaded spans into ONE shared ring dense_span_buffer (slot = span_head,
+    // wrapping): {start, id, rep, invw[0:3], at}. The reader walks a pass's ring range
+    // [md_base .. +md_cnt) and EXPANDS each span's rep pixels (pixel k = start+k) into the
+    // shade pipe, looking up the shared triangle_setups RING [id] for planes.
+    //
+    // DEEPER PIPELINING: the ring (2048 = two worst-case tiles) + an N-deep pass-metadata FIFO
+    // replace the old 2-half ping-pong, so the spanner can run SEVERAL passes ahead of the
+    // reader (bounded by MD_N and the spanner's go-FIFO depth), not just one. Each pass the
+    // spanner hands PUSHES one descriptor {base,cnt,last,post,tx,ty}; the reader POPs the head.
+    localparam integer SPAN_NSLOT = 2*TILE_W*TILE_H;   // 2048
+    localparam integer SPAN_AW    = $clog2(SPAN_NSLOT); // 11 (slot address width)
+    localparam integer MD_N       = 4;                  // passes in flight (== spanner GF depth)
+    localparam integer MD_AW      = $clog2(MD_N);        // 2
+    reg  [SPAN_AW-1:0] md_base [0:MD_N-1];  // per-pass ring base slot (span_pass_base)
+    reg  [SPAN_AW:0]   md_cnt  [0:MD_N-1];  // per-pass span count (0 => empty pass)
+    reg                md_last [0:MD_N-1];  // per-pass: tile's final shade -> post color
+    reg                md_post [0:MD_N-1];  // per-pass: post-only (OP-only FLUSH, no shade)
+    reg  [5:0]         md_tx   [0:MD_N-1], md_ty [0:MD_N-1];
+    reg  [MD_AW:0]     md_wp, md_rp;        // FIFO ptrs (extra MSB for full/empty disambig)
+    wire               md_empty = (md_wp == md_rp);
+    wire               md_full  = (md_wp[MD_AW] != md_rp[MD_AW]) &&
+                                  (md_wp[MD_AW-1:0] == md_rp[MD_AW-1:0]);
+    // dense span buffer WRITE bus (spanner_v2 sp_* port; driven in the spanner region below)
+    wire               sp_we;
+    wire [SPAN_AW-1:0] sp_slot;             // ring write slot (span_head)
+    wire [9:0]         sp_start, sp_id;
+    wire [2:0]         sp_rep;
+    wire [31:0]        sp_invw [0:3];
+    wire               sp_at;
+    // TSP reader read port (one span/slot) into the shared ring
+    reg  [SPAN_AW-1:0] dsr_addr;
+    wire [9:0]         dsr_start, dsr_id;
+    wire [2:0]         dsr_rep;
+    wire [31:0]        dsr_invw  [0:3];
+    wire               dsr_at;
+    dense_span_buffer #(.DEPTH(SPAN_NSLOT)) u_span (
+        .clk(clk),
+        .we(sp_we), .waddr(sp_slot),
+        .w_start(sp_start), .w_id(sp_id), .w_rep(sp_rep), .w_invw(sp_invw), .w_at(sp_at),
+        .raddr(dsr_addr),
+        .r_start(dsr_start), .r_id(dsr_id), .r_rep(dsr_rep),
+        .r_invw(dsr_invw), .r_at(dsr_at)
+    );
 
     // ---- DECOUPLED VIDEO-OUT (FLUSH) engine + color-buffer credit handshake ----
     // Each color half carries a 1-bit "full" credit col_full[h]: the TSP side sets it
@@ -534,196 +527,86 @@ module peel_core import tsp_pkg::*; (
     reg         ra_done_l;                // latched region-array-done (pulse is 1-cyc)
 
     // ==================================================================
-    // TSP plane cache: 64 entries, keyed by the FULL CoreTag word, banked into M10K
-    // in the plane_cache module (u_pc). cache_bypass is deliberately IGNORED (always
-    // cache). Miss -> param fetch (GetFpuEntry) + tsp_setup_min; per entry: 10 planes
-    // {ddx,ddy,c} + the record's isp/tsp/tcw words. The wide plane payload lives in
-    // M10K (registered read -> the plane-cache lookup is a 1-cycle registered read,
-    // pipelined as stage L1->L2 of the streaming shade producer: L1 presents the read,
-    // L2 samples hit + payload); the small tag/valid mirror stays in logic for the
-    // single-cycle invalidate. cur_* is the live working entry (feeds tsp_shade); the
-    // whole cur_* bundle is committed to the cache in one write at TSP_RUN.
+    // v2 TSP front: spanner_v2 (SPANGEN + SETUP), span_expander, shared triangle_setups RING.
+    // Replaces the old plane_cache + dual record_fetcher + tsp_setup_min + spn pixel-walk.
+    // spanner_v2 reads the CONSUMER taginvw half 4 aligned px/clk, coalesces same-tag runs
+    // into spans, bump-allocates a dense setup id per distinct triangle into the shared ring,
+    // fetches+sets-up its planes into triangle_setups[id], and streams sparse spans. The
+    // span_expander converts each span to per-pixel span_buffer_v2 writes. The reader walks
+    // span_buffer_v2 densely and looks up triangle_setups[id] for the planes.
+    //
+    // RING: triangle_setups is ONE shared instance (no ping-pong). spanner_v2 bump-allocates
+    // ids (top_tag); when a pass's setups are all written it records the tile's end pointer;
+    // the reader pulses spv_rd_done when it finishes draining that pass, freeing the range.
     // ==================================================================
-    localparam integer PC_N = 64;
 
-    // current entry (feeds tsp_shade)
-    reg [31:0] cur_isp, cur_tsp, cur_tcw;
-    reg [31:0] cur_ddx [0:9];
-    reg [31:0] cur_ddy [0:9];
-    reg [31:0] cur_c   [0:9];
+    // ---- spanner_v2 control glue ----
+    reg         spv_start;            // 1-cyc: begin a tile pass
+    wire        spv_busy;
+    wire        spv_tsp_go;           // ring go pulse (go-FIFO auto-records the tile end)
+    reg         spv_rd_done;          // 1-cyc: reader freed the oldest handed tile's ring range
+    reg         spv_shade_mode;       // spn_xbase/ybase/tx/ty declared with the ISP origins
 
-    // flat 320-bit views of cur_* (lane j at [32*j +: 32]) for the cache write port
-    wire [319:0] cur_ddx_flat, cur_ddy_flat, cur_c_flat;
-    genvar gpc;
+    // ---- 4-wide taginvw read muxed to the CONSUMER half (tsp_tag). g4_*_h come from the
+    // taginvw generate above; spv_rd_valid/spv_rd_group are driven by spanner_v2 below. ----
+    wire [31:0] g4_tag_c  [0:3];
+    wire [31:0] g4_invw_c [0:3];
+    wire [3:0]  g4_valid_c = g4_valid_h[tsp_tag];
+    wire [3:0]  g4_pt_c    = g4_pt_h[tsp_tag];
+    genvar gm;
     generate
-      for (gpc = 0; gpc < 10; gpc = gpc + 1) begin : pcflat
-        assign cur_ddx_flat[32*gpc +: 32] = cur_ddx[gpc];
-        assign cur_ddy_flat[32*gpc +: 32] = cur_ddy[gpc];
-        assign cur_c_flat  [32*gpc +: 32] = cur_c  [gpc];
+      for (gm = 0; gm < 4; gm = gm + 1) begin : g4mux
+        assign g4_tag_c [gm] = g4_tag_h [tsp_tag][gm];
+        assign g4_invw_c[gm] = g4_invw_h[tsp_tag][gm];
       end
     endgenerate
 
-    // plane_cache control (typed ports; driven by the shade FSM)
-    reg          pc_inval;                 // clear all valid (S_SHADE_START, 1-cyc reg)
-    reg          pc_lu_req;                // lookup (COMBINATIONAL: streaming stage L1)
-    reg          pc_wr_req;                // commit (TSP_RUN, 1-cyc reg)
-    wire         pc_rd_valid, pc_hit;
-    wire [31:0]  pc_o_isp, pc_o_tsp, pc_o_tcw;
-    wire [319:0] pc_o_ddx, pc_o_ddy, pc_o_c;
-    plane_cache #(.NENT(PC_N), .SLOTW(6)) u_pc (
-        .clk(clk), .reset(reset), .inval(pc_inval),
-        .lu_req(pc_lu_req), .lu_slot(pc_lu_slot_c), .lu_tag(pc_lu_tag_c),
-        .rd_valid(pc_rd_valid), .hit(pc_hit),
-        .o_isp(pc_o_isp), .o_tsp(pc_o_tsp), .o_tcw(pc_o_tcw),
-        .o_ddx(pc_o_ddx), .o_ddy(pc_o_ddy), .o_c(pc_o_c),
-        .wr_req(pc_wr_req), .wr_slot(sh_slot), .wr_tag(sh_tag),
-        .wr_isp(cur_isp), .wr_tsp(cur_tsp), .wr_tcw(cur_tcw),
-        .wr_ddx(cur_ddx_flat), .wr_ddy(cur_ddy_flat), .wr_c(cur_c_flat)
-    );
+    // ---- spanner_v2 -> triangle_setups (SETUP write) + dense_span_buffer (SPANGEN spans) ----
+    // sp_* dense span write bus is declared with the dense_span_buffer above. The span-count
+    // range (sp_first/sp_last/sp_cnt_z) is captured per pass by the glue at busy->0.
+    wire         ts_we;
+    wire [9:0]   ts_id;
+    wire [31:0]  ts_isp, ts_tsp, ts_tcw;
+    wire [319:0] ts_ddx, ts_ddy, ts_c;
+    wire         sp_ready;
+    wire [SPAN_AW:0] spv_sp_range_base, spv_sp_range_cnt;  // this pass's span ring range
 
-    // ---- SPANNER walk state (resolve every pixel's planes -> span buffer) ----
-    // The spanner walks x = 0..1023 of the CONSUMER u_taginvw half (tsp_tag), resolves
-    // each pixel's planes (plane cache hit, or DDR fetch + tsp_setup_min on a miss) and
-    // WRITES the full shade record into span_buffer[spn_prod][x]. sh_tag/sh_invw/sh_id
-    // are the pixel currently being resolved (also feed the fetch + cache write on a miss).
-    reg [9:0]  spx;           // the tile pixel 0..1023 the spanner is resolving
-    // ---- PIPELINED resolve (L0/L1/L2, 1 px/clk on hits; like M2's shade front but
-    // writing the span buffer instead of the shader). L0: present u_taginvw read of
-    // spx. L1(va/ida): sh_* resolved -> present plane-cache lookup. L2(vb/idb/..):
-    // pc_hit/pc_o_* resolved -> WRITE span buffer (hit) / miss -> freeze + fetch. ----
-    reg        sva;           // L1 occupied (u_taginvw read in flight for sida)
-    reg [9:0]  sida;
-    reg        svb;           // L2 occupied (plane-cache read in flight for sidb)
-    reg [9:0]  sidb;
-    reg [31:0] stagb;         // sidb's tag (for a miss)
-    reg [31:0] sinvwb;        // sidb's invW
-    reg        satb;          // sidb's PT alpha-test bit
-    reg        sstaged;       // sidb is shaded this pass (else a shade=0 skip write)
-    reg        siss_more;     // still pixels to ISSUE at L0 (spx<=1023)
-    reg [31:0] sh_tag;        // the resolving pixel's CoreTag (drives fetch + cache write)
-    reg [31:0] sh_invw;       // the resolving pixel's depth-buffer invW (-> span buffer)
-    reg [9:0]  sh_id;         // the resolving pixel's tile index (-> span buffer addr)
-    reg        sh_at;         // the resolving pixel's PT alpha-test enable (-> span buffer)
-
-    // plane-cache slot hash (ONE definition, used by both the write path (sh_slot) and
-    // the lookup path (pc_lu_slot_c) so they can never diverge): param_offs low bits XOR
-    // tag_offset (strip triangles share param_offs, so ^tag[2:0] spreads them across
-    // slots). (A wider tag[14:9]^tag[8:3]^tag[2:0] hash was tried but measured 2-3% MORE
-    // misses over the full scene; the 1-entry victim cache absorbs the residual pairwise
-    // aliasing this simpler hash leaves.)
-    function automatic [5:0] pc_slot(input [31:0] tag);
-        pc_slot = tag[8:3] ^ {3'b000, tag[2:0]};
-    endfunction
-
-    wire [5:0] sh_slot = pc_slot(sh_tag);
-
-    // plane-cache lookup address for THIS cycle (pipelined; see the request block).
-    // The read port is driven from L1 (a fresh peel result) or, while a present is
-    // stalled on a texture miss, re-driven for stage B to hold pc_hit/pc_o_* alive.
-    reg  [31:0] pc_lu_tag_c;
-    wire [5:0]  pc_lu_slot_c = pc_slot(pc_lu_tag_c);
-
-    // ==================== TWO record_fetchers: demand + prefetch ====================
-    // The param-record fetch+decode (GetFpuEntry: fetch isp/tsp/tcw + stream the 3
-    // vertices) lives in record_fetcher, instantiated TWICE to give the spanner a
-    // 2-deep record cache so a prefetched record doesn't thrash the demand fetch:
-    //   * u_fetch    (DEMAND)   : on a plane-cache miss the spanner starts it and waits
-    //                             its done, then latches o_* into cur_*/fv_* and runs
-    //                             tsp_setup_min + P_TSP_RUN as before. DDR client `ts`.
-    //   * u_prefetch (PREFETCH) : the SCAN sub-FSM (pf_st) runs it on the next uncached
-    //                             tag during P_TSP_RUN's setup wait; its done sets the
-    //                             prefetch shadow (pf_ready/pf_rtag). A later demand miss
-    //                             whose tag matches the shadow is PROMOTED (no demand
-    //                             fetch). DDR client `pf` (lowest priority).
-    // Each owns an internal burst-8 8-word sliding-window line reader (tw0 demand line +
-    // tw1 sequential-prefetch line); decode semantics are identical to the old inline
-    // FH_/FV_ FSM.
-    // Both record_fetchers SHARE the single `ts` DDR client. They are mutually
-    // exclusive: the prefetch only starts when the demand fetcher is idle (!fx_busy),
-    // so at most one drives DDR at a time. Mux their dreq onto ts_dreq; ts_dresp fans
-    // to both (only the active one consumes it).
-    ddr_rd_req_t  fx_dreq, pf_dreq;
-    reg          fx_start;                 // 1-cyc: start the DEMAND fetch
-    reg  [31:0]  fx_tag;                   // demand fetch tag
-    wire         fx_busy, fx_done;
-    wire [31:0]  fx_isp, fx_tsp, fx_tcw;
-    wire [31:0]  fx_x[0:2], fx_y[0:2], fx_z[0:2];
-    wire [31:0]  fx_u[0:2], fx_v[0:2], fx_col[0:2], fx_ofs[0:2];
-    record_fetcher u_fetch (
+    spanner_v2 #(.NSLOT(TILE_W*TILE_H), .SLOTW(10),
+                 .SPAN_NSLOT(SPAN_NSLOT), .SPAN_W(SPAN_AW)) u_spanner (
         .clk(clk), .reset(reset),
-        .start(fx_start), .tag(fx_tag), .param_base(param_base),
+        .start(spv_start), .busy(spv_busy), .shade_mode(spv_shade_mode),
+        .xbase(spn_xbase), .ybase(spn_ybase), .param_base(param_base),
         .intensity_shadow(regs.fpu_shad_scale.intensity_shadow),
-        .busy(fx_busy), .done(fx_done),
-        .o_isp(fx_isp), .o_tsp(fx_tsp), .o_tcw(fx_tcw),
-        .o_x(fx_x), .o_y(fx_y), .o_z(fx_z),
-        .o_u(fx_u), .o_v(fx_v), .o_col(fx_col), .o_ofs(fx_ofs),
-        .dreq(fx_dreq), .dresp(ts_dresp)
+        .tsp_go(spv_tsp_go), .tsp_rd_done(spv_rd_done),
+        .rd_valid(spv_rd_valid), .rd_group(spv_rd_group),
+        .ti_valid(g4_valid_c), .ti_tag(g4_tag_c), .ti_invw(g4_invw_c), .ti_pt(g4_pt_c),
+        .ts_we(ts_we), .ts_id(ts_id), .ts_isp(ts_isp), .ts_tsp(ts_tsp), .ts_tcw(ts_tcw),
+        .ts_ddx(ts_ddx), .ts_ddy(ts_ddy), .ts_c(ts_c),
+        .sp_we(sp_we), .sp_slot(sp_slot),
+        .sp_range_base(spv_sp_range_base), .sp_range_cnt(spv_sp_range_cnt),
+        .sp_start(sp_start), .sp_id(sp_id), .sp_rep(sp_rep),
+        .sp_invw(sp_invw), .sp_at(sp_at), .sp_ready(sp_ready),
+        .dreq(ts_dreq), .dresp(ts_dresp)
+    );
+    // The expander is gone: spanner_v2 writes dense_span_buffer directly. sp_ready is 1'b1
+    // (the dense buffer accepts one span/clk unconditionally - no rep-cycle backpressure).
+    assign sp_ready = 1'b1;
+
+    // shared triangle_setups RING (spanner writes by id, reader reads by the span's id)
+    reg  [9:0]   tsg_raddr;
+    wire [31:0]  tsg_r_tsp, tsg_r_tcw;
+    wire         tsg_r_ptex, tsg_r_pofs;
+    wire [31:0]  tsg_r_ddx [0:9], tsg_r_ddy [0:9], tsg_r_c [0:9];
+    triangle_setups #(.DEPTH(TILE_W*TILE_H), .AW(10)) u_tsg (
+        .clk(clk),
+        .we(ts_we), .waddr(ts_id),
+        .w_isp(ts_isp), .w_tsp(ts_tsp), .w_tcw(ts_tcw),
+        .w_ddx(ts_ddx), .w_ddy(ts_ddy), .w_c(ts_c),
+        .raddr(tsg_raddr),
+        .r_tsp(tsg_r_tsp), .r_tcw(tsg_r_tcw), .r_ptex(tsg_r_ptex), .r_pofs(tsg_r_pofs),
+        .r_ddx(tsg_r_ddx), .r_ddy(tsg_r_ddy), .r_c(tsg_r_c)
     );
 
-    reg          pf_start;                 // 1-cyc: start the PREFETCH
-    reg  [31:0]  pf_ptag;                  // prefetch tag
-    wire         pf_busy, pf_done;
-    wire [31:0]  pfr_isp, pfr_tsp, pfr_tcw;
-    wire [31:0]  pfr_x[0:2], pfr_y[0:2], pfr_z[0:2];
-    wire [31:0]  pfr_u[0:2], pfr_v[0:2], pfr_col[0:2], pfr_ofs[0:2];
-    record_fetcher u_prefetch (
-        .clk(clk), .reset(reset),
-        .start(pf_start), .tag(pf_ptag), .param_base(param_base),
-        .intensity_shadow(regs.fpu_shad_scale.intensity_shadow),
-        .busy(pf_busy), .done(pf_done),
-        .o_isp(pfr_isp), .o_tsp(pfr_tsp), .o_tcw(pfr_tcw),
-        .o_x(pfr_x), .o_y(pfr_y), .o_z(pfr_z),
-        .o_u(pfr_u), .o_v(pfr_v), .o_col(pfr_col), .o_ofs(pfr_ofs),
-        .dreq(pf_dreq), .dresp(ts_dresp)
-    );
-    // share the ts client: the two fetchers are mutually exclusive (prefetch only runs
-    // when the demand fetcher is idle; a demand miss waits in P_PF_WAIT if a prefetch is
-    // in flight), so at most one asserts dreq.rd at a time. Mux by WHICH is requesting
-    // (request-driven, NOT busy-driven) so a read is never dropped: a busy-driven mux
-    // could point at the idle fetcher while the active one pulses .rd -> lost read ->
-    // that fetcher stuck in TF_MISS forever -> deadlock.
-    assign ts_dreq.rd    = fx_dreq.rd | pf_dreq.rd;
-    assign ts_dreq.addr  = fx_dreq.rd ? fx_dreq.addr  : pf_dreq.addr;
-    assign ts_dreq.burst = fx_dreq.rd ? fx_dreq.burst : pf_dreq.burst;
-
-    // prefetch shadow: u_prefetch's decoded record is held here (its outputs are wires,
-    // so latch a stable copy at pf_done) until a demand miss consumes it or a fresh
-    // prefetch overwrites it. pf_ready set at pf_done, cleared when promoted/consumed.
-    reg          pf_ready;                 // shadow holds a valid decoded record
-    reg  [31:0]  pf_rtag;                  // the tag the shadow decoded
-    reg  [31:0]  ps_isp, ps_tsp, ps_tcw;
-    reg  [31:0]  ps_x[0:2], ps_y[0:2], ps_z[0:2];
-    reg  [31:0]  ps_u[0:2], ps_v[0:2], ps_col[0:2], ps_ofs[0:2];
-
-    // fetched vertices (3) - the DEMAND record's decoded verts (feed tsp_setup_min).
-    // Latched from a promoted shadow or from u_fetch's o_* when the demand fetch lands.
-    reg [31:0] fv_x[0:2], fv_y[0:2], fv_z[0:2];
-    reg [31:0] fv_u[0:2], fv_v[0:2], fv_col[0:2], fv_ofs[0:2];
-
-    // decoded isp flags of the demand record (drive tsp_setup_min off cur_isp)
-    wire f_texture = cur_isp[ISP_TEXTURE_BIT];
-    wire f_offset  = cur_isp[ISP_OFFSET_BIT];
-    wire f_gouraud = cur_isp[ISP_GOURAUD_BIT];
-    wire f_uv16    = cur_isp[ISP_UV16_BIT];
-
-    // -------------------- TSP setup (plane producer) --------------------
-    reg         tsp_start;
-    wire        tsp_done, tsp_pvalid;
-    wire [3:0]  tsp_pidx;
-    wire [31:0] tsp_pddx, tsp_pddy, tsp_pc;
-    tsp_setup_min u_tsp (
-        .clk(clk), .reset(reset), .start(tsp_start), .done(tsp_done),
-        .gouraud(f_gouraud), .texture(f_texture), .offset(f_offset),
-        .x1(fv_x[0]),.y1(fv_y[0]),.z1(fv_z[0]),
-        .x2(fv_x[1]),.y2(fv_y[1]),.z2(fv_z[1]),
-        .x3(fv_x[2]),.y3(fv_y[2]),.z3(fv_z[2]),
-        .xbase(spn_xbase), .ybase(spn_ybase),   // the SPANNER's tile origin (not ISP's)
-        .u1(fv_u[0]),.v1(fv_v[0]),.u2(fv_u[1]),.v2(fv_v[1]),.u3(fv_u[2]),.v3(fv_v[2]),
-        .col1(fv_col[0]),.col2(fv_col[1]),.col3(fv_col[2]),
-        .ofs1(fv_ofs[0]),.ofs2(fv_ofs[1]),.ofs3(fv_ofs[2]),
-        .plane_valid(tsp_pvalid), .plane_idx(tsp_pidx),
-        .o_ddx(tsp_pddx), .o_ddy(tsp_pddy), .o_c(tsp_pc)
-    );
 
     // -------------------- TSP shade (FULLY PIPELINED, 1 pixel/clock) --------------------
     // The streaming producer presents a resolved pixel (planes from the plane cache
@@ -781,8 +664,9 @@ module peel_core import tsp_pkg::*; (
     end
     always @(posedge clk) begin
         if (!reset && sd_en && pp_in_valid && !pp_stall) begin
-            $fwrite(sd_fd, "%0d %0d %0d %0d %08x %08x %08x %02x %0d %0d",
-                    sd_seq, pp_in_id, pp_px, pp_py, pp_invw, pp_tsp, pp_tcw,
+            $fwrite(sd_fd, "%0d %0d %0d %0d %0d %0d %08x %08x %08x %02x %0d %0d",
+                    sd_seq, md_tx[md_rp[MD_AW-1:0]], md_ty[md_rp[MD_AW-1:0]], pp_in_id, pp_px, pp_py,
+                    pp_invw, pp_tsp, pp_tcw,
                     regs.text_control[4:0], pp_ptex, pp_pofs);
             for (sd_i = 0; sd_i < 10; sd_i = sd_i + 1) $fwrite(sd_fd, " %08x", pp_ddx[sd_i]);
             for (sd_i = 0; sd_i < 10; sd_i = sd_i + 1) $fwrite(sd_fd, " %08x", pp_ddy[sd_i]);
@@ -865,7 +749,6 @@ module peel_core import tsp_pkg::*; (
     // shade_mode only selects WHICH pixels are shaded, not whether we blend:
     //   0 = OP  : shade every pixel of the tile
     //   1 = PEEL: shade only pixels staged this pass (dt_valid)
-    reg        shade_mode;   // latched by TSP from ti_mode[] at T_IDLE
     integer    sh_pending;   // pixels presented this shade sub-phase (PEEL skips some)
 
     // ---- CONCURRENT TSP shade FSM (tst) + ISP<->TSP handshake (Milestone 2) ----
@@ -884,73 +767,58 @@ module peel_core import tsp_pkg::*; (
     // ISP toggles htile per raster PASS (not just per tile): shade pass P reads half A
     // while raster pass P+1 writes half B -> raster P+1 OVERLAPS shade P. ISP stalls
     // before rastering into a half that is still ti_ready (TSP hasn't consumed it).
-    // ---- SPANNER FSM (spn): OWNS plane cache / word reader / setup / cur_* ----
-    // Walks x=0..1023 of the CONSUMER u_taginvw half, resolving each pixel's planes and
-    // writing the full shade record into span_buffer[spn_prod]. PIPELINED L0/L1/L2 (like
-    // M2's shade front) so hits resolve at 1 px/clk; a plane-cache MISS freezes the
-    // pipeline and runs the param/vertex fetch + tsp_setup_min:
-    //   P_RUN    : the L0/L1/L2 pipeline (L0 taginvw read, L1 cache lookup, L2 buf write)
-    //   P_FETCH_W: wait for u_fetch.done (the DEMAND record_fetcher decodes the miss),
-    //              then latch o_* -> cur_*/fv_*. A miss whose tag == the prefetch shadow
-    //              (pf_ready && pf_rtag==sh_tag) SKIPS this: it latches the shadow and
-    //              jumps straight to P_TSP_RUN (ZERO demand fetch).
-    //   P_TSP_RUN: run tsp_setup_min on cur_*/fv_*, commit cur_* to the plane cache.
-    //   P_MPRES  : write cur_* (just fetched) into the span buffer for sidb; resume P_RUN
-    //   P_PF_WAIT: a prefetch is in flight at miss time -> wait for it (don't start a
-    //              redundant/colliding demand fetch), then promote-or-fetch.
-    localparam P_IDLE=0, P_RUN=1, P_MPRES=2, P_PF_WAIT=3,
-               P_FETCH_W=4, P_TSP_RUN=10, P_DONE=12;
-    reg [3:0]  spn;
-    // pipelined resolve control (combinational; mirrors M2's shade front):
-    wire spn_run     = (spn == P_RUN);
-    // L1 staged: the pixel on sh_* (sida) is shaded this pass.
-    wire spn_A_stg   = sva && (shade_mode ? sh_valid_o : 1'b1);
-    // L2 resolved this cycle: pc_hit/pc_o_* correspond to sidb (looked up last cycle),
-    // but only meaningful when sidb was staged (sstaged). A miss freezes + fetches.
-    wire spn_miss    = spn_run && svb && sstaged && !pc_hit;
-    wire spn_adv     = spn_run && !spn_miss;   // no texture stall here (that's downstream)
+    // ---- SPANNER_v2 GLUE FSM (spn) ----
+    // Starts spanner_v2 on a ready input half, waits its busy->0 (all spans emitted + all
+    // setups written into the shared triangle_setups ring), then hands the span_buffer_v2
+    // half to the reader. All resolve/fetch/setup work lives inside spanner_v2; this FSM is
+    // pure handshake glue (post-only tiles skip the spanner run entirely).
+    localparam G_IDLE=0, G_START=1, G_RUN=2;
+    reg [1:0]  spn;
 
-    // ==================== SCAN-PREFETCH (decode the NEXT miss's record under this
-    // miss's SETUP_WAIT, into u_prefetch's 2-deep shadow) ====================
-    // While the spanner sits in P_TSP_RUN waiting on tsp_done, the pipeline is frozen
-    // so the u_taginvw shade-read port (pb_shrd) and the plane-cache lookup port (pc_lu)
-    // are idle, AND the demand fetcher (u_fetch) is done. This best-effort sub-FSM
-    // (pf_st) uses those idle ports to SCAN FORWARD from the next pixel for the NEXT tag
-    // that MISSES the cache (and is staged), then FULLY DECODES that miss's record into
-    // the SECOND record_fetcher (u_prefetch) - not just warming DDR lines, but producing
-    // a ready-to-use decoded record held in the prefetch shadow (pf_ready/pf_rtag/ps_*).
-    // When the spanner later returns to P_RUN and reaches that pixel, its demand miss is
-    // PROMOTED from the shadow with ZERO demand fetch (see P_RUN miss path). It NEVER
-    // touches the demand fetch state (u_fetch/cur_*/fv_*) - only u_prefetch. It NEVER
-    // stalls/extends P_TSP_RUN: the instant tsp_done arrives, P_TSP_RUN proceeds and
-    // pf_st returns to PF_OFF, abandoning any partial scan (a started u_prefetch keeps
-    // running on its own DDR client and lands in the shadow whenever it finishes; only
-    // ONE prefetch is ever in flight, gated by !pf_busy). Prefetch is 1-deep; a wrong/
-    // partial prefetch just means a cold demand fetch later (no correctness impact).
-    localparam PF_OFF=0, PF_SCAN0=1, PF_SCAN1=2, PF_SCAN2=3, PF_ISSUE=4, PF_DONE=5;
-    reg [2:0]  pf_st;
-    reg [9:0]  pf_scan;       // next pixel to examine at PF_SCAN0
-    reg        pf_sv;         // PF_SCAN0->1: a taginvw read is in flight for pf_sid
-    reg [9:0]  pf_sid;        // pixel id whose taginvw read is in flight
-    reg [31:0] pf_tag;        // the found-miss tag (issued to u_prefetch)
-    // pf drives the shade-read port while presenting a scan read (PF_SCAN0), and the
-    // plane-cache lookup port the cycle after (PF_SCAN1, tag now resolved on sh_tag_o).
-    wire       pf_drive_shrd = (pf_st == PF_SCAN0);
-    wire       pf_drive_lu   = (pf_st == PF_SCAN1);
-
-    // ---- TSP READER FSM (tsp_st): drains span_buffer[tsp_rd] -> tsp_shade_pp ----
-    //   R_IDLE : pick a ready half (sb_ready[tsp_rd]); post-only -> R_POST
-    //   R_RUN  : STREAMING 1 px/clk. sbr_addr=tsp_i presents pixel tsp_i's read; the
-    //            pixel FED this cycle is the one presented last cycle (rd_i, rd_v). Hold
-    //            on pp_stall. rd_last marks the final pixel.
-    //   R_DRAIN: all fed; wait blend to drain (sh_out_n>=sh_pending && !cb_valid)
-    //   R_POST : post the finished tile's u_col to VO (on sb_last)
+    // ---- TSP READER FSM (tsp_st): pops the head pass descriptor (md FIFO), walks that pass's
+    // span RING range [md_base .. +md_cnt) with wrap, EXPANDS each span's rep pixels, looks up
+    // triangle_setups[id], feeds tsp_shade_pp.
+    //   R_IDLE : pop-peek the head descriptor (md_rp); post-only/empty -> post/skip
+    //   R_RUN  : per span: read span (Stage A, dsr_*), latch + expand rep pixels (Stage B),
+    //            present triangle_setups[id]; feed pp from the carried pixel + planes (Stage C).
+    //            Advance span_ptr (wrapping) only when a span finishes; stop via span_left.
+    //   R_DRAIN: all fed; wait blend to drain, then free this pass's ring range (spv_rd_done)
+    //            and pop md_rp (unless md_last -> R_POST pops).
+    //   R_POST : post the finished tile's u_col to VO (on md_last), pop md_rp
     localparam R_IDLE=0, R_RUN=1, R_DRAIN=3, R_POST=4;
     reg [2:0]  tsp_st;
-    reg [9:0]  tsp_i;         // reader pixel index being PRESENTED (raddr) this cycle
-    reg [9:0]  rd_i;          // pixel whose data is on sbr_* now (presented last cycle)
-    reg        rd_v;          // rd_i valid (a read was presented last cycle)
-    reg        rd_last;       // rd_i is the last pixel (1023)
+    // DENSE reader pipeline (3 decoupled stages, no bubble):
+    //  A) READ    : dsr_addr=span_ptr issues a slot read (registered, lands next cycle).
+    //               span_ptr advances per read issued; sb_rd_pend tracks a read in flight.
+    //  B) SKID    : ns_* holds ONE prefetched span (the resolved dsr_*), decoupling the
+    //               fixed 1-cycle read latency from the VARIABLE (1..4 cyc) expand below.
+    //  C) EXPAND  : cs_* is the span being expanded; cs_k walks 0..rep-1 -> Stage C -> pp.
+    // The skid lets READ run ahead and refill while EXPAND is busy, so every slot is
+    // consumed exactly once, in order, with no idle cycle between spans.
+    reg [SPAN_AW-1:0] span_ptr; // the IN-FLIGHT ring slot (Stage A addr), held stable, wraps
+    reg        rd_live;       // a slot read is OUTSTANDING (issued, not yet consumed)
+    reg        sb_rd_pend;    // the outstanding read has RESOLVED on dsr_* this cycle
+    reg        span_more;     // a slot remains AFTER the in-flight one (derived from span_left)
+    reg [SPAN_AW:0] span_left; // spans not yet CONSUMED (incl the in-flight one); md_cnt at prime
+    // Stage B skid: one prefetched span awaiting EXPAND.
+    reg        ns_v;
+    reg [9:0]  ns_start, ns_id;
+    reg [2:0]  ns_rep;
+    reg [31:0] ns_invw [0:3];
+    reg        ns_at;
+    // Stage C expand: current span being expanded + pixel counter k
+    reg        cs_v;          // a span is being expanded (cs_* valid)
+    reg [9:0]  cs_start, cs_id;
+    reg [2:0]  cs_rep;
+    reg [31:0] cs_invw [0:3];
+    reg        cs_at;
+    reg [2:0]  cs_k;          // pixel-within-span 0..rep-1
+    // Stage C: the pixel emitted last cycle -> feeds pp with fresh planes (tsg_r_* for cs_id).
+    reg        s2_v;          // Stage C occupied (a pixel to feed pp this cycle)
+    reg [9:0]  s2_p;          // pixel index (y:x)
+    reg [31:0] s2_invw;
+    reg        s2_at;
+    reg [9:0]  s2_id;         // held to re-present the tsg read on pp_stall
 
     reg  [1:0] ti_ready;      // per-half: rastered, awaiting shade
     reg        ti_mode [0:1]; // per-half OP(0)/PEEL(1)
@@ -1219,20 +1087,9 @@ module peel_core import tsp_pkg::*; (
     // single-driver enforcement; here we just say WHICH client is active this cycle.
     // The region barriers keep raster / shade / bulk phases disjoint, so at most one
     // read client and one write client is ever asserted.
-    integer swi;
     always @(*) begin
         // ---- peel buffer ----
         pb_ra_valid    = ras_out_valid;               // stage-A read (chunk resolved)
-        // SPANNER L0: present the u_taginvw read of spx every advance cycle; on a miss
-        // freeze we re-present sida's read so sh_* stays alive; on P_MPRES accept we
-        // re-present sida to resume. (Mirrors M2's pb_shrd drive.)
-        if (spn_run)          begin pb_shrd_valid = (spn_adv ? siss_more : sva);
-                                    pb_shrd_id    = (spn_adv ? spx : sida); end
-        else if (spn==P_MPRES)begin pb_shrd_valid = sva; pb_shrd_id = sida; end
-        // SCAN-prefetch (P_TSP_RUN only): present the taginvw read of pf_scan while
-        // scanning for the next-miss tag. pf_drive_shrd is set by the pf FSM below.
-        else if (pf_drive_shrd) begin pb_shrd_valid = 1'b1; pb_shrd_id = pf_scan; end
-        else                  begin pb_shrd_valid = 1'b0; pb_shrd_id = sida; end
         pb_clr_valid   = (st == S_CLEAR_WR);          // CLEAR walk write
         pb_clr_addr    = cl_i;
         pb_bufrd_valid = (st == S_PEEL_BUF_RUN);      // PeelBuffers read-ahead
@@ -1243,108 +1100,40 @@ module peel_core import tsp_pkg::*; (
 
         // ---- color buffer ----
         // STREAMING shade pipe: pp_out_valid is a clean 1-cycle pulse INDEPENDENT of
-        // pp_stall (the back-end drains while the front may be stalled on a texture
-        // miss). Consume it whenever high - gating on !pp_stall would drop results that
-        // emerge during a miss (the old frozen-pipe contract no longer holds).
+        // pp_stall (the back-end drains while the front may be stalled on a texture miss).
         cb_ca_valid = pp_out_valid;                   // blend stage CA read (out_id)
         cb_ca_id    = pp_out_id[9:0];                 // [10] is the at-bit
         // FLUSH read is driven by the DECOUPLED video-out FSM (vst), on the VO half.
         cb_fl_valid = (vst == VO_RD || vst == VO_WR); // VO read (vo_i)
         cb_fl_id    = vo_i;
 
-        // ---- span buffer READ (TSP reader), 1 px/clk streaming ----
-        // Normally present tsp_i (the pixel to feed NEXT cycle). While the shader is
-        // stalled we hold rd_i (the pixel being fed NOW) so its record stays on sbr_*.
-        sbr_addr = pp_stall ? rd_i : tsp_i;
-
-        // ---- plane cache lookup (SPANNER L1) ----
-        // On an advance cycle L1 presents the lookup of sida's tag (sh_tag_o, resolved
-        // this cycle) if staged; pc_hit/pc_o_* land next cycle at L2. On a miss freeze
-        // we re-present sidb's tag (stagb) so pc_hit/pc_o_* stay valid for the pixel we
-        // re-resolve after the fetch.
-        if (spn_run && !spn_adv && svb) begin
-            pc_lu_req   = 1'b1;
-            pc_lu_tag_c = stagb;
-        end else if (spn_run && spn_adv && spn_A_stg) begin
-            pc_lu_req   = 1'b1;
-            pc_lu_tag_c = sh_tag_o;
-        end else if (pf_drive_lu) begin
-            // SCAN-prefetch (P_TSP_RUN only): look up the scanned pixel's tag (resolved
-            // last cycle onto sh_tag_o) in the plane cache; pc_hit lands next cycle.
-            pc_lu_req   = 1'b1;
-            pc_lu_tag_c = sh_tag_o;
-        end else begin
-            pc_lu_req   = 1'b0;
-            pc_lu_tag_c = sh_tag_o;
-        end
-
-        // ---- span buffer WRITE (spanner L2), 1 px/clk ----
-        // On an advance cycle, L2 writes the record for sidb (the pixel looked up last
-        // cycle): staged HIT -> planes from pc_o_* (shade=1); not-staged -> shade=0. On
-        // P_MPRES (miss just fetched+set-up) -> write sidb from cur_* (shade=1).
-        sbw_we    = 1'b0;
-        sbw_addr  = sidb;
-        sbw_shade = 1'b0;
-        sbw_at    = satb;
-        sbw_invw  = sinvwb;
-        sbw_tsp   = 32'd0;
-        sbw_tcw   = 32'd0;
-        sbw_ptex  = 1'b0;
-        sbw_pofs  = 1'b0;
-        for (swi = 0; swi < 10; swi = swi + 1) begin
-            sbw_ddx[swi] = 32'd0; sbw_ddy[swi] = 32'd0; sbw_c[swi] = 32'd0;
-        end
-        if (spn_adv && svb) begin
-            sbw_we   = 1'b1;
-            sbw_addr = sidb;
-            if (!sstaged) begin
-                sbw_shade = 1'b0;            // PEEL-skipped pixel
-            end else begin                  // staged HIT (a miss would freeze, not adv)
-                sbw_shade = 1'b1;
-                sbw_tsp   = pc_o_tsp;
-                sbw_tcw   = pc_o_tcw;
-                sbw_ptex  = pc_o_isp[ISP_TEXTURE_BIT];
-                sbw_pofs  = pc_o_isp[ISP_OFFSET_BIT];
-                for (swi = 0; swi < 10; swi = swi + 1) begin
-                    sbw_ddx[swi] = pc_o_ddx[32*swi +: 32];
-                    sbw_ddy[swi] = pc_o_ddy[32*swi +: 32];
-                    sbw_c[swi]   = pc_o_c  [32*swi +: 32];
-                end
-            end
-        end else if (spn == P_MPRES) begin  // miss-resolved pixel from cur_*
-            sbw_we    = 1'b1;
-            sbw_addr  = sidb;
-            sbw_shade = 1'b1;
-            sbw_tsp   = cur_tsp;
-            sbw_tcw   = cur_tcw;
-            sbw_ptex  = cur_isp[ISP_TEXTURE_BIT];
-            sbw_pofs  = cur_isp[ISP_OFFSET_BIT];
-            for (swi = 0; swi < 10; swi = swi + 1) begin
-                sbw_ddx[swi] = cur_ddx[swi];
-                sbw_ddy[swi] = cur_ddy[swi];
-                sbw_c[swi]   = cur_c[swi];
-            end
-        end
+        // ---- TSP reader read-address presentation (dense span walk + expand) ----
+        // Stage A: dsr_addr = span_ptr = the IN-FLIGHT slot, held stable until consumed into
+        // the skid (so the registered read output dsr_* stays valid across a multi-cycle expand).
+        // setups ring: present the CURRENT expanding span's id (cs_id) so planes are stable
+        // across the span's rep pixels. On pp_stall, hold both (re-present s2_id for planes).
+        dsr_addr  = span_ptr;
+        tsg_raddr = pp_stall ? s2_id : cs_id;
     end
 
-    // ---- pp-input mux: drive tsp_shade_pp's inputs COMBINATIONALLY ----
-    // The TSP READER (tsp_st) drains span_buffer[tsp_rd]: in R_FEED the record for
-    // pixel tsp_i (read presented last cycle in R_REQ) is on sbr_*[tsp_rd]. Present it
-    // to the shader when it is a shaded pixel (r_shade); hold on pp_stall. id/invw and
-    // all planes come straight from the span buffer - no cache/cur_* here anymore.
+    // ---- pp-input mux: drive tsp_shade_pp's inputs COMBINATIONALLY from stage S2 ----
+    // S2 holds pixel s2_p: {shade,invw,at} carried from S1; planes are fresh on tsg_r_* (the
+    // setups read of s2's id, presented last cycle). Present to the shader when s2 is a
+    // shaded pixel; hold on pp_stall (the reader FSM freezes the whole pipeline).
     integer pj;
+    integer pj2;   // reader span-expand invw copy loop
     always @(*) begin
-        pp_in_valid = (tsp_st == R_RUN) && rd_v && sbr_shade[tsp_rd];
-        pp_in_id    = {sbr_at[tsp_rd], rd_i};    // fed pixel = rd_i; [10]=PT alpha-test
-        pp_invw     = sbr_invw[tsp_rd];
-        pp_tsp      = sbr_tsp[tsp_rd];
-        pp_tcw      = sbr_tcw[tsp_rd];
-        pp_ptex     = sbr_ptex[tsp_rd];
-        pp_pofs     = sbr_pofs[tsp_rd];
+        pp_in_valid = (tsp_st == R_RUN) && s2_v;   // every emitted span pixel is shaded
+        pp_in_id    = {s2_at, s2_p};             // fed pixel = s2_p; [10]=PT alpha-test
+        pp_invw     = s2_invw;
+        pp_tsp      = tsg_r_tsp;
+        pp_tcw      = tsg_r_tcw;
+        pp_ptex     = tsg_r_ptex;
+        pp_pofs     = tsg_r_pofs;
         for (pj = 0; pj < 10; pj = pj + 1) begin
-            pp_ddx[pj] = sbr_ddx[tsp_rd][pj];
-            pp_ddy[pj] = sbr_ddy[tsp_rd][pj];
-            pp_c[pj]   = sbr_c  [tsp_rd][pj];
+            pp_ddx[pj] = tsg_r_ddx[pj];
+            pp_ddy[pj] = tsg_r_ddy[pj];
+            pp_c[pj]   = tsg_r_c  [pj];
         end
         pp_px = pp_in_id[4:0];
         pp_py = pp_in_id[9:5];    // [10] is the at-bit, not part of px/py
@@ -1353,8 +1142,7 @@ module peel_core import tsp_pkg::*; (
     always @(posedge clk) begin
         if (reset) begin
             st<=S_IDLE; done<=0; ra_start<=0; ol_start<=0;
-            tsp_start<=0; fx_start<=0; pf_start<=0;
-            pf_ready<=1'b0; pf_rtag<=32'd0;
+            spv_start<=1'b0; spv_rd_done<=1'b0;
             ra_ack.list_done<=0; ol_ack.entry_done<=0; it_ack.triangle_done<=0;
             tri_count<=0; cull_count<=0; miss_count<=0; hit_count<=0; tri_seen<=0;
             sh_out_n<=0; ras_inflight<=0;
@@ -1383,26 +1171,19 @@ module peel_core import tsp_pkg::*; (
             cl_i<='0; pb_i<='0; pb_rd<='0; pb_pipe<=1'b0; first_peel<=1'b0;
             col_post<=1'b0;                   // color post-to-VO intent
             ra_done_l<=1'b0;                  // latched region-done
-            // SPANNER + TSP reader FSMs
-            spn<=P_IDLE; spx<=10'd0;
-            sva<=1'b0; svb<=1'b0; siss_more<=1'b0; sstaged<=1'b0;
-            spn_tx<=6'h3f; spn_ty<=6'h3f; pc_cold<=1'b1;   // force 1st-pass inval
+            // SPANNER_v2 glue + TSP reader FSMs
+            spn<=G_IDLE;
+            spv_shade_mode<=1'b0;
+            spn_tx<=6'h3f; spn_ty<=6'h3f;
             spn_xbase<=32'd0; spn_ybase<=32'd0;
-            // SCAN-prefetch sub-FSM
-            pf_st<=PF_OFF; pf_scan<=10'd0; pf_sv<=1'b0; pf_sid<=10'd0;
-            pf_tag<=32'd0;
-            spn_prod<=1'b0;
-            tsp_st<=R_IDLE; tsp_i<=10'd0; rd_v<=1'b0; rd_i<=10'd0; rd_last<=1'b0; tsp_rd<=1'b0;
-            sb_ready<=2'b00;
-            sb_last[0]<=1'b0; sb_last[1]<=1'b0;
-            sb_post[0]<=1'b0; sb_post[1]<=1'b0;
+            tsp_st<=R_IDLE;
+            span_ptr<='0; span_left<='0; rd_live<=1'b0; sb_rd_pend<=1'b0; span_more<=1'b0; ns_v<=1'b0;
+            cs_v<=1'b0; cs_k<=3'd0; s2_v<=1'b0; s2_id<=10'd0;
+            md_wp<='0; md_rp<='0;                 // span pass-metadata FIFO ptrs
             ti_ready<=2'b00; tsp_tag<=1'b0; tsp_col<=1'b0;
             ti_postonly[0]<=1'b0; ti_postonly[1]<=1'b0;
             // htile = ISP u_taginvw producer half (per pass); tsp_tag/tsp_col above.
             htile<=1'b0;
-            pc_inval<=1'b0; pc_wr_req<=1'b0;
-            // (plane cache valid bits are cleared by u_pc's own reset; pc_lu_req is
-            //  combinational, driven by the spanner)
         end else begin
 `ifndef SYNTHESIS
             // -------- performance counters: charge THIS clock to its buckets --------
@@ -1410,7 +1191,7 @@ module peel_core import tsp_pkg::*; (
             // for a start). Approximate "active" as: not S_IDLE, or any engine busy
             // (raster, setup, OR the decoupled video-out engine).
             if (st != S_IDLE || rs_st != RS_IDLE || su_busy || vst != VO_IDLE
-                             || spn != P_IDLE || tsp_st != R_IDLE) begin
+                             || spv_busy || spn != G_IDLE || tsp_st != R_IDLE) begin
                 pc_total <= pc_total + 1;
                 // decoupled VO engine busy (framebuffer writeout / scanout).
                 if (vst != VO_IDLE) pc_top_flush <= pc_top_flush + 1;
@@ -1429,9 +1210,7 @@ module peel_core import tsp_pkg::*; (
                     if      (pp_in_valid && pp_stall) pc_sh_tex_stall <= pc_sh_tex_stall + 1;
                     else if (pp_in_valid)             pc_sh_present   <= pc_sh_present   + 1;
                     else                              pc_sh_look      <= pc_sh_look      + 1;
-                end else if (spn == P_TSP_RUN)                    pc_sh_setup_wait <= pc_sh_setup_wait + 1;
-                else if (spn==P_FETCH_W)                          pc_sh_fetch <= pc_sh_fetch + 1;
-                else if (spn==P_RUN||spn==P_MPRES)                pc_sh_look  <= pc_sh_look  + 1;
+                end else if (spv_busy)                            pc_sh_setup_wait <= pc_sh_setup_wait + 1;
                 else if (tsp_st==R_DRAIN)                         pc_sh_drain <= pc_sh_drain + 1;
                 else                                              pc_sh_none  <= pc_sh_none  + 1;
 
@@ -1441,7 +1220,7 @@ module peel_core import tsp_pkg::*; (
                 else if (st==S_OL_RUN)                            pc_top_ol      <= pc_top_ol      + 1;
                 else if (st==S_DRAIN)                             pc_top_barrier <= pc_top_barrier + 1;
                 else                                              pc_top_other   <= pc_top_other   + 1;
-                if (spn != P_IDLE || tsp_st != R_IDLE)            pc_top_shade   <= pc_top_shade   + 1;
+                if (spv_busy || spn != G_IDLE || tsp_st != R_IDLE) pc_top_shade  <= pc_top_shade   + 1;
 
                 if (pp_stall) pc_tex_busy <= pc_tex_busy + 1;
                 if (su_busy)  pc_su_busy  <= pc_su_busy  + 1;
@@ -1454,7 +1233,7 @@ module peel_core import tsp_pkg::*; (
                     reg e_isp, e_spn, e_tsp; reg [2:0] occ;
                     e_isp = (rs_st != RS_IDLE) || su_busy ||
                             (st==S_CLEAR_WR) || (st==S_PEEL_BUF_RUN) || (st==S_OL_RUN);
-                    e_spn = (spn != P_IDLE);
+                    e_spn = spv_busy || (spn != G_IDLE);
                     e_tsp = (tsp_st != R_IDLE);
                     occ = {e_isp, e_spn, e_tsp};
                     pc_occ[occ] <= pc_occ[occ] + 1;
@@ -1468,27 +1247,11 @@ module peel_core import tsp_pkg::*; (
             end
 `endif
             done<=0; ra_start<=0; ol_start<=0;
-            tsp_start<=0; fx_start<=0; pf_start<=0;  // 1-cyc fetcher start strobes
+            spv_start<=1'b0; spv_rd_done<=1'b0;  // 1-cyc spanner start / ring-free strobes
             ra_ack.list_done<=0; ol_ack.entry_done<=0; it_ack.triangle_done<=0;
             eq_push = 1'b0;
-            pc_inval<=1'b0; pc_wr_req<=1'b0;  // 1-cyc strobes (pc_lu_req is combi)
             col_post<=1'b0;                   // 1-cyc: color-buffer post-to-VO intent
             // fbw_req is driven COMBINATIONALLY by the decoupled VO engine.
-
-            // ---- prefetch shadow capture: latch u_prefetch's decoded record on its
-            // done pulse into the stable shadow (its o_* are wires). pf_rtag was latched
-            // when the prefetch was ISSUED (pf_start below). Sets pf_ready; a demand miss
-            // that matches promotes it (clearing pf_ready), else the next issued prefetch
-            // overwrites it. ----
-            if (pf_done) begin
-                ps_isp <= pfr_isp; ps_tsp <= pfr_tsp; ps_tcw <= pfr_tcw;
-                for (j = 0; j < 3; j = j + 1) begin
-                    ps_x[j]<=pfr_x[j]; ps_y[j]<=pfr_y[j]; ps_z[j]<=pfr_z[j];
-                    ps_u[j]<=pfr_u[j]; ps_v[j]<=pfr_v[j];
-                    ps_col[j]<=pfr_col[j]; ps_ofs[j]<=pfr_ofs[j];
-                end
-                pf_ready <= 1'b1;
-            end
 
             // ============ streamed rasterizer CONSUMER: stage A -> stage B ============
             // Stage A (ras_out_valid): the combinational peel-RAM read of chunk
@@ -1498,6 +1261,18 @@ module peel_core import tsp_pkg::*; (
             // peel RAM. Here in stage B we also write the dt_pt REG (kept out of the
             // RAM) and accumulate more_to_draw (moved off the old combinational path).
             b_valid <= 1'b0;
+`ifndef SYNTHESIS
+            if ($test$plusargs("coaltrace") && b_valid && (|b_we))
+                $display("[WRITE] htile=%b tile(%0d,%0d) y=%0d x=%0d tag=%08x", htile, cur_tx, cur_ty, b_oy, b_ox, b_tag);
+            if ($test$plusargs("coaltrace") && spv_start)
+                $display("[START] tsp_tag=%b spn tile(%0d,%0d) shade_mode(~ti)=%b ti_ready=%b", tsp_tag, ti_tx[tsp_tag], ti_ty[tsp_tag], ~ti_mode[tsp_tag], ti_ready);
+            // +passtrace: log every shade handoff START (tile, OP/PEEL mode, last, postonly)
+            if ($test$plusargs("passtrace") && spv_start)
+                $display("[PASS] tile(%0d,%0d) mode=%s last=%b postonly=%b",
+                         ti_tx[tsp_tag], ti_ty[tsp_tag],
+                         ti_mode[tsp_tag] ? "PEEL" : "OP  ",
+                         ti_last[tsp_tag], ti_postonly[tsp_tag]);
+`endif
             if (ras_out_valid) begin
                 b_valid  <= 1'b1;
                 b_inside <= ras_inside;
@@ -1532,6 +1307,15 @@ module peel_core import tsp_pkg::*; (
             // a reg), presents the col-RAM read of out_id (combi block), and counts it
             // as drained. Stage CB (cb_valid): cr_rdata = OLD col_buf[id] = dst, the
             // blend runs combinationally, and the combi block writes col_ram[id].
+`ifndef SYNTHESIS
+            // +blendtrace: at CB, log the dst (col_rd_argb) the blend reads for pixel 327/328
+            // in tile(7,4). Reveals if a layer reads a STALE/wrong dst (composite divergence).
+            if ($test$plusargs("blendtrace") && cb_valid && md_tx[md_rp[MD_AW-1:0]]==7
+                && md_ty[md_rp[MD_AW-1:0]]==4
+                && (cb_id==10'd327 || cb_id==10'd328))
+                $display("[BLENDCB] tile(7,4) id=%0d dst=%08x src=%08x tsp=%08x",
+                         cb_id, col_rd_argb, cb_argb, cb_tsp);
+`endif
             cb_valid <= 1'b0;
             if (pp_out_valid) begin                    // clean pulse; NOT gated on stall
                 cb_valid <= 1'b1;
@@ -1542,10 +1326,17 @@ module peel_core import tsp_pkg::*; (
                 sh_out_n <= sh_out_n + 1;
 `ifndef SYNTHESIS
                 pc_blend <= pc_blend + 1;
+                // +blendtrace: log the blend of the suspect pixel (tile(7,4), local id 328 = px8
+                // py10). Shows the source color this layer produced (dst it reads is next cyc).
+                if ($test$plusargs("blendtrace") && md_tx[md_rp[MD_AW-1:0]]==7
+                    && md_ty[md_rp[MD_AW-1:0]]==4
+                    && (pp_out_id[9:0]==10'd327 || pp_out_id[9:0]==10'd328))
+                    $display("[BLEND] tile(7,4) id=%0d src=%08x tsp=%08x at=%b md_rp=%0d col_prod=%b",
+                             pp_out_id[9:0], pp_out_argb, pp_out_tsp, pp_out_id[10], md_rp[MD_AW-1:0], tsp_col);
 `endif
             end
 `ifndef SYNTHESIS
-            if (sbw_we && sbw_shade) pc_swrite <= pc_swrite + 1;  // spanner shaded-px writes
+            if (sp_we) pc_swrite <= pc_swrite + 1;   // spans written to the dense buffer
 `endif
 
             case (st)
@@ -1565,13 +1356,13 @@ module peel_core import tsp_pkg::*; (
                 if (ra_tiles_parsed) ra_done_l <= 1'b1;
                 if (ra_done_l || ra_tiles_parsed) begin
                     // Whole 3-stage pipeline drained: spanner idle, reader idle, no
-                    // pending ISP->spanner (ti_ready) or spanner->reader (sb_ready)
-                    // halves, no in-flight color POST intent (col_post is a 1-cyc pulse
+                    // pending ISP->spanner (ti_ready) or spanner->reader (md FIFO not
+                    // empty), no in-flight color POST intent (col_post is a 1-cyc pulse
                     // that sets col_full NEXT cycle - must not race the gate), and VO
                     // idle with no pending u_col halves. Missing !col_post here dropped
                     // the FINAL tile's writeout (last-tile-black bug).
-                    if (spn==P_IDLE && tsp_st==R_IDLE &&
-                        ti_ready==2'b00 && sb_ready==2'b00 &&
+                    if (spn==G_IDLE && !spv_busy && tsp_st==R_IDLE &&
+                        ti_ready==2'b00 && md_empty &&
                         !col_post && vst==VO_IDLE && col_full==2'b00) begin
                         ra_done_l <= 1'b0;
                         st<=S_DONE;
@@ -1882,443 +1673,289 @@ module peel_core import tsp_pkg::*; (
             default: st<=S_IDLE;
             endcase
 
-            // ================= CONCURRENT SPANNER FSM (spn) =================
-            // Runs every cycle alongside `st` / `rs_st` / the TSP reader. OWNS the plane
-            // cache (u_pc), the word reader (f_*), the fetched verts (fv_*), tsp_setup_min
-            // (u_tsp) and cur_*. It CONSUMES the ISP->spanner input half (ti_ready/ti_mode/
-            // ti_last/ti_postonly/ti_tx/ti_ty[tsp_tag]) and PRODUCES a fully-resolved span
-            // buffer (span_buffer[spn_prod]), handing it off via sb_ready[spn_prod]. It
-            // walks x=0..1023 of the CONSUMER u_taginvw half, resolving each pixel's planes
-            // (plane-cache hit -> pc_o_*; miss -> DDR fetch + tsp_setup_min -> cur_*) and
-            // writing the record into the span buffer (combinational sbw_* drive above).
+            // ================= SPANNER_v2 GLUE FSM (spn) =================
+            // Runs every cycle alongside `st`/`rs_st`/the TSP reader. Starts spanner_v2 on a
+            // ready CONSUMER input half, waits its busy->0 (all spans emitted + all setups
+            // written into the shared ring), then hands the span_buffer_v2 half to the reader
+            // and frees the input half. Post-only tiles (OP FLUSH) skip the spanner run.
             case (spn)
-            // Pick the next READY input half (in order via tsp_tag). Stall if the span
-            // buffer half we would write (spn_prod) is still owned by the TSP reader
-            // (sb_ready[spn_prod]). Post-only inputs skip the pixel walk.
-            P_IDLE: if (ti_ready[tsp_tag] && !sb_ready[spn_prod]) begin
+            G_IDLE: if (ti_ready[tsp_tag] && !md_full) begin
                 if (ti_postonly[tsp_tag]) begin
-                    // OP-only tile FLUSH: no shade; hand a post-only span half to the
-                    // reader (color already accumulated in u_col). Free the input half.
-                    sb_ready[spn_prod] <= 1'b1;
-                    sb_post [spn_prod] <= 1'b1;
-                    sb_last [spn_prod] <= 1'b1;         // post-only implies last
-                    sb_tx   [spn_prod] <= ti_tx[tsp_tag];
-                    sb_ty   [spn_prod] <= ti_ty[tsp_tag];
+                    // OP-only tile FLUSH: no shade; PUSH a post-only descriptor to the reader
+                    // (color already accumulated in u_col). No spanner run, no ring range
+                    // (md_cnt=0, md_post=1 -> reader goes straight to R_POST, no ring free).
+                    md_base[md_wp[MD_AW-1:0]] <= '0;
+                    md_cnt [md_wp[MD_AW-1:0]] <= '0;
+                    md_post[md_wp[MD_AW-1:0]] <= 1'b1;
+                    md_last[md_wp[MD_AW-1:0]] <= 1'b1;         // post-only implies last
+                    md_tx  [md_wp[MD_AW-1:0]] <= ti_tx[tsp_tag];
+                    md_ty  [md_wp[MD_AW-1:0]] <= ti_ty[tsp_tag];
+                    md_wp <= md_wp + 1'b1;
                     ti_ready[tsp_tag]  <= 1'b0;
-                    spn_prod <= ~spn_prod;
                     tsp_tag  <= ~tsp_tag;
 `ifndef SYNTHESIS
                     pc_span <= pc_span + 1;
 `endif
                 end else begin
-                    // The spanner's tile origin for u_tsp (its OWN tile, not ISP's live
-                    // t_xbase, since the spanner runs behind ISP). Latch from the handed
-                    // coords and compute xbase/ybase (as S_STATE does for ISP).
+                    // Latch the spanner's OWN tile origin (it runs behind ISP) + shade mode,
+                    // and pulse start. tsp_tag stays put during the run (the 4-wide read and
+                    // the span write both reference it).
                     spn_tx <= ti_tx[tsp_tag]; spn_ty <= ti_ty[tsp_tag];
                     spn_xbase <= i2f({4'd0, ti_tx[tsp_tag]} * 16'd32);
                     spn_ybase <= i2f({4'd0, ti_ty[tsp_tag]} * 16'd32);
-                    // TILE-GATED plane-cache invalidate: only wipe when the tile CHANGES
-                    // (xbase/ybase differ). Within a tile's peel passes the same tags
-                    // recur with IDENTICAL planes (pure fn of vertices + xbase/ybase), so
-                    // keeping the cache warm across passes turns passes 2..N into hits.
-                    if (ti_tx[tsp_tag] != spn_tx || ti_ty[tsp_tag] != spn_ty || pc_cold)
-                        pc_inval <= 1'b1;
-                    pc_cold <= 1'b0;
-                    shade_mode <= ti_mode[tsp_tag];
-                    // prime the pipeline: nothing in flight, all 1024 to issue at L0.
-                    spx <= 10'd0; sva <= 1'b0; svb <= 1'b0; siss_more <= 1'b1;
-                    spn <= P_RUN;
+                    // POLARITY: peel_core ti_mode is 0=OP,1=PEEL; spanner_v2 shade_mode is
+                    // 1=OP(shade all),0=PEEL(gate on ti_valid) -> INVERT.
+                    spv_shade_mode <= ~ti_mode[tsp_tag];
+                    spv_start <= 1'b1;
+                    spn <= G_START;
                 end
             end
 
-            // ---- PIPELINED resolve (L0/L1/L2, 1 px/clk on hits) ----
-            //   L0: present u_taginvw read of spx (pb_shrd, combi); spx++
-            //   L1(sva/sida): sh_* resolved -> present plane-cache lookup (pc_lu, combi)
-            //   L2(svb/sidb): pc_hit/pc_o_* -> WRITE span buffer (combi sbw_*)
-            // A MISS at L2 (staged && !pc_hit) freezes the front and fetches; P_MPRES
-            // writes the miss-resolved pixel then resumes. Skipped (!staged) pixels are
-            // written shade=0 at L2 as a bubble.
-            P_RUN: begin
-                if (spn_adv) begin
-                    if (svb && sstaged) hit_count <= hit_count + 1;
-`ifndef SYNTHESIS
-                    // [HIT]: a staged L2 pixel resolved from the plane cache (advancing,
-                    // so it wasn't a miss). Shows the full tag stream interleaved with
-                    // the [MISS] lines.
-                    if (md_en && svb && sstaged)
-                        $display("[HIT ] px%0d tag=%08x", sidb, stagb);
-`endif
-                    // L1 -> L2: sida's resolved pixel enters L2 (cache read presented
-                    // this cycle -> pc_* next). Carry staged/at/invw/tag.
-                    if (sva) begin
-                        svb    <= 1'b1;
-                        sidb   <= sida;
-                        stagb  <= sh_tag_o;
-                        sinvwb <= sh_depth_o;
-                        satb   <= sh_pt_o;
-                        sstaged<= spn_A_stg;
-`ifndef SYNTHESIS
-                        // +spandump: capture pixel sida's TSP input (id order, once/px).
-                        if (spd_en) begin
-                            cap_valid[sida] <= sh_valid_o;
-                            cap_tag  [sida] <= sh_tag_o;
-                            cap_invw [sida] <= sh_depth_o;
-                            cap_pt   [sida] <= sh_pt_o;
-                        end
-`endif
-                    end else begin
-                        svb <= 1'b0;
-                    end
-                    // L0 -> L1: issue the next pixel's read (presented this cycle via
-                    // pb_shrd), advance spx, retire siss_more at 1023.
-                    if (siss_more) begin
-                        sva  <= 1'b1;
-                        sida <= spx;
-                        if (spx == 10'd1023) siss_more <= 1'b0;
-                        else                 spx <= spx + 10'd1;
-                    end else begin
-                        sva <= 1'b0;
-                    end
-                    // drain: nothing left to issue and both stages empty -> pass done.
-                    if (!siss_more && !sva && !svb) spn <= P_DONE;
-                end else if (spn_miss) begin
-                    // L2 miss: freeze, latch sidb's context for the resolve.
-                    miss_count <= miss_count + 1;
-                    sh_tag  <= stagb; sh_invw <= sinvwb; sh_id <= sidb; sh_at <= satb;
-                    // PROMOTE: the SCAN prefetcher may already have decoded this exact
-                    // tag into the shadow (pf_ready && pf_rtag==stagb). If so, latch the
-                    // shadow into cur_*/fv_* and jump straight to setup - ZERO demand
-                    // fetch. Else start the DEMAND record_fetcher and wait its done.
-                    if (pf_ready && pf_rtag == stagb) begin
-                        cur_isp <= ps_isp; cur_tsp <= ps_tsp; cur_tcw <= ps_tcw;
-                        for (j = 0; j < 3; j = j + 1) begin
-                            fv_x[j]<=ps_x[j]; fv_y[j]<=ps_y[j]; fv_z[j]<=ps_z[j];
-                            fv_u[j]<=ps_u[j]; fv_v[j]<=ps_v[j];
-                            fv_col[j]<=ps_col[j]; fv_ofs[j]<=ps_ofs[j];
-                        end
-                        for (j = 0; j < 10; j = j + 1) begin
-                            cur_ddx[j]<=32'd0; cur_ddy[j]<=32'd0; cur_c[j]<=32'd0;
-                        end
-                        pf_ready  <= 1'b0;             // consume the shadow
-                        tsp_start <= 1'b1;
-                        spn <= P_TSP_RUN;
-`ifndef SYNTHESIS
-                        pc_pf_hit <= pc_pf_hit + 1;
-                        pc_m_promote <= pc_m_promote + 1;
-                        if (md_en) $display("[MISS #%0d] PROMOTE  expected=%08x actual=%08x (shadow hit, zero fetch)",
-                            miss_count, pf_rtag, stagb);
-`endif
-                    end else if (pf_busy || pf_done) begin
-                        // a prefetch is IN FLIGHT (or completing THIS cycle: pf_done drops
-                        // pf_busy and sets pf_ready non-blocking, so both read 0 here for
-                        // one cycle - must not fall through to COLD and discard it). Wait
-                        // in P_PF_WAIT for pf_ready, then promote if our tag else fetch.
-                        spn <= P_PF_WAIT;
-`ifndef SYNTHESIS
-                        if (md_en) $display("[MISS #%0d] WAIT     expected=%08x actual=%08x (prefetch in flight, %s)",
-                            miss_count, pf_rtag, stagb, (pf_rtag==stagb) ? "MATCH" : "MISMATCH");
-`endif
-                    end else begin
-                        fx_tag   <= stagb;
-                        fx_start <= 1'b1;
-                        spn <= P_FETCH_W;
-`ifndef SYNTHESIS
-                        pc_m_cold <= pc_m_cold + 1;
-                        if (md_en) $display("[MISS #%0d] FETCH    expected=%08x actual=%08x (COLD: no prefetch ready/busy; ready=%0b rtag=%08x)",
-                            miss_count, pf_rtag, stagb, pf_ready, pf_rtag);
-`endif
-                    end
-                end
-            end
+            // wait for the start to be accepted (busy rises 1 cycle after start).
+            G_START: if (spv_busy) spn <= G_RUN;
 
-            // A prefetch was in flight at miss time. Wait for pf_READY (the shadow is
-            // captured + valid), NOT just !pf_busy: pf_ready/ps_* are set by the capture
-            // block on pf_done, which is the SAME cycle busy drops - so gating on !pf_busy
-            // reads pf_ready one cycle too early (still 0, ps_* stale) -> spurious WAITMISS
-            // even when the tag matched. Gating on pf_ready fixes that.
-            P_PF_WAIT: if (pf_ready) begin
-                if (pf_rtag == sh_tag) begin
-                    cur_isp <= ps_isp; cur_tsp <= ps_tsp; cur_tcw <= ps_tcw;
-                    for (j = 0; j < 3; j = j + 1) begin
-                        fv_x[j]<=ps_x[j]; fv_y[j]<=ps_y[j]; fv_z[j]<=ps_z[j];
-                        fv_u[j]<=ps_u[j]; fv_v[j]<=ps_v[j];
-                        fv_col[j]<=ps_col[j]; fv_ofs[j]<=ps_ofs[j];
-                    end
-                    for (j = 0; j < 10; j = j + 1) begin
-                        cur_ddx[j]<=32'd0; cur_ddy[j]<=32'd0; cur_c[j]<=32'd0;
-                    end
-                    pf_ready  <= 1'b0;
-                    tsp_start <= 1'b1;
-                    spn <= P_TSP_RUN;
+            // spanner running: hand off when done (!spv_busy: SPANGEN drained + all setups
+            // written + all spans written to the ring). PUSH a descriptor carrying this pass's
+            // span RING RANGE {base, cnt} so the reader knows where/how many slots to walk.
+            G_RUN: if (!spv_busy) begin
 `ifndef SYNTHESIS
-                    pc_pf_hit <= pc_pf_hit + 1;
-                    pc_m_waithit <= pc_m_waithit + 1;
-                    if (md_en) $display("[MISS #%0d] WAITHIT  expected=%08x actual=%08x (waited for prefetch, matched)",
-                        miss_count, pf_rtag, sh_tag);
+                if ($test$plusargs("passtrace"))
+                    $display("[SPN->] tile(%0d,%0d) mode=%s base=%0d cnt=%0d",
+                             ti_tx[tsp_tag], ti_ty[tsp_tag], ti_mode[tsp_tag]?"PEEL":"OP  ",
+                             spv_sp_range_base[SPAN_AW-1:0], spv_sp_range_cnt);
 `endif
-                end else begin
-                    fx_tag   <= sh_tag;   // prefetch was a different tag -> demand fetch
-                    fx_start <= 1'b1;
-                    spn <= P_FETCH_W;
-`ifndef SYNTHESIS
-                    pc_m_waitmiss <= pc_m_waitmiss + 1;
-                    if (md_en) $display("[MISS #%0d] WAITMISS expected=%08x actual=%08x (waited but WRONG tag -> demand fetch)",
-                        miss_count, pf_rtag, sh_tag);
-`endif
-                end
-            end
-
-            // ---- DEMAND record fetch: wait for u_fetch.done, latch its decoded o_*
-            // into cur_*/fv_* (zero the planes for tsp_setup_min to fill), start setup. ----
-            P_FETCH_W: if (fx_done) begin
-                cur_isp <= fx_isp; cur_tsp <= fx_tsp; cur_tcw <= fx_tcw;
-                for (j = 0; j < 3; j = j + 1) begin
-                    fv_x[j]<=fx_x[j]; fv_y[j]<=fx_y[j]; fv_z[j]<=fx_z[j];
-                    fv_u[j]<=fx_u[j]; fv_v[j]<=fx_v[j];
-                    fv_col[j]<=fx_col[j]; fv_ofs[j]<=fx_ofs[j];
-                end
-                for (j = 0; j < 10; j = j + 1) begin
-                    cur_ddx[j]<=32'd0; cur_ddy[j]<=32'd0; cur_c[j]<=32'd0;
-                end
-                tsp_start <= 1'b1;
-                spn <= P_TSP_RUN;
-            end
-
-            // wait for tsp_setup_min; commit cur_* to the plane cache (was T_TSP_RUN).
-            // Next cycle P_MPRES writes cur_* into the span buffer for sidb.
-            P_TSP_RUN: if (tsp_done) begin
-                pc_wr_req <= 1'b1;
-                spn <= P_MPRES;
-            end
-
-            // MISS write: the combi block wrote cur_* into span_buffer[spn_prod][sidb]
-            // this cycle (shade=1). sidb (L2) is consumed -> svb<=0; L1 (sva/sida)
-            // survived the fetch and resumes at L1 next cycle. Back to the pipeline.
-            P_MPRES: begin
-                svb <= 1'b0;
-                spn <= P_RUN;
-            end
-
-            // pass fully resolved into span_buffer[spn_prod]. Hand it to the TSP reader
-            // (sb_ready credit + metadata), free the ISP->spanner input half, flip the
-            // producer half, advance tsp_tag to the next input pass.
-            P_DONE: begin
-                sb_ready[spn_prod] <= 1'b1;
-                sb_post [spn_prod] <= 1'b0;
-                sb_last [spn_prod] <= ti_last[tsp_tag];
-                sb_tx   [spn_prod] <= ti_tx  [tsp_tag];
-                sb_ty   [spn_prod] <= ti_ty  [tsp_tag];
-                ti_ready[tsp_tag]  <= 1'b0;      // free the input half for ISP
-                spn_prod <= ~spn_prod;
+                md_base[md_wp[MD_AW-1:0]] <= spv_sp_range_base[SPAN_AW-1:0]; // ring base slot
+                md_cnt [md_wp[MD_AW-1:0]] <= spv_sp_range_cnt;               // # spans (0=empty)
+                md_post[md_wp[MD_AW-1:0]] <= 1'b0;
+                md_last[md_wp[MD_AW-1:0]] <= ti_last[tsp_tag];
+                md_tx  [md_wp[MD_AW-1:0]] <= ti_tx  [tsp_tag];
+                md_ty  [md_wp[MD_AW-1:0]] <= ti_ty  [tsp_tag];
+                md_wp <= md_wp + 1'b1;
+                ti_ready[tsp_tag]  <= 1'b0;         // free the input half for ISP
                 tsp_tag  <= ~tsp_tag;
 `ifndef SYNTHESIS
                 pc_span <= pc_span + 1;
-                // +spandump: flush this pass's captured TSP-input buffer to
-                // spanner_input_<spd_n>.txt (TEXT: one 8-hex-digit word per line; header
-                // of 9 words then 1024 records of {valid,tag,invw,pt}).
-                if (spd_en) begin : spd_flush
-                    integer spf; integer si; string spname;
-                    spname = $sformatf("spanner_input_%0d.txt", spd_n);
-                    spf = $fopen(spname, "w");
-                    if (spf != 0) begin
-                        spd_wr32(spf, 32'h53504E31);                 // magic "SPN1"
-                        spd_wr32(spf, {31'd0, shade_mode});
-                        spd_wr32(spf, spn_xbase);
-                        spd_wr32(spf, spn_ybase);
-                        spd_wr32(spf, {5'd0, param_base});
-                        spd_wr32(spf, {31'd0, regs.fpu_shad_scale.intensity_shadow});
-                        spd_wr32(spf, 32'd1024);                     // npix
-                        spd_wr32(spf, {26'd0, spn_tx});
-                        spd_wr32(spf, {26'd0, spn_ty});
-                        for (si = 0; si < 1024; si = si + 1) begin
-                            spd_wr32(spf, {31'd0, cap_valid[si]});
-                            spd_wr32(spf, cap_tag[si]);
-                            spd_wr32(spf, cap_invw[si]);
-                            spd_wr32(spf, {31'd0, cap_pt[si]});
-                        end
-                        $fclose(spf);
-                        $display("[peel_core] spandump: pass %0d -> %0s", spd_n, spname);
-                    end
-                    spd_n = spd_n + 1;
-                end
 `endif
-                spn <= P_IDLE;
+                spn <= G_IDLE;
             end
-            default: spn <= P_IDLE;
+            default: spn <= G_IDLE;
             endcase
 
-            // ================= SCAN-PREFETCH sub-FSM (pf_st) =================
-            // Active ONLY while spn==P_TSP_RUN (the shade-read + cache-lookup ports are
-            // idle then and the demand fetcher u_fetch is done). Best-effort: forced to
-            // PF_OFF the moment we leave P_TSP_RUN (tsp_done -> P_MPRES), abandoning any
-            // partial scan. Never gates P_TSP_RUN. It SCANS for the next-miss tag using
-            // the idle shade-read + plane-cache ports, then hands that tag to the SECOND
-            // record_fetcher (u_prefetch) via pf_start, which fully decodes it into the
-            // prefetch shadow (pf_ready/pf_rtag/ps_*) on its OWN DDR client. It NEVER
-            // touches the demand path (u_fetch / cur_* / fv_*). Only ONE prefetch is
-            // in flight (issue gated on !pf_busy). A promoted demand miss (P_RUN above)
-            // consumes the shadow with zero demand fetch.
-            if (spn != P_TSP_RUN) begin
-                // outside the setup window: idle. (Also (re)armed here so a fresh
-                // P_TSP_RUN entry restarts the scan from the current pipeline front.)
-                pf_st <= PF_OFF;
-                pf_sv <= 1'b0;
-            end else begin
-                case (pf_st)
-                // arm: start scanning from the next unresolved pixel (sida if the L1
-                // slot is live, else spx). Nothing pending -> stay off.
-                PF_OFF: begin
-                    pf_sv <= 1'b0;
-                    if (sva) begin
-                        pf_scan <= sida; pf_st <= PF_SCAN0;
-                    end else if (siss_more) begin
-                        pf_scan <= spx;  pf_st <= PF_SCAN0;
-                    end
-                    // else: pipeline draining, no pixels left to scan -> stay PF_OFF.
-                end
-                // present the u_taginvw shade-read of pf_scan (pb_shrd driven combi via
-                // pf_drive_shrd). Its {valid,tag,depth} resolve onto sh_*_o next cycle.
-                PF_SCAN0: begin
-                    pf_sv  <= 1'b1;
-                    pf_sid <= pf_scan;
-                    pf_st  <= PF_SCAN1;
-                end
-                // sh_*_o now hold pf_sid's tag/staged. If NOT staged (shade_mode &&
-                // !sh_valid_o) skip it; else present the plane-cache lookup (pc_lu driven
-                // combi via pf_drive_lu); pc_hit lands next cycle at PF_SCAN2.
-                PF_SCAN1: begin
-                    if (shade_mode && !sh_valid_o) begin
-                        // skipped pixel: advance to the next (respect pass end 1023).
-                        if (pf_sid == 10'd1023) pf_st <= PF_DONE;
-                        else begin pf_scan <= pf_sid + 10'd1; pf_st <= PF_SCAN0; end
-                    end else begin
-                        pf_tag <= sh_tag_o;   // remember in case this is the miss
-                        pf_st  <= PF_SCAN2;
-                    end
-                end
-                // pc_hit resolved for pf_sid's tag. Keep scanning if it's a HIT, OR if
-                // its tag == the CURRENT miss's tag (stagb): that tag is being resolved
-                // right now and committed to the cache at this P_TSP_RUN's done, so by
-                // the time the spanner reaches this pixel it'll be a HIT - prefetching it
-                // is wasted and steals the slot from the true next-distinct miss. Only a
-                // tag that is uncached AND != stagb is a genuine future demand miss.
-                PF_SCAN2: begin
-                    // skip: a hit, the current miss's own tag (stagb), OR a tag ALREADY
-                    // sitting ready in the shadow (pf_ready && pf_rtag==pf_tag) - no need
-                    // to re-prefetch what we already have.
-                    if (pc_hit || (pf_tag == stagb) || (pf_ready && pf_rtag == pf_tag)) begin
-                        if (pf_sid == 10'd1023) pf_st <= PF_DONE;
-                        else begin pf_scan <= pf_sid + 10'd1; pf_st <= PF_SCAN0; end
-                    end else if (!pf_busy) begin
-                        // found the next miss (pf_tag captured at PF_SCAN1). Only issue
-                        // when u_prefetch is free (one prefetch in flight); its done will
-                        // set pf_ready/pf_rtag via the shadow-capture block above.
-`ifndef SYNTHESIS
-                        pc_prefetch <= pc_prefetch + 1;
-                        // WASTED: a DIFFERENT-tag ready shadow is being clobbered without
-                        // ever having been consumed (mis-prediction). Same-tag re-issues
-                        // are skipped above, so this only counts genuine waste.
-                        if (pf_ready && pf_rtag != pf_tag) begin
-                            pc_pf_wasted <= pc_pf_wasted + 1;
-                            if (md_en) $display("[PREFETCH] WASTED ready tag=%08x clobbered by new tag=%08x",
-                                pf_rtag, pf_tag);
-                        end
-                        if (md_en) $display("[PREFETCH] issue tag=%08x (scanned pixel %0d, during miss tag=%08x)",
-                            pf_tag, pf_sid, stagb);
-`endif
-                        pf_ptag  <= pf_tag;
-                        pf_rtag  <= pf_tag;   // shadow will decode THIS tag
-                        pf_ready <= 1'b0;     // invalidate any stale shadow
-                        pf_start <= 1'b1;
-                        pf_st    <= PF_ISSUE;
-                    end
-                    // else (pf_busy): a prefetch is still running; leave it and idle.
-                end
-                // prefetch issued: idle until we leave P_TSP_RUN (its done lands in the
-                // shadow asynchronously via the capture block, even after PF_OFF).
-                PF_ISSUE: pf_st <= PF_DONE;
-                // scan exhausted / issued: idle until we leave P_TSP_RUN.
-                PF_DONE: ;
-                default: pf_st <= PF_OFF;
-                endcase
-            end
-
             // ================= CONCURRENT TSP READER FSM (tsp_st) =================
-            // Trivial drain of span_buffer[tsp_rd] into tsp_shade_pp at 1 px/clk. All
-            // plane-cache miss latency was absorbed upstream by the spanner, so this
-            // never stalls except on pp_stall (texture miss) - hold the current pixel.
-            // On sb_last it posts the finished tile's color (u_col[tsp_col]) to VO.
+            // Dense drain of span_buffer_v2[tsp_rd] -> triangle_setups[id] -> tsp_shade_pp,
+            // 1 px/clk. Two registered-read stages: S1 = span buffer, S2 = setups ring. S2
+            // feeds the shader (combi pp mux). The whole pipe holds on pp_stall. On sb_last it
+            // posts the finished tile's color (u_col[tsp_col]) to VO.
             case (tsp_st)
             // pick the next READY span half (in order via tsp_rd). Post-only -> post now.
-            R_IDLE: if (sb_ready[tsp_rd]) begin
-                if (sb_post[tsp_rd]) begin
+            // Empty pass (no spans) -> nothing to shade: go straight to DRAIN/POST.
+            // A shading pass blends into col_prod=tsp_col; don't start until VO has FREED that
+            // half (!col_full[tsp_col]). The dense reader shades far faster than the old per-
+            // pixel walk, so without this it laps the VO engine and blends into a half VO is
+            // still flushing (col_prod==col_vo read conflict). (An empty pass does no blend,
+            // so it doesn't need the gate; post-only takes R_POST which has its own gate.)
+            R_IDLE: if (!md_empty && (md_post[md_rp[MD_AW-1:0]] || md_cnt[md_rp[MD_AW-1:0]]=='0
+                                      || !col_full[tsp_col])) begin
+                if (md_post[md_rp[MD_AW-1:0]]) begin
                     tsp_st <= R_POST;
+                end else if (md_cnt[md_rp[MD_AW-1:0]] == '0) begin
+                    // 0 spans: no shade work. Skip to DRAIN (frees ring range; posts if last).
+                    sh_out_n <= 0; sh_pending <= 0;
+                    rd_live <= 1'b0; sb_rd_pend <= 1'b0; span_more <= 1'b0; span_left <= '0;
+                    ns_v <= 1'b0; cs_v <= 1'b0; s2_v <= 1'b0;
+                    tsp_st <= R_DRAIN;
                 end else begin
-                    tsp_i     <= 10'd0;      // address to PRESENT next cycle
-                    rd_v      <= 1'b0;       // nothing fed yet (1-cyc read latency)
-                    rd_last   <= 1'b0;
-                    sh_out_n  <= 0;
-                    sh_pending <= 0;
-                    tsp_st <= R_RUN;
+`ifndef SYNTHESIS
+                    if ($test$plusargs("passtrace"))
+                        $display("[->RD] tile(%0d,%0d) base=%0d cnt=%0d",
+                                 md_tx[md_rp[MD_AW-1:0]], md_ty[md_rp[MD_AW-1:0]],
+                                 md_base[md_rp[MD_AW-1:0]], md_cnt[md_rp[MD_AW-1:0]]);
+`endif
+                    // Prime the READ stage at this pass's ring BASE. dsr_addr=span_ptr is held
+                    // stable, so the base slot's registered read resolves next cycle. span_left =
+                    // spans not yet consumed (incl the in-flight one); span_more = >1 remaining.
+                    span_ptr   <= md_base[md_rp[MD_AW-1:0]];      // in-flight slot = pass base
+                    span_left  <= md_cnt [md_rp[MD_AW-1:0]];      // spans remaining
+                    rd_live    <= 1'b1;                           // base read outstanding
+                    sb_rd_pend <= 1'b0;                           // base read resolves NEXT cyc
+                    span_more  <= (md_cnt[md_rp[MD_AW-1:0]] > 1); // slots after the base one?
+                    ns_v <= 1'b0; cs_v <= 1'b0; s2_v <= 1'b0; cs_k <= 3'd0;
+                    sh_out_n <= 0; sh_pending <= 0;
+                    tsp_st   <= R_RUN;
                 end
             end
 
-            // STREAMING 1 px/clk drain. sbr_addr=tsp_i (combi) presents pixel tsp_i's
-            // read THIS cycle; its data lands NEXT cycle. So the pixel being FED this
-            // cycle is the one presented last cycle (rd_i, marked rd_v): its record is on
-            // sbr_*[tsp_rd] now. The pp-input mux presents it (pp_in_valid when rd_v &&
-            // r_shade); on pp_stall we HOLD (don't advance the present addr, so the held
-            // pixel's data stays on sbr_*). When the last fed pixel (rd_last) is accepted,
-            // go drain the blend.
-            R_RUN: begin
-                if (!pp_stall) begin
-                    // this cycle FEEDS pixel rd_i (data on sbr_* now, if rd_v).
-                    if (rd_v && sbr_shade[tsp_rd]) sh_pending <= sh_pending + 1;
-                    if (rd_v && rd_last) begin
-                        rd_v   <= 1'b0;
-                        tsp_st <= R_DRAIN;
+            // DENSE span walk + expand - THREE decoupled stages advancing each !pp_stall cycle.
+            // A 1-deep skid (+ a bypass) decouples the fixed 1-cycle dense-read latency from the
+            // VARIABLE 1..4-cycle expand, so every slot is consumed EXACTLY ONCE, in order, with
+            // no skip and no double-read. Steady state (rep>=2 spans) is bubble-free: the read
+            // runs ahead into the skid while the current span expands. A lone rep-1 span can
+            // cost a single bubble cycle (its 1-cycle expand can't hide the next slot's read),
+            // which is harmless.
+            //  A) READ  : dsr_addr=span_ptr = the IN-FLIGHT slot, held stable until consumed;
+            //             its registered read lands next cycle. span_ptr advances (to the next
+            //             slot within [0..sb_span_last]) only when the in-flight read is consumed
+            //             (consume_read); sb_rd_pend = the held slot's read has resolved on dsr_*.
+            //  B) SKID  : ns_* holds one prefetched span; filled from dsr_* (fill) when the read
+            //             resolved and the skid is empty/draining and it wasn't bypassed.
+            //  C) EXPAND: emit cs_*[cs_k] -> s2_* -> pp; cs_k walks 0..rep-1. On span finish,
+            //             accept the next span from the SKID, or BYPASS straight off dsr_* when
+            //             the skid is empty but a read resolved this cycle. rep==0 (unwritten
+            //             slot) is guarded - never expanded (cs_rep-1 would underflow to 7).
+            R_RUN: if (!pp_stall) begin
+                // ---- local decisions (all declared first; SV: decls precede statements) ----
+                reg        span_done, accept, fill, dsr_rdy, src_v, consume_read;
+                reg [9:0]  src_start, src_id;
+                reg [2:0]  src_rep;
+                reg        src_at;
+                reg [31:0] src_invw [0:3];
+                integer    si;
+                // current expand span finishes this cycle (or none in flight)
+                span_done = !cs_v || (cs_k == cs_rep - 3'd1);
+                // a slot read resolved on dsr_* this cycle
+                dsr_rdy   = sb_rd_pend;
+                // The next span to feed EXPAND comes from the SKID (ns_*) if full, else a
+                // BYPASS directly off dsr_* when a read resolved this cycle (bubble-free 1-deep
+                // skid). src_* selects between them.
+                src_v = ns_v || dsr_rdy;
+                if (ns_v) begin
+                    src_start = ns_start; src_id = ns_id; src_rep = ns_rep; src_at = ns_at;
+                    for (si=0; si<4; si=si+1) src_invw[si] = ns_invw[si];
+                end else begin  // bypass from dsr_* (shared ring, no half index)
+                    src_start = dsr_start; src_id = dsr_id;
+                    src_rep = dsr_rep; src_at = dsr_at;
+                    for (si=0; si<4; si=si+1) src_invw[si] = dsr_invw[si];
+                end
+                // accept a span into EXPAND when the current one finishes and a src is available.
+                accept = span_done && src_v;
+                // the in-flight dsr_* read is CONSUMED this cycle iff it resolved AND either the
+                // skid can take it (empty now, or drained by accept) OR it was BYPASSED straight
+                // into EXPAND (accept while skid empty). This is what advances the read pointer.
+                consume_read = dsr_rdy && (!ns_v || accept);
+                // it goes into the SKID (fill) unless it was bypassed into EXPAND this cycle.
+                fill   = consume_read && !(accept && !ns_v);
+
+                // --- Stage C: emit the pixel the current cs points at (this cycle's cs/k) ---
+                if (cs_v) begin
+                    s2_v    <= 1'b1;
+                    s2_p    <= cs_start + {7'd0, cs_k};
+                    s2_invw <= cs_invw[cs_k];
+                    s2_at   <= cs_at;
+                    s2_id   <= cs_id;
+                    sh_pending <= sh_pending + 1;
+                    if (!span_done) cs_k <= cs_k + 3'd1;   // mid-span: next pixel
+                end else s2_v <= 1'b0;
+
+                // --- EXPAND accept: feed the next span (skid or bypass) into cs_* on finish. ---
+                if (span_done) begin
+                    if (src_v) begin
+`ifndef SYNTHESIS
+                        // +rdslot: log EVERY span accepted into EXPAND (skid or bypass) for
+                        // tile(7,4) covering pixels 324..331, so all passes (incl. bypass) show.
+                        if ($test$plusargs("rdslot") && md_tx[md_rp[MD_AW-1:0]]==7
+                            && md_ty[md_rp[MD_AW-1:0]]==4
+                            && src_start >= 10'd324 && src_start <= 10'd328)
+                            $display("[RDACC] tile(7,4) start=%0d id=%0d rep=%0d invw0=%08x via=%s",
+                                     src_start, src_id, src_rep, src_invw[0], ns_v ? "skid" : "bypass");
+`endif
+                        // guard rep==0 (never expand a would-be empty slot).
+                        cs_v     <= (src_rep != 3'd0);
+                        cs_k     <= 3'd0;
+                        cs_start <= src_start;
+                        cs_id    <= src_id;
+                        cs_rep   <= src_rep;
+                        cs_at    <= src_at;
+                        for (pj2 = 0; pj2 < 4; pj2 = pj2 + 1) cs_invw[pj2] <= src_invw[pj2];
                     end else begin
-                        // the pixel presented THIS cycle (tsp_i) becomes next cycle's fed
-                        // pixel; advance the present address.
-                        rd_v    <= 1'b1;
-                        rd_i    <= tsp_i;
-                        rd_last <= (tsp_i == 10'd1023);
-                        if (tsp_i != 10'd1023) tsp_i <= tsp_i + 10'd1;
+                        cs_v <= 1'b0;   // nothing available: EXPAND idles
                     end
                 end
-                // else pp_stall: hold tsp_i/rd_i/rd_v so the fed pixel's read stays valid.
-            end
 
-            // wait for the shade+blend pipe to drain (all fed pixels emerged and the
-            // trailing blend RMW landed). Free this span half; advance tsp_rd. If this
-            // was the tile's FINAL shade (sb_last) hand u_col to VO (R_POST).
+                // --- Stage B skid update ---
+                if (fill) begin
+`ifndef SYNTHESIS
+                    // +rdslot: log every accepted dense span for tile(7,4) whose run covers the
+                    // suspect pixel (local px8 py10 => start 10*32+8=328, or a span containing it).
+                    if ($test$plusargs("rdslot") && md_tx[md_rp[MD_AW-1:0]]==7
+                        && md_ty[md_rp[MD_AW-1:0]]==4)
+                        $display("[RDSLOT] tile(7,4) sp=%0d start=%0d id=%0d rep=%0d invw0=%08x bypass=%b",
+                                 span_ptr, dsr_start, dsr_id, dsr_rep,
+                                 dsr_invw[0], (accept && !ns_v));
+`endif
+                    ns_v     <= 1'b1;                    // in-flight read -> skid
+                    ns_start <= dsr_start;
+                    ns_id    <= dsr_id;
+                    ns_rep   <= dsr_rep;
+                    ns_at    <= dsr_at;
+                    for (pj2 = 0; pj2 < 4; pj2 = pj2 + 1) ns_invw[pj2] <= dsr_invw[pj2];
+                end else if (accept && ns_v) begin
+                    ns_v <= 1'b0;       // skid drained into EXPAND, nothing new -> empty
+                end
+
+                // --- Stage A read pointer / pend tracking ---
+                // dsr_addr = span_ptr is held stable, so the in-flight slot's registered read
+                // stays valid on dsr_* until CONSUMED into the skid (fill). On fill, advance
+                // span_ptr to the next RING slot (if any); its read then needs one cycle to
+                // resolve, so sb_rd_pend drops for that one cycle. WRAP-SAFE: last/more are
+                // derived from span_left (spans remaining, incl the in-flight one), NEVER from a
+                // pointer-equality against a wrapped end pointer. span_ptr wraps at SPAN_NSLOT
+                // (power-of-two) by width. This is the one-read-in-flight invariant.
+                if (consume_read) begin
+                    // the in-flight read (span_ptr) was taken (into skid or bypassed to EXPAND).
+                    span_left <= span_left - 1'b1;              // one span consumed
+                    if (span_more) begin                        // (span_left > 1 at prime/advance)
+                        span_ptr   <= span_ptr + 1'b1;          // advance (wraps within the ring)
+                        span_more  <= (span_left > 2);          // >1 will remain AFTER this consume
+                        sb_rd_pend <= 1'b0;                     // new slot resolves NEXT cycle
+                        // rd_live stays 1: a new read is now outstanding.
+                    end else begin
+                        // last slot consumed - no more reads outstanding. sb_rd_pend/rd_live
+                        // both clear and STAY clear so the drain detect can fire.
+                        sb_rd_pend <= 1'b0;
+                        rd_live    <= 1'b0;
+                    end
+                end else if (rd_live) begin
+                    // a read is outstanding and NOT consumed this cycle: it has resolved on dsr_*
+                    // (1 cycle after issue) -> mark valid. (Held stable until consumed.)
+                    sb_rd_pend <= 1'b1;
+                end
+                // else (!consume_read && !rd_live): reads exhausted - hold sb_rd_pend=0.
+
+                // --- drain detect: no read outstanding, skid empty, expand + Stage C idle ---
+                if (!rd_live && !ns_v && span_done && !cs_v && !s2_v)
+                    tsp_st <= R_DRAIN;
+            end
+            // else pp_stall: hold the whole pipeline (addresses re-presented by the combi mux).
+
+            // wait for the shade+blend pipe to drain (all fed pixels emerged and the trailing
+            // blend RMW landed). Free this pass's span+plane ring range; pop the descriptor
+            // (unless heading to R_POST, which still needs md_tx/ty/post -> it pops instead).
+            // If this was the tile's FINAL shade (md_last) hand u_col to VO (R_POST).
             R_DRAIN: if (sh_out_n >= sh_pending && !cb_valid) begin
-                sb_ready[tsp_rd] <= 1'b0;
+                spv_rd_done      <= 1'b1;        // free this pass's ring range (real pass)
 `ifndef SYNTHESIS
                 pc_drain <= pc_drain + 1;
 `endif
-                if (sb_last[tsp_rd]) tsp_st <= R_POST;
+                if (md_last[md_rp[MD_AW-1:0]]) tsp_st <= R_POST;  // pop happens in R_POST
                 else begin
-                    tsp_rd <= ~tsp_rd;
+                    md_rp  <= md_rp + 1'b1;      // pop this pass's descriptor
                     tsp_st <= R_IDLE;
                 end
             end
 
-            // POST the finished tile's color (u_col[tsp_col]) to the VO engine via the
-            // u_col ping-pong credit: stall until VO has drained this half
-            // (!col_full[tsp_col]), then set the credit + coords, flip tsp_col, advance.
-            // Post-only halves reach here without R_DRAIN, so free the credit here too.
+            // POST the finished tile's color (u_col[tsp_col]) to the VO engine via the u_col
+            // ping-pong credit. Post-only descriptors reach here without R_DRAIN (no ring range
+            // -> no spv_rd_done); pop the descriptor here too.
             R_POST: if (!col_full[tsp_col]) begin
                 col_post    <= 1'b1;
                 col_post_hp <= tsp_col;
-                col_post_tx <= sb_tx[tsp_rd];
-                col_post_ty <= sb_ty[tsp_rd];
+                col_post_tx <= md_tx[md_rp[MD_AW-1:0]];
+                col_post_ty <= md_ty[md_rp[MD_AW-1:0]];
                 tsp_col <= ~tsp_col;             // next tile -> other u_col half
-                sb_ready[tsp_rd] <= 1'b0;        // free (covers the post-only path)
 `ifndef SYNTHESIS
-                if (sb_post[tsp_rd]) pc_drain <= pc_drain + 1;  // post-only: not via R_DRAIN
+                if (md_post[md_rp[MD_AW-1:0]]) pc_drain <= pc_drain + 1;  // post-only: not via R_DRAIN
 `endif
-                tsp_rd <= ~tsp_rd;
+                md_rp  <= md_rp + 1'b1;          // pop this pass's descriptor
                 tsp_st <= R_IDLE;
             end
             default: tsp_st <= R_IDLE;
@@ -2452,14 +2089,6 @@ module peel_core import tsp_pkg::*; (
             eq_count <= eq_count + (eq_push  ? 5'd1 : 5'd0) - (eq_pop   ? 5'd1 : 5'd0);
             pq_count <= pq_count + (pq_push  ? 5'd1 : 5'd0) - (pq_pop   ? 5'd1 : 5'd0);
 
-            // plane stream capture (runs regardless of FSM state). Only cur_* is
-            // filled now; the whole bundle is committed to the plane cache in one
-            // pc_wr_req at TSP_RUN (no per-plane cache writes).
-            if (tsp_pvalid) begin
-                cur_ddx[tsp_pidx] = tsp_pddx;
-                cur_ddy[tsp_pidx] = tsp_pddy;
-                cur_c[tsp_pidx]   = tsp_pc;
-            end
         end
     end
 

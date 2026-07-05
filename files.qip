@@ -79,17 +79,20 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/isp_min/isp_depth_cmp_lp.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/peel_tile_buffer.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/taginvw_tile_buffer.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/color_tile_buffer.sv
-# span_buffer is the SPANNER->TSP handoff: one 1024-entry buffer of fully-resolved
-# per-pixel tsp_shade_pp inputs (planes/invw/tsp/tcw). The spanner writes it (plane-
-# cache miss latency absorbed here); the TSP reader drains it at a guaranteed 1px/clk.
-# Ping-ponged per pass. Must precede peel_core (instantiated there).
+# dense_span_buffer is the LIVE SPANNER_v2->TSP handoff (instantiated by peel_core): one
+# shared RING of {start,id,rep,invw[0:3],at} spans (DEPTH=2048 = two worst-case tiles). The
+# spanner writes at span_head (wrapping); the TSP reader walks each pass's ring range and
+# expands rep pixels 1px/clk. Ring pointers/metadata live in spanner_v2 + peel_core. Must
+# precede peel_core (instantiated there).
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/dense_span_buffer.sv
+# LEGACY span_buffer / span_buffer_v2 / span_expander: NOT instantiated in the live pipeline
+# (superseded by dense_span_buffer + triangle_setups). Kept only for their standalone unit
+# tests (tb/span_buffer_v2_selftest.sv, tb/span_expander_selftest.sv).
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/span_buffer.sv
-# span_buffer_v2 (thin {id,rep,invw,shmask,at}) + triangle_setups (id-indexed planes):
-# the spanner_v2 handoff pair (planes held once per triangle, span references by id).
-# Groundwork for the spanner_v2->peel_core integration; not yet instantiated.
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/span_buffer_v2.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/triangle_setups.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/span_expander.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/tsp_setup_stream.sv
 # 64-entry TSP plane cache banked into M10K (wide payload word/entry; small tag +
 # valid mirrors stay in logic for the hit test + 1-cyc invalidate). Must precede
 # peel_core (instantiated there).
@@ -105,6 +108,9 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/fifo_eq.sv
 # DDR line reader. peel_core instantiates it TWICE (demand + prefetch) for a 2-deep
 # record cache. Must precede peel_core (instantiated there).
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/record_fetcher.sv
+# spanner_v2: decoupled SPANGEN+SETUP TSP stage instantiated by peel_core. Depends on
+# record_fetcher + tsp_setup_stream (both above). Must precede peel_core.
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/spanner_v2.sv
 # peel_core: the render core with the DDR controller + framebuffer injected as
 # ports. mister_top wires the real HPS Avalon backend; the sim wrapper (tb) wires
 # a faux behavioral backend.

@@ -78,23 +78,28 @@ module spanner_v2_tb_top import tsp_pkg::*; (
         end
     end
 
+    // (the +planecheck refsw2 golden captures the per-id vertex record in C++ directly from
+    // the DUT's live fv_* at ts_we; no RTL snapshot needed here.)
+
     wire         sp_we;
-    wire [9:0]   sp_idx;
+    wire [9:0]   sp_slot;
+    wire [9:0]   sp_first, sp_last;
+    wire         sp_cnt_z;
+    wire [9:0]   sp_start;
     wire [9:0]   sp_id;
     wire [2:0]   sp_rep;
     wire [31:0]  sp_invw [0:3];
-    wire [3:0]   sp_shmask;
     wire         sp_at;
 
     // span_out store (public), one entry per run-start pixel index.
-    (* verilator public_flat_rw *) reg        spo_valid [0:NSLOT-1];  // a span starts here
+    (* verilator public_flat_rw *) reg        spo_valid [0:NSLOT-1];  // slot holds a span
+    (* verilator public_flat_rw *) reg [9:0]  spo_x     [0:NSLOT-1];  // run-start pixel (sp_idx data)
     (* verilator public_flat_rw *) reg [9:0]  spo_id    [0:NSLOT-1];
     (* verilator public_flat_rw *) reg [2:0]  spo_rep   [0:NSLOT-1];
     (* verilator public_flat_rw *) reg [31:0] spo_invw0 [0:NSLOT-1];
     (* verilator public_flat_rw *) reg [31:0] spo_invw1 [0:NSLOT-1];
     (* verilator public_flat_rw *) reg [31:0] spo_invw2 [0:NSLOT-1];
     (* verilator public_flat_rw *) reg [31:0] spo_invw3 [0:NSLOT-1];
-    (* verilator public_flat_rw *) reg [3:0]  spo_shmask[0:NSLOT-1];
     (* verilator public_flat_rw *) reg        spo_at    [0:NSLOT-1];
 `ifndef SYNTHESIS
     // +ddrtrace: log every DDR read request + data-ready window with a cycle stamp, to
@@ -126,16 +131,16 @@ module spanner_v2_tb_top import tsp_pkg::*; (
         end
     end
     always @(posedge clk) begin
-        if (sp_we) begin
-            spo_valid [sp_idx] <= 1'b1;
-            spo_id    [sp_idx] <= sp_id;
-            spo_rep   [sp_idx] <= sp_rep;
-            spo_invw0 [sp_idx] <= sp_invw[0];
-            spo_invw1 [sp_idx] <= sp_invw[1];
-            spo_invw2 [sp_idx] <= sp_invw[2];
-            spo_invw3 [sp_idx] <= sp_invw[3];
-            spo_shmask[sp_idx] <= sp_shmask;
-            spo_at    [sp_idx] <= sp_at;
+        if (sp_we) begin                       // DENSE: write at sp_slot, run-start px as data
+            spo_valid [sp_slot] <= 1'b1;
+            spo_x     [sp_slot] <= sp_start;
+            spo_id    [sp_slot] <= sp_id;
+            spo_rep   [sp_slot] <= sp_rep;
+            spo_invw0 [sp_slot] <= sp_invw[0];
+            spo_invw1 [sp_slot] <= sp_invw[1];
+            spo_invw2 [sp_slot] <= sp_invw[2];
+            spo_invw3 [sp_slot] <= sp_invw[3];
+            spo_at    [sp_slot] <= sp_at;
         end
     end
 
@@ -166,8 +171,9 @@ module spanner_v2_tb_top import tsp_pkg::*; (
         .ts_we(ts_we), .ts_id(ts_id),
         .ts_isp(ts_isp), .ts_tsp(ts_tsp), .ts_tcw(ts_tcw),
         .ts_ddx(ts_ddx), .ts_ddy(ts_ddy), .ts_c(ts_c),
-        .sp_we(sp_we), .sp_idx(sp_idx), .sp_id(sp_id), .sp_rep(sp_rep),
-        .sp_invw(sp_invw), .sp_shmask(sp_shmask), .sp_at(sp_at), .sp_ready(1'b1),
+        .sp_we(sp_we), .sp_slot(sp_slot), .sp_first(sp_first), .sp_last(sp_last),
+        .sp_cnt_z(sp_cnt_z), .sp_start(sp_start), .sp_id(sp_id), .sp_rep(sp_rep),
+        .sp_invw(sp_invw), .sp_at(sp_at), .sp_ready(1'b1),
         .dreq(ddr_req), .dresp(ddr_resp)
     );
 endmodule

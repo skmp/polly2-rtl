@@ -34,7 +34,12 @@
 //
 module spanner_v2 import tsp_pkg::*; #(
     parameter integer NSLOT = 1024,          // triangle_setups depth (== tile pixels)
-    parameter integer SLOTW = 10             // clog2(NSLOT)
+    parameter integer SLOTW = 10,            // clog2(NSLOT)
+    // span RING (shared with TSP) is sized larger than the plane ring: 2048 = two
+    // worst-case tiles, so a full 1024-span pass fits with room for a SECOND pass to be
+    // written and in flight while the first drains. SPAN_W = clog2(SPAN_NSLOT) = 11.
+    parameter integer SPAN_NSLOT = 2048,
+    parameter integer SPAN_W     = 11
 ) (
     input                       clk,
     input                       reset,
@@ -67,13 +72,25 @@ module spanner_v2 import tsp_pkg::*; #(
     output reg [31:0]           ts_isp, ts_tsp, ts_tcw,
     output reg [319:0]          ts_ddx, ts_ddy, ts_c,   // 10 x 32, lane j at [32*j+:32]
 
-    // ---- OUT: span buffer WRITE (SPANGEN engine) ----
+    // ---- OUT: span buffer WRITE (SPANGEN engine) into the shared RING ----
+    // DENSELY PACKED and SHADED-ONLY: SPANGEN emits a span ONLY for a maximal run of
+    // contiguous SHADED (valid, or OP) same-tag pixels within the aligned group. Invalid
+    // pixels emit NO span (they just advance the walk). Each shaded span is written at the
+    // ring head slot (sp_slot = span_head, wrapping). The reader walks this pass's ring range
+    // [sp_range_base .. +sp_range_cnt) and expands each span's rep pixels unconditionally (all
+    // shaded) - no per-pixel dense walk, no shade mask. sp_start = run-start pixel index (y:x).
     output reg                  sp_we,
-    output reg [SLOTW-1:0]      sp_idx,      // run-start pixel index (0..1023)
+    output reg [SPAN_W-1:0]     sp_slot,     // ring slot = span_head (wraps at SPAN_NSLOT)
+    // span RING RANGE of this pass, valid when busy deasserts: base = ring position of this
+    // pass's first span (== span_head at start), cnt = # spans emitted (0 => empty). Both
+    // carry the extra wrap-MSB so (head - base) is correct across a ring wrap. The reader
+    // walks cnt slots from base[SPAN_W-1:0] with natural wrap.
+    output reg [SPAN_W:0]       sp_range_base,
+    output reg [SPAN_W:0]       sp_range_cnt,
+    output reg [SLOTW-1:0]      sp_start,    // run-start pixel index (y:x, 0..1023) [data]
     output reg [SLOTW-1:0]      sp_id,       // setup id (== triangle_setups slot)
-    output reg [2:0]            sp_rep,      // run length 1..4
+    output reg [2:0]            sp_rep,      // run length 1..4 (all covered pixels shaded)
     output reg [31:0]           sp_invw [0:3], // per-covered-pixel invW (lanes 0..rep-1)
-    output reg [3:0]            sp_shmask,   // per-covered-lane shade-valid
     output reg                  sp_at,       // PT alpha-test enable (run-start lane)
     input                       sp_ready,    // span consumer (expander) can accept this cycle
 
@@ -129,6 +146,21 @@ module spanner_v2 import tsp_pkg::*; #(
     reg [GF_AW:0]      gf_wp, gf_rp;
     wire gf_empty = (gf_wp == gf_rp);
 
+    // ---- span RING (dense_span_buffer slots), shared with TSP (mirrors the plane ring) ----
+    // span_head = next slot to write; span_tail = oldest slot still owned by TSP. Sized
+    // SPAN_NSLOT=2048 so a single worst-case tile (<=1024 spans) always fits (deadlock-free,
+    // same argument as the plane ring) with room for a second pass in flight. Every SHADED
+    // span consumes a slot (NOT just allocs) -> the ring-full stall gates on run_shaded.
+    // span_pass_base snapshots span_head at each pass start (the pass's range base). A
+    // parallel end-pointer FIFO sgf_mem records each handed pass's span end (span_head); it
+    // shares gf_wp/gf_rp with the plane go-FIFO (planes+spans hand/free per-pass, lock-step).
+    reg [SPAN_W:0]     span_head, span_tail;      // ring head / tail (SPAN_W+1 bits)
+    wire span_ring_empty = (span_head == span_tail);
+    wire span_ring_full  = (span_head[SPAN_W] != span_tail[SPAN_W]) &&
+                           (span_head[SPAN_W-1:0] == span_tail[SPAN_W-1:0]);
+    reg [SPAN_W:0]     span_pass_base;            // span_head at this pass's start
+    reg [SPAN_W:0]     sgf_mem [0:(1<<GF_AW)-1];  // span END pointers handed to TSP
+
     // ============================ setup FIFO (SPANGEN -> SETUP) ============================
     // {id, tag} pushed when a span allocates a NEW slot; drained by the SETUP engine.
     localparam integer SF_AW = 3;                 // 8-deep
@@ -175,29 +207,36 @@ module spanner_v2 import tsp_pkg::*; #(
     reg [SLOTW-1:0]  t_h;           // pc_slot(run_tag) = dedup map bucket
     reg [31:0]       t_tag;
     reg [2:0]        t_rep;
-    reg [3:0]        t_shmask;
+    reg              t_ok;          // this run is SHADED (emit a span); else invalid (skip)
     reg [31:0]       t_invw [0:3];
     reg              t_at;
 
     wire [1:0] sg_lane = sg_x[1:0];              // intra-group position of sg_x
 
     // ---- leading-run coalesce (combinational off ti_*, the current group source) ----
-    // Start lane = sg_lane. Extend while lane in-group, tag equal. shade_ok(l) =
-    // shade_mode | ti_valid[l]. A run of not-shade-eligible tags is still a span (advances
-    // the walk) but with shmask=0; we coalesce equal tags to match the aligned model.
-    reg  [2:0] run_rep;                          // 1..4
-    reg  [3:0] run_shmask;                       // per-lane shade-valid over the run
+    // shade_ok(l) = shade_mode | ti_valid[l] : is lane l shaded this pass. run_ok0 = start
+    // lane shaded? Two run kinds, both advancing sg_x by run_rep, but only SHADED runs emit
+    // a span:
+    //   * SHADED start (run_ok0=1): extend while contiguous, shaded, and SAME tag. -> a real
+    //                  span (rep 1..4, all covered lanes shaded, same triangle).
+    //   * INVALID start(run_ok0=0): extend while contiguous invalid, IGNORING tag. -> emits
+    //                  NO span; just skips the invalid pixels (advance the walk).
+    // A shade transition (valid<->invalid) or a tag change breaks the run. No shade mask:
+    // every emitted span is uniformly shaded.
+    reg  [2:0] run_rep;                          // 1..4 (run length; advances sg_x)
     reg  [31:0] run_tag;
+    reg        run_ok0;                          // start lane shaded? (span emitted iff 1)
     integer rl;
     always @(*) begin
         run_tag    = ti_tag[sg_lane];
         run_rep    = 3'd1;
-        run_shmask = 4'd0;
-        run_shmask[sg_lane] = shade_mode | ti_valid[sg_lane];
+        run_ok0    = shade_mode | ti_valid[sg_lane];
         for (rl = 0; rl < 4; rl = rl + 1) begin
-            if (rl > sg_lane && rl == sg_lane + run_rep && ti_tag[rl] == run_tag) begin
+            // extend if in-group, contiguous, same shade-eligibility, and (if shaded) same tag.
+            if (rl > sg_lane && rl == sg_lane + run_rep
+                && ((shade_mode | ti_valid[rl]) == run_ok0)
+                && (run_ok0 ? (ti_tag[rl] == run_tag) : 1'b1)) begin
                 run_rep = run_rep + 3'd1;
-                run_shmask[rl] = shade_mode | ti_valid[rl];
             end
         end
     end
@@ -225,19 +264,28 @@ module spanner_v2 import tsp_pkg::*; #(
     wire            eff_valid = fwd0_hit | fwd1_hit | slot_valid_q;
     wire [31:0]     eff_tag   = fwd0_hit ? fwd0_tag : (fwd1_hit ? fwd1_tag : slot_tag_q);
     wire [SLOTW-1:0] eff_id   = fwd0_hit ? fwd0_id  : (fwd1_hit ? fwd1_id  : slot_id_q);
-    wire is_dedup_hit = t_valid && eff_valid && (eff_tag == t_tag);
-    wire needs_alloc  = t_valid && !is_dedup_hit;
-    // the ring id this emit uses: reuse the cached/forwarded id on a hit, else the next
-    // bump-allocated id (top_tag).
-    wire [SLOTW-1:0] emit_id = is_dedup_hit ? eff_id : top_tag[SLOTW-1:0];
+    // Only SHADED runs (t_ok) emit a span AND allocate/dedup/setup. An invalid run (t_ok=0)
+    // is retired at EMIT without emitting a span, allocating an id, or pushing a setup - it
+    // only advanced the walk past its invalid pixels.
+    wire run_shaded   = t_valid && t_ok;
+    wire is_dedup_hit = run_shaded && eff_valid && (eff_tag == t_tag);
+    wire needs_alloc  = run_shaded && !is_dedup_hit;
+    // ring id: reuse on a dedup hit, allocate the next bump id on a shaded miss, or a
+    // don't-care 0 for an invalid (unshaded) run (that span's id is never read).
+    wire [SLOTW-1:0] emit_id = is_dedup_hit ? eff_id
+                             : (run_shaded ? top_tag[SLOTW-1:0] : {SLOTW{1'b0}});
 
     // emit can commit when: an ALLOCATING emit needs setup-FIFO room AND a free ring slot.
     // A same-tag reuse needs neither. When blocked, the WHOLE pipeline freezes (COAL+EMIT).
     wire emit_stall_fifo = needs_alloc && sf_full;
-    wire emit_stall_ring = needs_alloc && ring_full;   // no free ring id -> wait for TSP
+    wire emit_stall_ring = needs_alloc && ring_full;   // no free plane id -> wait for TSP
     // also freeze if the span consumer (expander) can't accept the span this emit produces
-    wire emit_stall_span = t_valid && !sp_ready;
-    wire pipe_stall      = emit_stall_fifo | emit_stall_ring | emit_stall_span;
+    wire emit_stall_span = run_shaded && !sp_ready;   // only stall when actually emitting
+    // span RING full: EVERY shaded span consumes a slot (unlike plane alloc, miss-only), so
+    // this gates on run_shaded, not needs_alloc. No free span slot -> wait for TSP to drain.
+    wire emit_stall_span_ring = run_shaded && span_ring_full;
+    wire pipe_stall      = emit_stall_fifo | emit_stall_ring | emit_stall_span
+                         | emit_stall_span_ring;
 
     // ---- COAL advance: sg_x steps by run_rep; group exhausted when it crosses the group ----
     wire [SLOTW-1:0] sg_x_next   = sg_x + { {(SLOTW-3){1'b0}}, run_rep };
@@ -288,9 +336,13 @@ module spanner_v2 import tsp_pkg::*; #(
     );
 
     // latched decoded record of the tri being set up (feed tsp_setup_min)
-    reg [31:0] cur_isp, cur_tsp, cur_tcw;
-    reg [31:0] fv_x[0:2], fv_y[0:2], fv_z[0:2];
-    reg [31:0] fv_u[0:2], fv_v[0:2], fv_col[0:2], fv_ofs[0:2];
+    // fv_*/cur_isp: the verts + isp flags feeding tsp_setup_stream for the CURRENT setup
+    // (su_id). public_flat_rd so the TB can snapshot them at ts_we and run an INDEPENDENT
+    // refsw2 PlaneStepper3 golden (+planecheck).
+    reg [31:0] cur_isp /*verilator public_flat_rd*/;
+    reg [31:0] cur_tsp, cur_tcw;
+    reg [31:0] fv_x[0:2] /*verilator public_flat_rd*/, fv_y[0:2] /*verilator public_flat_rd*/, fv_z[0:2] /*verilator public_flat_rd*/;
+    reg [31:0] fv_u[0:2] /*verilator public_flat_rd*/, fv_v[0:2] /*verilator public_flat_rd*/, fv_col[0:2] /*verilator public_flat_rd*/, fv_ofs[0:2] /*verilator public_flat_rd*/;
     wire f_texture = cur_isp[ISP_TEXTURE_BIT];
     wire f_offset  = cur_isp[ISP_OFFSET_BIT];
     wire f_gouraud = cur_isp[ISP_GOURAUD_BIT];
@@ -323,13 +375,18 @@ module spanner_v2 import tsp_pkg::*; #(
         // ----- EMIT: span write + FIFO push. The descriptor produced by COAL last cycle
         // is in t_* (t_valid); its slot read has resolved -> dedup here and write. Held
         // (no write, no advance) when the pipeline is frozen. -----
-        sp_we      = t_valid && !pipe_stall;
-        sp_idx     = t_x;
+        // emit a span ONLY for a shaded run (t_ok); invalid runs retire silently.
+        sp_we      = run_shaded && !pipe_stall;
+        sp_slot    = span_head[SPAN_W-1:0]; // ring write slot = span_head (wraps)
+        sp_start   = t_x;                  // run-start pixel index (y:x) [data for the reader]
         sp_id      = emit_id;              // bump-allocated (or reused) ring id
         sp_rep     = t_rep;
-        sp_shmask  = t_shmask;
         sp_at      = t_at;
         for (k = 0; k < 4; k = k + 1) sp_invw[k] = t_invw[k];
+        // span RING range of this pass (valid at busy->0). base = span_head at pass start,
+        // cnt = span_head - base (wrap-safe via the extra MSB). cnt==0 => empty pass.
+        sp_range_base = span_pass_base;
+        sp_range_cnt  = span_head - span_pass_base;
 
         sf_push  = sp_we && needs_alloc;   // allocate -> push a setup
         sf_pdata = { emit_id, t_tag };
@@ -367,6 +424,7 @@ module spanner_v2 import tsp_pkg::*; #(
             fwd0_valid <= 1'b0; fwd1_valid <= 1'b0;
             sf_wp <= '0; sf_rp <= '0;
             top_tag <= '0; tail <= '0; gf_wp <= '0; gf_rp <= '0;
+            span_head <= '0; span_tail <= '0; span_pass_base <= '0;
             fetch_busy <= 1'b0; pend_v <= 1'b0; su_run <= 1'b0; ts_pend <= 1'b0;
             fx_start <= 1'b0; tsp_start <= 1'b0;
         end else begin
@@ -374,10 +432,13 @@ module spanner_v2 import tsp_pkg::*; #(
             tsp_start <= 1'b0;
             tsp_go    <= 1'b0;            // 1-cyc pulse
 
-            // ---------------- TSP freed a tile -> advance the ring tail ----------------
+            // ---------------- TSP freed a tile -> advance BOTH ring tails ----------------
+            // planes and spans hand/free per-pass in lock-step, so one free pulse (the same
+            // gf_rp entry) advances both the plane tail and the span tail.
             if (tsp_rd_done && !gf_empty) begin
-                tail  <= gf_mem[gf_rp[GF_AW-1:0]];   // free up to the oldest handed tile's end
-                gf_rp <= gf_rp + 1'b1;
+                tail      <= gf_mem [gf_rp[GF_AW-1:0]];  // free up to the oldest handed tile's plane end
+                span_tail <= sgf_mem[gf_rp[GF_AW-1:0]];  // ... and its span end
+                gf_rp     <= gf_rp + 1'b1;
             end
 
             // ---------------- start a tile pass ----------------
@@ -390,6 +451,15 @@ module spanner_v2 import tsp_pkg::*; #(
                 fwd0_valid <= 1'b0; fwd1_valid <= 1'b0;
                 sf_wp <= '0; sf_rp <= '0;
                 if (ring_empty && !(tsp_rd_done && !gf_empty)) begin top_tag <= '0; tail <= '0; end
+                // Span ring: same normalize (idle -> restart dense at 0) and latch this pass's
+                // range base. CRUCIAL: latch the POST-normalize head (0 when normalizing, else
+                // the current head), NOT the pre-normalize span_head - the normalize's NBA
+                // wouldn't be visible to a same-cycle span_pass_base <= span_head.
+                if (span_ring_empty && !(tsp_rd_done && !gf_empty)) begin
+                    span_head <= '0; span_tail <= '0; span_pass_base <= '0;
+                end else begin
+                    span_pass_base <= span_head;   // overlapped: this pass starts at the live head
+                end
                 if (cur_gen == GEN_MAX) begin
                     dd_clearing <= 1'b1; dd_clr_addr <= '0;   // SPANGEN idle until clear done
                 end else begin
@@ -417,6 +487,9 @@ module spanner_v2 import tsp_pkg::*; #(
                     dedup_ram[t_h] <= {cur_gen, t_tag, top_tag[SLOTW-1:0]};
                     top_tag <= top_tag + 1'b1;    // advance ring head (wraps via SLOTW+1 bits)
                 end
+                // dense pack: only an EMITTED (shaded) span advances the ring head. Guarded
+                // by !pipe_stall (this block), so a span-ring-full stall holds the head.
+                if (run_shaded) span_head <= span_head + 1'b1;
                 // forwarding shift: fwd0 = alloc this cycle (bucket t_h -> {tag,id}).
                 fwd1_valid <= fwd0_valid; fwd1_h <= fwd0_h; fwd1_id <= fwd0_id; fwd1_tag <= fwd0_tag;
                 fwd0_valid <= t_valid && needs_alloc;
@@ -426,12 +499,29 @@ module spanner_v2 import tsp_pkg::*; #(
 
                 // ---------- COAL: coalesce one span off ti_* (the current group) ----------
                 if (coal_fires) begin
+`ifndef SYNTHESIS
+                    if ($test$plusargs("coaltrace"))
+                        $display("[COAL] sg_x=%0d rdgrp=%0d rdv=%b ti_tag=%08x %08x %08x %08x val=%b",
+                                 sg_x, rd_group, rd_valid, ti_tag[0], ti_tag[1], ti_tag[2], ti_tag[3], ti_valid);
+                    // +peelzero: in PEEL mode (shade_mode=0), catch a span emitted for a
+                    // lane whose ti_invw==0 — the exact bad case (peel shading a pixel with
+                    // valid=1 but zeroed invW). Shows the lane's valid/tag/invw.
+                    if ($test$plusargs("peelzero") && !shade_mode && run_ok0
+                        && ti_invw[sg_lane] == 32'd0)
+                        $display("[PEELZERO] sg_x=%0d lane=%0d val=%b tag=%08x invw=%08x rep=%0d",
+                                 sg_x, sg_lane, ti_valid, ti_tag[sg_lane], ti_invw[sg_lane], run_rep);
+                    // catch a COAL emit where the START lane is shaded (span will be written)
+                    // AND its captured invw would be 0 in PEEL mode — the reader-fed bad px.
+                    if ($test$plusargs("peelzero") && !shade_mode && run_ok0 && sg_x < 8)
+                        $display("[COALDBG] sg_x=%0d lane=%0d val=%b tag=%08x ti_invw[l]=%08x rep=%0d run_id=%0d",
+                                 sg_x, sg_lane, ti_valid, ti_tag[sg_lane], ti_invw[sg_lane], run_rep, run_id);
+`endif
                     t_valid  <= 1'b1;
                     t_x      <= sg_x;
                     t_h      <= run_id;            // dedup map bucket = pc_slot(run_tag)
                     t_tag    <= run_tag;
                     t_rep    <= run_rep;
-                    t_shmask <= run_shmask;
+                    t_ok     <= run_ok0;           // shaded run -> emit a span; else skip
                     t_at     <= ti_pt[sg_lane];
                     for (q = 0; q < 4; q = q + 1)
                         t_invw[q] <= (q < run_rep) ? ti_invw[sg_lane + q[1:0]] : 32'd0;
@@ -542,13 +632,15 @@ module spanner_v2 import tsp_pkg::*; #(
             // =================== busy / done -> tsp_go ===================
             // done when SPANGEN drained (not walking, EMIT stage empty) AND the whole setup
             // path is drained (FIFO, fetch, skid, setup run, write pulse). At that moment the
-            // tile's setups are ALL in triangle_setups -> pulse tsp_go and record the tile's
-            // END pointer (top_tag) so tsp_done can later free this tile's ring range.
+            // tile's setups are ALL in triangle_setups -> pulse tsp_go and record BOTH the
+            // plane END pointer (top_tag) and the span END pointer (span_head) so tsp_done can
+            // later free this pass's plane AND span ring ranges together (shared gf_wp/gf_rp).
             if (busy && !start && !dd_clearing && !sg_active && !t_valid && sf_empty
                 && !fetch_busy && !pend_v && !su_run && !ts_pend) begin
                 busy   <= 1'b0;
                 tsp_go <= 1'b1;
-                gf_mem[gf_wp[GF_AW-1:0]] <= top_tag;
+                gf_mem [gf_wp[GF_AW-1:0]] <= top_tag;
+                sgf_mem[gf_wp[GF_AW-1:0]] <= span_head;
                 gf_wp <= gf_wp + 1'b1;
             end
         end

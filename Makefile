@@ -160,6 +160,23 @@ frontendtsp: | $(BUILD)
 	  $(CWD)/tb/frontend_tsp_tb.cpp --Mdir $(BUILD)/obj_frontendtsp -o tb
 	./$(BUILD)/obj_frontendtsp/tb $(DUMP)
 
+# taginvw_tile_buffer unit test: the split-out {valid,tag,invW} slice TSP reads. Exercises
+# the 4-wide aligned read (rd4/g4) with FOUR DISTINCT per-lane tags + a moving-address
+# streaming read + concurrent write/read, against the real M10K tile_ram. Self-checking.
+taginvw: | $(BUILD)
+	+$(VERILATOR) --binary $(VFLAGS) -Wno-BLKSEQ --top-module taginvw_selftest \
+	  rtl/tsp/tsp_pkg.sv rtl/isp_min/tile_ram.sv rtl/tsp/taginvw_tile_buffer.sv \
+	  tb/taginvw_selftest.sv --Mdir $(BUILD)/obj_taginvw -o taginvw
+	./$(BUILD)/obj_taginvw/taginvw
+
+# dense_span_buffer unit test: the DENSE spanner_v2->TSP handoff (one span/slot:
+# {start,rep,id,invw[0:3],at}). Writes spans at dense slots, reads back + streaming read.
+dense_span_buffer: | $(BUILD)
+	+$(VERILATOR) --binary $(VFLAGS) -Wno-BLKSEQ --top-module dense_span_buffer_selftest \
+	  rtl/tsp/dense_span_buffer.sv tb/dense_span_buffer_selftest.sv \
+	  --Mdir $(BUILD)/obj_densespan -o densespan
+	./$(BUILD)/obj_densespan/densespan
+
 # front-end + ISP + TSP + LAYER PEELING: OP as before; PT/TR use the peel depth
 # compare (isp_depth_cmp_lp) with dual depth/tag buffers + a per-pixel valid bit,
 # re-running the object list per peel pass, and blending at the end of the TSP
