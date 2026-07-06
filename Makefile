@@ -76,8 +76,8 @@ tex-addr: | $(BUILD)
 	./$(BUILD)/obj_texaddr/tb
 
 tex-uv: | $(BUILD)
-	+$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module tex_uv2texel \
-	  $(TSP)/tex_uv2texel.sv $(CWD)/tb/tex_uv2texel_tb.cpp \
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module tex_uvmap \
+	  $(TSP)/tex_uvmap.sv $(CWD)/tb/tex_uvmap_tb.cpp \
 	  --Mdir $(BUILD)/obj_texuv -o tb
 	./$(BUILD)/obj_texuv/tb
 

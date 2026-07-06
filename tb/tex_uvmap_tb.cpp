@@ -1,4 +1,4 @@
-#include "Vtex_uv2texel.h"
+#include "Vtex_uvmap.h"
 #include "verilated.h"
 #include <cstdio>
 #include <cstdint>
@@ -19,7 +19,7 @@ static int clampflip(int clamp,int flip,int coord,int size){
 
 int main(int c,char**v){
     Verilated::commandArgs(c,v);
-    auto*d=new Vtex_uv2texel;
+    auto*d=new Vtex_uvmap;
     int fails=0,total=0;
     // all 16 clamp/flip combos, 96 random (u,v,texu,texv) each - INCLUDING
     // negative and large UVs (wrap/flip must handle negatives: e.g. daytona road
@@ -55,7 +55,7 @@ int main(int c,char**v){
         }
       }
     }
-    // ---- GOLDEN REPLAY: real captured tex_uv2texel vectors from a scene (menu2).
+    // ---- GOLDEN REPLAY: real captured tex_uvmap vectors from a scene (menu2).
     // Each line: attrU attrV tsp tcw mip  c00u c00v c01u c01v c10u c10v c11u c11v ufrac vfrac
     // (attrU/attrV are the interpolated U/V floats fed to the module; tsp carries
     // texu/texv[5:0] + clamp/flip[18:15]). This pins the module to bit-exact outputs on
@@ -88,12 +88,12 @@ int main(int c,char**v){
                 }
             }
             fclose(f);
-            printf("tex_uv2texel golden(menu2): %d/%d passed\n", gtot-gfail, gtot);
+            printf("tex_uvmap golden(menu2): %d/%d passed\n", gtot-gfail, gtot);
             total+=gtot; fails+=gfail;
         }
     }
 
-    printf("tex_uv2texel: %d/%d passed\n", total-fails, total);
+    printf("tex_uvmap: %d/%d passed\n", total-fails, total);
     printf(fails?"UV FAIL\n":"UV OK\n");
     return fails?1:0;
 }

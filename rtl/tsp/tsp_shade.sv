@@ -3,7 +3,7 @@
 // Orchestrates verified blocks; the texel fetch is delegated to tex_fetch.
 //   fp_rcp_fast          : W = 1/invW  (invW from depth buffer)
 //   fp_mul_i5/add24/mul16: perspective interpolation of the 10 planes
-//   tex_uv2texel         : UV -> 4 corner texel coords + fractions
+//   tex_uvmap         : UV -> 4 corner texel coords + fractions
 //   tex_fetch            : per-corner texel -> ARGB (addr/cache/VQ/palette/decode)
 //   tex_filter           : nearest / bilinear
 //   color_combiner       : texenv (ShadInstr) + offset
@@ -76,7 +76,7 @@ module tsp_shade import tsp_pkg::*; (
 
     // ---- uv -> texel corners (combinational; outputs registered below) ----
     wire [10:0] c00u,c00v,c01u,c01v,c10u,c10v,c11u,c11v; wire [7:0] ufrac,vfrac;
-    tex_uv2texel u_uv (
+    tex_uvmap u_uv (
         .u(attr[0]), .v(attr[1]), .texu(texu), .texv(texv),
         .miplevel(4'd0),
         .clampu(clampu),.clampv(clampv),.flipu(flipu),.flipv(flipv),

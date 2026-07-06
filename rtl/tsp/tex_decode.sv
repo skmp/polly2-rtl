@@ -1,76 +1,198 @@
 //
-// tex_decode - decode one texel to ARGB8888, per refsw DecodeTextel +
-// ExpandToARGB8888 (no mipmap; MipLevel assumed 0). Bump map excluded.
+// tex_decode - decode one texel from a 64-bit memory word to a single 32-bit value,
+// per refsw DecodeTextel. 2-cycle pipeline; the palette RAM is INJECTED (addr out /
+// data in), 1-cycle M10K read.
 //
-// Inputs:
-//   pixfmt  : TCW.PixelFmt (0=1555 1=565 2=4444 3=YUV 5=PAL4 6=PAL8; 4 bump n/a)
-//   scan    : TCW.ScanOrder (selects ExpandToARGB8888 shuffle for 8888)
-//   palsel  : TCW.PalSelect[5:0]
-//   memtel  : the 64-bit memory word covering this texel (from the tex cache)
-//   offset  : texel linear offset (selects sub-word: 16b lane / 8b / 4b nibble)
-//   yuv_word: the relevant 32-bit YUV pair (offset&1 select) - precomputed by caller
-//   pal_argb: palette ROM lookup result (caller does the PAL_RAM read)
+//   template<PixelFmt> u32 DecodeTextel(PalSelect, u64 memtel, u32 offset):
+//     1555/565/4444/BumpMap/Reserved : return memtel_16[offset & 3]   (RAW 16-bit)
+//     YUV422                         : YUV422(y=memtel8[1+(offset&2)], u=memtel8[0],
+//                                             v=memtel8[2]) of memtel_32[offset&1]
+//     Pal4  : local = (memtel >> (offset&15)*4) & 15 ; idx = PalSelect*16 | local
+//     Pal8  : local = memtel_8[offset&7]            ; idx = (PalSelect/16)*256 | local
+//   PixelFmt: 0=1555 1=565 2=4444 3=YUV 4=Bump 5=Pal4 6=Pal8 7=Reserved
+//   PalSelect: 6 bits.  offset: 4 bits.
 //
-// The caller (tex fetch) provides the palette lookup + picks memtel; here we do
-// the format expansion math.
+// PIPELINE (3 cycles). The YUV422 conversion is split so no stage carries both the muls
+// AND the clamp/select: C2 does the muls + the G-channel two-product sum; C3 clamps,
+// packs and selects. (C2's yu*11+yv*22 -> /32 -> subtract -> clamp -> select was the
+// ~limiter as one cycle; the clamp/select moves to C3.)
+//   C1 (comb off inputs)  : 16b lane mux ; YUV byte selects + yu/yv = (u/v)-128 ;
+//                           palette index -> pal_addr  -> [REG]
+//   [REG] drives pal_addr; the external M10K reads it -> pal_data lands at C2 (1cyc).
+//   C2 (comb off C1 regs) : YUV muls / adds / divides -> pre-clamp yR/yG/yB ; carry
+//                           pal_data/w16/pixfmt -> [REG]
+//   C3 (comb off C2 regs) : clamp + pack + format select -> [REG] argb
+//
+// Latency = 3. in_valid -> out_valid. `stall` freezes all registers. The injected
+// palette must be a 1-cycle registered read off pal_addr so pal_data aligns to C2.
 //
 module tex_decode (
-    input  [2:0]  pixfmt,
-    input         scan,
-    input  [63:0] memtel,
-    input  [3:0]  offset_lo,   // offset[3:0], selects 16b/8b/4b sublane
-    input  [31:0] pal_argb,    // palette ROM output (for PAL4/PAL8)
-    output [31:0] argb
+    input             clk,
+    input             reset,
+    input             stall,
+    input             in_valid,
+    input      [2:0]  pixfmt,       // TCW.PixelFmt (0..7)
+    input      [1:0]  pal_fmt,      // palette-entry format: 0=1555 1=565 2=4444 3=8888
+    input             scan_order,   // ExpandToARGB8888 pad: 1=zero-pad, 0=MSB-repeat
+    input      [5:0]  palsel,       // TCW.PalSelect
+    input      [63:0] memtel,       // 64-bit memory word covering this texel
+    input      [3:0]  offset,       // texel offset (sub-word / nibble / byte select)
+
+    // injected palette RAM: pal_addr driven from the C1 register (1-cycle M10K read),
+    // pal_data consumed at C2.
+    output reg [9:0]  pal_addr,
+    input      [31:0] pal_data,
+
+    output            out_valid,
+    output     [31:0] argb
 );
-    // 16-bit lane select (offset & 3)
-    wire [15:0] w16 = (offset_lo[1:0]==2'd0) ? memtel[15:0]
-                    : (offset_lo[1:0]==2'd1) ? memtel[31:16]
-                    : (offset_lo[1:0]==2'd2) ? memtel[47:32]
-                                             : memtel[63:48];
+    // ============================================================================
+    // C1 combinational (off module inputs): cheap selects/subs + palette index.
+    // ============================================================================
+    // raw 16bpp lane (offset & 3)
+    wire [1:0]  l16 = offset[1:0];
+    wire [15:0] w16_c = (l16==2'd0) ? memtel[15:0]
+                      : (l16==2'd1) ? memtel[31:16]
+                      : (l16==2'd2) ? memtel[47:32]
+                                    : memtel[63:48];
 
-    // ---- ARGB expanders (refsw ARGBxxxx_32), fields as {A,R,G,B} bytes ----
-    wire [31:0] argb1555 = {(w16[15]?8'hFF:8'h00),
-                            {w16[14:10],3'b0},   // R
-                            {w16[9:5],3'b0},     // G
-                            {w16[4:0],3'b0}};    // B
-    wire [31:0] argb565  = {8'hFF,
-                            {w16[15:11],3'b0},   // R
-                            {w16[10:5],2'b0},    // G
-                            {w16[4:0],3'b0}};    // B
-    wire [31:0] argb4444 = {{w16[15:12],4'b0},   // A
-                            {w16[11:8],4'b0},    // R
-                            {w16[7:4],4'b0},     // G
-                            {w16[3:0],4'b0}};    // B
+    // palette index (Pal4/Pal8). idx = 10 bits.
+    wire [5:0]  nib_sel = {offset[3:0], 2'd0};        // (offset&15)*4, 0..60
+    wire [3:0]  pal4_local = memtel[ nib_sel +: 4 ];
+    wire [7:0]  pal8_local = memtel[ {offset[2:0], 3'd0} +: 8 ];
+    wire [9:0]  idx4 = { palsel[5:0], pal4_local };   // PalSelect*16 | local
+    wire [9:0]  idx8 = { palsel[5:4], pal8_local };   // (PalSelect/16)*256 | local
+    wire [9:0]  pal_addr_c = (pixfmt==3'd5) ? idx4 : idx8;
 
-    // ---- YUV422: two Y share U/V. offset&1 picks Y0/Y1; U,V from the pair ----
-    // 32-bit yuv word covering this texel = memtel[ (offset&1)?63:31 : ...]
-    wire [31:0] yuv32 = offset_lo[0] ? memtel[63:32] : memtel[31:0];
-    wire [7:0]  yuv_y0 = yuv32[15:8];    // memtel_yuv8[1]
-    wire [7:0]  yuv_y1 = yuv32[31:24];   // memtel_yuv8[3] (1 + (offset&2))
-    wire [7:0]  yuv_u  = yuv32[7:0];     // [0]
-    wire [7:0]  yuv_v  = yuv32[23:16];   // [2]
-    wire [7:0]  yv_y   = offset_lo[1] ? yuv_y1 : yuv_y0;
-    // R = Y + Yv*11/8 ; G = Y - (Yu*11+Yv*22)/32 ; B = Y + Yu*110/64
-    wire signed [9:0]  yu = $signed({2'b0, yuv_u}) - 10'sd128;
-    wire signed [9:0]  yv = $signed({2'b0, yuv_v}) - 10'sd128;
-    wire signed [15:0] yR = $signed({8'b0, yv_y}) + (yv * 16'sd11) / 16'sd8;
-    wire signed [15:0] yG = $signed({8'b0, yv_y}) - (yu*16'sd11 + yv*16'sd22) / 16'sd32;
-    wire signed [15:0] yB = $signed({8'b0, yv_y}) + (yu * 16'sd110) / 16'sd64;
+    // YUV byte selects + yu/yv + the CONSTANT MULTIPLIES. yu/yv are cheap subtracts and
+    // the *11/*22/*110 are shift-and-add trees (constant, no real multiplier) - done in
+    // C1 (off the early yu/yv) and registered, so C2 only does the adds/divides. This
+    // splits the G channel's yu*11+yv*22 (two muls in C1, the sum in C2).
+    // multstyle="logic" forces the products into fabric (NO DSP blocks).
+    wire [31:0] yuv32 = offset[0] ? memtel[63:32] : memtel[31:0];
+    wire [7:0]  yuv_y0 = yuv32[15:8];    // memtel_yuv8[1]  (offset&2==0)
+    wire [7:0]  yuv_y1 = yuv32[31:24];   // memtel_yuv8[3]  (offset&2==2)
+    wire [7:0]  yv_y_c = offset[1] ? yuv_y1 : yuv_y0;
+    wire signed [9:0] yu_c = $signed({2'b0, yuv32[7:0]})  - 10'sd128;   // u-128
+    wire signed [9:0] yv_c = $signed({2'b0, yuv32[23:16]}) - 10'sd128;  // v-128
+    (* multstyle = "logic" *) wire signed [17:0] m_yu11_c  = yu_c * 18'sd11;
+    (* multstyle = "logic" *) wire signed [17:0] m_yv11_c  = yv_c * 18'sd11;
+    (* multstyle = "logic" *) wire signed [17:0] m_yv22_c  = yv_c * 18'sd22;
+    (* multstyle = "logic" *) wire signed [17:0] m_yu110_c = yu_c * 18'sd110;
+
+    // ============================================================================
+    // C1 -> C2 REGISTER (also drives pal_addr for the 1-cycle palette read).
+    // ============================================================================
+    reg               v1;
+    reg [2:0]         s1_pixfmt;
+    reg [1:0]         s1_palfmt;
+    reg               s1_scan;
+    reg [15:0]        s1_w16;
+    reg [7:0]         s1_y;
+    reg signed [17:0] s1_yu11, s1_yv11, s1_yv22, s1_yu110;   // registered products
+    always @(posedge clk) begin
+        if (reset) v1 <= 1'b0;
+        else if (!stall) begin
+            v1        <= in_valid;
+            s1_pixfmt <= pixfmt;
+            s1_palfmt <= pal_fmt; s1_scan <= scan_order;
+            s1_w16    <= w16_c;
+            s1_y      <= yv_y_c;
+            s1_yu11   <= m_yu11_c;  s1_yv11 <= m_yv11_c;
+            s1_yv22   <= m_yv22_c;  s1_yu110<= m_yu110_c;
+            pal_addr  <= pal_addr_c;      // registered -> external M10K -> pal_data at C2
+        end
+    end
+
+    // ============================================================================
+    // C2 combinational (off C1 regs): YUV adds/divides -> pre-clamp yR/yG/yB (products
+    // came from C1). refsw YUV422: R=Y+Yv*11/8 ; G=Y-(Yu*11+Yv*22)/32 ; B=Y+Yu*110/64.
+    // pal_data landed this cycle -> carry to C3.
+    // ============================================================================
+    // NOTE: keep `/` (truncate toward zero), NOT >>> (floors) - they differ for negative
+    // values and the reference uses C division. `/const-pow2` synthesizes as a cheap
+    // shift + sign correction (no DSP).
+    wire signed [17:0] g_sum = s1_yu11 + s1_yv22;
+    wire signed [15:0] yR_c = $signed({8'b0, s1_y}) + 16'(s1_yv11 / 18'sd8);
+    wire signed [15:0] yG_c = $signed({8'b0, s1_y}) - 16'(g_sum   / 18'sd32);
+    wire signed [15:0] yB_c = $signed({8'b0, s1_y}) + 16'(s1_yu110 / 18'sd64);
+
+    reg               v2;
+    reg [2:0]         s2_pixfmt;
+    reg [1:0]         s2_palfmt;
+    reg               s2_scan;
+    reg [15:0]        s2_w16;
+    reg [31:0]        s2_pal;                 // pal_data carried (landed at C2)
+    reg signed [15:0] s2_yR, s2_yG, s2_yB;    // pre-clamp YUV->RGB
+    always @(posedge clk) begin
+        if (reset) v2 <= 1'b0;
+        else if (!stall) begin
+            v2        <= v1;
+            s2_pixfmt <= s1_pixfmt;
+            s2_palfmt <= s1_palfmt; s2_scan <= s1_scan;
+            s2_w16    <= s1_w16;
+            s2_pal    <= pal_data;
+            s2_yR <= yR_c; s2_yG <= yG_c; s2_yB <= yB_c;
+        end
+    end
+
+    // ============================================================================
+    // C3 combinational (off C2 regs): YUV clamp/pack ; 16b->ARGB8888 expand ; select.
+    // ============================================================================
     function [7:0] clamp8(input signed [15:0] v);
         clamp8 = (v < 0) ? 8'd0 : (v > 255) ? 8'd255 : v[7:0]; endfunction
-    wire [31:0] argbyuv = {8'hFF, clamp8(yR), clamp8(yG), clamp8(yB)};
 
-    // ---- palette formats: caller supplies pal_argb already expanded via PAL ROM
-    // (the ROM stores ARGB8888 placeholders), so just pass it through.
+    // ---- shared 16b -> ARGB8888 expander. `fmt`: 0=1555 1=565 2=4444 3=8888(passthru16).
+    //      scan=1 -> zero-pad the low bits ; scan=0 -> MSB-repeat (full-scale -> 0xFF). ----
+    //   channel expand helpers: take the field's high bits, fill low bits per scan.
+    function [7:0] ex5(input [4:0] c, input scan);   // 5-bit -> 8-bit
+        ex5 = scan ? {c, 3'b0} : {c, c[4:2]}; endfunction
+    function [7:0] ex6(input [5:0] c, input scan);   // 6-bit -> 8-bit
+        ex6 = scan ? {c, 2'b0} : {c, c[5:4]}; endfunction
+    function [7:0] ex4(input [3:0] c, input scan);   // 4-bit -> 8-bit
+        ex4 = scan ? {c, 4'b0} : {c, c}; endfunction
 
-    // ---- select ----
-    // GetExpandFormat: 1555->0,565->1,4444->2, YUV->3(8888 shuffle of yuv? no:
-    // yuv already ARGB8888). PAL4/PAL8 expand per PAL_RAM_CTRL - here the ROM is
-    // already ARGB8888 so pass through.
-    assign argb = (pixfmt==3'd0) ? argb1555
-                : (pixfmt==3'd1) ? argb565
-                : (pixfmt==3'd2) ? argb4444
-                : (pixfmt==3'd3) ? argbyuv
-                : (pixfmt==3'd5 || pixfmt==3'd6) ? pal_argb
-                : argb1555;  // reserved/bump -> treat as 1555
+    function [31:0] expand16(input [15:0] w, input [1:0] fmt, input scan);
+        begin
+            case (fmt)
+              2'd0: expand16 = { (w[15] ? 8'hFF : 8'h00),     // 1555 A
+                                 ex5(w[14:10], scan),          // R
+                                 ex5(w[9:5],   scan),          // G
+                                 ex5(w[4:0],   scan) };        // B
+              2'd1: expand16 = { 8'hFF,                        // 565 (no A)
+                                 ex5(w[15:11], scan),          // R
+                                 ex6(w[10:5],  scan),          // G
+                                 ex5(w[4:0],   scan) };        // B
+              2'd2: expand16 = { ex4(w[15:12], scan),          // 4444 A
+                                 ex4(w[11:8],  scan),          // R
+                                 ex4(w[7:4],   scan),          // G
+                                 ex4(w[3:0],   scan) };        // B
+              default: expand16 = {16'd0, w};                  // 3=8888 low16 passthrough
+            endcase
+        end
+    endfunction
+
+    wire [31:0] argb_yuv    = {8'hFF, clamp8(s2_yR), clamp8(s2_yG), clamp8(s2_yB)};
+    wire [31:0] argb_direct = expand16(s2_w16,       s2_pixfmt[1:0], s2_scan);
+    wire [31:0] argb_pal    = expand16(s2_pal[15:0], s2_palfmt,             s2_scan);
+
+    // select: 3=YUV ; 4=Bump/7=Reserved -> raw passthrough {0,w16} ; 5/6=palette (pal_fmt
+    // expand) ; 0/1/2=direct 16b expand (pixfmt).
+    wire [31:0] argb_sel =
+          (s2_pixfmt==3'd3)                    ? argb_yuv
+        : (s2_pixfmt==3'd4 || s2_pixfmt==3'd7) ? {16'd0, s2_w16}   // bump/reserved: passthru
+        : (s2_pixfmt==3'd5 || s2_pixfmt==3'd6) ? argb_pal
+                                               : argb_direct;
+
+    reg        v3;
+    reg [31:0] r_argb;
+    always @(posedge clk) begin
+        if (reset) v3 <= 1'b0;
+        else if (!stall) begin
+            v3     <= v2;
+            r_argb <= argb_sel;
+        end
+    end
+    assign out_valid = v3;
+    assign argb      = r_argb;
 endmodule

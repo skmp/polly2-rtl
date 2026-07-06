@@ -19,7 +19,7 @@
 //     i1 : ddx*x , ddy*y                       (fp_mul_i5)
 //     i2 : ddx*x + ddy*y + c                    (fp_add3_24, fused 3-way: 1 stage)
 //     i3 : * W  -> attr[0..9]                   (fp_mul16)
-//   UV   : attr(U,V) -> 4 texel corners + frac  (tex_uv2texel)  ; pack base/ofs
+//   UV   : attr(U,V) -> 4 texel corners + frac  (tex_uvmap)  ; pack base/ofs
 //   TEX  : 4 || tex_fetch_pp (t00,t01,t10,t11)  ; STALLS on cache miss
 //   FILT : bilinear/nearest blend               (tex_filter)
 //   COMB : texenv + offset                       (color_combiner)
@@ -253,7 +253,7 @@ module tsp_shade_pp import tsp_pkg::*; #(
     wire [2:0] u_texv=tsp3[2:0], u_texu=tsp3[5:3];
     wire u_clampv=tsp3[15],u_clampu=tsp3[16],u_flipv=tsp3[17],u_flipu=tsp3[18];
     wire [10:0] c00u,c00v,c01u,c01v,c10u,c10v,c11u,c11v; wire [7:0] ufr,vfr;
-    tex_uv2texel u_uv (
+    tex_uvmap u_uv (
         .u(i3_attr[0]), .v(i3_attr[1]), .texu(u_texu), .texv(u_texv),
         .miplevel(mip3),
         .clampu(u_clampu),.clampv(u_clampv),.flipu(u_flipu),.flipv(u_flipv),
@@ -288,11 +288,11 @@ module tsp_shade_pp import tsp_pkg::*; #(
 
 
 `ifndef SYNTHESIS
-    // -------- tex_uv2texel VECTOR DUMP (sim only) -------------------------------------
-    // One line per accepted textured pixel at the UV stage. Captures the tex_uv2texel
+    // -------- tex_uvmap VECTOR DUMP (sim only) -------------------------------------
+    // One line per accepted textured pixel at the UV stage. Captures the tex_uvmap
     // INPUTS (interpolated U/V float, texu/texv/mip, clamp/flip) and its OUTPUTS (the 4
     // bilinear corner texel coords + ufrac/vfrac). This is a complete, self-contained
-    // regression vector for tex_uv2texel: given the inputs, tex_uv2texel must reproduce
+    // regression vector for tex_uvmap: given the inputs, tex_uvmap must reproduce
     // the corners+fracs. Enabled with +uvdump[=<file>] (default uv_vectors.log).
     //   fields: seq id attrU attrV tsp tcw mip ptx  c00u c00v c01u c01v c10u c10v c11u c11v ufrac vfrac
     integer      uvd_fd = 0;
@@ -304,7 +304,7 @@ module tsp_shade_pp import tsp_pkg::*; #(
         else if ($test$plusargs("uvdump")) begin uvd_en = 1'b1; uvd_name = "uv_vectors.log"; end
         if (uvd_en) begin
             uvd_fd = $fopen(uvd_name, "w");
-            $fwrite(uvd_fd, "# tex_uv2texel vectors: one line per accepted textured pixel\n");
+            $fwrite(uvd_fd, "# tex_uvmap vectors: one line per accepted textured pixel\n");
             $fwrite(uvd_fd, "# seq id attrU attrV tsp tcw mip ptx c00u c00v c01u c01v c10u c10v c11u c11v ufrac vfrac\n");
         end
     end
@@ -318,7 +318,7 @@ module tsp_shade_pp import tsp_pkg::*; #(
     end
     final if (uvd_en && uvd_fd != 0) begin
         $fflush(uvd_fd); $fclose(uvd_fd);
-        $display("[tsp_shade_pp] tex_uv2texel vectors: %0d pixels -> %0s", uvd_seq, uvd_name);
+        $display("[tsp_shade_pp] tex_uvmap vectors: %0d pixels -> %0s", uvd_seq, uvd_name);
     end
 `endif
 
