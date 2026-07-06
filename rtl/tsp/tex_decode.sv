@@ -23,13 +23,14 @@
 //                           pal_data/w16/pixfmt -> [REG]
 //   C3 (comb off C2 regs) : clamp + pack + format select -> [REG] argb
 //
-// Latency = 3. in_valid -> out_valid. `stall` freezes all registers. The injected
-// palette must be a 1-cycle registered read off pal_addr so pal_data aligns to C2.
+// Latency = 3. in_valid -> out_valid. No stall: this unit sits on the BACK half of the
+// pipeline (fetch output -> decode -> filter), which drains unconditionally on valid -
+// a stall upstream appears here only as a bubble (in_valid=0), never a freeze. The
+// injected palette must be a 1-cycle registered read off pal_addr so pal_data aligns to C2.
 //
 module tex_decode (
     input             clk,
     input             reset,
-    input             stall,
     input             in_valid,
     input      [2:0]  pixfmt,       // TCW.PixelFmt (0..7)
     input      [1:0]  pal_fmt,      // palette-entry format: 0=1555 1=565 2=4444 3=8888
@@ -92,7 +93,7 @@ module tex_decode (
     reg signed [17:0] s1_yu11, s1_yv11, s1_yv22, s1_yu110;   // registered products
     always @(posedge clk) begin
         if (reset) v1 <= 1'b0;
-        else if (!stall) begin
+        else begin
             v1        <= in_valid;
             s1_pixfmt <= pixfmt;
             s1_palfmt <= pal_fmt; s1_scan <= scan_order;
@@ -126,7 +127,7 @@ module tex_decode (
     reg signed [15:0] s2_yR, s2_yG, s2_yB;    // pre-clamp YUV->RGB
     always @(posedge clk) begin
         if (reset) v2 <= 1'b0;
-        else if (!stall) begin
+        else begin
             v2        <= v1;
             s2_pixfmt <= s1_pixfmt;
             s2_palfmt <= s1_palfmt; s2_scan <= s1_scan;
@@ -188,7 +189,7 @@ module tex_decode (
     reg [31:0] r_argb;
     always @(posedge clk) begin
         if (reset) v3 <= 1'b0;
-        else if (!stall) begin
+        else begin
             v3     <= v2;
             r_argb <= argb_sel;
         end
