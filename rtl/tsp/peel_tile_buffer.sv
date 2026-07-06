@@ -119,10 +119,13 @@ module peel_tile_buffer import tsp_pkg::*; #(
     reg  ab_sel;
     reg  first_peel_r;
     // A/B field offsets selected by ab_sel: A = the (ab_sel? pair1 : pair0) fields.
-    wire integer OFF_DA  = ab_sel ? PW_DEPTH2 : PW_DEPTH;    // A depth
-    wire integer OFF_TA  = ab_sel ? PW_TAG2   : PW_TAG;      // A tag
-    wire integer OFF_DB  = ab_sel ? PW_DEPTH  : PW_DEPTH2;   // B depth (reference)
-    wire integer OFF_TB  = ab_sel ? PW_TAG    : PW_TAG2;     // B tag   (reference)
+    integer OFF_DA, OFF_TA, OFF_DB, OFF_TB;
+    always @* begin
+        OFF_DA = ab_sel ? PW_DEPTH2 : PW_DEPTH;    // A depth
+        OFF_TA = ab_sel ? PW_TAG2   : PW_TAG;      // A tag
+        OFF_DB = ab_sel ? PW_DEPTH  : PW_DEPTH2;   // B depth (reference)
+        OFF_TB = ab_sel ? PW_TAG    : PW_TAG2;     // B tag   (reference)
+    end
     function automatic [31:0] fld(input [PEEL_W*NB-1:0] w, input integer off, input integer b);
         fld = w[PEEL_W*b + off +: 32]; endfunction
     // pixel index of lane b in the chunk at (y, xchunk-base): {y[4:0], x[4:0]} = y*32 + x.

@@ -47,8 +47,9 @@ module dense_span_buffer #(
     assign wrw[F_AT]          = w_at;
     genvar gi;
     generate
-      for (gi = 0; gi < 4; gi = gi + 1)
+      for (gi = 0; gi < 4; gi = gi + 1) begin : g_wr_invw
         assign wrw[F_INVW + 32*gi +: 32] = w_invw[gi];
+      end
     endgenerate
 
     always @(posedge clk) begin
@@ -62,7 +63,8 @@ module dense_span_buffer #(
     assign r_at    = rdw[F_AT];
     genvar gr;
     generate
-      for (gr = 0; gr < 4; gr = gr + 1)
+      for (gr = 0; gr < 4; gr = gr + 1) begin : g_rd_invw
         assign r_invw[gr] = rdw[F_INVW + 32*gr +: 32];
+      end
     endgenerate
 endmodule
