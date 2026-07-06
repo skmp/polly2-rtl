@@ -297,6 +297,42 @@ module spanner_v2 import tsp_pkg::*; #(
     // (g_ready), and the pipeline isn't frozen.
     wire coal_fires = sg_active && g_ready && !pipe_stall;
 
+    // ---- SINGLE dedup_ram write port (M10K-inferable) ----
+    // dedup_ram has exactly TWO logical writers - the gen-wrap clear-walk and the EMIT
+    // allocation - which are MUTUALLY EXCLUSIVE (during dd_clearing, sg_active=0 so
+    // coal_fires=0 and t_valid stays 0 -> no EMIT write; clearing ends the cycle it sets
+    // sg_active, and no EMIT can race that cycle). Two inline `dedup_ram[..]<=` statements
+    // defeat Quartus RAM inference (Warning 10999) and fall back to 1024x50 = 51200 FLOPS.
+    // Collapsing them into one muxed write port (one addr, one data, one enable) infers a
+    // single M10K with IDENTICAL behavior and timing - the EMIT write keeps its !pipe_stall
+    // and (t_valid && needs_alloc) guard, the clear write keeps its every-cycle-while-clearing
+    // guard - so there is NO performance change, only the RAM<->flop mapping.
+    wire            dd_emit_we = !pipe_stall && t_valid && needs_alloc;
+    wire            dd_we    = dd_clearing || dd_emit_we;
+    wire [SLOTW-1:0] dd_waddr = dd_clearing ? dd_clr_addr : t_h;
+    wire [DD_W-1:0]  dd_wdata = dd_clearing ? {DD_W{1'b0}}
+                                            : {cur_gen, t_tag, top_tag[SLOTW-1:0]};
+    // Read port: present run_id's bucket exactly when COAL produces a descriptor (coal_fires),
+    // so dd_rd_q resolves next cycle in EMIT. A clean read ENABLE (dd_re) + read ADDRESS
+    // (dd_raddr) in a DEDICATED always block below is the textbook synchronous-read M10K
+    // template; keeping the read inline under the control FSM made Quartus see the read as
+    // asynchronous (Info 276007) and fall back to 1024x50 flops.
+    wire            dd_re    = coal_fires;
+    wire [SLOTW-1:0] dd_raddr = run_id;
+
+    // ---- dedup_ram: DEDICATED simple-dual-port M10K block (textbook template) ----
+    // ONE write port (dd_we/dd_waddr/dd_wdata), ONE registered read port (dd_re/dd_raddr ->
+    // dd_rd_q). Isolated from the control FSM so Quartus infers a clean synchronous-read RAM
+    // (no async-read fallback). `no_rw_check`: a same-cycle read+write to the same address
+    // returns OLD data; the fwd0/fwd1 forwarding downstream already covers that R/W collision,
+    // so the read semantics are unchanged from the original inline `dd_rd_q <= dedup_ram[..]`.
+    // Timing is identical: dd_re == coal_fires (read presented exactly when a descriptor is
+    // produced), dd_we gated exactly as the original two inline writes were.
+    always @(posedge clk) begin
+        if (dd_we) dedup_ram[dd_waddr] <= dd_wdata;
+        if (dd_re) dd_rd_q <= dedup_ram[dd_raddr];
+    end
+
     // ============================ SETUP path (streaming, no serial FSM) ============================
     // Three independent stages, each fed continuously, so the record fetch of triangle
     // N+1 OVERLAPS the plane setup of triangle N (they were serial before: ~144 fetch +
@@ -471,9 +507,11 @@ module spanner_v2 import tsp_pkg::*; #(
                 end
             end
 
+            // dedup_ram writes/reads are handled by the DEDICATED M10K block above
+            // (dd_we/dd_waddr/dd_wdata write, dd_re/dd_raddr->dd_rd_q read).
+
             // ---------------- dedup clear-walk (gen wrap) ----------------
             if (dd_clearing) begin
-                dedup_ram[dd_clr_addr] <= '0;   // gen=0 -> permanently invalid
                 if (dd_clr_addr == NSLOT-1) begin
                     dd_clearing <= 1'b0; cur_gen <= {{(GEN_W-1){1'b0}}, 1'b1};   // gen=1
                     sg_x <= '0; sg_active <= 1'b1; t_valid <= 1'b0; g_ready <= 1'b0;
@@ -487,7 +525,7 @@ module spanner_v2 import tsp_pkg::*; #(
                 // On a MISS, bump-allocate id=top_tag into the ring and write the map
                 // bucket {cur_gen, tag, id}. span write + setup push are combinational (sp_*).
                 if (t_valid && needs_alloc) begin
-                    dedup_ram[t_h] <= {cur_gen, t_tag, top_tag[SLOTW-1:0]};
+                    // dedup_ram[t_h] write is done by the single muxed port above (dd_emit_we).
                     top_tag <= top_tag + 1'b1;    // advance ring head (wraps via SLOTW+1 bits)
                 end
                 // dense pack: only an EMITTED (shaded) span advances the ring head. Guarded
@@ -528,8 +566,9 @@ module spanner_v2 import tsp_pkg::*; #(
                     t_at     <= ti_pt[sg_lane];
                     for (q = 0; q < 4; q = q + 1)
                         t_invw[q] <= (q < run_rep) ? ti_invw[sg_lane + q[1:0]] : 32'd0;
-                    // present the dedup read for THIS descriptor (resolves next cycle in EMIT)
-                    dd_rd_q <= dedup_ram[run_id];
+                    // the dedup read for THIS descriptor is presented by the dedicated M10K
+                    // block above (dd_re == coal_fires, dd_raddr == run_id); dd_rd_q resolves
+                    // next cycle in EMIT. run_id/coal_fires are stable this cycle.
 
                     // advance. The read for sg_x_next's group is presented THIS cycle
                     // (rd_group tracks rd_next_x continuously) -> ti_* is correct next cycle.
