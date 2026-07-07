@@ -271,7 +271,7 @@ module tex_unit import tsp_pkg::*; #(
     wire [3:0]  dec_ov;
     generate for (gi=0; gi<4; gi=gi+1) begin : dec
         tex_decode u_dec (
-            .clk(clk),.reset(reset),.stall(1'b0),.in_valid(f_ov),
+            .clk(clk),.reset(reset),.in_valid(f_ov),
             .pixfmt(p_pixfmt[F]),.pal_fmt(p_palfmt[F]),.scan_order(p_scan[F]),
             .palsel(p_palsel[F]),.memtel(f_word[gi]),.offset(p_off[gi][F]),
             .pal_addr(pal_addr[gi]),.pal_data(pal_data[gi]),
