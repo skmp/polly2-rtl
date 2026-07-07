@@ -7,7 +7,7 @@
 //
 //   per pixel: tag -> plane-cache lookup (64-entry, keyed by the FULL 32-bit
 //   CoreTag) miss: fetch param record (GetFpuEntry) + tsp_setup_min; hit: planes
-//   from cache. tsp_shade_pp shades (textures via two tex_cache_4p over the shared
+//   from cache. tsp_shade_v2_pp shades (textures via two tex_cache_4p over the shared
 //   DDR channel), blend composites the layer, PT/TL peel back-to-front.
 //
 // Wrappers provide the DDR/fb backend:
@@ -35,8 +35,9 @@ module peel_core import tsp_pkg::*; (
     // -------------------- reg_file --------------------
     pvr_regs_t  regs;
     fog_rd_req_t fog_req; fog_rd_resp_t fog_resp;
-    pal_rd_req_t pal_req; pal_rd_resp_t pal_resp;
-    assign fog_req = '0; assign pal_req = '0;
+    pal_rd_req_t pal_req [0:3]; pal_rd_resp_t pal_resp [0:3];   // 4 corner palette read ports
+    assign fog_req = '0;
+    // pal_req[*] driven by the shader's 4 palette read ports (pp_pal_addr) below.
     reg_file u_rf (.clk(clk),.reset(reset),.wr_en(wr_en),.wr_addr(wr_addr),.wr_data(wr_data),
         .regs(regs),.fog_req(fog_req),.fog_resp(fog_resp),.pal_req(pal_req),.pal_resp(pal_resp));
 
@@ -142,12 +143,9 @@ module peel_core import tsp_pkg::*; (
     // cache (2x dual-port M10K each, full copy), replacing the 8 per-corner
     // tex_cache instances. Simultaneous same-line misses dedupe to one DDR read;
     // distinct-line misses serialize (the pipe stalls while any corner is busy).
-    cache_req_t   pp_tc_req [0:3], pp_vq_req [0:3];
-    cache_resp_t  pp_tc_resp[0:3], pp_vq_resp[0:3];
-    tex_cache_4p_1c u_tc4 (.clk(clk),.reset(reset),.creq(pp_tc_req),.cresp(pp_tc_resp),
-        .dreq(tex_dreq[0]),.dresp(tex_dresp[0]));
-    tex_cache_4p_1c u_vq4 (.clk(clk),.reset(reset),.creq(pp_vq_req),.cresp(pp_vq_resp),
-        .dreq(tex_dreq[1]),.dresp(tex_dresp[1]));
+    // The two texture caches (data + VQ) now live INSIDE tsp_shade_v2_pp's tex_unit; the
+    // shader drives tex_dreq[0]/tex_dreq[1] (this core's DDR arbiter tc/vq clients) directly
+    // via its ddr_req/ddr_resp ports (wired at the shader instance below).
 
     // -------------------- parsers --------------------
     reg          ra_start;
@@ -629,7 +627,7 @@ module peel_core import tsp_pkg::*; (
 
     // -------------------- TSP shade (FULLY PIPELINED, 1 pixel/clock) --------------------
     // The streaming producer presents a resolved pixel (planes from the plane cache
-    // on a hit, or from cur_* on a just-fetched miss) on pp_in_valid; tsp_shade_pp
+    // on a hit, or from cur_* on a just-fetched miss) on pp_in_valid; tsp_shade_v2_pp
     // streams results out on pp_out_valid, carrying the pixel index (0..1023) as the
     // id so the consumer can write col_buf[out_id]. pp_stall (any texel fetcher busy)
     // freezes the pipe; the producer holds the presented pixel while stalled.
@@ -649,21 +647,31 @@ module peel_core import tsp_pkg::*; (
     wire [31:0]  pp_out_argb;
     wire [31:0]  pp_out_tsp;
 
-    tsp_shade_pp #(.IDW(11)) u_shade (
+    // pixel palette read ports (shader -> reg_file's 4-copy PAL RAM)
+    wire [9:0] pp_pal_addr [0:3];
+    assign pal_req[0].raddr = pp_pal_addr[0]; assign pal_req[1].raddr = pp_pal_addr[1];
+    assign pal_req[2].raddr = pp_pal_addr[2]; assign pal_req[3].raddr = pp_pal_addr[3];
+    wire [31:0] pp_pal_data [0:3];
+    assign pp_pal_data[0] = pal_resp[0].rdata; assign pp_pal_data[1] = pal_resp[1].rdata;
+    assign pp_pal_data[2] = pal_resp[2].rdata; assign pp_pal_data[3] = pal_resp[3].rdata;
+
+    tsp_shade_v2_pp #(.IDW(11)) u_shade (
         .clk(clk),.reset(reset),
         .in_valid(pp_in_valid),.in_id(pp_in_id),.px(pp_px),.py(pp_py),.invw_in(pp_invw),
         .in_ddx(pp_ddx),.in_ddy(pp_ddy),.in_c(pp_c),
         .tsp(pp_tsp),.tcw(pp_tcw),.text_ctrl(regs.text_control[4:0]),
+        .pal_fmt(regs.pal_ram_ctrl[1:0]),
         .pp_texture(pp_ptex),.pp_offset(pp_pofs),
         .out_valid(pp_out_valid),.out_id(pp_out_id),.out_argb(pp_out_argb),
         .out_tsp(pp_out_tsp),
         .stall(pp_stall),
-        .tc_req(pp_tc_req),.tc_resp(pp_tc_resp),.vq_req(pp_vq_req),.vq_resp(pp_vq_resp));
+        .pal_addr(pp_pal_addr),.pal_data(pp_pal_data),
+        .ddr_req(tex_dreq),.ddr_resp(tex_dresp));
 
 `ifndef SYNTHESIS
-    // -------- tsp_shade_pp INPUT DUMP (sim only) --------------------------------------
+    // -------- tsp_shade_v2_pp INPUT DUMP (sim only) --------------------------------------
     // Dumps every pixel ACCEPTED by the shader (pp_in_valid && !pp_stall) with all of its
-    // inputs, so the exact per-pixel stream feeding tsp_shade_pp can be diffed against the
+    // inputs, so the exact per-pixel stream feeding tsp_shade_v2_pp can be diffed against the
     // serial reference / refsw. Enabled at runtime with +shadedump[=<file>] (default file
     // shade_pp_input.log); zero cost otherwise. One header + one CSV-ish line per accept:
     //   seq id px py invw tsp tcw text_ctrl ptex pofs ddx[0..9] ddy[0..9] c[0..9]
@@ -677,7 +685,7 @@ module peel_core import tsp_pkg::*; (
         else if ($test$plusargs("shadedump")) begin sd_en = 1'b1; sd_name = "shade_pp_input.log"; end
         if (sd_en) begin
             sd_fd = $fopen(sd_name, "w");
-            $fwrite(sd_fd, "# tsp_shade_pp input dump: one line per accepted pixel\n");
+            $fwrite(sd_fd, "# tsp_shade_v2_pp input dump: one line per accepted pixel\n");
             $fwrite(sd_fd, "# seq id px py invw tsp tcw text_ctrl ptex pofs ddx0..9 ddy0..9 c0..9\n");
         end
     end
@@ -697,7 +705,7 @@ module peel_core import tsp_pkg::*; (
     final if (sd_en && sd_fd != 0) begin
         $fflush(sd_fd);
         $fclose(sd_fd);
-        $display("[peel_core] tsp_shade_pp input dump: %0d pixels written to %0s", sd_seq, sd_name);
+        $display("[peel_core] tsp_shade_v2_pp input dump: %0d pixels written to %0s", sd_seq, sd_name);
     end
 `endif
 
@@ -761,7 +769,7 @@ module peel_core import tsp_pkg::*; (
     reg        first_peel;      // this tile's FIRST PeelBuffers (folds refsw SetTagToMax:
                                 //   pb2 <- 0xFFFFFFFF instead of copying tagA)
 
-    // ---- single shared shade sub-phase (ONE tsp_shade_pp pipeline) ----
+    // ---- single shared shade sub-phase (ONE tsp_shade_v2_pp pipeline) ----
     // Invoked as a subroutine after OP and after each peel pass. The TSP pipeline
     // ALWAYS blends (refsw PixelFlush_tsp always runs BlendingUnit); the tag's
     // SrcInstr/DstInstr decide the effect (opaque tags use ONE/ZERO = overwrite).
@@ -796,7 +804,7 @@ module peel_core import tsp_pkg::*; (
 
     // ---- TSP READER FSM (tsp_st): pops the head pass descriptor (md FIFO), walks that pass's
     // span RING range [md_base .. +md_cnt) with wrap, EXPANDS each span's rep pixels, looks up
-    // triangle_setups[id], feeds tsp_shade_pp.
+    // triangle_setups[id], feeds tsp_shade_v2_pp.
     //   R_IDLE : pop-peek the head descriptor (md_rp); post-only/empty -> post/skip
     //   R_RUN  : per span: read span (Stage A, dsr_*), latch + expand rep pixels (Stage B),
     //            present triangle_setups[id]; feed pp from the carried pixel + planes (Stage C).
@@ -1156,7 +1164,7 @@ module peel_core import tsp_pkg::*; (
         tsg_raddr = pp_stall ? s2_id : cs_id;
     end
 
-    // ---- pp-input mux: drive tsp_shade_pp's inputs COMBINATIONALLY from stage S2 ----
+    // ---- pp-input mux: drive tsp_shade_v2_pp's inputs COMBINATIONALLY from stage S2 ----
     // S2 holds pixel s2_p: {shade,invw,at} carried from S1; planes are fresh on tsg_r_* (the
     // setups read of s2's id, presented last cycle). Present to the shader when s2 is a
     // shaded pixel; hold on pp_stall (the reader FSM freezes the whole pipeline).
@@ -1875,7 +1883,7 @@ module peel_core import tsp_pkg::*; (
             endcase
 
             // ================= CONCURRENT TSP READER FSM (tsp_st) =================
-            // Dense drain of span_buffer_v2[tsp_rd] -> triangle_setups[id] -> tsp_shade_pp,
+            // Dense drain of span_buffer_v2[tsp_rd] -> triangle_setups[id] -> tsp_shade_v2_pp,
             // 1 px/clk. Two registered-read stages: S1 = span buffer, S2 = setups ring. S2
             // feeds the shader (combi pp mux). The whole pipe holds on pp_stall. On sb_last it
             // posts the finished tile's color (u_col[tsp_col]) to VO.

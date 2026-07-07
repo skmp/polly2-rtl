@@ -35,7 +35,7 @@ MAKEFLAGS += -j$(NJOBS)
 VTHREADS ?= 1
 VFLAGS    = -Wno-WIDTH -Wno-UNOPTFLAT -Wno-UNSIGNED -Wno-DECLFILENAME -Irtl/tsp/gen \
             -j $(NJOBS) $(if $(filter-out 1,$(VTHREADS)),--threads $(VTHREADS),) \
-            --output-split 40000 --output-split-cfuncs 500 \
+            --output-split 40000 --output-split-cfuncs 20000 \
             -CFLAGS "-O3 -march=native"
 
 # combinational (bit-exact) design

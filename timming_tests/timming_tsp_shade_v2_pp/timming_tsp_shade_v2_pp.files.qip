@@ -1,0 +1,41 @@
+# --------------------------------------------------------------------------
+# timming_tsp_shade_v2_pp - isolated fileset for the whole-pipeline tsp_shade_v2_pp
+# perf harness. Paths are relative to this project dir
+# (timming_tests/timming_tsp_shade_v2_pp/), pointing up into ../../rtl.
+# --------------------------------------------------------------------------
+
+# ---- reduced-precision FP datapath (rtl/isp_min/) - PIPELINED (_pp) v2 units ----
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/isp_min/fp_rcp_faster.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/isp_min/fp_mul_i5_pp.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/isp_min/fp_add3_24_pp.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/isp_min/fp_mul16_pp.sv
+
+# ---- HPS DDR3 bridge (rtl/mister/) ----
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/mister/f2sdram_safe_terminator.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/mister/sysmem.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/mister/ddram.sv
+
+# ---- tsp package (structs) MUST come first among tsp files ----
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/tsp/tsp_pkg.sv
+
+# ---- v2 texture chain (tex_unit + its submodules; tex_unit owns the caches) ----
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/tsp/tex_cache_4p_1c.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/tsp/tex_fetch4_ob.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/tsp/tex_uvmap.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/tsp/tex_base_addr.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/tsp/tex_addroffsgen_ib.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/tsp/tex_add_mip.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/tsp/tex_decode.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/tsp/tex_filter.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/tsp/tex_unit.sv
+
+# ---- INTERP + shade helpers ----
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/tsp/stage_interp.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/tsp/tsp_miplevel.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/tsp/color_combiner.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/tsp/f2u8.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/tsp/delay_ram.sv
+
+# ---- DUT + harness ----
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/tsp/tsp_shade_v2_pp.sv
+set_global_assignment -name SYSTEMVERILOG_FILE timming_tsp_shade_v2_pp.sv

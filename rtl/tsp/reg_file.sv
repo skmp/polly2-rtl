@@ -5,7 +5,9 @@
 //     packed struct output - the top refers to them by name (regs.param_base,
 //     regs.isp_backgnd_t.shadow, ...). Bitfield regs are typed structs.
 //   * FOG table : M10K, 128 x 32-bit, own read port (fog_req/fog_resp).
-//   * PAL RAM   : M10K, 1024 x 32-bit, own read port (pal_req/pal_resp).
+//   * PAL RAM   : M10K, 1024 x 32-bit, FOUR read ports (pal_req[0:3]/pal_resp[0:3]) for
+//                 the 4 bilinear-corner texture decoders. 4-copy replication (all copies
+//                 take the same host writes), like tex_cache_4p_1c's 4-copy data.
 //
 // Write path: one 13-bit PVR BYTE offset (wr_addr) + wr_data + wr_en. Decode:
 //   wr_addr < 0x0200            -> scalar register (generated PVR_REG_WRITE_CASE)
@@ -29,9 +31,9 @@ module reg_file import tsp_pkg::*; (
     // FOG table read port (0..127)
     input  fog_rd_req_t  fog_req,
     output fog_rd_resp_t fog_resp,
-    // PAL RAM read port (0..1023)
-    input  pal_rd_req_t  pal_req,
-    output pal_rd_resp_t pal_resp
+    // PAL RAM read ports (0..1023), one per bilinear corner decoder
+    input  pal_rd_req_t  pal_req  [0:3],
+    output pal_rd_resp_t pal_resp [0:3]
 );
     // scalar register storage as a flat packed vector, aliased to the struct so
     // the generated write-case (which slices by bit position) and the struct
@@ -64,12 +66,16 @@ module reg_file import tsp_pkg::*; (
     end
     assign fog_resp.rdata = fog_rd_r;
 
-    // ---- PAL RAM (M10K, 1024 x 32) ----
-    (* ramstyle = "M10K" *) reg [31:0] pal_mem [0:1023];
-    reg [31:0] pal_rd_r;
-    always @(posedge clk) begin
-        if (wr_en && is_pal) pal_mem[woff - 11'h400] <= wr_data;  // 0x1000>>2 = 0x400
-        pal_rd_r <= pal_mem[pal_req.raddr];
-    end
-    assign pal_resp.rdata = pal_rd_r;
+    // ---- PAL RAM (M10K, 1024 x 32) - 4-copy replicated for 4 corner read ports. Each copy
+    //      takes the SAME host write; each has its own registered read (like the tex cache). ----
+    genvar pc;
+    generate for (pc=0; pc<4; pc=pc+1) begin : palcopy
+        (* ramstyle = "M10K" *) reg [31:0] pal_mem [0:1023];
+        reg [31:0] pal_rd_r;
+        always @(posedge clk) begin
+            if (wr_en && is_pal) pal_mem[woff - 11'h400] <= wr_data;  // 0x1000>>2 = 0x400
+            pal_rd_r <= pal_mem[pal_req[pc].raddr];
+        end
+        assign pal_resp[pc].rdata = pal_rd_r;
+    end endgenerate
 endmodule
