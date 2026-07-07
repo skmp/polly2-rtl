@@ -77,14 +77,35 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
 
     // ==============================================================
     // FLOW CONTROL. The front stalls only when a TEXTURED INTERP-output pixel is waiting
-    // and tex_unit can't accept it (cache miss-fill). `tu_ready`/`iv_wants_fetch`/`pl_room`
-    // are forward refs assigned below.
+    // and tex_unit can't accept it (cache miss-fill).
+    //
+    // TIMING: tex_unit.in_ready comes combinationally out of the cache's miss-detect FSM,
+    // which is physically FAR from the front (RCP/INTERP/MIP + the delay_rams). Driving the
+    // front's clock-enable `en` directly off it makes `stall` a huge-fanout net launching
+    // from that far cone into hundreds of front-register ENA pins (and shares its timing
+    // domain with the cache wren) - the -0.25ns fail. So we REGISTER the readiness locally
+    // (rdy_r) and gate the front off THAT flop; the net now launches next to the front.
+    // The registered ready reacts one cycle late, so a 1-DEEP SKID at the tex_unit input
+    // catches the single pixel the front may over-issue before the stall lands, and
+    // re-presents it. A FIFO would not help throughput here (front and tex_unit are both
+    // <=1 px/clk); this is purely a fanout/route cut. `pl_room` (local FIFO counter) is
+    // folded into the same registered gate.
     // ==============================================================
-    wire       tu_ready;              // tex_unit.in_ready
+    wire       tu_ready;              // tex_unit.in_ready (combinational, far cone)
     wire       iv_wants_fetch;        // an INTERP-output pixel wants a tex_unit slot
     wire       pl_room;               // COMB payload FIFO has space
-    assign stall = iv_wants_fetch && (!tu_ready || !pl_room);
-    wire en = ~stall;                 // front pipeline clock-enable
+    wire       sk_full;               // skid holds an un-accepted pixel (forward ref)
+
+    // registered accept-readiness: 1 = the tex_unit input path can take a pixel next cycle.
+    // Off the far cache readiness + local FIFO room + skid emptiness, all sampled a cycle
+    // early so the front's `en` net is a plain flop output.
+    reg        rdy_r;
+    always @(posedge clk) begin
+        if (reset) rdy_r <= 1'b1;
+        else       rdy_r <= tu_ready && pl_room && !sk_full;
+    end
+    assign stall = iv_wants_fetch && !rdy_r;
+    wire en = ~stall;                 // front pipeline clock-enable (off rdy_r, local flop)
 
     // ==============================================================
     // STAGE RCP: W = 1/invW (fp_rcp_faster, 5 clocks). Everything else is delayed by
@@ -246,38 +267,116 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
     // A textured INTERP-output pixel is what wants the tex_unit slot.
     // ==============================================================
     assign iv_wants_fetch = iv_ov;             // any valid INTERP-output pixel needs a slot
-    wire tu_issue = iv_ov & en;                // a pixel is accepted into tex_unit this cyc
+    wire tu_issue = iv_ov & en;                // front presents a pixel this cycle
+
+    // ---- per-pixel bundle: EVERYTHING for one pixel = tex_unit inputs + the COMB payload.
+    //      Packed so the 1-deep skid holds one over-issued pixel as a single register, and
+    //      so the COMB payload stays glued to its texel through the skid (push COMB FIFO on
+    //      ACCEPT, from THIS bundle - not from the front `iv_*` which may have advanced). ----
+    // field widths: u32 v32 texu3 texv3 mip4 clu clv flu flv addr21 tex vq scan strd mm
+    //               pixf3 filt2 pals6 tc5 igna | base32 ofs32 ptsp32 ptx pof | id
+    localparam integer TUW =
+        32+32 + 3+3+4 + 1+1+1+1 + 21 + 1 + 1+1+1+1 + 3+2+6 + 5 + 1   // tex_unit inputs
+        + 32+32+32 + 1+1                                             // comb: base ofs tsp ptx pof
+        + IDW;
+    wire [TUW-1:0] tu_in = {
+        iv_attr[0], iv_attr[1],                        // u(32), v(32)
+        tu_texu, tu_texv, iv_mip,                      // texu(3), texv(3), mip(4)
+        tu_clampu, tu_clampv, tu_flipu, tu_flipv,      // clu clv flu flv (4)
+        tu_texaddr,                                    // tex_addr_in(21)
+        iv_ptx,                                        // tex(1)
+        tu_vq, tu_scan, tu_stridesel, tu_mipmapped,    // (4)
+        tu_pixfmt, tu_filter, tu_palsel,               // pixf(3) filt(2) pals(6)
+        iv_tc,                                         // text_ctrl(5)
+        tu_ignorea,                                    // ignore_texa(1)
+        iv_base, iv_ofs, iv_tsp, iv_ptx, iv_pof,       // COMB payload: base ofs tsp ptx pof
+        iv_id                                          // id(IDW)
+    };
+
+    // ---- 1-DEEP SKID: holds the pixel the front over-issued while rdy_r was (registered)
+    //      high but the REAL tu_ready dropped that same cycle. Re-presents it until taken.
+    //      rdy_r sampled !sk_full, so the front is already stalled while the skid is full -
+    //      it can never over-issue a SECOND pixel, so 1 entry is sufficient. ----
+    reg              sk_v;
+    reg  [TUW-1:0]   sk_d;
+    assign sk_full = sk_v;
+
+    // what tex_unit sees this cycle: the skid pixel if held, else the fresh front pixel.
+    wire            tu_valid = sk_v ? 1'b1 : tu_issue;
+    wire [TUW-1:0]  tu_bits  = sk_v ? sk_d : tu_in;
+    wire            tu_take  = tu_valid && tu_ready;   // tex_unit accepts (comb) this cycle
+
+    always @(posedge clk) begin
+        if (reset) sk_v <= 1'b0;
+        else begin
+            if (sk_v) begin
+                if (tu_ready) sk_v <= 1'b0;            // held pixel accepted -> free skid
+            end else if (tu_issue && !tu_ready) begin
+                sk_v <= 1'b1; sk_d <= tu_in;           // over-issue -> capture
+            end
+        end
+    end
+
+    // ---- unpack the (skid-or-fresh) bundle: tex_unit inputs (x_*) + COMB payload (P_*) ----
+    wire [31:0]    x_u    = tu_bits[TUW-1        -: 32];
+    wire [31:0]    x_v    = tu_bits[TUW-1-32     -: 32];
+    wire [2:0]     x_texu = tu_bits[TUW-1-64     -: 3];
+    wire [2:0]     x_texv = tu_bits[TUW-1-67     -: 3];
+    wire [3:0]     x_mip  = tu_bits[TUW-1-70     -: 4];
+    wire           x_clu  = tu_bits[TUW-1-74];
+    wire           x_clv  = tu_bits[TUW-1-75];
+    wire           x_flu  = tu_bits[TUW-1-76];
+    wire           x_flv  = tu_bits[TUW-1-77];
+    wire [20:0]    x_addr = tu_bits[TUW-1-78     -: 21];
+    wire           x_tex  = tu_bits[TUW-1-99];
+    wire           x_vq   = tu_bits[TUW-1-100];
+    wire           x_scan = tu_bits[TUW-1-101];
+    wire           x_strd = tu_bits[TUW-1-102];
+    wire           x_mm   = tu_bits[TUW-1-103];
+    wire [2:0]     x_pixf = tu_bits[TUW-1-104    -: 3];
+    wire [1:0]     x_filt = tu_bits[TUW-1-107    -: 2];
+    wire [5:0]     x_pals = tu_bits[TUW-1-109    -: 6];
+    wire [4:0]     x_tc   = tu_bits[TUW-1-115    -: 5];
+    wire           x_igna = tu_bits[TUW-1-120];
+    wire [31:0]    x_base = tu_bits[TUW-1-121    -: 32];
+    wire [31:0]    x_ofs  = tu_bits[TUW-1-153    -: 32];
+    wire [31:0]    x_tsp  = tu_bits[TUW-1-185    -: 32];
+    wire           x_ptx  = tu_bits[TUW-1-217];
+    wire           x_pof  = tu_bits[TUW-1-218];
+    wire [IDW-1:0] x_id   = tu_bits[IDW-1        : 0];
 
     wire        tu_ov;
     wire [IDW-1:0] tu_oid;
     wire [31:0] tu_argb;
     tex_unit #(.IDW(IDW)) u_tex (
         .clk(clk),.reset(reset),
-        .in_valid(tu_issue),.in_id(iv_id),
-        .u(iv_attr[0]),.v(iv_attr[1]),
-        .texu(tu_texu),.texv(tu_texv),.miplevel(iv_mip),
-        .clampu(tu_clampu),.clampv(tu_clampv),.flipu(tu_flipu),.flipv(tu_flipv),
-        .tex_addr_in(tu_texaddr),.tex(iv_ptx),
-        .vq(tu_vq),.scan(tu_scan),.stride_sel(tu_stridesel),.mipmapped(tu_mipmapped),
-        .pixfmt(tu_pixfmt),.pal_fmt(pal_fmt),.palsel(tu_palsel),
-        .text_ctrl(iv_tc),.filter_mode(tu_filter),.ignore_texa(tu_ignorea),
+        .in_valid(tu_valid),.in_id(x_id),
+        .u(x_u),.v(x_v),
+        .texu(x_texu),.texv(x_texv),.miplevel(x_mip),
+        .clampu(x_clu),.clampv(x_clv),.flipu(x_flu),.flipv(x_flv),
+        .tex_addr_in(x_addr),.tex(x_tex),
+        .vq(x_vq),.scan(x_scan),.stride_sel(x_strd),.mipmapped(x_mm),
+        .pixfmt(x_pixf),.pal_fmt(pal_fmt),.palsel(x_pals),
+        .text_ctrl(x_tc),.filter_mode(x_filt),.ignore_texa(x_igna),
         .in_ready(tu_ready),
         .out_valid(tu_ov),.out_id(tu_oid),.out_argb(tu_argb),
         .pal_addr(pal_addr),.pal_data(pal_data),
         .ddr_req(ddr_req),.ddr_resp(ddr_resp));
 
     // ==============================================================
-    // COMB payload FIFO: pushed on tu_issue, popped on tu_ov (tex_unit result). Carries the
-    // per-pixel colour base/offset, tsp, ptx/pof, id across tex_unit's variable latency. id
-    // is ALSO echoed by tex_unit (tu_oid) - the FIFO id is what we trust for COMB alignment
-    // and both must match in order (in-order pipeline). ptx==0 pixels also ride the FIFO.
+    // COMB payload FIFO: pushed when tex_unit ACCEPTS a pixel (tu_take), popped on tu_ov
+    // (tex_unit result). Carries the per-pixel colour base/offset, tsp, ptx/pof, id across
+    // tex_unit's variable latency. The payload is taken from the (skid-or-fresh) bundle so
+    // it stays glued to the exact pixel tex_unit accepted - if the skid delayed a pixel, its
+    // colour rode along in the skid and enters the FIFO on the SAME cycle as its texel issue.
+    // id is also echoed by tex_unit (tu_oid); both must match in order (in-order pipeline).
     // ==============================================================
     localparam integer PLW = 32+32+32+1+1+IDW;   // base, ofs, tsp, ptx, pof, id
-    wire [PLW-1:0] pl_in = { iv_base, iv_ofs, iv_tsp, iv_ptx, iv_pof, iv_id };
+    wire [PLW-1:0] pl_in = { x_base, x_ofs, x_tsp, x_ptx, x_pof, x_id };
     localparam integer PLD = 64, PLAW = 6;
     reg  [PLW-1:0] plf [0:PLD-1];
     reg  [PLAW-1:0] pl_h, pl_t; reg [PLAW:0] pl_cnt;
-    wire pl_push = tu_issue;
+    wire pl_push = tu_take;              // push exactly when tex_unit accepts (skid-safe)
     wire pl_pop  = tu_ov;
     wire [PLW-1:0] pl_out = plf[pl_h];
     assign pl_room = (pl_cnt < PLD-4);
