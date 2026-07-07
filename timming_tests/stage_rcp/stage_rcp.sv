@@ -1,6 +1,6 @@
 //
-// stage_rcp - per-stage timing harness for tsp_shade_pp.
-// STAGE RCP: W = 1/invW (fp_rcp_fast, 3-clock).
+// stage_rcp - per-stage timing harness for tsp_shade_v2_pp.
+// STAGE RCP: W = 1/invW (fp_rcp_faster, 5-clock deeper-pipelined variant).
 //
 // Pattern: HPS-writable input reg bank -> stage (combinational) -> RAW registered
 // output vector (PURE stage timing, no logic before the flop) -> XOR-fold the
@@ -28,7 +28,7 @@ module stage_rcp import tsp_pkg::*; (
 
     wire ov; wire [31:0] y;
 
-    fp_rcp_fast u_dut (.clk(clk),.reset(reset),.stall(1'b0),
+    fp_rcp_faster u_dut (.clk(clk),.reset(reset),.stall(1'b0),
         .in_valid(in_reg[1][0]),.x(in_reg[0]),.out_valid(ov),.y(y));
 
     // ---- RAW capture: register the stage's whole output vector with NO logic in

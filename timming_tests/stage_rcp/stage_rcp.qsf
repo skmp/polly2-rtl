@@ -1,4 +1,4 @@
-# stage_rcp - standalone Quartus timing project (one tsp_shade_pp pipeline stage).
+# stage_rcp - standalone Quartus timing project (one tsp_shade_v2_pp pipeline stage).
 set_global_assignment -name FAMILY "Cyclone V"
 set_global_assignment -name DEVICE 5CSEBA6U23I7
 set_global_assignment -name LAST_QUARTUS_VERSION "17.0.0 Standard Edition"
@@ -14,7 +14,7 @@ set_global_assignment -name SEARCH_PATH .
 set_global_assignment -name SEARCH_PATH ../../rtl/tsp/gen
 
 set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/tsp/tsp_pkg.sv
-set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/isp_min/fp_rcp_fast.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/isp_min/fp_rcp_faster.sv
 set_global_assignment -name SDC_FILE stage.sdc
 
 set_global_assignment -name TOP_LEVEL_ENTITY stage_rcp
