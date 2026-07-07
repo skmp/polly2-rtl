@@ -76,35 +76,17 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
     integer s, k;
 
     // ==============================================================
-    // FLOW CONTROL. The front stalls only when a TEXTURED INTERP-output pixel is waiting
-    // and tex_unit can't accept it (cache miss-fill).
-    //
-    // TIMING: tex_unit.in_ready comes combinationally out of the cache's miss-detect FSM,
-    // which is physically FAR from the front (RCP/INTERP/MIP + the delay_rams). Driving the
-    // front's clock-enable `en` directly off it makes `stall` a huge-fanout net launching
-    // from that far cone into hundreds of front-register ENA pins (and shares its timing
-    // domain with the cache wren) - the -0.25ns fail. So we REGISTER the readiness locally
-    // (rdy_r) and gate the front off THAT flop; the net now launches next to the front.
-    // The registered ready reacts one cycle late, so a 1-DEEP SKID at the tex_unit input
-    // catches the single pixel the front may over-issue before the stall lands, and
-    // re-presents it. A FIFO would not help throughput here (front and tex_unit are both
-    // <=1 px/clk); this is purely a fanout/route cut. `pl_room` (local FIFO counter) is
-    // folded into the same registered gate.
+    // FLOW CONTROL. The front stalls (combinationally) only when a TEXTURED INTERP-output
+    // pixel is waiting and tex_unit can't accept it (cache miss-fill) or the COMB payload
+    // FIFO is full. This is the SAME discipline as the old tsp_shade_pp (no registered-ready,
+    // no skid). It makes `stall` a fanout net off tex_unit.in_ready (~-0.25ns at 120), but
+    // it is the control structure that is known NOT to lock up. `iv_wants_fetch`/`pl_room`
+    // are forward refs assigned below.
     // ==============================================================
-    wire       tu_ready;              // tex_unit.in_ready (combinational, far cone)
+    wire       tu_ready;              // tex_unit.in_ready (combinational)
     wire       iv_wants_fetch;        // an INTERP-output pixel wants a tex_unit slot
     wire       pl_room;               // COMB payload FIFO has space
-    wire       sk_full;               // skid holds an un-accepted pixel (forward ref)
-
-    // registered accept-readiness: 1 = the tex_unit input path can take a pixel next cycle.
-    // Off the far cache readiness + local FIFO room + skid emptiness, all sampled a cycle
-    // early so the front's `en` net is a plain flop output.
-    reg        rdy_r;
-    always @(posedge clk) begin
-        if (reset) rdy_r <= 1'b1;
-        else       rdy_r <= tu_ready && pl_room && !sk_full;
-    end
-    assign stall = iv_wants_fetch && !rdy_r;
+    assign stall = iv_wants_fetch && (!tu_ready || !pl_room);
     wire en = ~stall;                 // front pipeline clock-enable (off rdy_r, local flop)
 
     // ==============================================================
@@ -263,101 +245,27 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
 
     // ==============================================================
     // STAGE TEX: tex_unit - float U/V (attr[0]=U, attr[1]=V) + config -> 1 filtered ARGB.
-    // Owns the caches; asserts in_ready=0 (tu_ready) on a miss-fill (the front's stall).
-    // A textured INTERP-output pixel is what wants the tex_unit slot.
+    // Owns the caches; asserts in_ready=0 (tu_ready) on a miss-fill (the front's stall). A
+    // textured INTERP-output pixel wants the tex_unit slot. Fed DIRECTLY off the front (no
+    // skid): a pixel issues when iv_ov & en, and the front holds it stable while stalled -
+    // the same discipline the old tsp_shade_pp used.
     // ==============================================================
     assign iv_wants_fetch = iv_ov;             // any valid INTERP-output pixel needs a slot
-    wire tu_issue = iv_ov & en;                // front presents a pixel this cycle
-
-    // ---- per-pixel bundle: EVERYTHING for one pixel = tex_unit inputs + the COMB payload.
-    //      Packed so the 1-deep skid holds one over-issued pixel as a single register, and
-    //      so the COMB payload stays glued to its texel through the skid (push COMB FIFO on
-    //      ACCEPT, from THIS bundle - not from the front `iv_*` which may have advanced). ----
-    // field widths: u32 v32 texu3 texv3 mip4 clu clv flu flv addr21 tex vq scan strd mm
-    //               pixf3 filt2 pals6 tc5 igna | base32 ofs32 ptsp32 ptx pof | id
-    localparam integer TUW =
-        32+32 + 3+3+4 + 1+1+1+1 + 21 + 1 + 1+1+1+1 + 3+2+6 + 5 + 1   // tex_unit inputs
-        + 32+32+32 + 1+1                                             // comb: base ofs tsp ptx pof
-        + IDW;
-    wire [TUW-1:0] tu_in = {
-        iv_attr[0], iv_attr[1],                        // u(32), v(32)
-        tu_texu, tu_texv, iv_mip,                      // texu(3), texv(3), mip(4)
-        tu_clampu, tu_clampv, tu_flipu, tu_flipv,      // clu clv flu flv (4)
-        tu_texaddr,                                    // tex_addr_in(21)
-        iv_ptx,                                        // tex(1)
-        tu_vq, tu_scan, tu_stridesel, tu_mipmapped,    // (4)
-        tu_pixfmt, tu_filter, tu_palsel,               // pixf(3) filt(2) pals(6)
-        iv_tc,                                         // text_ctrl(5)
-        tu_ignorea,                                    // ignore_texa(1)
-        iv_base, iv_ofs, iv_tsp, iv_ptx, iv_pof,       // COMB payload: base ofs tsp ptx pof
-        iv_id                                          // id(IDW)
-    };
-
-    // ---- 1-DEEP SKID: holds the pixel the front over-issued while rdy_r was (registered)
-    //      high but the REAL tu_ready dropped that same cycle. Re-presents it until taken.
-    //      rdy_r sampled !sk_full, so the front is already stalled while the skid is full -
-    //      it can never over-issue a SECOND pixel, so 1 entry is sufficient. ----
-    reg              sk_v;
-    reg  [TUW-1:0]   sk_d;
-    assign sk_full = sk_v;
-
-    // what tex_unit sees this cycle: the skid pixel if held, else the fresh front pixel.
-    wire            tu_valid = sk_v ? 1'b1 : tu_issue;
-    wire [TUW-1:0]  tu_bits  = sk_v ? sk_d : tu_in;
-    wire            tu_take  = tu_valid && tu_ready;   // tex_unit accepts (comb) this cycle
-
-    always @(posedge clk) begin
-        if (reset) sk_v <= 1'b0;
-        else begin
-            if (sk_v) begin
-                if (tu_ready) sk_v <= 1'b0;            // held pixel accepted -> free skid
-            end else if (tu_issue && !tu_ready) begin
-                sk_v <= 1'b1; sk_d <= tu_in;           // over-issue -> capture
-            end
-        end
-    end
-
-    // ---- unpack the (skid-or-fresh) bundle: tex_unit inputs (x_*) + COMB payload (P_*) ----
-    wire [31:0]    x_u    = tu_bits[TUW-1        -: 32];
-    wire [31:0]    x_v    = tu_bits[TUW-1-32     -: 32];
-    wire [2:0]     x_texu = tu_bits[TUW-1-64     -: 3];
-    wire [2:0]     x_texv = tu_bits[TUW-1-67     -: 3];
-    wire [3:0]     x_mip  = tu_bits[TUW-1-70     -: 4];
-    wire           x_clu  = tu_bits[TUW-1-74];
-    wire           x_clv  = tu_bits[TUW-1-75];
-    wire           x_flu  = tu_bits[TUW-1-76];
-    wire           x_flv  = tu_bits[TUW-1-77];
-    wire [20:0]    x_addr = tu_bits[TUW-1-78     -: 21];
-    wire           x_tex  = tu_bits[TUW-1-99];
-    wire           x_vq   = tu_bits[TUW-1-100];
-    wire           x_scan = tu_bits[TUW-1-101];
-    wire           x_strd = tu_bits[TUW-1-102];
-    wire           x_mm   = tu_bits[TUW-1-103];
-    wire [2:0]     x_pixf = tu_bits[TUW-1-104    -: 3];
-    wire [1:0]     x_filt = tu_bits[TUW-1-107    -: 2];
-    wire [5:0]     x_pals = tu_bits[TUW-1-109    -: 6];
-    wire [4:0]     x_tc   = tu_bits[TUW-1-115    -: 5];
-    wire           x_igna = tu_bits[TUW-1-120];
-    wire [31:0]    x_base = tu_bits[TUW-1-121    -: 32];
-    wire [31:0]    x_ofs  = tu_bits[TUW-1-153    -: 32];
-    wire [31:0]    x_tsp  = tu_bits[TUW-1-185    -: 32];
-    wire           x_ptx  = tu_bits[TUW-1-217];
-    wire           x_pof  = tu_bits[TUW-1-218];
-    wire [IDW-1:0] x_id   = tu_bits[IDW-1        : 0];
+    wire tu_issue = iv_ov & en;                // a pixel is accepted into tex_unit this cyc
 
     wire        tu_ov;
     wire [IDW-1:0] tu_oid;
     wire [31:0] tu_argb;
     tex_unit #(.IDW(IDW)) u_tex (
         .clk(clk),.reset(reset),
-        .in_valid(tu_valid),.in_id(x_id),
-        .u(x_u),.v(x_v),
-        .texu(x_texu),.texv(x_texv),.miplevel(x_mip),
-        .clampu(x_clu),.clampv(x_clv),.flipu(x_flu),.flipv(x_flv),
-        .tex_addr_in(x_addr),.tex(x_tex),
-        .vq(x_vq),.scan(x_scan),.stride_sel(x_strd),.mipmapped(x_mm),
-        .pixfmt(x_pixf),.pal_fmt(pal_fmt),.palsel(x_pals),
-        .text_ctrl(x_tc),.filter_mode(x_filt),.ignore_texa(x_igna),
+        .in_valid(tu_issue),.in_id(iv_id),
+        .u(iv_attr[0]),.v(iv_attr[1]),
+        .texu(tu_texu),.texv(tu_texv),.miplevel(iv_mip),
+        .clampu(tu_clampu),.clampv(tu_clampv),.flipu(tu_flipu),.flipv(tu_flipv),
+        .tex_addr_in(tu_texaddr),.tex(iv_ptx),
+        .vq(tu_vq),.scan(tu_scan),.stride_sel(tu_stridesel),.mipmapped(tu_mipmapped),
+        .pixfmt(tu_pixfmt),.pal_fmt(pal_fmt),.palsel(tu_palsel),
+        .text_ctrl(iv_tc),.filter_mode(tu_filter),.ignore_texa(tu_ignorea),
         .in_ready(tu_ready),
         .out_valid(tu_ov),.out_id(tu_oid),.out_argb(tu_argb),
         .pal_addr(pal_addr),.pal_data(pal_data),
@@ -366,26 +274,74 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
     // ==============================================================
     // COMB payload FIFO: pushed when tex_unit ACCEPTS a pixel (tu_take), popped on tu_ov
     // (tex_unit result). Carries the per-pixel colour base/offset, tsp, ptx/pof, id across
-    // tex_unit's variable latency. The payload is taken from the (skid-or-fresh) bundle so
-    // it stays glued to the exact pixel tex_unit accepted - if the skid delayed a pixel, its
-    // colour rode along in the skid and enters the FIFO on the SAME cycle as its texel issue.
-    // id is also echoed by tex_unit (tu_oid); both must match in order (in-order pipeline).
+    // tex_unit's variable latency. Pushed on issue (tu_issue) with the front's iv_* payload;
+    // popped on tu_ov. Since tex_unit is in-order lockstep, the k-th pushed payload lines up
+    // with the k-th texel result. id is also echoed by tex_unit (tu_oid) for cross-check.
     // ==============================================================
     localparam integer PLW = 32+32+32+1+1+IDW;   // base, ofs, tsp, ptx, pof, id
-    wire [PLW-1:0] pl_in = { x_base, x_ofs, x_tsp, x_ptx, x_pof, x_id };
+    wire [PLW-1:0] pl_in = { iv_base, iv_ofs, iv_tsp, iv_ptx, iv_pof, iv_id };
     localparam integer PLD = 64, PLAW = 6;
     reg  [PLW-1:0] plf [0:PLD-1];
     reg  [PLAW-1:0] pl_h, pl_t; reg [PLAW:0] pl_cnt;
-    wire pl_push = tu_take;              // push exactly when tex_unit accepts (skid-safe)
-    wire pl_pop  = tu_ov;
+    wire pl_push = tu_issue;                    // push on front issue (== tex_unit accept)
+    // Pop on a tex_unit result, but NEVER when the FIFO is empty. In steady state a tu_ov
+    // always has a matching prior push (tex_unit is in-order & lossless), so this gate is a
+    // no-op there. It ONLY suppresses spurious tu_ov pulses during the reset/startup window
+    // (the whole pipe momentarily shows out_valid=1 before it settles) that would otherwise
+    // underflow pl_cnt (0 - N wraps to ~127), latch pl_room=0, and deadlock the front.
+    wire pl_pop  = tu_ov && (pl_cnt != 0);
     wire [PLW-1:0] pl_out = plf[pl_h];
     assign pl_room = (pl_cnt < PLD-4);
+`ifndef SYNTHESIS
+    reg dl_dfired = 1'b0, dl_xfired = 1'b0, dl_hw_fired = 1'b0;   // one-shot flags
+    integer dl_npush = 0, dl_npop = 0;        // cumulative push/pop counters
+`endif
     always @(posedge clk) begin
         if (reset) begin pl_h<=0; pl_t<=0; pl_cnt<=0; end
         else begin
             if (pl_push) begin plf[pl_t] <= pl_in; pl_t <= pl_t + 1'b1; end
             if (pl_pop)  pl_h <= pl_h + 1'b1;
             pl_cnt <= pl_cnt + (pl_push?1:0) - (pl_pop?1:0);
+`ifndef SYNTHESIS
+            // UNDERFLOW/OVERFLOW CATCH: a pop with the FIFO empty (tu_ov without a prior
+            // push) means tex_unit emitted a SPURIOUS result -> pl_cnt wraps negative ->
+            // deadlock. An overflow means room-gating failed. Dump the first occurrence.
+            if (dl_en && pl_pop && !pl_push && pl_cnt == 0)
+                $display("[tsp_shade_v2_pp] FIFO UNDERFLOW: tu_ov popped empty FIFO. tu_issue=%b tu_ready=%b iv_ov=%b stall=%b en=%b",
+                         tu_issue, tu_ready, iv_ov, stall, en);
+            if (dl_en && pl_push && !pl_pop && pl_cnt >= PLD[PLAW:0])
+                $display("[tsp_shade_v2_pp] FIFO OVERFLOW @cnt=%0d: push past depth.", pl_cnt);
+            // CUMULATIVE push/pop counters + per-cycle trace once cnt climbs. Settles whether
+            // pushes outnumber pops (shader mis-accounts tu_issue vs tex_unit accept), or pops
+            // simply stopped. tex_unit's own tracker shows its accepts~=emits, so if pushes
+            // here >> pops, tu_issue is pulsing more than tex_unit accepts (double-push).
+            dl_npush <= dl_npush + (pl_push?1:0);
+            dl_npop  <= dl_npop  + (pl_pop?1:0);
+            if (dl_en && pl_cnt >= 7'd48 && (pl_push || pl_pop))
+                $display("[shade FIFO] t=%0t cnt=%0d push=%b pop=%b (Spush=%0d Spop=%0d) | tu_issue=%b tu_ready=%b tu_ov=%b iv_ov=%b stall=%b en=%b room=%b",
+                         $time, pl_cnt, pl_push, pl_pop, dl_npush, dl_npop, tu_issue, tu_ready, tu_ov, iv_ov, stall, en, pl_room);
+            if (dl_en && !dl_dfired && pl_cnt >= 7'd64) begin
+                dl_dfired <= 1'b1;
+                $display("[tsp_shade_v2_pp] FIFO OVERFLOWED: cnt=%0d  totalPush=%0d totalPop=%0d (diff=%0d)",
+                         pl_cnt, dl_npush, dl_npop, dl_npush - dl_npop);
+            end
+            // X-CATCH (decisive): an X on pl_push/pl_pop poisons pl_cnt permanently, and
+            // `X >= 48` is FALSE so all the threshold traces above stay silent while the dump
+            // still prints a garbage %0d value. Fires ONCE the first time push/pop/cnt go X.
+            if (!dl_xfired && ($isunknown(pl_push) || $isunknown(pl_pop) || $isunknown(pl_cnt))) begin
+                dl_xfired <= 1'b1;
+                $display("[tsp_shade_v2_pp] X POISON @t=%0t: pl_push=%b pl_pop=%b pl_cnt=%b  (tu_ov=%b tu_issue=%b) <- tex_unit out_valid went X",
+                         $time, pl_push, pl_pop, pl_cnt, tu_ov, tu_issue);
+            end
+            // RAW HIGH-WATER (NO gate at all - not even dl_en): announce the first time pl_cnt
+            // in THIS block ever exceeds 40. If this never prints but the dump shows cnt=97,
+            // then the dump's pl_cnt is a DIFFERENT signal than this block updates (aliasing).
+            if (pl_cnt > 7'd40 && !dl_hw_fired) begin
+                dl_hw_fired <= 1'b1;
+                $display("[shade RAW] FIFO cnt exceeded 40: pl_cnt=%0d h=%0d t=%0d push=%b pop=%b t=%0t",
+                         pl_cnt, pl_h, pl_t, pl_push, pl_pop, $time);
+            end
+`endif
         end
     end
     wire [31:0]    P_base = pl_out[PLW-1        -: 32];
@@ -404,8 +360,13 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
     wire [31:0] cc_textel = P_ptx ? tu_argb : 32'h00000000;
     wire        cc_ov;
     wire [31:0] comb_col;
+    // in_valid = pl_pop (a real FIFO pop), NOT raw tu_ov. color_combiner consumes the POPPED
+    // payload (P_base/P_ofs/P_tsp/...), so its valid must align with an actual pop. This also
+    // suppresses spurious tex_unit out_valid pulses (e.g. the reset/startup glitch): a tu_ov
+    // with an empty FIFO does not pop, so it produces no result - it can't over-count the
+    // core's shade-drain accounting (sh_out_n) or collide the color-buffer read clients.
     color_combiner u_cc (
-        .clk(clk),.reset(reset),.in_valid(tu_ov),
+        .clk(clk),.reset(reset),.in_valid(pl_pop),
         .pp_texture(P_ptx),.pp_offset(P_pof),.shadinstr(c_shad),
         .base(P_base),.textel(cc_textel),.offset(P_ofs),
         .out_valid(cc_ov),.col(comb_col));
@@ -430,4 +391,61 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
             end
         end
     end
+
+`ifndef SYNTHESIS
+    // ============================================================================
+    // DEADLOCK WATCHDOG (sim only). The pipe deadlocks intermittently under cache
+    // misses. This counts cycles where the shader is STUCK - a pixel is being
+    // presented (in_valid) but is stalled (stall) AND nothing is draining out the
+    // back (no tu_ov, no cc_ov, no out_valid) - and once that persists past a
+    // threshold, dumps every handshake so we can see WHICH stage is wedged:
+    //   stall   = iv_wants_fetch && (!tu_ready || !pl_room)
+    //     -> !tu_ready  : tex_unit can't accept (its cache is stuck mid-fill)
+    //     -> !pl_room   : COMB payload FIFO is full and never draining (tu_ov dead)
+    //   tu_ov never firing while in-flight -> tex_unit swallowed a result (payload
+    //     desync under a miss). Enabled with +dlwatch[=<N cycles>] (default 4096).
+    integer      dl_thresh = 4096;
+    reg          dl_en = 1'b0;
+    integer      dl_stuck = 0;      // consecutive stuck cycles
+    reg          dl_fired = 1'b0;   // one-shot per stuck episode
+    integer      dl_arg;
+    // (dl_xfired/dl_dfired one-shots for the FIFO X-catch/divergence catch above.)
+    initial begin
+        if ($value$plusargs("dlwatch=%d", dl_arg)) begin dl_en = 1'b1; dl_thresh = dl_arg; end
+        else if ($test$plusargs("dlwatch"))        begin dl_en = 1'b1; end
+    end
+    // "stuck" = presenting a stalled pixel with no result anywhere in the drain path.
+    wire dl_draining = tu_ov || cc_ov || out_valid;
+    wire dl_stuck_now = in_valid && stall && !dl_draining;
+    always @(posedge clk) begin
+        if (reset) begin dl_stuck <= 0; dl_fired <= 1'b0; end
+        else if (dl_en) begin
+            if (dl_stuck_now) dl_stuck <= dl_stuck + 1;
+            else begin dl_stuck <= 0; dl_fired <= 1'b0; end
+
+            if (dl_stuck_now && dl_stuck >= dl_thresh && !dl_fired) begin
+                dl_fired <= 1'b1;
+                $display("=========================================================");
+                $display("[tsp_shade_v2_pp] DEADLOCK: stuck %0d cycles. State dump:", dl_stuck);
+                $display("  in_valid=%b  stall=%b  en=%b", in_valid, stall, en);
+                $display("  --- front ---");
+                $display("  rc_ov=%b  iv_ov=%b  iv_wants_fetch=%b", rc_ov, iv_ov, iv_wants_fetch);
+                $display("  --- tex_unit handshake ---");
+                $display("  tu_issue=%b  tu_ready=%b  tu_ov=%b  (tu_ready=0 => tex_unit/cache wedged)", tu_issue, tu_ready, tu_ov);
+                $display("  --- COMB payload FIFO ---");
+                $display("  pl_cnt=%0d  pl_room=%b  pl_push=%b  pl_pop=%b  pl_h=%0d pl_t=%0d",
+                         pl_cnt, pl_room, pl_push, pl_pop, pl_h, pl_t);
+                $display("    (pl_room=0 & pl_pop stuck 0 => tu_ov never fires => result swallowed)");
+                $display("  --- back ---");
+                $display("  cc_ov=%b  out_valid=%b", cc_ov, out_valid);
+                $display("  --- DDR ports (tex_unit -> arbiter) ---");
+                $display("  tc: rd=%b addr=%h burst=%0d | busy=%b dready=%b",
+                         ddr_req[0].rd, ddr_req[0].addr, ddr_req[0].burst, ddr_resp[0].busy, ddr_resp[0].dready);
+                $display("  vq: rd=%b addr=%h burst=%0d | busy=%b dready=%b",
+                         ddr_req[1].rd, ddr_req[1].addr, ddr_req[1].burst, ddr_resp[1].busy, ddr_resp[1].dready);
+                $display("=========================================================");
+            end
+        end
+    end
+`endif
 endmodule

@@ -316,4 +316,50 @@ module tex_unit import tsp_pkg::*; #(
     assign out_valid = filt_ov;
     assign out_argb  = filt_argb;
     assign out_id    = r_id[FILTLAT-1];
+
+`ifndef SYNTHESIS
+    // ============================================================================
+    // RESULT-LEAK WATCHDOG (sim only). Same +dlwatch gate as the shader watchdog.
+    reg          tw_en = 1'b0;
+    integer      tw_arg;
+    initial begin
+        if ($value$plusargs("dlwatch=%d", tw_arg)) tw_en = 1'b1;
+        else if ($test$plusargs("dlwatch"))        tw_en = 1'b1;
+    end
+    // IN-FLIGHT TRACKER: count accepted issues (in_valid & in_ready) minus emitted
+    // results (out_valid). If tex_unit is lossless every accepted pixel eventually
+    // exits, so this stays bounded (~= total pipe latency). A monotonic climb means
+    // tex_unit is SWALLOWING results (a pixel accepted but never emitted) - the payload/
+    // f_ov desync under misses. We flag when it grows implausibly large.
+    wire tu_accept_dbg = in_valid && in_ready;
+    integer tw_inflight = 0;
+    reg     tw_if_fired = 1'b0;
+    reg     tw_x_fired = 1'b0;
+    always @(posedge clk) begin
+        if (reset) begin tw_inflight <= 0; tw_if_fired <= 1'b0; end
+        else if (tw_en) begin
+            tw_inflight <= tw_inflight + (tu_accept_dbg?1:0) - (out_valid?1:0);
+            // Total pipe latency (uvmap..filter) is ~20 cycles under all-hits. So >40 in
+            // flight already means results have PAUSED. Trace continuously past 40 so we see
+            // exactly where the valid chain (f_ov -> dec_ov -> filt_ov) dies.
+            if (tw_inflight >= 40)
+                $display("  [tex_unit] t=%0t inflight=%0d | in_valid=%b(accept=%b) r_iss=%b f_ov=%b dec_ov0=%b filt_ov=%b out_valid=%b | fetch_ready=%b front_stall=%b | tc:rd=%b busy=%b dready=%b vq:rd=%b busy=%b dready=%b",
+                         $time, tw_inflight, in_valid, tu_accept_dbg, r_iss, f_ov, dec_ov[0], filt_ov, out_valid,
+                         fetch_ready, front_stall,
+                         ddr_req[0].rd, ddr_resp[0].busy, ddr_resp[0].dready,
+                         ddr_req[1].rd, ddr_resp[1].busy, ddr_resp[1].dready);
+            if (tw_inflight > 60 && !tw_if_fired) begin
+                tw_if_fired <= 1'b1;
+                $display("  [tex_unit] RESULT PAUSE: %0d pixels accepted but not emitted (valid chain died - see trace above).", tw_inflight);
+            end
+            // X-CATCH on the valid chain: pinpoint the FIRST stage whose valid goes X (an
+            // unreset valid register). This is what poisons the shader FIFO's pl_cnt. Fires ONCE.
+            if (!tw_x_fired && ($isunknown(f_ov) || $isunknown(dec_ov[0]) || $isunknown(filt_ov) || $isunknown(out_valid))) begin
+                tw_x_fired <= 1'b1;
+                $display("  [tex_unit] VALID X @t=%0t: f_ov=%b dec_ov0=%b filt_ov=%b out_valid=%b <- first unreset valid reg in the chain",
+                         $time, f_ov, dec_ov[0], filt_ov, out_valid);
+            end
+        end
+    end
+`endif
 endmodule
