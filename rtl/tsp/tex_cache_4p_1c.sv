@@ -152,6 +152,13 @@ module tex_cache_4p_1c import tsp_pkg::*; (
     reg [LAW-1:0]  m_line; reg [IXW-1:0] m_ix; reg [TAGW-1:0] m_tag;
     reg [1:0]      m_beat; reg [255:0] m_acc;
     wire [28:0] m_base = {m_line, 2'b00};
+    // Per-port copy WRITE-ENABLE for this fill: only the port copies whose frozen
+    // request is for the line being filled (m_line) are updated. This is the fix for
+    // the direct-mapped ALIAS livelock: two frozen corners on different lines that map
+    // to the SAME index no longer evict each other - each port's private copy keeps its
+    // own corner, so the group can reach group_ready. (The 4 copies were previously kept
+    // identical, which turned a natural 4-way capacity into a 1-way collision.)
+    reg [3:0]      m_wport;
 
     // lowest-index REPLY-stage port that MISSED. fm[2]=1 => none.
     wire [2:0] fm = (t_v[0] && !t_hit[0]) ? 3'd0 :
@@ -167,7 +174,7 @@ module tex_cache_4p_1c import tsp_pkg::*; (
 
     always @(posedge clk) begin
         if (reset) begin
-            st <= S_RST; rd_r <= 0; rst_i <= 0; retesting <= 0;
+            st <= S_RST; rd_r <= 0; rst_i <= 0; retesting <= 0; m_wport <= 4'd0;
             for (i=0;i<4;i=i+1) t_v[i]<=0;
 `ifndef SYNTHESIS
             for (i=0;i<5;i=i+1) stat_hit[i] <= 0;
@@ -215,8 +222,15 @@ module tex_cache_4p_1c import tsp_pkg::*; (
                     m_ix   <= t_line[fm[1:0]][IXW-1:0];
                     m_tag  <= t_line[fm[1:0]][LAW-1:IXW];
                     m_beat <= 2'd0;
-                    for (k=0;k<4;k=k+1)
+                    // write-enable exactly the port copies that MISSED on this same line
+                    // (a hitting port isn't rewritten; a port on a different line keeps
+                    // its own copy -> no alias eviction). Ports missing a DIFFERENT line
+                    // stay missing and drive the next fill after the retest.
+                    for (k=0;k<4;k=k+1) begin
                         retest_ix[k] <= t_line[k][IXW-1:0];    // keep ALL t_v (group waits)
+                        m_wport[k]   <= t_v[k] && !t_hit[k] &&
+                                        (t_line[k] == t_line[fm[1:0]]);
+                    end
                     st <= S_MISS;
                 end else begin
                     // no miss: accept a new request per port for next cycle's REPLY.
@@ -239,14 +253,13 @@ module tex_cache_4p_1c import tsp_pkg::*; (
             S_FILL: if (dresp.dready) begin
                 m_acc[64*m_beat +: 64] <= dresp.dout;
                 if (m_beat == 2'd3) begin
-                    data0[m_ix] <= { dresp.dout, m_acc[191:0] };
-                    data1[m_ix] <= { dresp.dout, m_acc[191:0] };
-                    data2[m_ix] <= { dresp.dout, m_acc[191:0] };
-                    data3[m_ix] <= { dresp.dout, m_acc[191:0] };
-                    meta0[m_ix] <= {1'b1, m_tag};
-                    meta1[m_ix] <= {1'b1, m_tag};
-                    meta2[m_ix] <= {1'b1, m_tag};
-                    meta3[m_ix] <= {1'b1, m_tag};
+                    // write ONLY the port copies that requested this line (m_wport). A
+                    // port on a different line keeps its own resident copy -> aliasing
+                    // corners coexist and the group can reach group_ready.
+                    if (m_wport[0]) begin data0[m_ix] <= { dresp.dout, m_acc[191:0] }; meta0[m_ix] <= {1'b1, m_tag}; end
+                    if (m_wport[1]) begin data1[m_ix] <= { dresp.dout, m_acc[191:0] }; meta1[m_ix] <= {1'b1, m_tag}; end
+                    if (m_wport[2]) begin data2[m_ix] <= { dresp.dout, m_acc[191:0] }; meta2[m_ix] <= {1'b1, m_tag}; end
+                    if (m_wport[3]) begin data3[m_ix] <= { dresp.dout, m_acc[191:0] }; meta3[m_ix] <= {1'b1, m_tag}; end
                     // reload the frozen reads from the (now updated) store, re-test next cyc.
                     retesting <= 1'b1;
                     st <= S_RETEST;
@@ -262,6 +275,35 @@ module tex_cache_4p_1c import tsp_pkg::*; (
     end
 
 `ifndef SYNTHESIS
+    // ---- LIVELOCK detector: fills that never resolve the group ----
+    // This cache is direct-mapped (index = line[IXW-1:0]); all 4 port copies mirror ONE
+    // cache. A group of 4 bilinear corners is served ATOMICALLY (group_ready). Each fill
+    // resolves only the LOWEST missing port's line. If two frozen ports want DIFFERENT
+    // lines that ALIAS to the SAME index (same low IXW bits, different tag), filling one
+    // evicts the other's entry, so the group NEVER reaches group_ready: S_RUN(miss)->
+    // S_MISS->S_FILL->S_RETEST->S_RUN(miss)->... forever. Each pass stays in S_MISS/S_FILL
+    // only ~16 cyc, so a per-state timer misses it - count consecutive fills WITHOUT a
+    // group_ready instead. A healthy fill is followed by group_ready within a couple
+    // retests; dozens of back-to-back fills == livelock.
+    integer tc_fills; reg tc_reported;
+    always @(posedge clk) begin
+        if (reset) begin tc_fills <= 0; tc_reported <= 1'b0; end
+        else begin
+            if (group_ready)             tc_fills <= 0;             // group made progress
+            else if (st==S_MISS && !dresp.busy) tc_fills <= tc_fills + 1;  // one more fill kicked
+            if (tc_fills > 64 && !tc_reported) begin
+                tc_reported <= 1'b1;
+                $display("\n$$$$$$ TEX$ LIVELOCK %m (%0d fills, no group_ready) $$$$$$", tc_fills);
+                $display("  filling line=%08x (index=%0d tag=%0d) via port %0d", m_line, m_ix, m_tag, fm[1:0]);
+                for (k=0;k<4;k=k+1)
+                    $display("  port%0d: v=%0d line=%08x  index=%0d tag=%0d  hit=%0d",
+                             k, t_v[k], t_line[k], t_line[k][IXW-1:0], t_line[k][LAW-1:IXW], t_hit[k]);
+                $display("  -> ports with SAME index but DIFFERENT tag alias/evict each other.");
+                $display("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$\n");
+            end
+        end
+    end
+
     final begin
         $display("=== TEX$1c %m: %0d lookup-cycles: HIT4=%0d HIT3=%0d HIT2=%0d HIT1=%0d HIT0=%0d ===",
                  stat_n, stat_hit[4], stat_hit[3], stat_hit[2], stat_hit[1], stat_hit[0]);
