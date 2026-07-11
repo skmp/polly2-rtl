@@ -434,7 +434,7 @@ module spanner_v2 import tsp_pkg::*; #(
         // cycle from the presented address, so we drive rd_group to the group of the pixel
         // COAL will coalesce NEXT cycle, CONTINUOUSLY (don't rely on the read output
         // persisting across cycles). Next-coalesced pixel = sg_x_next if COAL fires this
-        // cycle (advancing), else sg_x (idle/fill/held). rd_valid tracks it while active.
+        // cycle (advancing), else sg_x (idle/fill/held).
         rd_next_x = coal_fires ? sg_x_next : sg_x;
         rd_valid  = sg_active && !pipe_stall;
         rd_group  = { rd_next_x[SLOTW-1:2], 2'b00 };
