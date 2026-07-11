@@ -5,105 +5,108 @@
 //
 // A direct-mapped, 512-entry cache indexed by the low 9 bits of the triangle's
 // CoreTag (== low bits of {param_offs_in_words, tag_offset}). Each entry stores the
-// FULL 32-bit CoreTag it currently owns plus a single `done` bit meaning "this
-// triangle has no more visible pixels this pass -> a later peel pass may SKIP it".
-// A lookup HITs only when the stored tag matches the queried tag exactly (so an
-// index collision from a different triangle is a MISS, not a false skip).
+// FULL 32-bit CoreTag plus a 2-BIT `done` field - one bit per peel-pass PARITY. A
+// ping-pong parity `pp` (toggled by the caller each pass) selects which bit is the
+// PREVIOUS-pass view (read for the skip test) and which is the CURRENT-pass view
+// (written this pass): read bit = done[~pp], write bit = done[pp].
 //
-// Bulk clear uses a GENERATION counter (not a per-entry reset loop, which Verilator
-// cannot do with non-blocking array writes): each entry stores the `gen` it was last
-// written under; an entry is live only if e_gen==cur_gen. `clr` bumps cur_gen, so the
-// whole cache goes stale in one cycle with no walk.
+// STICKY / MONOTONIC done: every current-pass write is an RMW that ORs in the
+// PREVIOUS-pass bit -> done[pp] <= done[~pp] | new_bit. So once a triangle is marked
+// done in some pass it STAYS done in every later pass automatically (no explicit
+// skip-forward copy, no A/B buffer swap):
+//   * RS_POP provisional  : new_bit=1 -> done[pp] = prev|1 = 1
+//   * clear (displace/win/more): new_bit=0 -> done[pp] = prev|0 = prev
+//   * skip (prev done)    : new_bit=1 (or via prev|.. ) -> stays 1, carried forward
+// The LAST write of a triangle's raster wins: if any clear fired, done[pp]=prev; if
+// only the provisional-1 fired (won nothing, never displaced), done[pp]=1.
 //
-// Semantics (bit = 1 => fully occluded / skip):
-//   * reset / clr : bump generation -> every entry stale (lookups MISS).
-//   * set (A/B)   : install tag at its index with done=1 and gen=cur_gen. Two ports so
-//                   two producers (skip-forward + before-raster) can set DIFFERENT tags
-//                   in one cycle; port B wins a same-index tie.
-//   * clr1 (per lane): if a lane's tag HITs a live entry, force its done bit to 0 (a
-//                   Z-write displaced one of that triangle's pixels -> not done). A SET
-//                   to the same index this cycle overrides (SET wins -> done stays 1).
-//   * lookup(tag) : hit = live && stored tag == tag; done = that entry's done bit.
-//
-// Combinational reads keep the caller's single-cycle fetch-gate / raster / stage-B
-// decisions timing-neutral. Writes are synchronous.
+// Reads: 2 combinational read ports (skip-test on port lk; write-RMW reads prev of
+// the tag being written, per write lane). A HIT requires an exact full-tag match on a
+// LIVE entry (current generation), so an index collision from a different triangle is
+// a MISS. Bulk clear bumps a generation counter (per-tile) so every entry goes stale
+// in one cycle (Verilator can't non-blocking-reset an array in a loop).
 //
 `ifndef SYNTHESIS
 module isp_sort_cache #(
     parameter integer ENTRIES = 512,
     parameter integer IDXW    = 9,           // clog2(ENTRIES)
-    parameter integer LANES   = 4,           // per-cycle CLR1 requests (one per raster lane)
+    parameter integer WLANES  = 6,           // per-cycle RMW write lanes
     parameter integer GENW    = 16,          // generation counter width
     parameter [31:0]  INVALID = 32'hFFFFFFFF // sentinel core tag (never a real tag)
 ) (
     input             clk,
     input             reset,
 
-    // ---- bulk clear (per-pass for the write copy; per-tile for both) ----
-    input             clr,                   // 1: invalidate the WHOLE cache this cycle
+    // ---- ping-pong pass parity: read = done[~pp], write = done[pp] ----
+    input             pp,
 
-    // ---- lookup (combinational: present tag -> hit/done same cycle) ----
+    // ---- bulk clear (per-tile): bump generation -> all entries stale ----
+    input             clr,
+
+    // ---- SKIP-TEST read port (combinational): hit + prev-pass done bit ----
     input      [31:0] lk_tag,
     output            lk_hit,
-    output            lk_done,
+    output            lk_done,                // done[~pp] of a live matching entry
 
-    // ---- write: SET x2 (install tag, done=1) ----
-    input             set_valid,             // port A
-    input      [31:0] set_tag,
-    input             set_b_valid,           // port B (wins same-index tie)
-    input      [31:0] set_b_tag,
-
-    // ---- write: CLR1 (per-lane; if a lane's tag hits, force its done=0) ----
-    input      [LANES-1:0]     c1_valid,
-    input      [32*LANES-1:0]  c1_tag
+    // ---- RMW WRITE lanes: done[pp] <= done[~pp] | new_bit, install tag+gen.
+    // Each lane is (valid, tag, bit). Lanes target (usually) DIFFERENT tags. If two
+    // lanes hit the SAME index this cycle, the HIGHEST-numbered valid lane wins (last
+    // write); its new_bit still ORs the prev-pass bit. ----
+    input      [WLANES-1:0]    w_valid,
+    input      [32*WLANES-1:0] w_tag,
+    input      [WLANES-1:0]    w_bit
 );
-    // storage: {gen, done, tag[31:0]} per entry
+    // storage: {gen, tag[31:0], done[1:0]} per entry
     reg [31:0]     e_tag  [0:ENTRIES-1];
-    reg            e_done [0:ENTRIES-1];
+    reg [1:0]      e_done [0:ENTRIES-1];      // [0]=parity0 view, [1]=parity1 view
     reg [GENW-1:0] e_gen  [0:ENTRIES-1];
     reg [GENW-1:0] cur_gen;
 
     function automatic [IDXW-1:0] idx(input [31:0] t);
         idx = t[IDXW-1:0];
     endfunction
-    // an entry is LIVE (belongs to the current generation) and matches `t`
-    function automatic live_hit(input [IDXW-1:0] i, input [31:0] t);
-        live_hit = (e_gen[i] == cur_gen) && (e_tag[i] == t) && (t != INVALID);
+    function automatic live(input [IDXW-1:0] i, input [31:0] t);
+        live = (e_gen[i] == cur_gen) && (e_tag[i] == t) && (t != INVALID);
+    endfunction
+    // previous-pass done bit for a (possibly not-yet-live) entry: 0 if the entry is
+    // stale or a different tag (a fresh triangle has no prior-pass done).
+    function automatic prevbit(input [IDXW-1:0] i, input [31:0] t);
+        prevbit = live(i, t) ? e_done[i][~pp] : 1'b0;
     endfunction
 
-    // ---- combinational lookup ----
+    // ---- SKIP-TEST read (port 1) ----
     wire [IDXW-1:0] lk_i = idx(lk_tag);
-    assign lk_hit  = live_hit(lk_i, lk_tag);
-    assign lk_done = lk_hit && e_done[lk_i];
+    assign lk_hit  = live(lk_i, lk_tag);
+    assign lk_done = lk_hit && e_done[lk_i][~pp];
 
-    wire [IDXW-1:0] set_i   = idx(set_tag);
-    wire [IDXW-1:0] set_b_i = idx(set_b_tag);
-    function automatic set_hits(input [IDXW-1:0] i);
-        set_hits = (set_valid && set_i == i) || (set_b_valid && set_b_i == i);
-    endfunction
-
-    integer l;
-    reg [31:0]     cl_tag;
-    reg [IDXW-1:0] cl_i;
+    integer w;
+    reg [31:0]     wt;
+    reg [IDXW-1:0] wi;
+    reg            nb;
     always @(posedge clk) begin
         if (reset)      cur_gen <= '0;
-        else if (clr)   cur_gen <= cur_gen + 1'b1;   // whole cache stale in one cycle
+        else if (clr)   cur_gen <= cur_gen + 1'b1;
 
         if (!reset) begin
-            // CLR1 (per lane): clear the displaced triangle's done bit on a live hit,
-            // unless a SET targets the same index this cycle (SET wins).
-            for (l = 0; l < LANES; l = l + 1) begin
-                cl_tag = c1_tag[32*l +: 32];
-                cl_i   = idx(cl_tag);
-                if (c1_valid[l] && live_hit(cl_i, cl_tag) && !set_hits(cl_i))
-                    e_done[cl_i] <= 1'b0;
-            end
-            // SET installs tag+done=1 under the current gen. Port B wins a same-index tie.
-            if (set_valid) begin
-                e_tag [set_i] <= set_tag;  e_done[set_i] <= 1'b1;  e_gen[set_i] <= cur_gen;
-            end
-            if (set_b_valid) begin
-                e_tag [set_b_i] <= set_b_tag; e_done[set_b_i] <= 1'b1; e_gen[set_b_i] <= cur_gen;
+            // RMW write lanes. Lowest-to-highest so the highest valid lane to a given
+            // index writes last (wins). Each lane reads the PREV-pass bit (port 2..) of
+            // its own tag and ORs new_bit; writes the CUR-pass bit, installs tag+gen.
+            for (w = 0; w < WLANES; w = w + 1) begin
+                wt = w_tag[32*w +: 32];
+                wi = idx(wt);
+                nb = w_bit[w] | prevbit(wi, wt);   // sticky: prev==1 keeps 1
+                if (w_valid[w] && wt != INVALID) begin
+                    e_tag [wi]     <= wt;
+                    e_gen [wi]     <= cur_gen;
+                    e_done[wi][pp] <= nb;          // current-pass bit
+                    // If the entry was STALE (first live write this generation), its OTHER
+                    // (prev-pass) bit is garbage/uninitialized. Force it to 0 so a later
+                    // same-pass write to THIS entry reads prev=0 (not stale junk). Without
+                    // this, a triangle's provisional-1 write makes the entry live, then its
+                    // win/displace clear reads a garbage prev bit and wrongly stays done.
+                    if (!live(wi, wt))
+                        e_done[wi][~pp] <= 1'b0;
+                end
             end
         end
     end
