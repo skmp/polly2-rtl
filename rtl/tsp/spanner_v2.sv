@@ -436,7 +436,14 @@ module spanner_v2 import tsp_pkg::*; #(
         // persisting across cycles). Next-coalesced pixel = sg_x_next if COAL fires this
         // cycle (advancing), else sg_x (idle/fill/held).
         rd_next_x = coal_fires ? sg_x_next : sg_x;
-        rd_valid  = sg_active && !pipe_stall;
+        // rd_valid MUST stay asserted through a pipe_stall: when it drops, the taginvw
+        // read address collapses to group 0 (taginvw raddr defaults to 0 with rd4_valid=0),
+        // so the NEXT cycle ti_* holds group 0's {tag,invW} instead of sg_x's group. If COAL
+        // then fires (stall just cleared), it coalesces sg_x off group 0's STALE data
+        // (observed on menu2: group 0 = px0-3,py0's invW leaking into an interior group after
+        // a 1-cycle bubble). rd_next_x already = sg_x while stalled (coal_fires=0), so keeping
+        // rd_valid high just re-presents sg_x's group -> ti_* is always correct when COAL resumes.
+        rd_valid  = sg_active;
         rd_group  = { rd_next_x[SLOTW-1:2], 2'b00 };
 
         // ----- SETUP -> triangle_setups write -----
