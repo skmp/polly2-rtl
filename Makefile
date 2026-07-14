@@ -54,7 +54,7 @@ MODE ?= tri
 MODEARG = $(if $(filter quad,$(MODE)),quad,)
 
 .PHONY: all vectors fp sim sim-tri sim-quad seq seq-tri seq-quad ip ip-tri ip-quad quartus clean \
-        test tex tex-addr tex-uv tex-filter tex-combiner tex-fetch pipe oparse isprim region regfile regen planecache setupstream
+        test tex tex-addr tex-uv tex-filter tex-combiner tex-fetch pipe oparse isprim region regfile regen planecache setupstream sortcache
 
 # TSP module files (package first). ISP shared FP units come from rtl/isp_min.
 TSP_RTL = rtl/tsp/tsp_pkg.sv $(filter-out rtl/tsp/tsp_pkg.sv,$(wildcard rtl/tsp/*.sv))
@@ -62,7 +62,7 @@ TSP_RTL = rtl/tsp/tsp_pkg.sv $(filter-out rtl/tsp/tsp_pkg.sv,$(wildcard rtl/tsp/
 all: fp sim-tri sim-quad seq-tri seq-quad ip-tri ip-quad
 
 # ---- run the fast unit tests (FP prims + TSP texture blocks + full pipeline) ----
-test: fp tex oparse isprim region regfile setupstream pipe
+test: fp tex oparse isprim region regfile setupstream sortcache pipe
 
 # ---- TSP texture-pipeline block tests (randomized vectors vs refsw) ----
 TSP = rtl/tsp
@@ -121,6 +121,14 @@ setupstream: | $(BUILD)
 	  rtl/isp_min/mac16.sv rtl/isp_min/fp_mul16.sv rtl/isp_min/fp_add24.sv rtl/isp_min/fp_rcp_fast.sv \
 	  $(CWD)/tb/isp_setup_streamed_tb.cpp --Mdir $(BUILD)/obj_setupstream -o tb
 	./$(BUILD)/obj_setupstream/tb
+
+# sort_cache unit test: enter/demote/check semantics, same-cycle demote-wins
+# priority, alias mismatch conservatism, reset sweep, random soak vs a C model.
+sortcache: | $(BUILD)
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module sort_cache \
+	  rtl/tsp/sort_cache.sv \
+	  $(CWD)/tb/sort_cache_tb.cpp --Mdir $(BUILD)/obj_sortcache -o tb
+	./$(BUILD)/obj_sortcache/tb
 
 # isp_primitive_iterator_pf quad unit test: ENT_QUAD / ENT_TRI / ENT_STRIP entries
 # through a behavioral DDR; checks vertices, quad flag + v3x/v3y, and the tag

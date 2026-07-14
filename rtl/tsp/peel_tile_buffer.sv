@@ -54,6 +54,9 @@ module peel_tile_buffer import tsp_pkg::*; #(
     input                       b_peeling,   // 1 = layer-peel compare, 0 = opaque
     output     [LANES-1:0]      b_pass_lp,   // per-lane peel accept (for dt_pt)
     output     [LANES-1:0]      b_more,      // per-lane MoreToDraw (peel)
+    output     [32*LANES-1:0]   b_oldtag,    // per-lane RESIDENT pending tag (tagBufferA
+                                             // read back in stage B) - the tag a peel
+                                             // accept displaces; for the sort cache
     // per-lane STAGE-B WRITE-ENABLE (accept: inside & pass, peel or opaque). Mirrors
     // exactly the lanes this module writes back, so the split-out u_taginvw handoff
     // buffer can DUPLICATE the {valid,tag,invW} write with an identical mask.
@@ -145,6 +148,7 @@ module peel_tile_buffer import tsp_pkg::*; #(
                 .valid(f_valid (rdata, gd)),
                 .pass (ras_pass_lp[gd]),
                 .more (ras_more_lp[gd]));
+            assign b_oldtag[32*gd +: 32] = f_tag(rdata, gd);
         end
     endgenerate
     // peel accept / more are only meaningful on peeling lanes that are inside
