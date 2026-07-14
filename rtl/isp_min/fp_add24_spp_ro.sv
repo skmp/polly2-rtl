@@ -3,24 +3,25 @@
 //
 // Same reduced-precision non-IEEE add/sub as the combinational fp_add24 (DaZ, no
 // inf/NaN, truncate, overflow saturates, underflow flushes) and BIT-EXACT to it for the
-// same (a, b_in, sub) - but split into a 3-clock streaming pipeline whose OUTPUT is
+// same (a, b_in, sub) - but split into a 4-clock streaming pipeline whose OUTPUT is
 // registered.
 //
-// S1 is restructured in the fp_add3_24 style: instead of fp_add24's compare-and-swap
-// alignment (8b exp compare + 24b significand magnitude compare -> big/small swap
-// muxes -> shift -> add, ~12ns on Cyclone V), BOTH operands are aligned to the max
-// exponent and summed SIGNED:
-//   S1 : e_max = max(exa,exb); shift each significand right by (e_max - e_own); the
-//        larger shifts by 0 (lossless), the smaller truncates exactly as fp_add24's
-//        single-shift did -> signed sum (26b). No magnitude compare, no swap.
-//   S2 : sign/abs + leading-1 SEARCH only (priority encode -> shift select / amount).
-//   S3 : apply the shift + exponent adjust + pack -> registered y.
-// Bit-exact: |ssum| == big - small_shifted (same truncation), sign(ssum) == sign of the
-// larger-magnitude operand, and the exact-cancellation case packs +0 both ways.
+// This is a 4-STAGE unit (was 3): even with the align-to-max restructure (no magnitude
+// compare/swap) the single-stage exp-max -> shift-amount -> barrel shift -> signed add
+// chain measured ~85 MHz standalone on Cyclone V, so - like fp_add3_24_spp_ro - the
+// align is split in two:
+//   S1a : decode (sub sign-fix, DaZ) + max exponent + the two shift AMOUNTS. Register
+//         the raw significands, signs, shift amounts, and e_max.
+//   S1b : apply the two variable shifts + conditional-negate 26b SIGNED sum. (NEW)
+//   S2  : sign/abs + leading-1 SEARCH only (priority encode -> shift select / amount).
+//   S3  : apply the shift + exponent adjust + pack -> registered y.
+// Bit-exact: the larger operand shifts by 0 (lossless), the smaller truncates exactly
+// as fp_add24's single-shift did; |ssum| == big - small_shifted, sign(ssum) == sign of
+// the larger-magnitude operand, and the exact-cancellation case packs +0 both ways.
 //
 // CONVENTION (matches fp_rcp_fast / the streaming units):
 //   ports (clk, reset, stall, in_valid, a, b_in, sub, out_valid, y).
-//   in_valid @N -> out_valid @N+3, y @N+3 (registered). stall=1 freezes all stages.
+//   in_valid @N -> out_valid @N+4, y @N+4 (registered). stall=1 freezes all stages.
 //   one result/clock throughput when !stall.
 //
 module fp_add24_spp_ro (
@@ -35,7 +36,8 @@ module fp_add24_spp_ro (
     output reg [31:0] y
 );
     // ======================================================================
-    // S1 combinational: align BOTH operands to the max exponent + signed sum.
+    // S1a combinational: decode + max exponent + the two shift amounts. No
+    // shifting/adding here - just the (shallow) exponent-compare tree.
     // ======================================================================
     wire [31:0] b = sub ? {~b_in[31], b_in[30:0]} : b_in;
     wire       sa = a[31],  sb = b[31];
@@ -43,32 +45,54 @@ module fp_add24_spp_ro (
 
     // same decode as fp_add24: denormal keeps its mantissa with hidden bit 0,
     // exponent clamped to 1.
-    wire [23:0] sig_a = {(ea != 8'd0), a[22:0]};
-    wire [23:0] sig_b = {(eb != 8'd0), b[22:0]};
+    wire [23:0] sig_a_c = {(ea != 8'd0), a[22:0]};
+    wire [23:0] sig_b_c = {(eb != 8'd0), b[22:0]};
     wire [7:0]  exa   = (ea == 8'd0) ? 8'd1 : ea;
     wire [7:0]  exb   = (eb == 8'd0) ? 8'd1 : eb;
 
     wire [7:0] e_max_c = (exa >= exb) ? exa : exb;
-    wire [7:0] sha = e_max_c - exa;
-    wire [7:0] shb = e_max_c - exb;
-    wire [23:0] al_a = (sha >= 8'd24) ? 24'd0 : (sig_a >> sha);
-    wire [23:0] al_b = (shb >= 8'd24) ? 24'd0 : (sig_b >> shb);
+    wire [7:0] sha_c = e_max_c - exa;
+    wire [7:0] shb_c = e_max_c - exb;
+
+    // ---- S1a registers ----
+    reg        v1a;
+    reg [23:0] s1a_siga, s1a_sigb;
+    reg        s1a_sa, s1a_sb;
+    reg [7:0]  s1a_sha, s1a_shb;
+    reg [7:0]  s1a_emax;
+    always @(posedge clk) begin
+        if (reset) v1a <= 1'b0;
+        else if (!stall) begin
+            v1a      <= in_valid;
+            s1a_siga <= sig_a_c;  s1a_sigb <= sig_b_c;
+            s1a_sa   <= sa;       s1a_sb   <= sb;
+            s1a_sha  <= sha_c;    s1a_shb  <= shb_c;
+            s1a_emax <= e_max_c;
+        end
+    end
+
+    // ======================================================================
+    // S1b combinational: apply the two variable shifts + signed sum. The larger
+    // operand shifts by 0 (lossless); the smaller truncates exactly as fp_add24.
+    // ======================================================================
+    wire [23:0] al_a = (s1a_sha >= 8'd24) ? 24'd0 : (s1a_siga >> s1a_sha);
+    wire [23:0] al_b = (s1a_shb >= 8'd24) ? 24'd0 : (s1a_sigb >> s1a_shb);
 
     // signed contributions: 26 bits = 24 mag + sign + 1 headroom (sum of two).
-    wire signed [25:0] va = sa ? -$signed({2'b0, al_a}) : $signed({2'b0, al_a});
-    wire signed [25:0] vb = sb ? -$signed({2'b0, al_b}) : $signed({2'b0, al_b});
+    wire signed [25:0] va = s1a_sa ? -$signed({2'b0, al_a}) : $signed({2'b0, al_a});
+    wire signed [25:0] vb = s1a_sb ? -$signed({2'b0, al_b}) : $signed({2'b0, al_b});
     wire signed [25:0] ssum_c = va + vb;
 
-    // ---- S1 registers ----
+    // ---- S1b registers ----
     reg               v1;
     reg signed [25:0] s1_ssum;
     reg [7:0]         s1_emax;
     always @(posedge clk) begin
         if (reset) v1 <= 1'b0;
         else if (!stall) begin
-            v1      <= in_valid;
+            v1      <= v1a;
             s1_ssum <= ssum_c;
-            s1_emax <= e_max_c;
+            s1_emax <= s1a_emax;
         end
     end
 
