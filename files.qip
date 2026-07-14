@@ -65,6 +65,8 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/tex_cache_4p_1c.sv
 # 4-read-port single-copy registered-M10K texture/VQ cache. Now owned INSIDE tex_unit
 # (tex_fetch4_ob's u_tc4/u_vq4), not by peel_core. Must precede tex_fetch4_ob.
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/tex_cache_4p_1c.sv
+# peel sort-cache: "fully rendered" triangle filter for peel passes. Before peel_core.
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/sort_cache.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/tsp_miplevel.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/delay_ram.sv
 # --- v2 TSP shade (tsp_shade_v2_pp): pipelined FP (_pp) interp + reciprocal, the new

@@ -227,6 +227,7 @@ module peel_core import tsp_pkg::*; (
     reg  [CHUNK_AW-1:0]    pb_bufwr_addr;
     wire [RAS_LANES-1:0]   b_pass_lp;           // per-lane peel accept (for dt_pt)
     wire [RAS_LANES-1:0]   b_more;              // per-lane MoreToDraw
+    wire [32*RAS_LANES-1:0] b_oldtag;           // per-lane resident pending tag (sort$)
     wire [RAS_LANES-1:0]   b_we;                // per-lane stage-B accept (-> u_taginvw)
 
     // ---- color tile buffer control (typed ports) ----
@@ -279,7 +280,11 @@ module peel_core import tsp_pkg::*; (
     wire        su_out_pt;    // list-kind (PT) of the retiring triangle
     // gate on fq_out_valid (the head entry is loaded in the output register), not
     // just !fq_empty: the M10K read that fills fq_out lags a pushed entry by a cycle.
-    assign su_in_valid = fq_out_valid && (pq_count <= 5'd4);
+    // From the second peel pass on (sc_skip_en) a head needs its sort-cache verdict
+    // first: not-done heads issue to setup, done heads are popped/skipped instead
+    // (sc_skip_pop). The 2-cycle verdict hides under setup's II.
+    assign su_in_valid = fq_out_valid && (pq_count <= 5'd4)
+                      && (!sc_skip_en || (sc_hd_v && !sc_hd_skip));
 
     isp_setup_streamed u_isp (
         .clk(clk), .reset(reset),
@@ -402,7 +407,7 @@ module peel_core import tsp_pkg::*; (
         .ras_b_valid(b_valid), .b_inside(b_inside), .b_invw(b_invw),
         .b_y(b_oy), .b_x(b_ox), .b_tag(b_tag), .b_mode(b_mode),
         .b_zwdis(b_zwdis), .b_peeling(b_peeling),
-        .b_pass_lp(b_pass_lp), .b_more(b_more), .b_we(b_we),
+        .b_pass_lp(b_pass_lp), .b_more(b_more), .b_oldtag(b_oldtag), .b_we(b_we),
         // shade single-pixel read: MOVED to the split-out u_taginvw handoff buffer.
         // u_peel stays ISP-private (depth compare + PeelBuffers only); its shade port
         // is tied off.
@@ -415,6 +420,45 @@ module peel_core import tsp_pkg::*; (
         .pb_rd_valid(pb_bufrd_valid), .pb_rd_addr(pb_bufrd_addr),
         .pb_wr_valid(pb_bufwr_valid), .pb_wr_addr(pb_bufwr_addr),
         .pb_first(first_peel)
+    );
+
+    // ---- SORT CACHE (u_sort): peel "fully rendered" triangle filter ----
+    // ENTER: every peel-pass triangle popped to setup writes {tag,1} to all 4 ways.
+    // DEMOTE: every stage-B `more` event is EXACTLY a "this fragment needs a later
+    // pass" event (see isp_depth_cmp_lp): pass=1 -> the displaced RESIDENT pending
+    // tag (b_oldtag), pass=0 -> the deferred INCOMING fragment (b_tag). b_more is
+    // already masked by inside & peeling; valid=0 lanes never raise more on accept,
+    // so the SetTagToMax filler is never demoted.
+    // CHECK: at the fq head, from the SECOND peel pass of a tile on (pass 1 must
+    // prime the entries; cross-tile staleness self-corrects because every checked
+    // triangle was re-entered/demoted in pass p-1 of THIS tile, and aliased-away
+    // entries fail the tag compare -> render). The S_DRAIN barrier + PeelBuffers
+    // walk guarantee the previous pass's demotes are long settled before the next
+    // pass's pops, so a verdict here is final. A done head is popped WITHOUT being
+    // issued to setup - the pass skips its fetch-to-raster cost entirely. Setup-
+    // culled and corner-culled triangles enter and never demote, so they are also
+    // skipped from pass 2 on (cull is geometric, pass-invariant - a free bonus).
+    wire        sc_ready, sc_chk_vq, sc_chk_done;
+    reg         sc_chk_p;                  // check in flight for the current head
+    reg         sc_hd_v, sc_hd_skip;       // verdict (valid, skip) for current head
+    wire        sc_skip_en   = peeling && (peel_pass >= 8'd2) && sc_ready;
+    wire        sc_chk_issue = sc_skip_en && fq_out_valid && !sc_hd_v && !sc_chk_p;
+    wire        sc_skip_pop  = sc_skip_en && fq_out_valid && sc_hd_v && sc_hd_skip;
+    wire        sc_enter     = su_in_valid && su_in_ready && peeling;
+    wire [RAS_LANES-1:0] sc_wr_valid = b_valid ? b_more : {RAS_LANES{1'b0}};
+    wire [32*RAS_LANES-1:0] sc_wr_tag;
+    genvar gsc;
+    generate
+      for (gsc = 0; gsc < RAS_LANES; gsc = gsc + 1) begin : scwt
+        assign sc_wr_tag[32*gsc +: 32] = b_pass_lp[gsc] ? b_oldtag[32*gsc +: 32] : b_tag;
+      end
+    endgenerate
+    sort_cache u_sort (
+        .clk(clk), .reset(reset), .ready(sc_ready),
+        .en_valid(sc_enter),      .en_tag(fq_out[FF_TAG +: 32]),
+        .wr_valid(sc_wr_valid),   .wr_tag(sc_wr_tag),
+        .chk_valid(sc_chk_issue), .chk_tag(fq_out[FF_TAG +: 32]),
+        .chk_valid_q(sc_chk_vq),  .chk_done(sc_chk_done)
     );
 
     // ---- PING-PONG ISP->TSP handoff buffer (u_taginvw): the {valid,tag,invW} slice
@@ -1065,6 +1109,7 @@ module peel_core import tsp_pkg::*; (
     integer pc_ras_idle;        // RS_IDLE: not rasterizing (waiting / nothing to do)
     integer pc_ras_corner;      // RS_CORNER: per-triangle 4-corner probe wait (8 cyc/tri)
     integer pc_corner_cull;     // triangles trivially rejected by the 4-corner test
+    integer pc_sort_skip;       // triangles skipped by the sort cache (fully rendered)
     // TSP / shade engine (classified by top FSM `st` when in a shade sub-phase)
     integer pc_sh_present;      // SH_PRESENT accepted: pixel issued into shade pipe
     integer pc_sh_tex_stall;    // SH_PRESENT && pp_stall: blocked on texture fetch
@@ -1258,10 +1303,12 @@ module peel_core import tsp_pkg::*; (
             pc_hand<=0; pc_span<=0; pc_drain<=0; pc_blend<=0; pc_swrite<=0;
             pc_prefetch<=0; pc_pf_hit<=0; pc_pf_wasted<=0;
             pc_m_promote<=0; pc_m_waithit<=0; pc_m_waitmiss<=0; pc_m_cold<=0;
+            pc_sort_skip<=0;
 `endif
             rs_st<=RS_IDLE;
             pq_head<=0; pq_tail<=0; pq_count<=0;
             fq_head<=0; fq_tail<=0; fq_count<=0; fq_out_valid<=1'b0;
+            sc_chk_p<=1'b0; sc_hd_v<=1'b0; sc_hd_skip<=1'b0;
             eq_head<=0; eq_tail<=0; eq_count<=0;
             peeling<=1'b0; more_to_draw<=1'b0; peel_pass<=8'd0; op_shaded<=1'b0;
             has_pt<=1'b0; has_tr<=1'b0; peel_which<=1'b0;
@@ -1785,6 +1832,8 @@ module peel_core import tsp_pkg::*; (
                 $display("  CORNER-CULL: culled=%0d / probed=%0d tris (corner-wait=%0d cyc = %0d/tri; sweep saved ~%0d cyc)",
                     pc_corner_cull, tri_count, pc_ras_corner,
                     tri_count ? pc_ras_corner/tri_count : 0, pc_corner_cull*256);
+                $display("  SORT-CACHE:  skipped=%0d peel triangles (fetch+setup+raster avoided)",
+                    pc_sort_skip);
                 // WHY is raster IDLE? Partition RS_IDLE by top `st`. %% is of the IDLE total.
                 // SHADE = overlapped (good: raster done, spanner/reader still shading); the
                 // rest is serial ISP overhead with no downstream running.
@@ -2204,9 +2253,35 @@ module peel_core import tsp_pkg::*; (
             // present a triangle to the streaming setup; pop fq when accepted.
             // su_in_valid is assigned combinationally outside the always block.
             // accept IS the pop: it consumes the head entry sitting in fq_out.
-            if (su_in_valid && su_in_ready) begin
+            // sc_skip_pop is the sort-cache SKIP: the head was fully rendered in an
+            // earlier peel pass - consume it WITHOUT issuing to setup (mutually
+            // exclusive with a setup accept: su_in_valid is 0 when sc_hd_skip).
+            if ((su_in_valid && su_in_ready) || sc_skip_pop) begin
                 fq_head <= (fq_head==FIFO_N-1) ? 4'd0 : fq_head+4'd1;
                 fifo_pop = 1'b1;
+`ifndef SYNTHESIS
+                if (sc_skip_pop) begin
+                    pc_sort_skip <= pc_sort_skip + 1;
+                    if ($test$plusargs("sorttrace"))
+                        $display("[SORT$ SKIP] tile(%0d,%0d) pass=%0d tag=%08x",
+                                 cur_tx, cur_ty, peel_pass, fq_out[FF_TAG +: 32]);
+                end
+`endif
+            end
+
+            // ---- sort-cache head verdict tracking: one check per fq head. A pop
+            //      (either kind) invalidates the verdict; the next head re-checks.
+            //      A check result can never collide with a pop: pops (when sc_skip_en)
+            //      require a verdict, and a verdict-in-flight implies none yet. ----
+            if (sc_chk_issue) sc_chk_p <= 1'b1;
+            if (sc_chk_vq) begin
+                sc_chk_p   <= 1'b0;
+                sc_hd_v    <= 1'b1;
+                sc_hd_skip <= sc_chk_done;
+            end
+            if (fifo_pop) begin
+                sc_hd_v    <= 1'b0;
+                sc_hd_skip <= 1'b0;
             end
 
             // ---- FWFT read-ahead: keep fq_out loaded with the head entry ----
