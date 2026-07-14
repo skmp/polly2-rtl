@@ -22,6 +22,10 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/isp_min/fp_mul16.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/isp_min/fp_add24.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/isp_min/fp_add3_24.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/isp_min/fp_rcp_fast.sv
+# streaming registered-output variants (tsp_setup_stream II=2 datapath)
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/isp_min/fp_mul16_spp_ro.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/isp_min/fp_add24_spp_ro.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/isp_min/fp_add3_24_spp_ro.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/isp_min/fp_mul_i5.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/isp_min/mac16.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/isp_min/isp_setup_min.sv
@@ -35,6 +39,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/isp_min/tile_ram.sv
 # tsp_pkg (bundle structs for injected caches/DDR) must come first.
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/tsp_pkg.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/fp_mul_c9.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/fp_mul_c9_spp_ro.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/tsp_setup_min.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/tex_decode.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/tex_addr.sv

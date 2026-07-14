@@ -1,0 +1,21 @@
+# --------------------------------------------------------------------------
+# timming_tsp_setup_min - isolated fileset for the whole-unit tsp_setup_min perf
+# harness. Paths are relative to this project dir
+# (timming_tests/timming_tsp_setup_min/), pointing up into ../../rtl.
+# --------------------------------------------------------------------------
+
+# ---- reduced-precision FP datapath (rtl/isp_min/) ----
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/isp_min/fp_mul16.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/isp_min/fp_add24.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/isp_min/mac16.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/isp_min/fp_rcp_fast.sv
+
+# ---- tsp package (structs) MUST come first among tsp files ----
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/tsp/tsp_pkg.sv
+
+# ---- shared attribute multiplier (colour channel) ----
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/tsp/fp_mul_c9.sv
+
+# ---- DUT + harness ----
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/tsp/tsp_setup_min.sv
+set_global_assignment -name SYSTEMVERILOG_FILE timming_tsp_setup_min.sv

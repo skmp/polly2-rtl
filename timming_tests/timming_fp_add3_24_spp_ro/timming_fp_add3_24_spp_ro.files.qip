@@ -1,0 +1,7 @@
+# --------------------------------------------------------------------------
+# timming_fp_add3_24_spp_ro - isolated fileset for the fp_add3_24_spp_ro perf harness.
+# Paths are relative to this project dir, pointing up into ../../rtl.
+# --------------------------------------------------------------------------
+
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/isp_min/fp_add3_24_spp_ro.sv
+set_global_assignment -name SYSTEMVERILOG_FILE timming_fp_add3_24_spp_ro.sv

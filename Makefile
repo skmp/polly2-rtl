@@ -249,6 +249,44 @@ mulc9: | $(BUILD)
 	  $(CWD)/tb/fp_mul_c9_tb.cpp --Mdir $(BUILD)/obj_mulc9 -o tb
 	./$(BUILD)/obj_mulc9/tb
 
+# streaming registered-output FP units vs their combinational parents (BIT-EXACT).
+# Each TB clocks the pipelined DUT + a combinational ref and checks 0-tolerance match.
+mul16sppro: | $(BUILD)
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module fp_mul16_spp_ro_tb_top \
+	  rtl/isp_min/fp_mul16.sv rtl/isp_min/fp_mul16_spp_ro.sv tb/fp_mul16_spp_ro_tb_top.sv \
+	  $(CWD)/tb/fp_mul16_spp_ro_tb.cpp -CFLAGS -I$(CWD)/tb --Mdir $(BUILD)/obj_mul16sppro -o tb
+	./$(BUILD)/obj_mul16sppro/tb
+
+add24sppro: | $(BUILD)
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module fp_add24_spp_ro_tb_top \
+	  rtl/isp_min/fp_add24.sv rtl/isp_min/fp_add24_spp_ro.sv tb/fp_add24_spp_ro_tb_top.sv \
+	  $(CWD)/tb/fp_add24_spp_ro_tb.cpp -CFLAGS -I$(CWD)/tb --Mdir $(BUILD)/obj_add24sppro -o tb
+	./$(BUILD)/obj_add24sppro/tb
+
+mulc9sppro: | $(BUILD)
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module fp_mul_c9_spp_ro_tb_top \
+	  rtl/tsp/fp_mul_c9.sv rtl/tsp/fp_mul_c9_spp_ro.sv tb/fp_mul_c9_spp_ro_tb_top.sv \
+	  $(CWD)/tb/fp_mul_c9_spp_ro_tb.cpp -CFLAGS -I$(CWD)/tb --Mdir $(BUILD)/obj_mulc9sppro -o tb
+	./$(BUILD)/obj_mulc9sppro/tb
+
+add3sppro: | $(BUILD)
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module fp_add3_24_spp_ro_tb_top \
+	  rtl/isp_min/fp_add3_24.sv rtl/isp_min/fp_add3_24_spp_ro.sv tb/fp_add3_24_spp_ro_tb_top.sv \
+	  $(CWD)/tb/fp_add3_24_spp_ro_tb.cpp -CFLAGS -I$(CWD)/tb --Mdir $(BUILD)/obj_add3sppro -o tb
+	./$(BUILD)/obj_add3sppro/tb
+
+# tsp_setup_stream (II=2 spp_ro rewrite) vs tsp_setup_min vs double reference.
+tspsetupstream: | $(BUILD)
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module tsp_setup_stream_tb_top \
+	  tb/tsp_setup_stream_tb_top.sv \
+	  rtl/tsp/tsp_setup_min.sv rtl/tsp/tsp_setup_stream.sv \
+	  rtl/tsp/fp_mul_c9.sv rtl/tsp/fp_mul_c9_spp_ro.sv \
+	  rtl/isp_min/mac16.sv rtl/isp_min/fp_mul16.sv rtl/isp_min/fp_add24.sv \
+	  rtl/isp_min/fp_rcp_fast.sv rtl/isp_min/fp_rcp_faster.sv \
+	  rtl/isp_min/fp_mul16_spp_ro.sv rtl/isp_min/fp_add24_spp_ro.sv rtl/isp_min/fp_add3_24_spp_ro.sv \
+	  $(CWD)/tb/tsp_setup_stream_tb.cpp -CFLAGS -I$(CWD)/tb --Mdir $(BUILD)/obj_tspsetupstream -o tb
+	./$(BUILD)/obj_tspsetupstream/tb
+
 # reg_file unit test: PVR scalar regs (generated) + FOG/PAL M10K tables.
 regfile: | $(BUILD)
 	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ --public-flat-rw -Irtl/tsp/gen \

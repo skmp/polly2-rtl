@@ -1,0 +1,24 @@
+# --------------------------------------------------------------------------
+# timming_tsp_setup_stream - isolated fileset for the whole-unit tsp_setup_stream
+# perf harness. Paths are relative to this project dir
+# (timming_tests/timming_tsp_setup_stream/), pointing up into ../../rtl.
+#
+# tsp_setup_stream is the II=2 rewrite on streaming REGISTERED-OUTPUT units
+# (*_spp_ro); the combinational fp units are no longer instantiated by it.
+# --------------------------------------------------------------------------
+
+# ---- streaming registered-output FP datapath ----
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/isp_min/fp_mul16_spp_ro.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/isp_min/fp_add24_spp_ro.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/isp_min/fp_add3_24_spp_ro.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/isp_min/fp_rcp_faster.sv
+
+# ---- tsp package (structs) MUST come first among tsp files ----
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/tsp/tsp_pkg.sv
+
+# ---- shared attribute multiplier (colour channel), pipelined variant ----
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/tsp/fp_mul_c9_spp_ro.sv
+
+# ---- DUT + harness ----
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/tsp/tsp_setup_stream.sv
+set_global_assignment -name SYSTEMVERILOG_FILE timming_tsp_setup_stream.sv
