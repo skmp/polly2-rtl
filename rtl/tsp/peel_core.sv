@@ -1561,6 +1561,25 @@ module peel_core import tsp_pkg::*; (
                         end
                         peeling <= 1'b1;
                         st <= S_PEEL_INIT;
+                    end else if (!op_shaded) begin
+                        // NO lists at all (no OP, no PT, no TL): nothing has shaded
+                        // this tile yet - u_taginvw still holds the CLEAR's background
+                        // tags and u_col was never written. The TSP pass must STILL
+                        // run so the background poly renders: hand a NORMAL OP shade
+                        // with ti_last so TSP shades the background into u_col and
+                        // THEN posts it to VO. (A post-only here handed a never-
+                        // written u_col -> garbage tile.)
+                        op_shaded <= 1'b1;
+                        ti_ready[htile] <= 1'b1;
+                        ti_mode [htile] <= 1'b0;             // OP (background)
+                        ti_last [htile] <= 1'b1;             // final shade -> post to VO
+                        ti_postonly[htile] <= 1'b0;
+                        ti_tx[htile] <= cur_tx; ti_ty[htile] <= cur_ty;
+                        htile <= ~htile;
+`ifndef SYNTHESIS
+                        pc_hand <= pc_hand + 1;
+`endif
+                        ra_ack.list_done <= 1'b1; st <= S_RA_ACK;
                     end else begin
                         // OP-only tile: color already accumulated in u_col by the OP
                         // shade. Issue a POST-ONLY handoff so TSP hands u_col to VO
