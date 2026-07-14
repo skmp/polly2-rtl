@@ -122,6 +122,15 @@ setupstream: | $(BUILD)
 	  $(CWD)/tb/isp_setup_streamed_tb.cpp --Mdir $(BUILD)/obj_setupstream -o tb
 	./$(BUILD)/obj_setupstream/tb
 
+# isp_primitive_iterator_pf quad unit test: ENT_QUAD / ENT_TRI / ENT_STRIP entries
+# through a behavioral DDR; checks vertices, quad flag + v3x/v3y, and the tag
+# param_offs advance (hdr + nverts*stride per array record).
+itquad: | $(BUILD)
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module isp_primitive_iterator_pf \
+	  $(TSP)/tsp_pkg.sv $(TSP)/isp_primitive_iterator_pf.sv \
+	  $(CWD)/tb/isp_primitive_iterator_quad_tb.cpp --Mdir $(BUILD)/obj_itquad -o tb
+	./$(BUILD)/obj_itquad/tb
+
 # regenerate the PVR register typedefs from minicast's pvr_regs.h
 PVR_REGS_H = ../minicast/libswirl/hw/pvr/pvr_regs.h
 regen:
