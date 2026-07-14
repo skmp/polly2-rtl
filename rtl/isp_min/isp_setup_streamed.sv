@@ -1,30 +1,90 @@
 //
-// isp_setup_streamed - 4-way INTERLEAVED isp_setup_min.
+// isp_setup_streamed - STREAMED ISP setup (II=15) on registered-output pipelined FP
+// units, with QUAD support.
 //
-// isp_setup_min runs one triangle through a 14-step micro-schedule where each
-// logical step is stretched to MAC_PH=4 real clocks (the 3-stage pipelined mac16
-// must settle before the next dependent step reads it). That leaves the 4 mac
-// lanes idle 3 of every 4 clocks. This version fills those idle slots by
-// INTERLEAVING 4 INDEPENDENT triangles: real clock t services slot (t mod 4), so
-// each of the 4 slots is serviced once per 4 clocks - exactly the MAC_PH cadence -
-// and the lanes are busy every clock. Throughput: one triangle retired ~every 14
-// clocks (II~=14/tri vs 56/tri), SAME 4 mac lanes (no extra DSP).
+// Facelift of the old 4-way mac16 interleave into the SAME shape as tsp_setup_stream:
+// a statically-scheduled pipeline where every register-to-register path goes through
+// exactly one *_spp_ro pipeline stage (or a shallow registered select), so there are
+// no fat combinational float clouds and no multicycle SDC anywhere.
 //
-// Timing (the subtle part): mac16 latency is exactly 4 clocks (input reg -> comb
-// mul -> p_r -> sum_r -> q_r) and the interleave depth NS is also 4, so the mac
-// output la_q..ld_q at any clock holds the result of the op that the CURRENTLY
-// serviced slot issued exactly 4 clocks (= one of its service turns) ago. Each
-// slot therefore reads la_q..ld_q DIRECTLY - no result latch needed (L == NS, the
-// interleave self-aligns). Every scratchpad register is per-slot ([0:3]). CRUCIAL:
-// EVERY lane must issue an op EVERY clock (dummy 0*1+0 when a step doesn't use a
-// lane) - a clock that leaves a lane un-driven re-feeds stale inputs and shifts
-// the per-lane slot<->result mapping, corrupting other slots.
+//   * units: 3x fp_add24_spp_ro (4clk, A0/A1/A2), 1x fp_add3_24_spp_ro (4clk, A3),
+//     4x fp_mul16_spp_ro (2clk, M0..M3), 1x fp_rcp_faster (5clk).
+//   * ALL sign handling is a SIGN-BIT FLIP ({~f[31],f[30:0]}), never a multiply:
+//     the 8 post-sgn edge deltas, the reused negated diffs (X3-X1 = -(X1-X3), ...),
+//     -Aa/-Ba into the ddx/ddy products, and the subtractions folded into A3 addends.
+//   * min-magnitude anchors: each edge constant Cn is anchored at the smaller
+//     max(|XL|,|YT|) of ITS two endpoints; the invW plane c at the smallest of
+//     v1/v2/v3 (same rationale/tournament as isp_setup_min).
 //
-// Streaming interface: in_valid/in_ready accept a triangle into a free slot; when
-// a slot finishes, out_valid pulses for one clock with that triangle's planes.
-// The consumer must accept out_valid every clock it can appear (it appears at most
-// once per 4 clocks, so a 1-deep skid in the consumer suffices; isp_core's plane
-// FIFO does this).
+// QUADS (refsw2 RenderQuadArray -> RasterizeTriangle(v1,v2,v3,&v4)): when `quad` is
+// asserted the entry carries a 4th vertex (x4,y4):
+//   DX31 = sgn*(X3-X4)  DY31 = sgn*(Y3-Y4)   DX41 = sgn*(X4-X1)  DY41 = sgn*(Y4-Y1)
+//   C4   = DY41*XL4a - DX41*YT4a (anchored over v4/v1);  T3/T4 = istl(DX,DY)
+// For a TRIANGLE (quad=0) the 4th edge degenerates to the classic fallback:
+//   DX31 = sgn*(X3-X1)  DY31 = sgn*(Y3-Y1)  DX41 = DY41 = 0  C4 = 1.0 (no bias)
+// The invW plane, tri_area, sign and cull ALWAYS use v1/v2/v3 only (refsw2's
+// PlaneStepper3 ignores v4); the bbox includes v4 when quad. v4's Z is never read,
+// so there is no z4 port.
+//
+// -------------------------------------------------------------------------------
+// BUFFERING CONTRACT (as tsp_setup_stream): input-UNBUFFERED - the triangle inputs
+// feed only the latch registers, sampled on (in_valid && in_ready); the producer
+// holds them stable that cycle. Output-BUFFERED - every output is a register.
+// (Exception, documented: in_ready is rdy_r AND NOT stall - one gate off two
+// registered signals + out_ready - so a retire blocked by !out_ready cannot
+// falsely accept a triangle.) Internally every *_spp_ro input comes from a register
+// or a registered unit output (live output-bus reads are registered unit outputs).
+//
+// -------------------------------------------------------------------------------
+// PIPELINING MODEL. One 6-bit `cnt` drives the per-triangle FRONT phase (cnt 1..15:
+// operand fetch, diffs, area, anchors, sgn). At cnt==15 the triangle's TAIL is handed
+// to a 16-deep pulse shift register d[1..16] (+ a parity bit alongside), which keeps
+// shifting through latches of LATER triangles - so a new triangle can latch every 15
+// cycles while up to two older tails drain. Per-triangle values that must survive
+// past the next latch are PING-PONG BANKED [0:1] on a parity bit that alternates per
+// latch; the tail taps read their own triangle's bank via the carried parity.
+// All bank writes land at relative cnt >= 2 and all reads by relative cnt 31, so two
+// banks suffice for any latch spacing >= 15 (next-next triangle's earliest bank
+// write is at +30+2 = rel 32 > 31). Unit-issue slots were checked pairwise: within
+// each unit the largest slot difference is 13 < 15, so NO structural conflict exists
+// for any latch spacing >= 15 either.
+//
+// Unit latencies (operands/valid registered at end of cnt K -> result y readable
+// during cnt K+L+1): mul16 L=2 (read @K+3), add24/add3 L=4 (read @K+5), rcp L=5
+// (in_valid during K+1 -> y during K+6). "Live" reads take y exactly at its read cnt.
+//
+// FRONT (cnt-driven; sel @N -> A-lane result @N+5):
+//   sel1: A0=X1-X3    A1=Y2-Y3    A2=Y1-Y3     [@6]
+//   sel2: A0=X2-X3    A1=X1-X2    A2=Y1-Y2     [@7]
+//   sel3: A0=Z2-Z1    A1=Z3-Z1    A2=X3-Wx     [@8]   (Wv = quad ? v4 : v1)
+//   sel4: A0=Y3-Wy    A1=X4-X1    A2=Y4-Y1     [@9]
+//   sel5: A0=X1-XB    A1=Y1-YB    A2=X2-XB     [@10]
+//   sel6: A0=Y2-YB    A1=X3-XB    A2=Y3-YB     [@11]
+//   sel7: A0=X4-XB    A1=Y4-YB                 [@12]
+//   @2 bank tag/isp/pt/quad; bbox floors @2, subs @3, min/max @4/@5, clamp+bank @6
+//   @7 M0/M1 = area products (P1's X2-X3 read LIVE off A0)      [@10]
+//   @9 M0..M3 = Aa/Ba products (negations folded into operands) [@12]
+//   @9 area_go: A0 = P0 - P1 (both LIVE off M0/M1)              [@14]
+//   @12/@13 A3 = Aa / Ba (products LIVE off M0..M3)             [@17/@18]
+//   @13 anchor tournaments; rc_go (rcp x = area LIVE @14 -> rc_y @19)
+//   @14 capture area; sgn/cull -> bank; 8 sgn-FLIPPED edge deltas -> bank
+//   @15 tl1..4 = istl(DX,DY); M0..M3 = C1/C2 partials (DY*XLa, DX*YTa) [@18]
+//   @15 seed tail: d[1] <= 1 (d[i] == relative cnt 15+i)
+// TAIL (d-tap driven, parity-banked reads):
+//   d1 (16): M0..M3 = C3/C4 partials                            [@19]
+//   d2 (17): Aa <= A3.y
+//   d3 (18): Ba <= A3.y; A3 = C1 (partials LIVE); hold C2a/C2b
+//   d4 (19): A3 = C3 (LIVE); hold C4a/C4b; M0/M1 = ddx/ddy = -Aa*rc_y (rc_y LIVE)
+//   d5 (20): A3 = C2 (held)          d6 (21): A3 = C4 (held)
+//   d7 (22): ddx/ddy <= M0/M1.y; M2/M3 = ddx*aXL / ddy*aYT (ddx LIVE)  [@25]
+//   d8..d11 (23..26): c1/c3/c2/c4 <= A3.y (+top-left -1ulp bias; c4 quad mux)
+//   d10 (25): A3 = c_invw = aZ - f0 - f1 (partials LIVE)        [@30]
+//   d15 (30): c_invw <= A3.y
+//   d16 (31): RETIRE -> all outputs registered, out_valid pulses next cycle.
+//
+// Latency latch -> out_valid: 32 clks. Sustained throughput: one triangle / 15 clks.
+// BACKPRESSURE: if !out_ready at the retire tap, `stall` freezes the WHOLE pipe
+// (cnt, d, banks, every spp_ro stage) losslessly until out_ready.
 //
 module isp_setup_streamed (
     input             clk,
@@ -34,22 +94,21 @@ module isp_setup_streamed (
     input             in_valid,
     output            in_ready,
     input      [31:0] isp_word,
-    input      [31:0] in_tag,     // opaque payload carried through with the triangle
-    input             in_pt,      // list-kind (PT) payload carried through with the triangle
+    input      [31:0] in_tag,     // opaque payload carried through
+    input             in_pt,      // list-kind (PT) payload carried through
+    input             quad,       // 1: entry is a quad (x4/y4 valid)
     input      [31:0] x1, input [31:0] y1, input [31:0] z1,
     input      [31:0] x2, input [31:0] y2, input [31:0] z2,
     input      [31:0] x3, input [31:0] y3, input [31:0] z3,
+    input      [31:0] x4, input [31:0] y4,
     input      [31:0] xbase, input [31:0] ybase,
 
-    output            busy,        // 1 = at least one slot has a triangle in flight
-    // output: one-clock pulse per retired triangle, gated by out_ready. A slot that
-    // reaches retire when !out_ready HOLDS (stays at c14, keeps its result) and
-    // retries the next time it is serviced -> no dropped triangles under backpressure.
+    output            busy,
     input             out_ready,
     output reg        out_valid,
-    output reg [31:0] out_tag,     // in_tag of the retiring triangle
-    output reg        out_pt,      // in_pt of the retiring triangle
-    output reg [31:0] out_isp,     // isp_word of the retiring triangle
+    output reg [31:0] out_tag,
+    output reg        out_pt,
+    output reg [31:0] out_isp,
     output reg        sgn_neg,
     output reg        cull,
     output reg [31:0] dx12, output reg [31:0] dx23, output reg [31:0] dx31, output reg [31:0] dx41,
@@ -58,160 +117,31 @@ module isp_setup_streamed (
     output reg [31:0] ddx_invw, output reg [31:0] ddy_invw, output reg [31:0] c_invw,
     output reg [4:0]  bx0, output reg [4:0] bx1, output reg [4:0] by0, output reg [4:0] by1
 );
-    localparam [31:0] ONE = 32'h3f800000, ZERO = 32'd0, NEG1 = 32'hbf800000;
-    localparam integer NS = 4;    // interleave depth = MAC_PH
+    localparam [31:0] ONE = 32'h3f800000, ZERO = 32'd0;
 
-    // ---------------- per-slot vertex holders ----------------
-    // ramstyle=logic: these 4-deep arrays must be LUT registers, NOT block RAM.
-    // Quartus otherwise infers altsyncram, whose late read-data starves the long
-    // combinational bbox cloud (f2i_floor barrel-shift -> min/max -> clamp5) and
-    // blows the 100 MHz path by ~11 ns. Keeping them as registers removes the RAM
-    // read delay; the bbox itself is additionally pipelined below.
-    reg [31:0] X1[0:NS-1],Y1[0:NS-1],Z1[0:NS-1]  /* synthesis ramstyle = "logic" */;
-    reg [31:0] X2[0:NS-1],Y2[0:NS-1],Z2[0:NS-1]  /* synthesis ramstyle = "logic" */;
-    reg [31:0] X3[0:NS-1],Y3[0:NS-1],Z3[0:NS-1]  /* synthesis ramstyle = "logic" */;
-    reg [31:0] XB[0:NS-1],YB[0:NS-1]             /* synthesis ramstyle = "logic" */;
-    reg [31:0] ISPW[0:NS-1];
-    reg [31:0] TAG[0:NS-1];       // opaque payload carried through
-    reg        PT [0:NS-1];       // list-kind (PT) payload carried through
-
-    // ---------------- per-slot scratchpad ----------------
-    reg [31:0] d_X1X3[0:NS-1],d_Y2Y3[0:NS-1],d_Y1Y3[0:NS-1],d_X2X3[0:NS-1];
-    reg [31:0] d_X1X2[0:NS-1],d_Y1Y2[0:NS-1],d_X2X1[0:NS-1],d_Y2Y1[0:NS-1];
-    reg [31:0] d_X3X1[0:NS-1],d_Y3Y1[0:NS-1],d_Z2Z1[0:NS-1],d_Z3Z1[0:NS-1];
-    reg [31:0] XL1[0:NS-1],YT1[0:NS-1],XL2[0:NS-1],YT2[0:NS-1],XL3[0:NS-1],YT3[0:NS-1];
-    reg [31:0] P_a0[0:NS-1],P_a1[0:NS-1];
-    reg [31:0] tri_area[0:NS-1],inv_area[0:NS-1],sgn[0:NS-1];
-    reg [31:0] Aa0[0:NS-1],Ba0[0:NS-1],Aa[0:NS-1],Ba[0:NS-1];
-    reg [31:0] ddx[0:NS-1],ddy[0:NS-1];
-    reg [31:0] DX12[0:NS-1],DX23[0:NS-1],DX31[0:NS-1],DY12[0:NS-1],DY23[0:NS-1],DY31[0:NS-1];
-    reg [31:0] C1a[0:NS-1],C2a[0:NS-1],C3a[0:NS-1];
-    reg [31:0] ddxXL1[0:NS-1],ddyYT1[0:NS-1],zc0[0:NS-1];
-    reg        tl1[0:NS-1],tl2[0:NS-1],tl3[0:NS-1];
-    // min-magnitude anchor for the invW plane constant: pick the vertex k in {1,2,3}
-    // minimising max(|XLk|,|YTk|) so ddx*XLk / ddy*YTk stay small (no huge-anchor
-    // cancellation for guard-band verts). The anchor's Z/XL/YT are muxed into the
-    // c_invw chain (cyc 9..12) instead of always using vertex 1.
-    reg [31:0] aZ[0:NS-1], aXL[0:NS-1], aYT[0:NS-1];  // selected anchor Z, XL, YT
-    // PER-EDGE min-magnitude anchor for the edge constants C1/C2/C3: each edge is
-    // anchored at the smaller-magnitude of its TWO endpoints (edge1=v1..v2,
-    // edge2=v2..v3, edge3=v3..v1). Guard-band edges otherwise get a huge anchor and
-    // the coverage test goes wrong (black slivers along long edges).
-    reg [31:0] e1XL[0:NS-1],e1YT[0:NS-1], e2XL[0:NS-1],e2YT[0:NS-1], e3XL[0:NS-1],e3YT[0:NS-1];
-    // per-slot outputs accumulated during the schedule (copied out at retire).
-    // NOTE: dx12/23/31, dy12/23/31, ddx, ddy are NOT mirrored here - the working
-    // regs DX*/DY*/ddx/ddy are each written once (cyc 8/9), last read at cyc 10/11,
-    // and survive un-clobbered to retire (cyc 14), so retire reads them directly.
-    // That removed 8 dead mirror arrays (8 x NS x 32 = 1024 FF) at zero timing cost.
-    reg [31:0] o_c1[0:NS-1],o_c2[0:NS-1],o_c3[0:NS-1];
-    reg [31:0] o_cinvw[0:NS-1];
-    reg        o_sgnneg[0:NS-1], o_cull[0:NS-1];
-
-    // ---------------- pipelined tile-local bbox (per slot) ----------------
-    // The bbox used to be one combinational cloud (f2i_floor barrel-shift -> 6x
-    // 16-bit min/max -> clamp5) evaluated in the retire cycle - the 100 MHz critical
-    // path. The vertices are fixed from accept (c0) onward, so we spread the cloud
-    // across 3 schedule steps into per-slot registers, and retire just copies them.
-    //   stage bb1 (@cyc 3): f2i_floor each coord, subtract tile origin -> local ints
-    //   stage bb2 (@cyc 4): min/max reduce -> bbox extents
-    //   stage bb3 (@cyc 5): clamp5 -> o_bx0/o_bx1/o_by0/o_by1
-    reg signed [15:0] lXa[0:NS-1],lXb[0:NS-1],lXc[0:NS-1];   // local X of v1,v2,v3
-    reg signed [15:0] lYa[0:NS-1],lYb[0:NS-1],lYc[0:NS-1];   // local Y of v1,v2,v3
-    reg signed [15:0] bxmin_r[0:NS-1],bxmax_r[0:NS-1];
-    reg signed [15:0] bymin_r[0:NS-1],bymax_r[0:NS-1];
-    reg [4:0] o_bx0[0:NS-1],o_bx1[0:NS-1],o_by0[0:NS-1],o_by1[0:NS-1];
-
-    // per-slot control
-    reg        slot_busy[0:NS-1];
-    reg [4:0]  cyc[0:NS-1];        // logical step 0..14 for each slot
-    assign busy = slot_busy[0] | slot_busy[1] | slot_busy[2] | slot_busy[3];
-
-    // ---------------- 4 combinational MAC lanes (shared) ----------------
-    reg  [31:0] la_a,la_b,la_c; reg la_s;  wire [31:0] la_q;
-    reg  [31:0] lb_a,lb_b,lb_c; reg lb_s;  wire [31:0] lb_q;
-    reg  [31:0] lc_a,lc_b,lc_c; reg lc_s;  wire [31:0] lc_q;
-    reg  [31:0] ld_a,ld_b,ld_c; reg ld_s;  wire [31:0] ld_q;
-    mac16 u_la (.clk(clk),.reset(reset),.a(la_a),.b(la_b),.c(la_c),.sub(la_s),.q(la_q));
-    mac16 u_lb (.clk(clk),.reset(reset),.a(lb_a),.b(lb_b),.c(lb_c),.sub(lb_s),.q(lb_q));
-    mac16 u_lc (.clk(clk),.reset(reset),.a(lc_a),.b(lc_b),.c(lc_c),.sub(lc_s),.q(lc_q));
-    mac16 u_ld (.clk(clk),.reset(reset),.a(ld_a),.b(ld_b),.c(ld_c),.sub(ld_s),.q(ld_q));
-
-    // mac16 latency = 4 clocks (input-reg -> comb mul -> p_r -> sum_r -> q_r), and
-    // NS=4, so the slot serviced THIS clock reads la_q..ld_q DIRECTLY: la_q now
-    // holds the result of the op this same slot issued exactly 4 clocks ago. No
-    // per-slot result latch is needed (the interleave self-aligns, L==NS).
-
-    // ---------------- 1 SHARED reciprocal (pipelined 3-cycle) ----------------
-    // The FSM services exactly one slot per clock (sl == phase) and requests a
-    // reciprocal only inside the cyc==5 branch, so AT MOST ONE rc_req is asserted
-    // per clock across all slots. A single fully-pipelined fp_rcp_fast (accepts one
-    // x/clock, result 3 clocks later) therefore serves all 4 slots with ZERO
-    // contention and no throughput loss (was 4 units -> now 1). The result is routed
-    // back to the requesting slot via a 3-stage {valid,slot} shift register matching
-    // the pipe latency; back-to-back requests from different slots are handled since
-    // each stage carries its own slot id.
-    reg        rc_req[0:NS-1]; reg [31:0] rc_in[0:NS-1];
-    reg        rc_done[0:NS-1]; reg [31:0] inv_reg[0:NS-1];
-
-    // one-hot -> shared request: only one rc_req is ever high, so OR/mux is safe.
-    wire        rc_req_any = rc_req[0] | rc_req[1] | rc_req[2] | rc_req[3];
-    wire [1:0]  rc_req_slot = rc_req[1] ? 2'd1 : rc_req[2] ? 2'd2 : rc_req[3] ? 2'd3 : 2'd0;
-    wire [31:0] rc_req_x    = rc_req[0] ? rc_in[0] : rc_req[1] ? rc_in[1]
-                            : rc_req[2] ? rc_in[2] : rc_in[3];
-    wire        rc_ack; wire [31:0] rc_y;
-    fp_rcp_fast u_rcp (.clk(clk),.reset(reset),.stall(1'b0),
-        .in_valid(rc_req_any),.x(rc_req_x),.out_valid(rc_ack),.y(rc_y));
-
-    // 3-stage pipeline of the requesting slot id, tracking the in-flight request
-    // through the reciprocal so rc_ack can be attributed to the right slot. (Kept
-    // as a shift register even though the fp_rcp_fast valid pipe already tracks
-    // validity, so the slot id stays aligned with rc_ack.)
-    reg [1:0] rc_slot_p [0:2];
-    integer rp;
-    always @(posedge clk) begin
-        rc_slot_p[0] <= rc_req_slot;
-        rc_slot_p[1] <= rc_slot_p[0];
-        rc_slot_p[2] <= rc_slot_p[1];
-    end
-    // capture the shared result into the requesting slot's inv_reg / rc_done.
-    // rc_done clears on a fresh request for that slot (mirrors the old per-slot reset).
-    integer gsq;
-    always @(posedge clk) begin
-        for (gsq=0; gsq<NS; gsq=gsq+1) begin
-            if (reset || rc_req[gsq]) rc_done[gsq] <= 1'b0;
-            else if (rc_ack && rc_slot_p[2]==gsq[1:0]) begin
-                rc_done[gsq] <= 1'b1; inv_reg[gsq] <= rc_y;
-            end
-        end
-    end
-
-    // ---------------- sign / helper functions (identical to isp_setup_min) --------
+    // ---------------- helpers (identical numerics to isp_setup_min) ----------------
     function fzero(input [31:0] f); fzero=(f[30:0]==31'd0); endfunction
     function fneg (input [31:0] f); fneg = f[31]&&(f[30:0]!=31'd0); endfunction
     function fpos (input [31:0] f); fpos = !f[31]&&(f[30:0]!=31'd0); endfunction
-    function istl(input [31:0] fdx, input [31:0] fdy);
+    function istl(input [31:0] fdx, input [31:0] fdy);   // IsTopLeft on sgn-normalized edges
         istl=(fzero(fdy)&&fpos(fdx))||fneg(fdy); endfunction
-    function [31:0] fneg32(input [31:0] f); fneg32={~f[31],f[30:0]}; endfunction
-
-    // anchor magnitude: max(|XL|,|YT|) reduced to its biased exponent (bits[30:23]).
-    // Comparing exponents orders float magnitudes; a zero (exp 0) reads as smallest.
+    function [31:0] fnegf(input [31:0] f); fnegf={~f[31],f[30:0]}; endfunction
+    // NOTE on -0: a flipped zero delta yields -0 (the old mac16 path's add stage
+    // normalized these to +0). Harmless: every consumer path (raster Xhs / invW
+    // sums) re-derives the sign through an fp adder, and those pack +0 on exact
+    // cancellation; istl uses fzero. So no zero-normalizing logic is spent here.
+    // anchor magnitude: max(|XL|,|YT|) reduced to biased exponent
     function [7:0] amag(input [31:0] xl, input [31:0] yt);
         amag = (xl[30:23] > yt[30:23]) ? xl[30:23] : yt[30:23]; endfunction
 
-    // ---------------- tile-local bbox (float->int floor), per retiring slot -------
-    // SATURATED to [0,2047] - see isp_setup_min for the rationale (a plain 16-bit
-    // truncation of a millions-scale off-screen vertex wraps to garbage, collapsing
-    // the bbox to a corner so the whole tile below its first row goes black).
+    // ---------------- tile-local bbox (float->int floor), saturated ----------------
     function automatic signed [15:0] f2i_floor(input [31:0] f);
         integer e, sh; reg [31:0] mag; reg [11:0] sat;
         begin
             e = f[30:23] - 127;
             if (f[30:23] == 8'd0 || e < 0) mag = 0;
             else if (e >= 11) mag = 32'h7FFFFFFF;           // |v| >= 2048 -> saturate
-            else begin
-                sh = 23 - e;                                // e in 0..10 -> sh 23..13
-                mag = {8'b0, 1'b1, f[22:0]} >> sh;
-            end
+            else begin sh = 23 - e; mag = {8'b0, 1'b1, f[22:0]} >> sh; end
             sat = (mag > 32'd2047) ? 12'd2047 : mag[11:0];
             f2i_floor = f[31] ? -{4'b0, sat} : {4'b0, sat};
         end
@@ -221,239 +151,352 @@ module isp_setup_streamed (
             if (v < 0) clamp5 = 5'd0; else if (v > 31) clamp5 = 5'd31; else clamp5 = v[4:0];
         end
     endfunction
+    function automatic signed [15:0] mn2(input signed [15:0] a, input signed [15:0] b);
+        mn2 = (a < b) ? a : b; endfunction
+    function automatic signed [15:0] mx2(input signed [15:0] a, input signed [15:0] b);
+        mx2 = (a > b) ? a : b; endfunction
 
-    // ---------------- interleave control ----------------
-    reg [1:0] phase;              // slot serviced this clock = phase (0..3)
+    // ================================================================
+    // latched triangle (input-unbuffered: written only on latch)
+    // ================================================================
+    reg [31:0] X1,Y1,Z1, X2,Y2,Z2, X3,Y3,Z3, X4,Y4, XB,YB;
+    reg [31:0] ISPW, TAGr;
+    reg        PTr, Qr;
 
-    // a free slot to accept a new triangle into (must be the slot being serviced,
-    // so its first op is issued this clock). We accept only when phase's slot is free.
-    wire       accept = in_valid && !slot_busy[phase];
-    assign in_ready = !slot_busy[phase];
+    // ================================================================
+    // control: front cnt (1..15) + tail pulse SR (d[1..16], parity alongside)
+    // ================================================================
+    reg        front;
+    reg [5:0]  cnt;
+    reg        cur_par;            // bank parity of the triangle in the FRONT phase
+    reg [16:1] d;                  // d[i] high during relative cnt 15+i
+    reg [16:1] dpar;               // that pulse's triangle bank parity
+    reg        rdy;
 
-    // lane driver tasks
-    task L0(input [31:0]a,b,c,input s); begin la_a<=a;la_b<=b;la_c<=c;la_s<=s; end endtask
-    task L1(input [31:0]a,b,c,input s); begin lb_a<=a;lb_b<=b;lb_c<=c;lb_s<=s; end endtask
-    task L2(input [31:0]a,b,c,input s); begin lc_a<=a;lc_b<=b;lc_c<=c;lc_s<=s; end endtask
-    task L3(input [31:0]a,b,c,input s); begin ld_a<=a;ld_b<=b;ld_c<=c;ld_s<=s; end endtask
+    // retire tap + global lossless freeze on output backpressure
+    wire       stall = d[16] && !out_ready;
+    assign     in_ready = rdy && !stall;
+    wire       latch_now = in_valid && in_ready;
+    assign     busy = front || (|d);
 
-    integer k;
-    reg [1:0] sl;                 // slot serviced this clock (= phase)
-    reg [31:0] qa,qb,qc,qd;       // this slot's latched mac results
-    reg [1:0] cm; reg tapos,taneg,wrong;
+    // ================================================================
+    // ping-pong BANKED per-triangle results (write rel>=2, read <= rel 31)
+    // ================================================================
+    reg [31:0] bTAG [0:1], bISP [0:1];
+    reg        bPT  [0:1], bQ   [0:1], bSGN [0:1], bCULL[0:1];
+    reg [4:0]  bBX0 [0:1], bBX1 [0:1], bBY0 [0:1], bBY1 [0:1];
+    reg [31:0] bDX12[0:1], bDX23[0:1], bDX31[0:1], bDX41[0:1];
+    reg [31:0] bDY12[0:1], bDY23[0:1], bDY31[0:1], bDY41[0:1];
 
+    // ---------------- single-copy scratch (lifetime < 15 verified per value) -------
+    reg [31:0] dX1X3,dY2Y3,dY1Y3;          // @6
+    reg [31:0] dX2X3,dX1X2,dY1Y2;          // @7
+    reg [31:0] dZ2Z1,dZ3Z1,dX3W;           // @8
+    reg [31:0] dY3W,dX41d,dY41d;           // @9
+    reg [31:0] XL1,YT1,XL2;                // @10
+    reg [31:0] YT2,XL3,YT3;                // @11
+    reg [31:0] XL4,YT4;                    // @12
+    reg [31:0] e1XL,e1YT, e2XL,e2YT, e3XL,e3YT, e4XL,e4YT;   // @13, read <= @16
+    reg [31:0] aZ,aXL,aYT;                 // @13, read <= @25
+    reg        tl1,tl2,tl3,tl4;            // @15, read <= @26
+    reg [31:0] Aa,Ba;                      // @17/@18, read @19
+    reg [31:0] C2a,C2b, C4a,C4b;           // @18/@19, read @20/@21
+    reg [31:0] ddx,ddy;                    // @22, read @31
+    reg [31:0] sc_c1,sc_c2,sc_c3,sc_c4;    // @23..26, read @31
+    reg [31:0] sc_cinvw;                   // @30, read @31
+
+    // ---------------- bbox pipeline (front phase) ----------------
+    // Five shallow stages (@2 floors, @3 origin subs, @4 pairwise min/max, @5 final
+    // min/max, @6 clamp+bank): floor's barrel shift, the 16-bit subtract, the quad
+    // mux and the compare tree each get their own reg-to-reg hop - the fused
+    // floor+sub+mux version missed 100 MHz by ~1.2 ns.
+    reg signed [15:0] fX1r,fX2r,fX3r,fX4r, fY1r,fY2r,fY3r,fY4r, fXBr,fYBr;
+    reg signed [15:0] lXa,lXb,lXc,lXd, lYa,lYb,lYc,lYd;
+    reg signed [15:0] bxmnab,bxmncd,bxmxab,bxmxcd, bymnab,bymncd,bymxab,bymxcd;
+    reg signed [15:0] bxmn,bxmx,bymn,bymx;
+
+    // ================================================================
+    // A0/A1/A2 subtract lanes: GEO operand REGISTER (sel @N -> issue @N+1) so the
+    // wide cnt-mux is off the adder S1 path. A0 doubles as the area subtract via
+    // the registered area_go_r pulse (operands read LIVE off M0/M1).
+    // ================================================================
+    reg [31:0] g0a_c,g0b_c, g1a_c,g1b_c, g2a_c,g2b_c;
+    reg        g0v_c,g1v_c,g2v_c;
+    wire [31:0] Wx = Qr ? X4 : X1;
+    wire [31:0] Wy = Qr ? Y4 : Y1;
+    always @(*) begin
+        g0a_c=X1; g0b_c=X3; g1a_c=Y2; g1b_c=Y3; g2a_c=Y1; g2b_c=Y3;
+        g0v_c=1'b0; g1v_c=1'b0; g2v_c=1'b0;
+        case (cnt)
+            6'd1: begin g0a_c=X1;g0b_c=X3;g0v_c=1;  g1a_c=Y2;g1b_c=Y3;g1v_c=1;  g2a_c=Y1;g2b_c=Y3;g2v_c=1; end
+            6'd2: begin g0a_c=X2;g0b_c=X3;g0v_c=1;  g1a_c=X1;g1b_c=X2;g1v_c=1;  g2a_c=Y1;g2b_c=Y2;g2v_c=1; end
+            6'd3: begin g0a_c=Z2;g0b_c=Z1;g0v_c=1;  g1a_c=Z3;g1b_c=Z1;g1v_c=1;  g2a_c=X3;g2b_c=Wx;g2v_c=1; end
+            6'd4: begin g0a_c=Y3;g0b_c=Wy;g0v_c=1;  g1a_c=X4;g1b_c=X1;g1v_c=1;  g2a_c=Y4;g2b_c=Y1;g2v_c=1; end
+            6'd5: begin g0a_c=X1;g0b_c=XB;g0v_c=1;  g1a_c=Y1;g1b_c=YB;g1v_c=1;  g2a_c=X2;g2b_c=XB;g2v_c=1; end
+            6'd6: begin g0a_c=Y2;g0b_c=YB;g0v_c=1;  g1a_c=X3;g1b_c=XB;g1v_c=1;  g2a_c=Y3;g2b_c=YB;g2v_c=1; end
+            6'd7: begin g0a_c=X4;g0b_c=XB;g0v_c=1;  g1a_c=Y4;g1b_c=YB;g1v_c=1; end
+            default: ;
+        endcase
+    end
+    reg [31:0] g0a_r,g0b_r, g1a_r,g1b_r, g2a_r,g2b_r;
+    reg        g0v_r,g1v_r,g2v_r;
+    reg        area_go_r;
+
+    wire [31:0] a0_y,a1_y,a2_y;
+    fp_add24_spp_ro A0 (.clk(clk),.reset(reset),.stall(stall),.in_valid(g0v_r || area_go_r),
+        .a(area_go_r ? m0_y : g0a_r), .b_in(area_go_r ? m1_y : g0b_r), .sub(1'b1),
+        .out_valid(), .y(a0_y));
+    fp_add24_spp_ro A1 (.clk(clk),.reset(reset),.stall(stall),.in_valid(g1v_r),
+        .a(g1a_r), .b_in(g1b_r), .sub(1'b1), .out_valid(), .y(a1_y));
+    fp_add24_spp_ro A2 (.clk(clk),.reset(reset),.stall(stall),.in_valid(g2v_r),
+        .a(g2a_r), .b_in(g2b_r), .sub(1'b1), .out_valid(), .y(a2_y));
+
+    // ================================================================
+    // M0..M3 multiplier lanes (operands pre-registered)
+    // ================================================================
+    reg [31:0] m0a,m0b, m1a,m1b, m2a,m2b, m3a,m3b;
+    reg        m0v,m1v,m2v,m3v;
+    wire [31:0] m0_y,m1_y,m2_y,m3_y;
+    fp_mul16_spp_ro M0 (.clk(clk),.reset(reset),.stall(stall),.in_valid(m0v),.a(m0a),.b(m0b),.out_valid(),.y(m0_y));
+    fp_mul16_spp_ro M1 (.clk(clk),.reset(reset),.stall(stall),.in_valid(m1v),.a(m1a),.b(m1b),.out_valid(),.y(m1_y));
+    fp_mul16_spp_ro M2 (.clk(clk),.reset(reset),.stall(stall),.in_valid(m2v),.a(m2a),.b(m2b),.out_valid(),.y(m2_y));
+    fp_mul16_spp_ro M3 (.clk(clk),.reset(reset),.stall(stall),.in_valid(m3v),.a(m3a),.b(m3b),.out_valid(),.y(m3_y));
+
+    // ================================================================
+    // A3: 3-input add - Aa, Ba, C1..C4, c_invw (7 issues, slots verified disjoint)
+    // ================================================================
+    reg [31:0] a3a,a3b,a3c; reg a3v;
+    wire [31:0] a3_y;
+    fp_add3_24_spp_ro A3 (.clk(clk),.reset(reset),.stall(stall),.in_valid(a3v),
+        .a(a3a),.b(a3b),.c(a3c),.out_valid(),.y(a3_y));
+
+    // ================================================================
+    // reciprocal 1/tri_area (x = area LIVE off A0 during the rc_go_r cycle)
+    // ================================================================
+    reg  rc_go_r;
+    wire [31:0] rc_y;
+    fp_rcp_faster u_rcp (.clk(clk),.reset(reset),.stall(stall),
+        .in_valid(rc_go_r), .x(a0_y), .out_valid(), .y(rc_y));
+
+    integer i;
     always @(posedge clk) begin
         if (reset) begin
-            phase <= 2'd0; out_valid <= 1'b0;
-            for (k=0;k<NS;k=k+1) begin slot_busy[k]<=1'b0; rc_req[k]<=1'b0; end
+            front<=0; cnt<=0; cur_par<=0; d<='0; dpar<='0; rdy<=1'b1; out_valid<=0;
+            g0v_r<=0; g1v_r<=0; g2v_r<=0; m0v<=0; m1v<=0; m2v<=0; m3v<=0; a3v<=0;
+            area_go_r<=0; rc_go_r<=0;
         end else begin
             out_valid <= 1'b0;
-            for (k=0;k<NS;k=k+1) rc_req[k] <= 1'b0;
-            phase <= phase + 2'd1;
+            if (!stall) begin
+                // ---- handshake: rdy asserts during cnt 15 (earliest re-latch), so
+                //      consecutive latches are >= 15 apart; when idle it stays high. ----
+                if (latch_now)                 rdy <= 1'b0;
+                else if (front && cnt==6'd14)  rdy <= 1'b1;
 
-            // mac16 latency == NS == 4, so la_q..ld_q THIS clock hold the result of
-            // the op this same slot issued 4 clocks ago -> read them directly.
-            sl = phase;                 // slot serviced this clock
-            qa = la_q; qb = lb_q; qc = lc_q; qd = ld_q;
+                // ---- latch a new triangle (flip the bank parity for it) ----
+                if (latch_now) begin
+                    X1<=x1;Y1<=y1;Z1<=z1; X2<=x2;Y2<=y2;Z2<=z2; X3<=x3;Y3<=y3;Z3<=z3;
+                    X4<=x4;Y4<=y4; XB<=xbase;YB<=ybase;
+                    ISPW<=isp_word; TAGr<=in_tag; PTr<=in_pt; Qr<=quad;
+                    cur_par <= ~cur_par;
+                    front<=1'b1; cnt<=6'd1;
+                end else begin
+                    if (front && cnt==6'd15) front<=1'b0;
+                    cnt <= (cnt==6'd63) ? cnt : cnt+6'd1;
+                end
 
-            // EVERY lane must issue an op EVERY clock: with mac latency == NS == 4,
-            // each lane holds exactly one in-flight op per slot; a clock that leaves
-            // a lane un-driven re-feeds stale inputs and shifts the slot<->result
-            // mapping, corrupting OTHER slots. Default all lanes to a harmless dummy
-            // (0*1+0 = 0); the scheduled step below overrides the lanes it uses.
-            L0(ZERO,ONE,ZERO,0); L1(ZERO,ONE,ZERO,0);
-            L2(ZERO,ONE,ZERO,0); L3(ZERO,ONE,ZERO,0);
+                // ---- tail pulse SR: seed at cnt15, shift EVERY (unstalled) clock ----
+                d[1]    <= front && (cnt==6'd15);
+                dpar[1] <= cur_par;
+                for (i=2; i<=16; i=i+1) begin d[i]<=d[i-1]; dpar[i]<=dpar[i-1]; end
 
-            if (!slot_busy[sl]) begin
-                // slot is free: accept a new triangle and issue its c0 ops
-                if (accept) begin
-                    X1[sl]<=x1;Y1[sl]<=y1;Z1[sl]<=z1; X2[sl]<=x2;Y2[sl]<=y2;Z2[sl]<=z2;
-                    X3[sl]<=x3;Y3[sl]<=y3;Z3[sl]<=z3; XB[sl]<=xbase; YB[sl]<=ybase;
-                    ISPW[sl]<=isp_word; TAG[sl]<=in_tag; PT[sl]<=in_pt;
-                    // c0: area diffs (a - c via sub, b=ONE)
-                    L0(x1,ONE,x3,1); L1(y2,ONE,y3,1); L2(y1,ONE,y3,1); L3(x2,ONE,x3,1);
-                    cyc[sl] <= 5'd1; slot_busy[sl] <= 1'b1;
-                end
-            end else begin
-                // slot busy: run its scheduled step `cyc[sl]`, reading qa..qd
-                case (cyc[sl])
-                1: begin
-                    d_X1X3[sl]<=qa; d_Y2Y3[sl]<=qb; d_Y1Y3[sl]<=qc; d_X2X3[sl]<=qd;
-                    L0(X1[sl],ONE,X2[sl],1); L1(Y1[sl],ONE,Y2[sl],1); L2(X2[sl],ONE,X1[sl],1); L3(Y2[sl],ONE,Y1[sl],1);
-                    // bbox stage 1: float->int floor of each vertex, minus tile origin
-                    lXa[sl] <= f2i_floor(X1[sl]) - f2i_floor(XB[sl]);
-                    lXb[sl] <= f2i_floor(X2[sl]) - f2i_floor(XB[sl]);
-                    lXc[sl] <= f2i_floor(X3[sl]) - f2i_floor(XB[sl]);
-                    lYa[sl] <= f2i_floor(Y1[sl]) - f2i_floor(YB[sl]);
-                    lYb[sl] <= f2i_floor(Y2[sl]) - f2i_floor(YB[sl]);
-                    lYc[sl] <= f2i_floor(Y3[sl]) - f2i_floor(YB[sl]);
-                    cyc[sl]<=5'd2;
-                end
-                2: begin
-                    d_X1X2[sl]<=qa; d_Y1Y2[sl]<=qb; d_X2X1[sl]<=qc; d_Y2Y1[sl]<=qd;
-                    L0(X3[sl],ONE,X1[sl],1); L1(Y3[sl],ONE,Y1[sl],1); L2(Z2[sl],ONE,Z1[sl],1); L3(Z3[sl],ONE,Z1[sl],1);
-                    // bbox stage 2: min/max reduce
-                    bxmin_r[sl] <= (lXa[sl]<lXb[sl]?(lXa[sl]<lXc[sl]?lXa[sl]:lXc[sl]):(lXb[sl]<lXc[sl]?lXb[sl]:lXc[sl]));
-                    bxmax_r[sl] <= (lXa[sl]>lXb[sl]?(lXa[sl]>lXc[sl]?lXa[sl]:lXc[sl]):(lXb[sl]>lXc[sl]?lXb[sl]:lXc[sl]));
-                    bymin_r[sl] <= (lYa[sl]<lYb[sl]?(lYa[sl]<lYc[sl]?lYa[sl]:lYc[sl]):(lYb[sl]<lYc[sl]?lYb[sl]:lYc[sl]));
-                    bymax_r[sl] <= (lYa[sl]>lYb[sl]?(lYa[sl]>lYc[sl]?lYa[sl]:lYc[sl]):(lYb[sl]>lYc[sl]?lYb[sl]:lYc[sl]));
-                    cyc[sl]<=5'd3;
-                end
-                3: begin
-                    d_X3X1[sl]<=qa; d_Y3Y1[sl]<=qb; d_Z2Z1[sl]<=qc; d_Z3Z1[sl]<=qd;
-                    L0(d_X1X3[sl],d_Y2Y3[sl],ZERO,0);
-                    L1(d_Y1Y3[sl],d_X2X3[sl],ZERO,0);
-                    L2(X1[sl],ONE,XB[sl],1);
-                    L3(Y1[sl],ONE,YB[sl],1);
-                    // bbox stage 3: clamp5 -> final per-slot bbox outputs
-                    o_bx0[sl] <= clamp5(bxmin_r[sl]);   o_bx1[sl] <= clamp5(bxmax_r[sl]+16'sd1);
-                    o_by0[sl] <= clamp5(bymin_r[sl]);   o_by1[sl] <= clamp5(bymax_r[sl]+16'sd1);
-                    cyc[sl]<=5'd4;
-                end
-                4: begin
-                    P_a0[sl]<=qa; P_a1[sl]<=qb; XL1[sl]<=qc; YT1[sl]<=qd;
-                    L0(qa,ONE,qb,1);                 // tri_area = P0 - P1
-                    L1(d_Z3Z1[sl],d_Y2Y1[sl],ZERO,0);  // Aa0
-                    L2(d_X3X1[sl],d_Z2Z1[sl],ZERO,0);  // Ba0
-                    L3(X2[sl],ONE,XB[sl],1);           // XL2
-                    cyc[sl]<=5'd5;
-                end
-                5: begin
-                    tri_area[sl]<=qa;
-                    cm=ISPW[sl][28:27];
-                    wrong=(cm[0]==1'b0 && fneg(qa))||(cm[0]==1'b1 && fpos(qa));
-                    if ((cm>=2'd2) && wrong) begin
-                        // early cull: retire immediately with cull=1
-                        o_cull[sl]<=1'b1; o_sgnneg[sl]<=fpos(qa);
-                        cyc[sl]<=5'd14;               // -> retire
-                    end else begin
-                        Aa0[sl]<=qb; Ba0[sl]<=qc; XL2[sl]<=qd;
-                        rc_in[sl]<=qa; rc_req[sl]<=1'b1;
-                        L1(fneg32(d_Z2Z1[sl]),d_Y3Y1[sl],qb,0);  // Aa (L0 = default dummy)
-                        L2(fneg32(d_X2X1[sl]),d_Z3Z1[sl],qc,0);  // Ba
-                        L3(Y2[sl],ONE,YB[sl],1);                 // YT2
-                        cyc[sl]<=5'd6;
+                // ---- GEO subtract operand registration (sel N -> issue N+1) ----
+                g0a_r<=g0a_c; g0b_r<=g0b_c; g0v_r<=g0v_c && front;
+                g1a_r<=g1a_c; g1b_r<=g1b_c; g1v_r<=g1v_c && front;
+                g2a_r<=g2a_c; g2b_r<=g2b_c; g2v_r<=g2v_c && front;
+                area_go_r <= front && (cnt==6'd9);    // A0 area sub in @10 -> y @14
+                rc_go_r   <= front && (cnt==6'd13);   // rcp in @14 (x=area live) -> y @19
+
+                if (front) begin
+                    // ---- FRONT captures ----
+                    if (cnt==6'd6)  begin dX1X3<=a0_y; dY2Y3<=a1_y; dY1Y3<=a2_y; end
+                    if (cnt==6'd7)  begin dX2X3<=a0_y; dX1X2<=a1_y; dY1Y2<=a2_y; end
+                    if (cnt==6'd8)  begin dZ2Z1<=a0_y; dZ3Z1<=a1_y; dX3W<=a2_y; end
+                    if (cnt==6'd9)  begin dY3W<=a0_y; dX41d<=a1_y; dY41d<=a2_y; end
+                    if (cnt==6'd10) begin XL1<=a0_y; YT1<=a1_y; XL2<=a2_y; end
+                    if (cnt==6'd11) begin YT2<=a0_y; XL3<=a1_y; YT3<=a2_y; end
+                    if (cnt==6'd12) begin XL4<=a0_y; YT4<=a1_y; end
+
+                    // ---- payload bank (rel 2: latch regs -> bank, survives re-latch) ----
+                    if (cnt==6'd2) begin
+                        bTAG[cur_par]<=TAGr; bISP[cur_par]<=ISPW;
+                        bPT[cur_par]<=PTr;   bQ[cur_par]<=Qr;
+                    end
+
+                    // ---- bbox: floors @2, origin subs (+quad mux) @3, pairwise
+                    //      min/max @4, final min/max @5, clamp+bank @6 ----
+                    if (cnt==6'd2) begin
+                        fX1r<=f2i_floor(X1); fX2r<=f2i_floor(X2);
+                        fX3r<=f2i_floor(X3); fX4r<=f2i_floor(X4);
+                        fY1r<=f2i_floor(Y1); fY2r<=f2i_floor(Y2);
+                        fY3r<=f2i_floor(Y3); fY4r<=f2i_floor(Y4);
+                        fXBr<=f2i_floor(XB); fYBr<=f2i_floor(YB);
+                    end
+                    if (cnt==6'd3) begin
+                        lXa<=fX1r-fXBr; lXb<=fX2r-fXBr; lXc<=fX3r-fXBr;
+                        lXd<=(Qr ? fX4r : fX1r)-fXBr;
+                        lYa<=fY1r-fYBr; lYb<=fY2r-fYBr; lYc<=fY3r-fYBr;
+                        lYd<=(Qr ? fY4r : fY1r)-fYBr;
+                    end
+                    if (cnt==6'd4) begin
+                        bxmnab<=mn2(lXa,lXb); bxmncd<=mn2(lXc,lXd);
+                        bxmxab<=mx2(lXa,lXb); bxmxcd<=mx2(lXc,lXd);
+                        bymnab<=mn2(lYa,lYb); bymncd<=mn2(lYc,lYd);
+                        bymxab<=mx2(lYa,lYb); bymxcd<=mx2(lYc,lYd);
+                    end
+                    if (cnt==6'd5) begin
+                        bxmn<=mn2(bxmnab,bxmncd); bxmx<=mx2(bxmxab,bxmxcd);
+                        bymn<=mn2(bymnab,bymncd); bymx<=mx2(bymxab,bymxcd);
+                    end
+                    if (cnt==6'd6) begin
+                        bBX0[cur_par]<=clamp5(bxmn); bBX1[cur_par]<=clamp5(bxmx+16'sd1);
+                        bBY0[cur_par]<=clamp5(bymn); bBY1[cur_par]<=clamp5(bymx+16'sd1);
+                    end
+
+                    // ---- anchors @13 (all XL/YT visible; Z1..Z3 still this triangle's) ----
+                    if (cnt==6'd13) begin
+                        // per-edge min-mag anchor: smaller max(|XL|,|YT|) of the edge's ends
+                        if (amag(XL2,YT2)<amag(XL1,YT1)) begin e1XL<=XL2;e1YT<=YT2; end
+                        else                             begin e1XL<=XL1;e1YT<=YT1; end
+                        if (amag(XL3,YT3)<amag(XL2,YT2)) begin e2XL<=XL3;e2YT<=YT3; end
+                        else                             begin e2XL<=XL2;e2YT<=YT2; end
+                        if (Qr) begin   // edge3 = v3..v4 for quads, v3..v1 for tris
+                            if (amag(XL4,YT4)<amag(XL3,YT3)) begin e3XL<=XL4;e3YT<=YT4; end
+                            else                             begin e3XL<=XL3;e3YT<=YT3; end
+                        end else begin
+                            if (amag(XL1,YT1)<amag(XL3,YT3)) begin e3XL<=XL1;e3YT<=YT1; end
+                            else                             begin e3XL<=XL3;e3YT<=YT3; end
+                        end
+                        if (amag(XL1,YT1)<amag(XL4,YT4)) begin e4XL<=XL1;e4YT<=YT1; end
+                        else                             begin e4XL<=XL4;e4YT<=YT4; end
+                        // invW plane anchor: min over v1/v2/v3 (same priority as setup_min)
+                        if (amag(XL2,YT2)<amag(XL1,YT1) && amag(XL2,YT2)<=amag(XL3,YT3)) begin
+                            aZ<=Z2; aXL<=XL2; aYT<=YT2;
+                        end else if (amag(XL3,YT3)<amag(XL1,YT1)) begin
+                            aZ<=Z3; aXL<=XL3; aYT<=YT3;
+                        end else begin
+                            aZ<=Z1; aXL<=XL1; aYT<=YT1;
+                        end
+                    end
+
+                    // ---- @14: area LIVE on a0_y -> sign, cull, sgn-FLIPPED edges (bank) ----
+                    if (cnt==6'd14) begin
+                        bSGN[cur_par] <= fpos(a0_y);
+                        begin : cb
+                          reg [1:0] cm; reg wrong;
+                          cm=ISPW[28:27];
+                          wrong=(cm[0]==1'b0&&fneg(a0_y))||(cm[0]==1'b1&&fpos(a0_y));
+                          bCULL[cur_par]<=(cm>=2'd2)&&wrong;
+                        end
+                        // sgn = -1 iff area > 0: pure sign-bit flips, NO multiplies
+                        bDX12[cur_par] <= fpos(a0_y) ? fnegf(dX1X2) : dX1X2;
+                        bDX23[cur_par] <= fpos(a0_y) ? fnegf(dX2X3) : dX2X3;
+                        bDX31[cur_par] <= fpos(a0_y) ? fnegf(dX3W)  : dX3W;
+                        bDX41[cur_par] <= Qr ? (fpos(a0_y) ? fnegf(dX41d) : dX41d) : ZERO;
+                        bDY12[cur_par] <= fpos(a0_y) ? fnegf(dY1Y2) : dY1Y2;
+                        bDY23[cur_par] <= fpos(a0_y) ? fnegf(dY2Y3) : dY2Y3;
+                        bDY31[cur_par] <= fpos(a0_y) ? fnegf(dY3W)  : dY3W;
+                        bDY41[cur_par] <= Qr ? (fpos(a0_y) ? fnegf(dY41d) : dY41d) : ZERO;
+                    end
+                    // ---- @15: top-left flags on the sgn-normalized edges ----
+                    if (cnt==6'd15) begin
+                        tl1<=istl(bDX12[cur_par],bDY12[cur_par]);
+                        tl2<=istl(bDX23[cur_par],bDY23[cur_par]);
+                        tl3<=istl(bDX31[cur_par],bDY31[cur_par]);
+                        tl4<=istl(bDX41[cur_par],bDY41[cur_par]);
                     end
                 end
-                6: begin
-                    Aa[sl]<=qb; Ba[sl]<=qc; YT2[sl]<=qd;
-                    o_sgnneg[sl] <= fpos(tri_area[sl]);
-                    sgn[sl]      <= fpos(tri_area[sl]) ? NEG1 : ONE;
-                    L0(X3[sl],ONE,XB[sl],1);           // XL3
-                    L1(Y3[sl],ONE,YB[sl],1);           // YT3
-                    cyc[sl]<=5'd7;
+
+                // ================= multiplier issue (front + tail) =================
+                m0v<=1'b0; m1v<=1'b0; m2v<=1'b0; m3v<=1'b0;
+                // @7: area products P0=(X1-X3)(Y2-Y3), P1=(Y1-Y3)(X2-X3); the X2-X3
+                //     diff lands THIS cycle -> read it LIVE off A0. [y @10]
+                if (front && cnt==6'd7) begin
+                    m0a<=dX1X3; m0b<=dY2Y3; m0v<=1'b1;
+                    m1a<=dY1Y3; m1b<=a0_y;  m1v<=1'b1;
                 end
-                7: begin
-                    // The reciprocal is a FIXED 3-cycle pipe, requested at c5. This
-                    // slot is serviced every 4 clocks, so by c7 (8 clocks after c5)
-                    // inv_reg[sl] has been valid for cycles - no wait needed.
-                    XL3[sl]<=qa; YT3[sl]<=qb;          // c6 L0/L1 results
-                    inv_area[sl]<=inv_reg[sl];
-                    L0(fneg32(Aa[sl]),inv_reg[sl],ZERO,0);   // ddx = -(Aa*inv)
-                    L1(fneg32(Ba[sl]),inv_reg[sl],ZERO,0);   // ddy = -(Ba*inv)
-                    L2(sgn[sl],d_X1X2[sl],ZERO,0);           // DX12
-                    L3(sgn[sl],d_X2X3[sl],ZERO,0);           // DX23
-                    cyc[sl]<=5'd8;
+                // @9: Aa/Ba products, negations folded into operands (sign flips only):
+                //     Aa = (z3-z1)(Y2-Y1) + (z1-z2)(Y3-Y1)
+                //     Ba = (X3-X1)(z2-z1) + (X1-X2)(z3-z1)      [y @12]
+                if (front && cnt==6'd9) begin
+                    m0a<=dZ3Z1;        m0b<=fnegf(dY1Y2); m0v<=1'b1;
+                    m1a<=fnegf(dZ2Z1); m1b<=fnegf(dY1Y3); m1v<=1'b1;
+                    m2a<=fnegf(dX1X3); m2b<=dZ2Z1;        m2v<=1'b1;
+                    m3a<=dX1X2;        m3b<=dZ3Z1;        m3v<=1'b1;
                 end
-                8: begin
-                    ddx[sl]<=qa; ddy[sl]<=qb; DX12[sl]<=qc; DX23[sl]<=qd;
-                    L0(sgn[sl],d_X3X1[sl],ZERO,0);     // DX31
-                    L1(sgn[sl],d_Y1Y2[sl],ZERO,0);     // DY12
-                    L2(sgn[sl],d_Y2Y3[sl],ZERO,0);     // DY23
-                    L3(sgn[sl],d_Y3Y1[sl],ZERO,0);     // DY31
-                    // ---- select min-magnitude anchor vertex for the invW plane c.
-                    // All XL1..3/YT1..3 are in registers now; pick the vertex whose
-                    // max(|XL|,|YT|) exponent is smallest, mux its Z/XL/YT.
-                    if (amag(XL2[sl],YT2[sl]) < amag(XL1[sl],YT1[sl]) &&
-                        amag(XL2[sl],YT2[sl]) <= amag(XL3[sl],YT3[sl])) begin
-                        aZ[sl]<=Z2[sl]; aXL[sl]<=XL2[sl]; aYT[sl]<=YT2[sl];
-                    end else if (amag(XL3[sl],YT3[sl]) < amag(XL1[sl],YT1[sl])) begin
-                        aZ[sl]<=Z3[sl]; aXL[sl]<=XL3[sl]; aYT[sl]<=YT3[sl];
-                    end else begin
-                        aZ[sl]<=Z1[sl]; aXL[sl]<=XL1[sl]; aYT[sl]<=YT1[sl];
-                    end
-                    // ---- PER-EDGE anchor: smaller-magnitude of each edge's 2 verts.
-                    // edge1 = v1..v2 : anchor v1 or v2
-                    if (amag(XL2[sl],YT2[sl]) < amag(XL1[sl],YT1[sl]))
-                         begin e1XL[sl]<=XL2[sl]; e1YT[sl]<=YT2[sl]; end
-                    else begin e1XL[sl]<=XL1[sl]; e1YT[sl]<=YT1[sl]; end
-                    // edge2 = v2..v3 : anchor v2 or v3
-                    if (amag(XL3[sl],YT3[sl]) < amag(XL2[sl],YT2[sl]))
-                         begin e2XL[sl]<=XL3[sl]; e2YT[sl]<=YT3[sl]; end
-                    else begin e2XL[sl]<=XL2[sl]; e2YT[sl]<=YT2[sl]; end
-                    // edge3 = v3..v1 : anchor v3 or v1
-                    if (amag(XL1[sl],YT1[sl]) < amag(XL3[sl],YT3[sl]))
-                         begin e3XL[sl]<=XL1[sl]; e3YT[sl]<=YT1[sl]; end
-                    else begin e3XL[sl]<=XL3[sl]; e3YT[sl]<=YT3[sl]; end
-                    cyc[sl]<=5'd9;
+                // @15: C1/C2 partials (edges 1,2)  [y @18]
+                if (front && cnt==6'd15) begin
+                    m0a<=bDY12[cur_par]; m0b<=e1XL; m0v<=1'b1;
+                    m1a<=bDX12[cur_par]; m1b<=e1YT; m1v<=1'b1;
+                    m2a<=bDY23[cur_par]; m2b<=e2XL; m2v<=1'b1;
+                    m3a<=bDX23[cur_par]; m3b<=e2YT; m3v<=1'b1;
                 end
-                9: begin
-                    DX31[sl]<=qa; DY12[sl]<=qb; DY23[sl]<=qc; DY31[sl]<=qd;
-                    L0(qb,e1XL[sl],ZERO,0);           // C1a = DY12*XL (edge1 min-mag anchor)
-                    L1(qc,e2XL[sl],ZERO,0);           // C2a = DY23*XL (edge2)
-                    L2(qd,e3XL[sl],ZERO,0);           // C3a = DY31*XL (edge3)
-                    L3(ddx[sl],aXL[sl],ZERO,0);        // ddx*XL_anchor (invW plane)
-                    cyc[sl]<=5'd10;
+                // d1 (16): C3/C4 partials (edges 3,4)  [y @19]
+                if (d[1]) begin
+                    m0a<=bDY31[dpar[1]]; m0b<=e3XL; m0v<=1'b1;
+                    m1a<=bDX31[dpar[1]]; m1b<=e3YT; m1v<=1'b1;
+                    m2a<=bDY41[dpar[1]]; m2b<=e4XL; m2v<=1'b1;
+                    m3a<=bDX41[dpar[1]]; m3b<=e4YT; m3v<=1'b1;
                 end
-                10: begin
-                    C1a[sl]<=qa; C2a[sl]<=qb; C3a[sl]<=qc; ddxXL1[sl]<=qd;
-                    tl1[sl]<=istl(DX12[sl],DY12[sl]);
-                    tl2[sl]<=istl(DX23[sl],DY23[sl]);
-                    tl3[sl]<=istl(DX31[sl],DY31[sl]);
-                    L0(fneg32(DX12[sl]),e1YT[sl],qa,0); // C1raw (edge1 min-mag anchor)
-                    L1(fneg32(DX23[sl]),e2YT[sl],qb,0); // C2raw (edge2)
-                    L2(fneg32(DX31[sl]),e3YT[sl],qc,0); // C3raw (edge3)
-                    L3(ddy[sl],aYT[sl],ZERO,0);        // ddy*YT_anchor (invW plane)
-                    cyc[sl]<=5'd11;
+                // d4 (19): ddx/ddy = -Aa*rcy / -Ba*rcy (rc_y LIVE this cycle)  [y @22]
+                if (d[4]) begin
+                    m0a<=fnegf(Aa); m0b<=rc_y; m0v<=1'b1;
+                    m1a<=fnegf(Ba); m1b<=rc_y; m1v<=1'b1;
                 end
-                11: begin
-                    ddyYT1[sl]<=qd;
-                    o_c1[sl]<= tl1[sl] ? qa : (qa - 32'd1);
-                    o_c2[sl]<= tl2[sl] ? qb : (qb - 32'd1);
-                    o_c3[sl]<= tl3[sl] ? qc : (qc - 32'd1);
-                    L3(aZ[sl],ONE,ddxXL1[sl],1);       // zc0 = z_anchor - ddx*XL_anchor
-                    cyc[sl]<=5'd12;
+                // d7 (22): c_invw partials ddx*aXL / ddy*aYT (ddx/ddy LIVE)  [y @25]
+                if (d[7]) begin
+                    ddx<=m0_y; ddy<=m1_y;
+                    m2a<=m0_y; m2b<=aXL; m2v<=1'b1;
+                    m3a<=m1_y; m3b<=aYT; m3v<=1'b1;
                 end
-                12: begin
-                    zc0[sl]<=qd;
-                    L0(qd,ONE,ddyYT1[sl],1);          // c_invw = zc0 - ddy*YT1
-                    cyc[sl]<=5'd13;
+
+                // ================= A3 issue (front + tail; slots disjoint) =================
+                a3v<=1'b0;
+                if (front && cnt==6'd12) begin a3a<=m0_y; a3b<=m1_y; a3c<=ZERO; a3v<=1'b1; end // Aa [y @17]
+                if (front && cnt==6'd13) begin a3a<=m2_y; a3b<=m3_y; a3c<=ZERO; a3v<=1'b1; end // Ba [y @18]
+                if (d[3])  begin a3a<=m0_y; a3b<=fnegf(m1_y); a3c<=ZERO; a3v<=1'b1;            // C1 [y @23]
+                                 C2a<=m2_y; C2b<=m3_y; end
+                if (d[4])  begin a3a<=m0_y; a3b<=fnegf(m1_y); a3c<=ZERO; a3v<=1'b1;            // C3 [y @24]
+                                 C4a<=m2_y; C4b<=m3_y; end
+                if (d[5])  begin a3a<=C2a; a3b<=fnegf(C2b); a3c<=ZERO; a3v<=1'b1; end          // C2 [y @25]
+                if (d[6])  begin a3a<=C4a; a3b<=fnegf(C4b); a3c<=ZERO; a3v<=1'b1; end          // C4 [y @26]
+                if (d[10]) begin a3a<=aZ; a3b<=fnegf(m2_y); a3c<=fnegf(m3_y); a3v<=1'b1; end   // c_invw [y @30]
+
+                // ---- A3 result captures ----
+                if (d[2])  Aa<=a3_y;
+                if (d[3])  Ba<=a3_y;
+                // edge constants: top-left bias = integer -1 ulp when NOT top-left
+                if (d[8])  sc_c1 <= tl1 ? a3_y : (a3_y - 32'd1);
+                if (d[9])  sc_c3 <= tl3 ? a3_y : (a3_y - 32'd1);
+                if (d[10]) sc_c2 <= tl2 ? a3_y : (a3_y - 32'd1);
+                if (d[11]) sc_c4 <= bQ[dpar[11]] ? (tl4 ? a3_y : (a3_y - 32'd1)) : ONE;
+                if (d[15]) sc_cinvw <= a3_y;
+
+                // ================= retire (d16, rel 31) =================
+                if (d[16]) begin
+                    out_valid <= 1'b1;
+                    out_tag <= bTAG[dpar[16]]; out_isp <= bISP[dpar[16]];
+                    out_pt  <= bPT [dpar[16]];
+                    sgn_neg <= bSGN[dpar[16]]; cull    <= bCULL[dpar[16]];
+                    dx12<=bDX12[dpar[16]]; dx23<=bDX23[dpar[16]];
+                    dx31<=bDX31[dpar[16]]; dx41<=bDX41[dpar[16]];
+                    dy12<=bDY12[dpar[16]]; dy23<=bDY23[dpar[16]];
+                    dy31<=bDY31[dpar[16]]; dy41<=bDY41[dpar[16]];
+                    c1<=sc_c1; c2<=sc_c2; c3<=sc_c3; c4<=sc_c4;
+                    ddx_invw<=ddx; ddy_invw<=ddy; c_invw<=sc_cinvw;
+                    bx0<=bBX0[dpar[16]]; bx1<=bBX1[dpar[16]];
+                    by0<=bBY0[dpar[16]]; by1<=bBY1[dpar[16]];
                 end
-                13: begin
-                    o_cinvw[sl]<=qa;
-                    cm=ISPW[sl][28:27]; tapos=fpos(tri_area[sl]); taneg=fneg(tri_area[sl]);
-                    wrong=(cm[0]==0&&taneg)||(cm[0]==1&&tapos);
-                    o_cull[sl]<=(cm>=2)&&wrong;
-                    cyc[sl]<=5'd14;
-                end
-                14: begin
-                    // RETIRE this slot - but ONLY if the consumer can take it. If
-                    // !out_ready, hold at c14 (slot stays busy, keeps its result) and
-                    // retry when this slot is next serviced. Never drop a triangle.
-                    if (out_ready) begin
-                        out_valid <= 1'b1;
-                        out_tag   <= TAG[sl];
-                        out_pt    <= PT[sl];
-                        out_isp   <= ISPW[sl];
-                        sgn_neg   <= o_sgnneg[sl];
-                        cull      <= o_cull[sl];
-                        // read the working regs directly (they survive un-clobbered
-                        // to retire); no separate o_* mirrors needed for these.
-                        dx12<=DX12[sl]; dx23<=DX23[sl]; dx31<=DX31[sl]; dx41<=ZERO;
-                        dy12<=DY12[sl]; dy23<=DY23[sl]; dy31<=DY31[sl]; dy41<=ZERO;
-                        c1<=o_c1[sl]; c2<=o_c2[sl]; c3<=o_c3[sl]; c4<=ONE;
-                        ddx_invw<=ddx[sl]; ddy_invw<=ddy[sl]; c_invw<=o_cinvw[sl];
-                        bx0<=o_bx0[sl]; bx1<=o_bx1[sl];
-                        by0<=o_by0[sl]; by1<=o_by1[sl];
-                        slot_busy[sl] <= 1'b0;
-                    end
-                    // else: stay at cyc[sl]==14, slot_busy stays 1 -> retry next turn
-                end
-                default: slot_busy[sl] <= 1'b0;
-                endcase
             end
         end
     end
-
-    // (bbox is now pipelined per-slot at cyc 1..3 above and copied out at retire;
-    //  the old combinational bbox cloud on the retiring slot's vertices was removed.)
 endmodule

@@ -1,0 +1,20 @@
+# --------------------------------------------------------------------------
+# timming_isp_setup_streamed - isolated fileset for the whole-unit
+# isp_setup_streamed perf harness. Paths are relative to this project dir
+# (timming_tests/timming_isp_setup_streamed/), pointing up into ../../rtl.
+#
+# The rewritten isp_setup_streamed runs on the streaming registered-output FP
+# family (SAME units as tsp_setup_stream): mul16/add24/add3_24 spp_ro + the
+# fast reciprocal. The old mac16/fp_rcp_fast combinational path is no longer
+# instantiated by it.
+# --------------------------------------------------------------------------
+
+# ---- streaming registered-output FP datapath ----
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/isp_min/fp_mul16_spp_ro.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/isp_min/fp_add24_spp_ro.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/isp_min/fp_add3_24_spp_ro.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/isp_min/fp_rcp_faster.sv
+
+# ---- DUT + harness ----
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/isp_min/isp_setup_streamed.sv
+set_global_assignment -name SYSTEMVERILOG_FILE timming_isp_setup_streamed.sv
