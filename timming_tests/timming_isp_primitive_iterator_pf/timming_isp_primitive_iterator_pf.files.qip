@@ -1,0 +1,12 @@
+# --------------------------------------------------------------------------
+# timming_isp_primitive_iterator_pf - isolated fileset for the prefetching
+# entry->triangle iterator perf harness. Paths are relative to this project dir,
+# pointing up into ../../rtl.
+# --------------------------------------------------------------------------
+
+# ---- tsp package (structs) MUST come first ----
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/tsp/tsp_pkg.sv
+
+# ---- DUT + harness ----
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/tsp/isp_primitive_iterator_pf.sv
+set_global_assignment -name SYSTEMVERILOG_FILE timming_isp_primitive_iterator_pf.sv

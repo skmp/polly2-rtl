@@ -75,8 +75,7 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
     wire       ex_two_vol   = ex_shadow & ~intensity_shadow;
     wire [4:0] ex_stride_w  = 5'd3 + ex_skip * (ex_two_vol ? 5'd2 : 5'd1);
     wire [4:0] ex_hdr_words = ex_two_vol ? 5'd5 : 5'd3;
-    wire [26:0] ex_rec_bytes = {22'b0, ex_hdr_words, 2'b00} + 27'd3 * {ex_stride_w, 2'b00};
-    wire [20:0] ex_rec_words = ex_rec_bytes[22:2];
+    // (rec_bytes/rec_words are now computed in the staged exg_* pipeline below)
     // For a STRIP, read only up to the LAST vertex any enabled triangle needs, not
     // all 8. Triangle i (mask[5-i]) uses verts i,i+1,i+2; the highest enabled i =
     // 5 - (lowest set bit of mask), so verts needed = (5-lsb)+3 = 8-lsb. (Array
@@ -92,12 +91,33 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
             default:   lsb6 = 3'd5;   // mask==0 (no tris): read minimal (3 verts)
         endcase
     endfunction
-    // ex_-sourced record span (mirrors the old combinational rd_span_vw but from the
-    // ex_* latch sources) so it can be registered into rd_span_r at record start.
     wire [3:0] ex_strip_nv = 4'd8 - {1'b0, lsb6(ex_mask)};   // 3..8
     wire [3:0] ex_nverts   = ex_array ? 4'd3 : ex_strip_nv;
-    wire [8:0] ex_span_vw  = {4'b0, ex_hdr_words}
-                           + ({5'b0,(ex_nverts-4'd1)} * {4'b0, ex_stride_w}) + 9'd3;
+
+    // ---- per-ENTRY geometry pre-computation (2 shallow stages) ----
+    // The record geometry (stride/hdr/span/rec_bytes/rec_words) is CONSTANT for the
+    // whole entry (shadow/skip/mask/array never change between an array entry's
+    // records), but computing it combinationally at the record-start latch put the
+    // whole ex_shadow -> stride-mux -> (nverts-1)*stride multiply cone (plus the
+    // parallel 3*stride rec_bytes multiply) into that one cycle - the ~15ns
+    // ex_shadow -> rd_span_r Fmax violator. Split it per ENTRY instead:
+    //   E+1 (exg_s1_v): register the shallow terms (stride, hdr, nverts-1) off ex_*.
+    //   E+2 (exg_v)   : register the products (span, rec_bytes, rec_words) off the
+    //                   STAGE-1 REGISTERS - each multiply gets its own clean cycle.
+    // Record start then copies plain registers (no logic). Costs +2 cycles per
+    // entry, amortized over all its records.
+    reg        exg_s1_v, exg_v;
+    reg [4:0]  exg_stride_r, exg_hdr_r;
+    reg [3:0]  exg_nm1_r;                       // nverts - 1
+    reg [8:0]  exg_span_r;
+    reg [26:0] exg_recb_r;
+    reg [20:0] exg_recw_r;
+    // stage-2 combinational (from stage-1 registers; same expressions/widths as the
+    // old ex_span_vw / ex_rec_bytes / ex_rec_words, only the sources changed)
+    wire [8:0]  exg_span_c = {4'b0, exg_hdr_r}
+                           + ({5'b0, exg_nm1_r} * {4'b0, exg_stride_r}) + 9'd3;
+    wire [26:0] exg_recb_c = {22'b0, exg_hdr_r, 2'b00} + 27'd3 * {exg_stride_r, 2'b00};
+    wire [20:0] exg_recw_c = exg_recb_c[22:2];
 
     // outstanding-record bookkeeping: reader has fetched (or is fetching) records
     // that emit has not yet finished. flush + none-outstanding + reader idle -> done.
@@ -198,6 +218,7 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
         if (reset) begin
             rst<=R_IDLE; est<=E_IDLE; dreq_rd_r<=0; entry_ack<=0;
             rd_buf<=0; em_buf<=0; ex_active<=0; outstanding<=0;
+            exg_s1_v<=0; exg_v<=0;
             b_ready[0]<=0; b_ready[1]<=0; b_done[0]<=0; b_done[1]<=0;
             tri_ready_r<=0;
         end else begin
@@ -221,8 +242,22 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
                         ex_po     <= entry.param_offs_in_words;
                         ex_base   <= param_base + {entry.param_offs_in_words, 2'b00};
                         ex_count  <= (entry_type != ENT_STRIP) ? entry.count : 5'd1;
+                        exg_s1_v  <= 1'b0;     // geometry pipeline restarts for this entry
+                        exg_v     <= 1'b0;
                         entry_ack <= 1'b1;     // consume it; producer advances
                     end
+                end else if (!exg_s1_v) begin
+                    // entry geometry, stage 1: the shallow terms off the ex_* latches
+                    exg_stride_r <= ex_stride_w;
+                    exg_hdr_r    <= ex_hdr_words;
+                    exg_nm1_r    <= ex_nverts - 4'd1;
+                    exg_s1_v     <= 1'b1;
+                end else if (!exg_v) begin
+                    // entry geometry, stage 2: the products, off the stage-1 REGISTERS
+                    exg_span_r <= exg_span_c;
+                    exg_recb_r <= exg_recb_c;
+                    exg_recw_r <= exg_recw_c;
+                    exg_v      <= 1'b1;
                 end else if (!b_ready[rd_buf]) begin
                     // start the next record of the current entry into rd_buf
                     rd_base   <= ex_base;
@@ -231,14 +266,14 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
                     rd_mask   <= ex_mask;
                     rd_po     <= ex_po;
                     rd_array  <= ex_array;
-                    // register the record geometry (constant for the whole record)
-                    // so the per-beat comparator / stepping never re-derive it from
-                    // rd_shadow through a multiply.
-                    rd_span_r      <= ex_span_vw;
-                    rd_hdr_r       <= ex_hdr_words;
-                    rd_stride_r    <= ex_stride_w;
-                    rd_rec_bytes_r <= ex_rec_bytes;
-                    rd_rec_words_r <= ex_rec_words;
+                    // record geometry: plain register-to-register copies of the
+                    // per-entry pre-computed values (no logic in this latch - the
+                    // ex_shadow -> multiply cone was the Fmax violator here).
+                    rd_span_r      <= exg_span_r;
+                    rd_hdr_r       <= exg_hdr_r;
+                    rd_stride_r    <= exg_stride_r;
+                    rd_rec_bytes_r <= exg_recb_r;
+                    rd_rec_words_r <= exg_recw_r;
                     rst       <= R_REQ;
                 end
             end
