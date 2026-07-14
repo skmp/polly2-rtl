@@ -234,6 +234,11 @@ package tsp_pkg;
         logic          triangle_ready;   // LEVEL: a triangle's 3 vertices are stable
         logic [31:0]   isp;              // record's ISP_TSP word (Cull/Depth/ZWrite etc)
         xyz_t          v0, v1, v2;       // the triangle's 3 vertices (XYZ only)
+        logic          quad;             // 1: ENT_QUAD record - v3x/v3y hold the 4th
+                                         // vertex (edges become 12/23/34/41). The 4th
+                                         // vertex's Z is never used (refsw2 PlaneStepper3
+                                         // takes v0..v2 only), so it is not carried.
+        logic [31:0]   v3x, v3y;         // 4th vertex X/Y (valid when quad)
         core_tag_t     tag;              // this triangle's CoreTag (CoreTagFromDesc:
                                          // isp.CacheBypass/shadow/skip/param_offs + i)
         logic          is_pt;            // list-membership: this triangle came from the PT

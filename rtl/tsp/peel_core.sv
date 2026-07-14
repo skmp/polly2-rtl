@@ -285,9 +285,11 @@ module peel_core import tsp_pkg::*; (
         .clk(clk), .reset(reset),
         .in_valid(su_in_valid), .in_ready(su_in_ready),
         .isp_word(fq_out[FF_ISP +:32]), .in_tag(fq_out[FF_TAG +:32]), .in_pt(fq_out[FF_PT]),
+        .quad(fq_out[FF_QUAD]),
         .x1(fq_out[FF_X1 +:32]), .y1(fq_out[FF_Y1 +:32]), .z1(fq_out[FF_Z1 +:32]),
         .x2(fq_out[FF_X2 +:32]), .y2(fq_out[FF_Y2 +:32]), .z2(fq_out[FF_Z2 +:32]),
         .x3(fq_out[FF_X3 +:32]), .y3(fq_out[FF_Y3 +:32]), .z3(fq_out[FF_Z3 +:32]),
+        .x4(fq_out[FF_X4 +:32]), .y4(fq_out[FF_Y4 +:32]),
         .xbase(t_xbase), .ybase(t_ybase),
         .busy(su_busy),
         .out_ready(!pq_full),
@@ -924,12 +926,14 @@ module peel_core import tsp_pkg::*; (
     // head. Push into the slot being (re)loaded is BYPASSED from the write data, since
     // no_rw_check M10K returns OLD data on a same-address same-cycle read+write.
     localparam integer FIFO_N = 8;
-    localparam integer FQ_W = 353;   // 11 * 32 + 1 (is_pt)
+    localparam integer FQ_W = 418;   // 13 * 32 + 1 (is_pt) + 1 (quad)
     localparam integer FF_ISP=0,  FF_TAG=32,
                        FF_X1=64,  FF_Y1=96,  FF_Z1=128,
                        FF_X2=160, FF_Y2=192, FF_Z2=224,
                        FF_X3=256, FF_Y3=288, FF_Z3=320,
-                       FF_PT=352;    // list-kind (PT) bit
+                       FF_PT=352,    // list-kind (PT) bit
+                       FF_X4=353, FF_Y4=385,   // QUAD 4th vertex (X/Y only, no Z)
+                       FF_QUAD=417;  // 1 = quad record (v4/edge-41 path active)
     (* ramstyle = "M10K, no_rw_check" *) reg [FQ_W-1:0] fq_ram [0:FIFO_N-1];
     reg [FQ_W-1:0] fq_out;         // registered head entry (FWFT output register)
     reg            fq_out_valid;   // fq_out holds a valid head entry
@@ -947,6 +951,8 @@ module peel_core import tsp_pkg::*; (
     assign fq_wrw[FF_Z2  +:32] = it_trio.v1.z;
     assign fq_wrw[FF_X3  +:32] = it_trio.v2.x; assign fq_wrw[FF_Y3 +:32] = it_trio.v2.y;
     assign fq_wrw[FF_Z3  +:32] = it_trio.v2.z;
+    assign fq_wrw[FF_X4  +:32] = it_trio.v3x;  assign fq_wrw[FF_Y4 +:32] = it_trio.v3y;
+    assign fq_wrw[FF_QUAD]     = it_trio.quad;
     wire fq_full  = (fq_count == FIFO_N);
     wire fq_empty = (fq_count == 0);
 
@@ -1608,18 +1614,15 @@ module peel_core import tsp_pkg::*; (
                     end
                 end
                 else if (ol_prim.entry_ready && !ol_ack.entry_done) begin
-                    if (ol_prim.entry_type == ENT_STRIP ||
-                        ol_prim.entry_type == ENT_TRI) begin
-                        if (!eq_full) begin
-                            eq_etype[eq_tail[2:0]] <= ol_prim.entry_type;
-                            eq_entry[eq_tail[2:0]] <= ol_prim.entry;
-                            eq_ispt [eq_tail[2:0]] <= (peel_which==1'b0);  // list-kind tag
-                            eq_tail <= (eq_tail==EQ_N-1) ? 4'd0 : eq_tail+4'd1;
-                            eq_push = 1'b1;
-                            ol_ack.entry_done <= 1'b1;
-                        end
-                    end else begin
-                        ol_ack.entry_done <= 1'b1;   // quad: skip (ack, don't queue)
+                    // strips, tri arrays AND quad arrays all queue to the iterator
+                    // (quads used to be ack-and-dropped here - sprite geometry vanished)
+                    if (!eq_full) begin
+                        eq_etype[eq_tail[2:0]] <= ol_prim.entry_type;
+                        eq_entry[eq_tail[2:0]] <= ol_prim.entry;
+                        eq_ispt [eq_tail[2:0]] <= (peel_which==1'b0);  // list-kind tag
+                        eq_tail <= (eq_tail==EQ_N-1) ? 4'd0 : eq_tail+4'd1;
+                        eq_push = 1'b1;
+                        ol_ack.entry_done <= 1'b1;
                     end
                 end
             end

@@ -29,7 +29,7 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
 
     // streaming entry input
     input                  entry_valid,      // an entry is available
-    input      entry_type_e    entry_type,   // ENT_STRIP or ENT_TRI
+    input      entry_type_e    entry_type,   // ENT_STRIP / ENT_TRI / ENT_QUAD
     input      objlist_entry_t entry,        // mask (STRIP) / count (ARRAY)
     input                  entry_pt,         // list-kind: this entry is from the PT list
                                              // (carried through to trio.is_pt per-triangle)
@@ -57,6 +57,7 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
     reg        b_shadow[0:1];
     reg [20:0] b_po    [0:1];          // param_offs_in_words of this record
     reg        b_array [0:1];          // 1 = array record (tag_offset 0), 0 = strip
+    reg        b_quad  [0:1];          // 1 = QUAD array record (4 verts, -> trio.quad)
     reg [3:0]  b_nfill [0:1];          // vertices captured (Z landed)
     reg        b_ready [0:1];          // buffer holds a complete/streaming record
     reg        b_done  [0:1];          // buffer's burst fully read (all verts in)
@@ -67,6 +68,7 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
     // being expanded by the READER (independent of what emit is draining).
     reg        ex_active;              // an entry is being expanded by the reader
     reg        ex_array;
+    reg        ex_quad;                // array entry is a QUAD array (4 verts/record)
     reg [2:0]  ex_skip;   reg ex_shadow;   reg [5:0] ex_mask;
     reg        ex_ispt;                // list-kind of the entry being expanded
     reg [20:0] ex_po;                  // running param_offs of the next record
@@ -92,7 +94,7 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
         endcase
     endfunction
     wire [3:0] ex_strip_nv = 4'd8 - {1'b0, lsb6(ex_mask)};   // 3..8
-    wire [3:0] ex_nverts   = ex_array ? 4'd3 : ex_strip_nv;
+    wire [3:0] ex_nverts   = ex_array ? (ex_quad ? 4'd4 : 4'd3) : ex_strip_nv;
 
     // ---- per-ENTRY geometry pre-computation (2 shallow stages) ----
     // The record geometry (stride/hdr/span/rec_bytes/rec_words) is CONSTANT for the
@@ -113,10 +115,15 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
     reg [26:0] exg_recb_r;
     reg [20:0] exg_recw_r;
     // stage-2 combinational (from stage-1 registers; same expressions/widths as the
-    // old ex_span_vw / ex_rec_bytes / ex_rec_words, only the sources changed)
-    wire [8:0]  exg_span_c = {4'b0, exg_hdr_r}
-                           + ({5'b0, exg_nm1_r} * {4'b0, exg_stride_r}) + 9'd3;
-    wire [26:0] exg_recb_c = {22'b0, exg_hdr_r, 2'b00} + 27'd3 * {exg_stride_r, 2'b00};
+    // old ex_span_vw / ex_rec_bytes / ex_rec_words, only the sources changed).
+    // rec_bytes = (hdr + nverts*stride)*4 with nverts*stride = nm1*stride + stride,
+    // sharing the one nm1*stride product with the span (was a hard-coded 3*stride,
+    // wrong for QUAD arrays which carry 4 vertices per record).
+    wire [8:0]  exg_nvs_c  = {5'b0, exg_nm1_r} * {4'b0, exg_stride_r};   // (nverts-1)*stride
+    wire [8:0]  exg_span_c = {4'b0, exg_hdr_r} + exg_nvs_c + 9'd3;
+    wire [26:0] exg_recb_c = {22'b0, exg_hdr_r, 2'b00}
+                           + {16'b0, exg_nvs_c, 2'b00}
+                           + {20'b0, exg_stride_r, 2'b00};
     wire [20:0] exg_recw_c = exg_recb_c[22:2];
 
     // outstanding-record bookkeeping: reader has fetched (or is fetching) records
@@ -131,7 +138,7 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
     reg        rd_buf;                 // buffer the reader is filling
     // geometry of the record currently being READ (latched when reader starts it)
     reg [26:0] rd_base;   reg [2:0] rd_skip;  reg rd_shadow; reg [5:0] rd_mask;
-    reg [20:0] rd_po;     reg rd_array;
+    reg [20:0] rd_po;     reg rd_array;      reg rd_quad;
     // Record geometry (span/header/stride) is CONSTANT for the whole record and
     // depends only on the latched shadow/skip/mask/array. Computing the span
     // combinationally (it has a multiply) used to feed the per-beat
@@ -188,6 +195,11 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
     assign trio.isp            = b_isp[em_buf];
     assign trio.is_pt          = b_pt[em_buf];
     assign trio.v0 = v0_r; assign trio.v1 = v1_r; assign trio.v2 = v2_r;
+    // QUAD 4th vertex: read straight off the presented buffer (stable while
+    // b_ready, like b_isp; only meaningful when trio.quad). Its Z is never used.
+    assign trio.quad = b_quad[em_buf];
+    assign trio.v3x  = vslot[em_buf][3].x;
+    assign trio.v3y  = vslot[em_buf][3].y;
     assign trio.tag            = tag_r;
     assign trio.prim_done      = 1'b0;   // not used by isp_core-pf path (drained instead)
 
@@ -235,6 +247,7 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
                     if (entry_valid && !b_ready[rd_buf]) begin
                         ex_active <= 1'b1;
                         ex_array  <= (entry_type != ENT_STRIP);
+                        ex_quad   <= (entry_type == ENT_QUAD);
                         ex_skip   <= entry.skip;
                         ex_shadow <= entry.shadow;
                         ex_ispt   <= entry_pt;      // list-kind, held for all this entry's records
@@ -266,6 +279,7 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
                     rd_mask   <= ex_mask;
                     rd_po     <= ex_po;
                     rd_array  <= ex_array;
+                    rd_quad   <= ex_quad;
                     // record geometry: plain register-to-register copies of the
                     // per-entry pre-computed values (no logic in this latch - the
                     // ex_shadow -> multiply cone was the Fmax violator here).
@@ -323,6 +337,7 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
                     b_pt   [rd_buf] <= ex_ispt;  // list-kind constant across an entry's records
                     b_po   [rd_buf] <= rd_po;
                     b_array[rd_buf] <= rd_array;
+                    b_quad [rd_buf] <= rd_quad;
                     b_done [rd_buf] <= 1'b1;
                     b_ready[rd_buf] <= 1'b1;
                     rd_buf          <= ~rd_buf;
@@ -366,7 +381,9 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
             end
             E_PRESENT: begin
                 if (b_array[em_buf] && !tri_ready_r) begin
-                    if (b_nfill[em_buf] >= 4'd3) begin
+                    // quad records carry 4 vertices - wait for all of them (trio.v3x/y
+                    // are read live off vslot[3], which must have landed)
+                    if (b_nfill[em_buf] >= (b_quad[em_buf] ? 4'd4 : 4'd3)) begin
                         v0_r<=vslot[em_buf][0]; v1_r<=vslot[em_buf][1]; v2_r<=vslot[em_buf][2];
                         tag_r<=mk_tag(b_isp[em_buf][ISP_CACHEBYPASS_BIT], b_shadow[em_buf],
                                       b_skip[em_buf], b_po[em_buf], 3'd0);

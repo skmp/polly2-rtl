@@ -240,6 +240,8 @@ module isp_core import tsp_pkg::*; (
         .clk(clk), .reset(reset),
         .in_valid(su_in_valid), .in_ready(su_in_ready),
         .isp_word(fq_isp[fq_head[2:0]]), .in_tag(fq_tag[fq_head[2:0]]), .in_pt(1'b0),
+        .quad(fq_quad[fq_head[2:0]]),
+        .x4(fq_x4[fq_head[2:0]]), .y4(fq_y4[fq_head[2:0]]),
         .x1(fq_x1[fq_head[2:0]]), .y1(fq_y1[fq_head[2:0]]), .z1(fq_z1[fq_head[2:0]]),
         .x2(fq_x2[fq_head[2:0]]), .y2(fq_y2[fq_head[2:0]]), .z2(fq_z2[fq_head[2:0]]),
         .x3(fq_x3[fq_head[2:0]]), .y3(fq_y3[fq_head[2:0]]), .z3(fq_z3[fq_head[2:0]]),
@@ -352,6 +354,8 @@ module isp_core import tsp_pkg::*; (
     reg [31:0] fq_x1[0:FIFO_N-1], fq_y1[0:FIFO_N-1], fq_z1[0:FIFO_N-1];
     reg [31:0] fq_x2[0:FIFO_N-1], fq_y2[0:FIFO_N-1], fq_z2[0:FIFO_N-1];
     reg [31:0] fq_x3[0:FIFO_N-1], fq_y3[0:FIFO_N-1], fq_z3[0:FIFO_N-1];
+    reg [31:0] fq_x4[0:FIFO_N-1], fq_y4[0:FIFO_N-1];   // QUAD 4th vertex (X/Y only)
+    reg        fq_quad[0:FIFO_N-1];                     // 1 = quad record
     reg [3:0]  fq_head, fq_tail;
     reg [4:0]  fq_count;
     reg        fifo_push, fifo_pop;
@@ -589,22 +593,18 @@ module isp_core import tsp_pkg::*; (
                 // iterator finishes what's queued in eq (observed via !it_pf_busy).
                 if (ol_done) st <= S_DRAIN;
                 else if (ol_prim.entry_ready && !ol_ack.entry_done) begin
-                    if (ol_prim.entry_type == ENT_STRIP ||
-                        ol_prim.entry_type == ENT_TRI) begin
-                        if (!eq_full) begin
-                            eq_etype[eq_tail[2:0]] <= ol_prim.entry_type;
-                            eq_entry[eq_tail[2:0]] <= ol_prim.entry;
-                            eq_tail <= (eq_tail==EQ_N-1) ? 4'd0 : eq_tail+4'd1;
-                            eq_push = 1'b1;
-                            ol_ack.entry_done <= 1'b1;
-                            // DEBUG (disabled): one line per object-list entry read.
-                            // $display("[OLREAD] tile=%0d,%0d type=%0d param_offs=%0h skip=%0d shadow=%0d mask=%02h count=%0d",
-                            //     cur_tx, cur_ty, ol_prim.entry_type,
-                            //     ol_prim.entry.param_offs_in_words, ol_prim.entry.skip,
-                            //     ol_prim.entry.shadow, ol_prim.entry.mask, ol_prim.entry.count);
-                        end
-                    end else begin
-                        ol_ack.entry_done <= 1'b1;   // quad: skip
+                    // strips, tri arrays AND quad arrays all queue to the iterator
+                    if (!eq_full) begin
+                        eq_etype[eq_tail[2:0]] <= ol_prim.entry_type;
+                        eq_entry[eq_tail[2:0]] <= ol_prim.entry;
+                        eq_tail <= (eq_tail==EQ_N-1) ? 4'd0 : eq_tail+4'd1;
+                        eq_push = 1'b1;
+                        ol_ack.entry_done <= 1'b1;
+                        // DEBUG (disabled): one line per object-list entry read.
+                        // $display("[OLREAD] tile=%0d,%0d type=%0d param_offs=%0h skip=%0d shadow=%0d mask=%02h count=%0d",
+                        //     cur_tx, cur_ty, ol_prim.entry_type,
+                        //     ol_prim.entry.param_offs_in_words, ol_prim.entry.skip,
+                        //     ol_prim.entry.shadow, ol_prim.entry.mask, ol_prim.entry.count);
                     end
                 end
             end
@@ -749,6 +749,8 @@ module isp_core import tsp_pkg::*; (
                 fq_x1[fq_tail[2:0]]<=it_trio.v0.x; fq_y1[fq_tail[2:0]]<=it_trio.v0.y; fq_z1[fq_tail[2:0]]<=it_trio.v0.z;
                 fq_x2[fq_tail[2:0]]<=it_trio.v1.x; fq_y2[fq_tail[2:0]]<=it_trio.v1.y; fq_z2[fq_tail[2:0]]<=it_trio.v1.z;
                 fq_x3[fq_tail[2:0]]<=it_trio.v2.x; fq_y3[fq_tail[2:0]]<=it_trio.v2.y; fq_z3[fq_tail[2:0]]<=it_trio.v2.z;
+                fq_x4[fq_tail[2:0]]<=it_trio.v3x;  fq_y4[fq_tail[2:0]]<=it_trio.v3y;
+                fq_quad[fq_tail[2:0]]<=it_trio.quad;
                 it_ack.triangle_done <= 1'b1;
                 fq_tail  <= (fq_tail==FIFO_N-1) ? 4'd0 : fq_tail+4'd1;
                 fifo_push = 1'b1;

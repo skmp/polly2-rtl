@@ -1,0 +1,16 @@
+# --------------------------------------------------------------------------
+# timming_isp_raster_line - isolated fileset for the whole-unit isp_raster_line
+# perf harness. Paths are relative to this project dir
+# (timming_tests/timming_isp_raster_line/), pointing up into ../../rtl.
+#
+# isp_raster_line only depends on fp_mul_i5 and the split fp_add24_s1/s2
+# (both stages live in fp_add24.sv).
+# --------------------------------------------------------------------------
+
+# ---- FP datapath ----
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/isp_min/fp_mul_i5.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/isp_min/fp_add24.sv
+
+# ---- DUT + harness ----
+set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/isp_min/isp_raster_line.sv
+set_global_assignment -name SYSTEMVERILOG_FILE timming_isp_raster_line.sv
