@@ -23,8 +23,13 @@
 //                      a miss extends by the fill time but the SAME request is served.
 //
 // M10K: line DATA is held in FOUR full copies (data0..data3), one registered-read block
-// RAM per port, so 4 parallel reads map to M10K on Cyclone V. Fills write all four copies
-// + the shared-shape per-copy tag/valid so the copies stay identical.
+// RAM per port, so 4 parallel reads map to M10K on Cyclone V. A fill BROADCASTS the
+// line into every copy it safely can (idle ports, ports on the same line, ports whose
+// frozen line lives at a DIFFERENT index) - bilinear corners rotate roles between
+// adjacent samples, so a line fetched for one corner is the next sample's other corner
+// and broadcasting saves that re-miss. The ONE copy a fill must skip: a port frozen on
+// a DIFFERENT line at the SAME index (alias) - overwriting it is the eviction ping-pong
+// that livelocked the group-atomic protocol (see the alias-livelock note at m_wport).
 //
 // PROTOCOL per port i:
 //   creq[i].req    : client wants to issue creq[i].waddr this cycle
@@ -152,12 +157,14 @@ module tex_cache_4p_1c import tsp_pkg::*; (
     reg [LAW-1:0]  m_line; reg [IXW-1:0] m_ix; reg [TAGW-1:0] m_tag;
     reg [1:0]      m_beat; reg [255:0] m_acc;
     wire [28:0] m_base = {m_line, 2'b00};
-    // Per-port copy WRITE-ENABLE for this fill: only the port copies whose frozen
-    // request is for the line being filled (m_line) are updated. This is the fix for
-    // the direct-mapped ALIAS livelock: two frozen corners on different lines that map
-    // to the SAME index no longer evict each other - each port's private copy keeps its
-    // own corner, so the group can reach group_ready. (The 4 copies were previously kept
-    // identical, which turned a natural 4-way capacity into a 1-way collision.)
+    // Per-port copy WRITE-ENABLE for this fill: BROADCAST to every copy EXCEPT one
+    // whose port is frozen on a DIFFERENT line at the SAME index. Writing that copy is
+    // the direct-mapped ALIAS livelock: two frozen corners on aliasing lines evict each
+    // other forever and the group never reaches group_ready. Skipping exactly that case
+    // keeps the livelock proof (a frozen port's resident line is never displaced within
+    // its own group, so each fill strictly shrinks the missing set); broadcasting the
+    // rest (idle ports, same-line ports, different-index ports) shares one DDR fill
+    // across all four corner copies instead of each corner re-missing the same line.
     reg [3:0]      m_wport;
 
     // lowest-index REPLY-stage port that MISSED. fm[2]=1 => none.
@@ -222,14 +229,16 @@ module tex_cache_4p_1c import tsp_pkg::*; (
                     m_ix   <= t_line[fm[1:0]][IXW-1:0];
                     m_tag  <= t_line[fm[1:0]][LAW-1:IXW];
                     m_beat <= 2'd0;
-                    // write-enable exactly the port copies that MISSED on this same line
-                    // (a hitting port isn't rewritten; a port on a different line keeps
-                    // its own copy -> no alias eviction). Ports missing a DIFFERENT line
-                    // stay missing and drive the next fill after the retest.
+                    // write-enable every copy except an ALIASED frozen port: skip copy k
+                    // only when port k is frozen on a different line at the same index
+                    // (writing it would evict what k is waiting for/holding). Ports
+                    // missing a DIFFERENT line stay missing and drive the next fill
+                    // after the retest.
                     for (k=0;k<4;k=k+1) begin
                         retest_ix[k] <= t_line[k][IXW-1:0];    // keep ALL t_v (group waits)
-                        m_wport[k]   <= t_v[k] && !t_hit[k] &&
-                                        (t_line[k] == t_line[fm[1:0]]);
+                        m_wport[k]   <= !t_v[k]
+                                     || (t_line[k] == t_line[fm[1:0]])
+                                     || (t_line[k][IXW-1:0] != t_line[fm[1:0]][IXW-1:0]);
                     end
                     st <= S_MISS;
                 end else begin
@@ -253,9 +262,10 @@ module tex_cache_4p_1c import tsp_pkg::*; (
             S_FILL: if (dresp.dready) begin
                 m_acc[64*m_beat +: 64] <= dresp.dout;
                 if (m_beat == 2'd3) begin
-                    // write ONLY the port copies that requested this line (m_wport). A
-                    // port on a different line keeps its own resident copy -> aliasing
-                    // corners coexist and the group can reach group_ready.
+                    // broadcast to all copies m_wport allows (everything except an
+                    // aliased frozen port) - aliasing corners still coexist and the
+                    // group can reach group_ready, but idle/other-index copies pick
+                    // the line up for free.
                     if (m_wport[0]) begin data0[m_ix] <= { dresp.dout, m_acc[191:0] }; meta0[m_ix] <= {1'b1, m_tag}; end
                     if (m_wport[1]) begin data1[m_ix] <= { dresp.dout, m_acc[191:0] }; meta1[m_ix] <= {1'b1, m_tag}; end
                     if (m_wport[2]) begin data2[m_ix] <= { dresp.dout, m_acc[191:0] }; meta2[m_ix] <= {1'b1, m_tag}; end
