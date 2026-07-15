@@ -312,9 +312,11 @@ module isp_core import tsp_pkg::*; (
     generate
         for (gd = 0; gd < RAS_LANES; gd = gd + 1) begin : dcmp
             isp_depth_cmp u_cmp (
+                .peel(1'b0), .tag(32'h0), .zb2(32'h0), .pb(32'h0), .pb2(32'h0),
+                .valid(1'b0), .more(),
                 .mode(b_mode),
                 .nw  (b_invw[32*gd +: 32]),
-                .ob  (tr_rdata[TR_W*gd + 32 +: 32]),   // old depth (high half)
+                .zb  (tr_rdata[TR_W*gd + 32 +: 32]),   // old depth (high half)
                 .pass(ras_pass[gd]));
         end
     endgenerate

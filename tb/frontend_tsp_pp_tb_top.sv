@@ -316,8 +316,10 @@ module frontend_tsp_pp_tb_top import tsp_pkg::*; (
     generate
       for (gi_tex = 0; gi_tex < RAS_LANES; gi_tex = gi_tex + 1) begin : dcmp
         isp_depth_cmp u_cmp (.mode(depth_mode),
+            .peel(1'b0), .tag(32'h0), .zb2(32'h0), .pb(32'h0), .pb2(32'h0),
+            .valid(1'b0), .more(),
             .nw(ras_invw_flat[32*gi_tex +: 32]),
-            .ob(dt_depth[slot_isp][{ras_oy, ras_ox + 5'(gi_tex)}]),.pass(ras_pass[gi_tex]));
+            .zb(dt_depth[slot_isp][{ras_oy, ras_ox + 5'(gi_tex)}]),.pass(ras_pass[gi_tex]));
       end
     endgenerate
 

@@ -88,7 +88,6 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/tex_unit.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/tsp_shade_v2_pp.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/tsp_blend.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/isp_min/isp_depth_cmp.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/isp_min/isp_depth_cmp_lp.sv
 # Banked-M10K tile buffers for peel_core, each owning its RAM ports and enforcing
 # the access pattern via typed per-client ports. peel_tile_buffer packs the five
 # peel depth/tag buffers into a 129b x 8-bank tile_ram and owns the depth compare +

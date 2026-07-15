@@ -129,16 +129,13 @@ module peel_tile_buffer import tsp_pkg::*; #(
     // -------------------- internal depth compare (stage B) --------------------
     // Runs off the read-back chunk (rdata = the chunk stage A read last cycle) using
     // the latched b_* fragment fields.
-    wire [NB-1:0] ras_pass_op, ras_pass_lp, ras_more_lp;
+    wire [NB-1:0] ras_pass, ras_more;
     genvar gd;
     generate
         for (gd = 0; gd < NB; gd = gd + 1) begin : dcmp
             isp_depth_cmp u_cmp (
-                .mode(b_mode),
-                .nw  (b_invw[32*gd +: 32]),
-                .ob  (f_depth(rdata, gd)),
-                .pass(ras_pass_op[gd]));
-            isp_depth_cmp_lp u_cmp_lp (
+                .peel (b_peeling),
+                .mode (b_mode),
                 .nw   (b_invw[32*gd +: 32]),
                 .tag  (b_tag),
                 .zb   (f_depth (rdata, gd)),
@@ -146,19 +143,20 @@ module peel_tile_buffer import tsp_pkg::*; #(
                 .pb   (f_tag   (rdata, gd)),
                 .pb2  (f_tag2  (rdata, gd)),
                 .valid(f_valid (rdata, gd)),
-                .pass (ras_pass_lp[gd]),
-                .more (ras_more_lp[gd]));
+                .pass (ras_pass[gd]),
+                .more (ras_more[gd]));
             assign b_oldtag[32*gd +: 32] = f_tag(rdata, gd);
         end
     endgenerate
     // peel accept / more are only meaningful on peeling lanes that are inside
-    assign b_pass_lp = ras_pass_lp & b_inside & {NB{b_peeling}};
-    assign b_more    = ras_more_lp & b_inside & {NB{b_peeling}};
+    // (u_cmp muxes pass by peel and gates more, so ras_pass IS the peel accept
+    // when b_peeling and the opaque DepthMode accept otherwise)
+    assign b_pass_lp = ras_pass & b_inside & {NB{b_peeling}};
+    assign b_more    = ras_more & b_inside;
     // per-lane stage-B write-enable = inside & (peel accept | opaque accept). This is
     // exactly the `we[cw]` computed in the write mux below; expose it so u_taginvw can
     // duplicate the accepted {valid,tag,invW} write with an identical mask.
-    assign b_we = ras_b_valid ? (b_inside &
-                  (b_peeling ? ras_pass_lp : ras_pass_op)) : '0;
+    assign b_we = ras_b_valid ? (b_inside & ras_pass) : '0;
 
     // -------------------- READ port mux --------------------
     always @(*) begin
@@ -199,7 +197,7 @@ module peel_tile_buffer import tsp_pkg::*; #(
             for (cw = 0; cw < NB; cw = cw + 1) begin
                 if (b_inside[cw]) begin
                     if (b_peeling) begin
-                        if (ras_pass_lp[cw]) begin // peel accept: zb,pb,valid; keep B
+                        if (ras_pass[cw]) begin // peel accept: zb,pb,valid; keep B
                             we[cw] = 1'b1;
                             wdata[PEEL_W*cw + PW_DEPTH  +: 32] = b_invw[32*cw +: 32];
                             wdata[PEEL_W*cw + PW_TAG    +: 32] = b_tag;
@@ -208,7 +206,7 @@ module peel_tile_buffer import tsp_pkg::*; #(
                             wdata[PEEL_W*cw + PW_TAG2   +: 32] = f_tag2  (rdata, cw);
                         end
                     end else begin
-                        if (ras_pass_op[cw]) begin // opaque: tag<-tag, depth<-invW
+                        if (ras_pass[cw]) begin // opaque: tag<-tag, depth<-invW
                             we[cw] = 1'b1;
                             wdata[PEEL_W*cw + PW_DEPTH  +: 32] =
                                 b_zwdis ? f_depth(rdata, cw) : b_invw[32*cw +: 32];

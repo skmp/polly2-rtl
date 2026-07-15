@@ -195,7 +195,7 @@ dense_span_buffer: | $(BUILD)
 	./$(BUILD)/obj_densespan/densespan
 
 # front-end + ISP + TSP + LAYER PEELING: OP as before; PT/TR use the peel depth
-# compare (isp_depth_cmp_lp) with dual depth/tag buffers + a per-pixel valid bit,
+# compare (isp_depth_cmp peel mode) with dual depth/tag buffers + a per-pixel valid bit,
 # re-running the object list per peel pass, and blending at the end of the TSP
 # pipe -> shaded_lp_<name>.bmp.
 frontendtsplp: | $(BUILD)

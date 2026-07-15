@@ -191,7 +191,7 @@ module peel_core import tsp_pkg::*; (
     // than leaving an inline port mux governed only by convention:
     //   * peel_tile_buffer (u_peel): the five peel depth/tag buffers packed into ONE
     //     129-bit x 8-bank tile_ram {valid, tag2, tag, depth2, depth} per lane. It
-    //     owns the depth compare (isp_depth_cmp / isp_depth_cmp_lp) and the raster
+    //     owns the depth compare (isp_depth_cmp, opaque + peel modes) and the raster
     //     stage-A read / stage-B RMW, the shade single-pixel read, the CLEAR walk and
     //     the PeelBuffers RMW walk. Bank = x[2:0], addr = {y[4:0], x[4:3]}.
     //   * color_tile_buffer (u_col): col_buf as a single 1024x32 M10K. It owns the
@@ -425,7 +425,7 @@ module peel_core import tsp_pkg::*; (
     // ---- SORT CACHE (u_sort): peel "fully rendered" triangle filter ----
     // ENTER: every peel-pass triangle popped to setup writes {tag,1} to all 4 ways.
     // DEMOTE: every stage-B `more` event is EXACTLY a "this fragment needs a later
-    // pass" event (see isp_depth_cmp_lp): pass=1 -> the displaced RESIDENT pending
+    // pass" event (see isp_depth_cmp peel mode): pass=1 -> the displaced RESIDENT pending
     // tag (b_oldtag), pass=0 -> the deferred INCOMING fragment (b_tag). b_more is
     // already masked by inside & peeling; valid=0 lanes never raise more on accept,
     // so the SetTagToMax filler is never demoted.

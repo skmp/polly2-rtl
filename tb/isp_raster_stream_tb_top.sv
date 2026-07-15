@@ -50,8 +50,10 @@ module isp_raster_stream_tb_top import tsp_pkg::*; (
     generate
       for (genvar gd=0; gd<RAS_LANES; gd=gd+1) begin : dcmp
         isp_depth_cmp u_cmp (.mode(depth_mode),
+            .peel(1'b0), .tag(32'h0), .zb2(32'h0), .pb(32'h0), .pb2(32'h0),
+            .valid(1'b0), .more(),
             .nw(ras_invw_flat[32*gd +: 32]),
-            .ob(dt_depth[{cmp_y, cmp_x + 5'(gd)}]),.pass(ras_pass[gd]));
+            .zb(dt_depth[{cmp_y, cmp_x + 5'(gd)}]),.pass(ras_pass[gd]));
       end
     endgenerate
 
