@@ -195,7 +195,9 @@ module peel_core import tsp_pkg::*; (
     //     stage-A read / stage-B RMW, the shade single-pixel read, the CLEAR walk and
     //     the PeelBuffers RMW walk. Bank = x[2:0], addr = {y[4:0], x[4:3]}.
     //   * color_tile_buffer (u_col): col_buf as a single 1024x32 M10K. It owns the
-    //     blend RMW (2-stage CA read / CB tsp_blend+write) and the FLUSH read.
+    //     blend RMW port pattern (2-stage CA read / CB write) and the FLUSH read; the
+    //     tsp_blend itself is a single SHARED instance here (u_blend) since only the
+    //     producer half ever blends - per-half instances duplicated the multipliers.
     // The registered reads force the raster compare and the blend into 2-stage
     // pipelines and CLEAR/PeelBuffers into 128-chunk walks; the peel_core barriers
     // serialize the raster / shade / bulk phases so each buffer's single read+write
@@ -453,7 +455,7 @@ module peel_core import tsp_pkg::*; (
         assign sc_wr_tag[32*gsc +: 32] = b_pass_lp[gsc] ? b_oldtag[32*gsc +: 32] : b_tag;
       end
     endgenerate
-    sort_cache u_sort (
+    sort_cache #(.WAYS(RAS_LANES)) u_sort (
         .clk(clk), .reset(reset), .ready(sc_ready),
         .en_valid(sc_enter),      .en_tag(fq_out[FF_TAG +: 32]),
         .wr_valid(sc_wr_valid),   .wr_tag(sc_wr_tag),
@@ -522,6 +524,7 @@ module peel_core import tsp_pkg::*; (
     wire         col_prod = tsp_col;     // TSP blends a whole tile into this u_col half
     reg          col_vo;                 // which half VO reads out
     wire [31:0]  col_rd_argb_h [0:1];    // per-half registered read
+    wire [31:0]  cb_blend_out;           // shared tsp_blend result (stage CB write data)
     // blend (CA read / CB write) targets the producer half only; FLUSH read targets
     // the VO half only. gcol picks per-instance whether it is prod or vo this cycle.
     genvar gcol;
@@ -532,8 +535,7 @@ module peel_core import tsp_pkg::*; (
         color_tile_buffer #(.DEPTH(TILE_W*TILE_H)) u_col (
             .clk(clk), .reset(reset),
             .bl_ca_valid(is_prod && cb_ca_valid), .bl_ca_id(cb_ca_id),
-            .bl_cb_valid(is_prod && cb_valid), .cb_id(cb_id), .cb_argb(cb_argb),
-            .cb_tsp(cb_tsp), .cb_at_en(cb_at_en), .alpha_ref(regs.pt_alpha_ref[7:0]),
+            .bl_cb_valid(is_prod && cb_valid), .cb_id(cb_id), .cb_wdata(cb_blend_out),
             .fl_rd_valid(is_vo && cb_fl_valid), .fl_id(cb_fl_id),
             .rd_argb(col_rd_argb_h[gcol])
         );
@@ -542,6 +544,21 @@ module peel_core import tsp_pkg::*; (
     // blend dst read comes from the producer half; VO read from the VO half.
     assign col_rd_argb    = col_rd_argb_h[col_prod];   // blend dst (CA)
     wire [31:0] vo_rd_argb = col_rd_argb_h[col_vo];    // VO flush pixel
+
+    // ---- SHARED blend (stage CB): ONE tsp_blend for both u_col halves. Only the
+    // producer half ever blends (bl_cb_valid is is_prod-gated), so an in-buffer blend
+    // would just duplicate the per-channel mul-adds per half. Combinational off the
+    // latched CB fields (cb_*) and the producer half's registered dst read
+    // (col_rd_argb = OLD col_buf[cb_id]); the result writes back the same cycle. ----
+    tsp_blend u_blend (
+        .src       (cb_argb),
+        .dst       (col_rd_argb),
+        .src_instr (cb_tsp[31:29]),
+        .dst_instr (cb_tsp[28:26]),
+        .alpha_test(cb_at_en),
+        .alpha_ref (regs.pt_alpha_ref[7:0]),
+        .out       (cb_blend_out),
+        .at_pass   ());
 
     // ============ SPANNER_v2 -> TSP shared DENSE span RING ==========================
     // spanner_v2 writes shaded spans into ONE shared ring dense_span_buffer (slot = span_head,
@@ -791,12 +808,13 @@ module peel_core import tsp_pkg::*; (
 `endif
 
     // -------- blend unit: the very end of the TSP pipeline (refsw BlendingUnit) --------
-    // The blend RMW now lives INSIDE u_col (color_tile_buffer): a 2-stage pipeline
-    // over the M10K color buffer.
+    // The blend RMW is a 2-stage pipeline over the M10K color buffer; the blend
+    // itself is the SHARED u_blend instance above (one tsp_blend, both u_col halves).
     //   stage CA (on pp_out_valid && !pp_stall): latch cb_* and assert cb_ca_valid to
     //     present the col-RAM READ of cb_id; cb_valid<=1.
-    //   stage CB (next cycle, cb_valid): u_col reads OLD col_buf[cb_id] = the dst,
-    //     runs tsp_blend combinationally, and writes col_ram[cb_id] <- blend_out.
+    //   stage CB (next cycle, cb_valid): the producer half's registered read
+    //     (col_rd_argb) = OLD col_buf[cb_id] = the dst; u_blend runs combinationally
+    //     and u_col writes col_ram[cb_id] <- cb_blend_out.
     // Because the shade sub-phase presents pixels in ASCENDING shp order and the pipe
     // is in-order, out ids never repeat within a sub-phase -> CA id N and CB id N-1
     // are always distinct, so no same-address RMW hazard. SH_DRAIN additionally waits
