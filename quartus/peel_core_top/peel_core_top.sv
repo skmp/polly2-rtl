@@ -14,7 +14,7 @@
 // The framebuffer is written to DDR at FB_BASE (64-bit words, 2 ARGB px/word) for
 // the HPS/scanout to read.
 //
-module mister_top import tsp_pkg::*; #(
+module peel_core_top import tsp_pkg::*; #(
     // DDR byte base of the 640x480 ARGB framebuffer (64-bit words, 2 px/word).
     parameter [28:0] FB_BASE_WORD = 29'h0080000   // 64-bit-word address
 ) (
