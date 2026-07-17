@@ -12,6 +12,12 @@
  *   0xFF20200C  RESET      WO   any write runs a stretched PVR reset cycle
  *   0xFF202010  CYCLES     RO   clk_sys cycles GO->DONE (resets on GO)
  *   0xFF202014  CLK        RW   [1:0] core clock: 0=75 1=90 2=100 3=112.5MHz
+ *   0xFF202018  AUDIO_DATA W: push a stereo sample ([15:0] left, [31:16]
+ *                          right, signed 16-bit PCM) into the 2048-entry
+ *                          48 kHz HDMI audio FIFO. While the FIFO is full
+ *                          the store BLOCKS THIS CPU until the I2S side
+ *                          frees a slot (~21us per sample).
+ *                          R: [11:0] samples currently queued (0..2048).
  *
  * Prerequisites (load_fpga_bitstream already does both): L3 remap = 0x19
  * (lwhps2fpga visible) and brg_mod_reset = 0 (bridge out of reset).
@@ -33,6 +39,9 @@
 #define POLLY2_MMIO_RESET     0x200C
 #define POLLY2_MMIO_CYCLES    0x2010
 #define POLLY2_MMIO_CLK       0x2014
+#define POLLY2_MMIO_AUDIO_DATA 0x2018
+
+#define POLLY2_AUDIO_FIFO_DEPTH 2048u
 
 #define POLLY2_STATUS_WORKING 0x1u
 #define POLLY2_STATUS_DONE    0x2u
@@ -100,4 +109,23 @@ static inline void polly2_set_clock(unsigned sel)
 
 static inline void polly2_go(void)    { polly2_mmio_wr(POLLY2_MMIO_GO, 1); }
 static inline void polly2_reset(void) { polly2_mmio_wr(POLLY2_MMIO_RESET, 1); }
+
+/* Push one 48 kHz stereo sample. Hardware-blocking: when the FIFO is full
+ * the store stalls this CPU until a slot frees (one sample = ~20.8us).
+ * Check polly2_audio_space() first to feed without ever blocking. */
+static inline void polly2_audio_push(int16_t l, int16_t r)
+{
+	polly2_mmio_wr(POLLY2_MMIO_AUDIO_DATA,
+	               ((uint32_t)(uint16_t)r << 16) | (uint16_t)l);
+}
+
+static inline uint32_t polly2_audio_level(void) /* samples queued, 0..2048 */
+{
+	return polly2_mmio_rd(POLLY2_MMIO_AUDIO_DATA) & 0xFFFu;
+}
+
+static inline uint32_t polly2_audio_space(void)
+{
+	return POLLY2_AUDIO_FIFO_DEPTH - polly2_audio_level();
+}
 

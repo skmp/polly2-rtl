@@ -16,8 +16,9 @@
 //   - Display: pll_hdmi (fixed 148.5 MHz) + SPG (1080p raster, 640x480
 //     split-VRAM FB doubled to 1280x960, vbuf port) -> TX register stage ->
 //     ADV7513. No OSD, no scaler, no analog output.
-//   - Audio: pll_audio + silent I2S clocks so the ADV7513's audio config
-//     stays happy. No audio content.
+//   - Audio: pll_audio (24.576 MHz) + audio_i2s: 2048-entry sample FIFO
+//     fed from the MMIO AUDIO_DATA register (blocking when full), drained
+//     at 48 kHz onto the ADV7513's I2S input (16-bit, standard I2S).
 //
 //  The ARM (minicast) owns: bitstream load + reset release (gp[31:30],
 //  01 -> 00 -> 10), ADV7513 init, VRAM loading via /dev/mem, and the PVR
@@ -322,6 +323,10 @@ wire [31:0] pvr_mmio_wdata;
 wire  [7:0] pvr_vram_top;
 wire  [1:0] mmio_clk_sel;
 
+wire        aud_fifo_wr, aud_fifo_full;
+wire [31:0] aud_fifo_wdata;
+wire [11:0] aud_fifo_level;
+
 pvr_mmio pvr_mmio
 (
 	.clk              (clk_sys),
@@ -342,7 +347,12 @@ pvr_mmio pvr_mmio
 	.pvr_rst          (pvr_mmio_rst),
 	.vram_top         (pvr_vram_top),
 	.clk_sel          (mmio_clk_sel),
-	.pvr_done         (pvr_done)
+	.pvr_done         (pvr_done),
+
+	.aud_wr           (aud_fifo_wr),
+	.aud_wdata        (aud_fifo_wdata),
+	.aud_full         (aud_fifo_full),
+	.aud_level        (aud_fifo_level)
 );
 
 //////////////////////////////////////////////////////////////////////////
@@ -578,9 +588,11 @@ hdmiclk_ddr
 );
 
 //////////////////////////////////////////////////////////////////////////
-// Audio: silent, but keep the I2S clocks running - setup_hdmi configures
-// the ADV7513 for 48 kHz 16-bit I2S and it wants live clocks.
-// 24.576 MHz MCLK, /8 = 3.072 MHz bclk (64fs), /512 = 48 kHz LR.
+// Audio: MMIO AUDIO_DATA -> 2048-entry async FIFO -> I2S @ 48 kHz.
+// setup_hdmi configures the ADV7513 for 48 kHz 16-bit standard I2S;
+// audio_i2s generates the same clocking the old silent divider did
+// (24.576 MHz MCLK, /8 = 3.072 MHz bclk (64fs), /512 = 48 kHz LR) and
+// plays silence while the FIFO is empty.
 //////////////////////////////////////////////////////////////////////////
 
 wire clk_audio;
@@ -591,13 +603,26 @@ pll_audio pll_audio
 	.outclk_0(clk_audio)
 );
 
-reg [8:0] aud_div = 9'd0;
-always @(posedge clk_audio) aud_div <= aud_div + 9'd1;
+wire aud_sclk, aud_lrclk, aud_sdata;
+
+audio_i2s audio_i2s
+(
+	.wclk (clk_sys),
+	.wr   (aud_fifo_wr),
+	.wdata(aud_fifo_wdata),
+	.full (aud_fifo_full),
+	.level(aud_fifo_level),
+
+	.aclk (clk_audio),
+	.sclk (aud_sclk),
+	.lrclk(aud_lrclk),
+	.sdata(aud_sdata)
+);
 
 assign HDMI_MCLK  = clk_audio;
-assign HDMI_SCLK  = aud_div[2];
-assign HDMI_LRCLK = aud_div[8];
-assign HDMI_I2S   = 1'b0;
+assign HDMI_SCLK  = aud_sclk;
+assign HDMI_LRCLK = aud_lrclk;
+assign HDMI_I2S   = aud_sdata;
 
 //////////////////////////////////////////////////////////////////////////
 // Heartbeats

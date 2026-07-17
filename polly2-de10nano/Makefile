@@ -19,10 +19,23 @@ VFLAGS = -Wno-WIDTH -Wno-UNUSEDSIGNAL -j $(NJOBS) --build-jobs $(NJOBS) \
 
 TSP_PKG = ../polly2-core/rtl/gen/tsp_pkg.sv
 
-all: spg-sync pvr-burst spg-loopback
+all: spg-sync pvr-burst spg-loopback audio-i2s
 
 spg-sync: obj_dir/spg_sync_tb
 	./obj_dir/spg_sync_tb
+
+#   make audio-i2s - MMIO AUDIO_DATA -> 2048-entry async FIFO -> I2S:
+#                    framing/order/one-shot delivery, blocking-write
+#                    backpressure when full, non-audio accesses unaffected,
+#                    full-drain integrity (no loss or duplication)
+audio-i2s: obj_dir/audio_i2s_tb
+	./obj_dir/audio_i2s_tb
+
+obj_dir/audio_i2s_tb: rtl/pvr_mmio.sv rtl/audio_i2s.sv tb/audio_tb_top.sv tb/audio_i2s_tb.cpp
+	$(VERILATOR) --cc --exe --build $(VFLAGS) \
+	    -Wno-PINCONNECTEMPTY --top-module audio_tb_top \
+	    rtl/pvr_mmio.sv rtl/audio_i2s.sv tb/audio_tb_top.sv tb/audio_i2s_tb.cpp \
+	    -o audio_i2s_tb
 
 obj_dir/spg_sync_tb: rtl/spg.sv tb/spg_sync_tb.cpp
 	$(VERILATOR) --cc --exe --build $(VFLAGS) rtl/spg.sv tb/spg_sync_tb.cpp -o spg_sync_tb
@@ -56,4 +69,4 @@ obj_dir/pvr_burst_tb: rtl/simplex_pvr_top.sv tb/peel_core_stub.sv tb/pvr_burst_t
 clean:
 	rm -rf obj_dir
 
-.PHONY: all spg-sync pvr-burst spg-loopback clean
+.PHONY: all spg-sync pvr-burst spg-loopback audio-i2s clean
