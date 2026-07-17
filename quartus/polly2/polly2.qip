@@ -89,8 +89,23 @@ set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/tsp/tex/tex
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/peel_core.sv
 
 # ---- DE10-Nano / MiSTer board wrapper (instantiated by sys_top) ----
+set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/sys_top.v
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/simplex_pvr_top.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/spg.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/pvr_mmio.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/hps_lw_bridge.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/clk_mux_gf.sv
+
+# ---- vendored MiSTer HPS f2sdram plumbing (sysmem_lite, instantiated by
+#      sys_top) ----
+# sysmem.sv defines sysmem_lite + sysmem_HPS_fpga_interfaces; it instantiates
+# f2sdram_safe_terminator and the cyclonev_hps_interface_fpga2sdram device
+# primitive. Kept as vendored files in mister/ (was sourced via sys.qip)
+# rather than pulling the whole framework tree.
+set_global_assignment -name SYSTEMVERILOG_FILE ../../mister/f2sdram_safe_terminator.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../mister/sysmem.sv
+
+# ---- plls ----
+set_global_assignment -name QIP_FILE ../../polly2-de10nano/plls/pll.qip
+set_global_assignment -name QIP_FILE ../../polly2-de10nano/plls/pll_hdmi.qip
+set_global_assignment -name QIP_FILE ../../polly2-de10nano/plls/pll_audio.qip

@@ -494,7 +494,7 @@ wire [23:0] hdmi_data;
 wire        hdmi_hs, hdmi_vs, hdmi_de, hdmi_vbl, hdmi_brd;
 wire        spg_underrun;
 
-SPG spg
+spg spg
 (
 	.clk         (clk_hdmi),
 	.reset       (reset_req),

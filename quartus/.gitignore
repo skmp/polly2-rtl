@@ -15,6 +15,5 @@ rtl/*.bak
 *.f
 *.sopcinfo
 *.xml
-*.cdf
 *.rpt
 build_id.v
