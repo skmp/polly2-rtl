@@ -110,10 +110,11 @@ module simplex_pvr_top import tsp_pkg::*; (
     // ddr_req.rd until accepted. Avalon: assert read+address+burstcount until
     // !waitrequest (accepted), then `burst` readdatavalid beats stream back.
     // ==================================================================
-    reg        rd_inflight;   // a read has been accepted, beats still returning
-    reg [7:0]  rd_left;       // beats remaining to return
-    // issue while the core requests and we have no read in flight
-    wire       rd_issue = ddr_req.rd && !rd_inflight;
+    reg        rd_inflight = 1'b0;  // a read has been accepted, beats still returning
+    reg [7:0]  rd_left     = 8'd0;  // beats remaining to return
+    reg        rd_flush    = 1'b0;  // burst orphaned by a reset: swallow its beats
+    // issue while the core requests, no read in flight, and not in reset
+    wire       rd_issue = ddr_req.rd && !rd_inflight && !reset;
     assign DDRAM_RD       = rd_issue;
     // peel_core tags every read address as {4'b0011, word[24:0]} - the DC 64-bit
     // VRAM CS region marker (region/objlist/param/tex caches). The physical 64-bit
@@ -131,21 +132,31 @@ module simplex_pvr_top import tsp_pkg::*; (
     // (record_fetcher stuck mid-burst -> spanner_v2 busy=1 deadlock).
     assign ddr_resp.busy   = rd_inflight || (rd_issue && DDRAM_BUSY);
     assign ddr_resp.dout   = DDRAM_DOUT;
-    assign ddr_resp.dready = DDRAM_DOUT_READY && rd_inflight;
+    assign ddr_resp.dready = DDRAM_DOUT_READY && rd_inflight && !rd_flush;
 
+    // rd_inflight/rd_left are deliberately NOT cleared by reset: a burst the
+    // bridge accepted before the reset still returns ALL its beats afterwards
+    // (the HPS SDRAM controller executes accepted commands regardless of
+    // fabric state). Keep counting so those stale beats are consumed here
+    // instead of miscounting against the next render's first burst, which
+    // would shift every later read until the fabric is reprogrammed. A reset
+    // with a burst in flight sets rd_flush: the remaining beats are counted
+    // but dready is suppressed, so the freshly-reset core's arbiter never
+    // sees a beat it didn't request (an uncounted beat desyncs its d_beats
+    // bookkeeping - see the note above). New issues stay blocked meanwhile
+    // (ddr_resp.busy = rd_inflight, and rd_issue is gated on !reset).
     always @(posedge clk) begin
-        if (reset) begin
-            rd_inflight <= 1'b0; rd_left <= 8'd0;
-        end else begin
-            if (!rd_inflight) begin
-                if (rd_issue && !DDRAM_BUSY) begin  // accepted this cycle
-                    rd_inflight <= 1'b1;
-                    rd_left     <= ddr_req.burst;
-                end
-            end else if (DDRAM_DOUT_READY) begin
-                if (rd_left <= 8'd1) rd_inflight <= 1'b0;
-                rd_left <= rd_left - 8'd1;
+        if (reset && rd_inflight) rd_flush <= 1'b1;
+        else if (!rd_inflight)    rd_flush <= 1'b0;
+
+        if (!rd_inflight) begin
+            if (rd_issue && !DDRAM_BUSY) begin  // accepted this cycle
+                rd_inflight <= 1'b1;
+                rd_left     <= ddr_req.burst;
             end
+        end else if (DDRAM_DOUT_READY) begin
+            if (rd_left <= 8'd1) rd_inflight <= 1'b0;
+            rd_left <= rd_left - 8'd1;
         end
     end
 
@@ -211,8 +222,12 @@ module simplex_pvr_top import tsp_pkg::*; (
     reg  [28:0] run_base;                    // DDR word address of run_mem[0]
     reg  [28:0] run_next;                    // expected DDR word addr of the next word
 
-    reg         bst_busy;                    // 1 = DRAIN: streaming the burst
-    reg  [4:0]  bst_beat;                    // beat index presented (0..run_len-1)
+    reg         bst_busy = 1'b0;             // 1 = DRAIN: streaming the burst
+    reg  [4:0]  bst_beat = 5'd0;             // beat index presented (0..run_len-1)
+    reg         bst_sel  = 1'b0;             // fb_sel_upper latched at DRAIN entry:
+                                             // the half-mask must stay constant for
+                                             // every beat of a burst, even if a reset
+                                             // clears the reg file mid-drain
 
     // pending break-word: a packed word that couldn't extend the run (non-contig or
     // full) and must seed the NEXT run once this one has drained.
@@ -241,14 +256,24 @@ module simplex_pvr_top import tsp_pkg::*; (
     assign DDRAM2_WE       = bst_busy;
     assign DDRAM2_ADDR     = run_base;
     assign DDRAM2_BURSTCNT = {3'd0, run_len};
-    assign DDRAM2_DIN      = fb_sel_upper ? {32'd0, run_mem[bst_beat]}
-                                          : {run_mem[bst_beat], 32'd0};
-    assign DDRAM2_BE       = fb_sel_upper ? 8'b0000_1111 : 8'b1111_0000;
+    assign DDRAM2_DIN      = bst_sel ? {32'd0, run_mem[bst_beat]}
+                                     : {run_mem[bst_beat], 32'd0};
+    assign DDRAM2_BE       = bst_sel ? 8'b0000_1111 : 8'b1111_0000;
 
     always @(posedge clk) begin
         if (reset) begin
-            have_lo <= 1'b0; we_d <= 1'b0;
-            run_len <= 5'd0; bst_busy <= 1'b0; bst_beat <= 5'd0; hold_v <= 1'b0;
+            // Pairing/run bookkeeping clears, but an IN-FLIGHT BURST IS NOT
+            // ABORTED: the f2sdram port has already latched BURSTCNT and
+            // counts raw data beats - dropping WE short leaves the hard
+            // bridge expecting the missing beats forever. It then eats the
+            // next burst's first beats as this one's tail, shifting every
+            // subsequent FB write by the shortfall; that desync lives in the
+            // HPS bridge, survives every fabric-side reset, and only clears
+            // on reprogramming. So the DRAIN branch below keeps streaming
+            // under reset until the burst completes - the leftover beats
+            // rewrite stale FB bytes at their original addresses, harmless.
+            have_lo <= 1'b0; we_d <= 1'b0; hold_v <= 1'b0;
+            if (!bst_busy) run_len <= 5'd0;
         end else begin
             we_d <= fbw_req.we && !fbw_resp.busy;
 
@@ -258,6 +283,7 @@ module simplex_pvr_top import tsp_pkg::*; (
                 // partial run so the tile's last words aren't stranded.
                 if (!(fbw_req.we && !fbw_resp.busy) && !we_d && run_len!=5'd0) begin
                     bst_busy <= 1'b1; bst_beat <= 5'd0;      // -> DRAIN what we have
+                    bst_sel  <= fb_sel_upper;
                 end
 
                 if (fbw_req.we) begin
@@ -287,30 +313,33 @@ module simplex_pvr_top import tsp_pkg::*; (
                             hold_half <= pk_half;
                             hold_addr <= pk_addr;
                             bst_busy  <= 1'b1; bst_beat <= 5'd0;   // -> DRAIN
+                            bst_sel   <= fb_sel_upper;
                         end
                     end
+                end
+            end
+        end
+
+        // ================= DRAIN =================
+        // stream run_mem[0..run_len-1] as one burst (one beat / !BUSY cycle).
+        // Runs UNDER RESET too - the accepted burst must complete (see the
+        // reset note above).
+        if (bst_busy && !DDRAM2_BUSY) begin
+            if (bst_beat + 5'd1 >= run_len) begin
+                // burst done: re-seed from a held break-word, else empty.
+                bst_busy <= 1'b0;
+                bst_beat <= 5'd0;
+                if (hold_v && !reset) begin
+                    run_mem[0] <= hold_half;
+                    run_base   <= hold_addr;
+                    run_next   <= hold_addr + 29'd1;
+                    run_len    <= 5'd1;
+                    hold_v     <= 1'b0;
+                end else begin
+                    run_len <= 5'd0;
                 end
             end else begin
-                // ================= DRAIN =================
-                // stream run_mem[0..run_len-1] as one burst (one beat / !BUSY cycle).
-                if (!DDRAM2_BUSY) begin
-                    if (bst_beat + 5'd1 >= run_len) begin
-                        // burst done: re-seed from a held break-word, else empty.
-                        bst_busy <= 1'b0;
-                        bst_beat <= 5'd0;
-                        if (hold_v) begin
-                            run_mem[0] <= hold_half;
-                            run_base   <= hold_addr;
-                            run_next   <= hold_addr + 29'd1;
-                            run_len    <= 5'd1;
-                            hold_v     <= 1'b0;
-                        end else begin
-                            run_len <= 5'd0;
-                        end
-                    end else begin
-                        bst_beat <= bst_beat + 5'd1;
-                    end
-                end
+                bst_beat <= bst_beat + 5'd1;
             end
         end
     end
