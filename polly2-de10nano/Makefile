@@ -19,7 +19,7 @@ VFLAGS = -Wno-WIDTH -Wno-UNUSEDSIGNAL -j $(NJOBS) --build-jobs $(NJOBS) \
 
 TSP_PKG = ../polly2-core/rtl/gen/tsp_pkg.sv
 
-all: spg-sync pvr-burst
+all: spg-sync pvr-burst spg-loopback
 
 spg-sync: obj_dir/spg_sync_tb
 	./obj_dir/spg_sync_tb
@@ -29,6 +29,21 @@ obj_dir/spg_sync_tb: rtl/spg.sv tb/spg_sync_tb.cpp
 
 pvr-burst: obj_dir/pvr_burst_tb
 	./obj_dir/pvr_burst_tb
+
+#   make spg-loopback - stream a full frame through the FB write master in
+#                       tile order, scan it out through spg, compare every
+#                       window pixel (write layout vs scanout layout)
+spg-loopback: obj_dir/spg_loopback_tb
+	./obj_dir/spg_loopback_tb
+
+obj_dir/spg_loopback_tb: rtl/simplex_pvr_top.sv rtl/spg.sv tb/spg_loopback_top.sv tb/peel_core_stub.sv tb/spg_loopback_tb.cpp $(TSP_PKG)
+	$(VERILATOR) --cc --exe --build $(VFLAGS) \
+	    -Wno-UNUSEDPARAM -Wno-DECLFILENAME -Wno-PINMISSING \
+	    -I../polly2-core/rtl/gen \
+	    --top-module spg_loopback_top \
+	    $(TSP_PKG) tb/peel_core_stub.sv rtl/simplex_pvr_top.sv rtl/spg.sv \
+	    tb/spg_loopback_top.sv tb/spg_loopback_tb.cpp \
+	    -o spg_loopback_tb
 
 obj_dir/pvr_burst_tb: rtl/simplex_pvr_top.sv tb/peel_core_stub.sv tb/pvr_burst_tb.cpp $(TSP_PKG)
 	$(VERILATOR) --cc --exe --build $(VFLAGS) \
@@ -41,4 +56,4 @@ obj_dir/pvr_burst_tb: rtl/simplex_pvr_top.sv tb/peel_core_stub.sv tb/pvr_burst_t
 clean:
 	rm -rf obj_dir
 
-.PHONY: all spg-sync pvr-burst clean
+.PHONY: all spg-sync pvr-burst spg-loopback clean

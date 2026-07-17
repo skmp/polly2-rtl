@@ -381,6 +381,21 @@ set_global_assignment -name ALLOW_ANY_SHIFT_REGISTER_SIZE_FOR_RECOGNITION ON
 set_global_assignment -name ALLOW_SHIFT_REGISTER_MERGING_ACROSS_HIERARCHIES ALWAYS
 set_instance_assignment -name MAX_NUMBER_OF_REGISTERS_FROM_UNINFERRED_RAMS 8192 -to *
 
+# ---- HDMI output pipeline: NO shift-register extraction ----
+# With the aggressive SR settings above, the spg output pipe + the sys_top TX
+# stage (a 3-4 deep, logic-free, 24-bit-wide register chain, merged across
+# the hierarchy) was implemented as an M10K altshift_taps. Its RAM-to-IO
+# clock-to-out (~7.1 ns measured) fails the 148.5 MHz scanout domain
+# (hdmi_out_de -0.31 ns, several hdmi_out_d bits negative) and glitches
+# DE/data bits on the wire - visible as a stable seam / pixel speckles.
+# Keep every flop of the video path in fabric.
+set_instance_assignment -name AUTO_SHIFT_REGISTER_RECOGNITION OFF -to spg|*
+set_instance_assignment -name AUTO_SHIFT_REGISTER_RECOGNITION OFF -to hs
+set_instance_assignment -name AUTO_SHIFT_REGISTER_RECOGNITION OFF -to vs
+set_instance_assignment -name AUTO_SHIFT_REGISTER_RECOGNITION OFF -to de
+set_instance_assignment -name AUTO_SHIFT_REGISTER_RECOGNITION OFF -to d[*]
+set_instance_assignment -name AUTO_SHIFT_REGISTER_RECOGNITION OFF -to hdmi_out_*
+
 
 
 

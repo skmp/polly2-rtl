@@ -45,8 +45,8 @@ TSP_RTL = rtl/tsp/tsp_pkg.sv $(filter-out rtl/tsp/tsp_pkg.sv,$(wildcard rtl/tsp/
 # Package (must be listed, not just searched) + `-y` search dirs so Verilator
 # auto-resolves every module by name from any subtree.
 TSP_PKG   = rtl/gen/tsp_pkg.sv
-RTL_DIRS  = rtl rtl/gen rtl/buffers rtl/cores rtl/fp rtl/fpu rtl/isp \
-            rtl/lists rtl/tsp rtl/tsp/tex rtl/spanner
+RTL_DIRS  = rtl rtl/gen rtl/buffers rtl/fp rtl/isp \
+            rtl/lists rtl/setup rtl/tsp rtl/tsp/tex rtl/spanner
 # Files holding modules whose name != filename, so `-y` won't auto-find them:
 #   fp_add24.sv    -> fp_add24_s1 / fp_add24_s2
 #   stage_interp.sv-> interp_unit
