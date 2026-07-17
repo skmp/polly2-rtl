@@ -201,16 +201,30 @@ module spanner_v2 import tsp_pkg::*; #(
     // tree + adder + address routing) was the design's critical path. Costs +1 cycle
     // of fill at pass start; throughput is unchanged (pops <= 1/cyc, refills 1/cyc,
     // the FIFO never underruns after the initial fill).
+    // The FIFO is a RING (entries never move): gq_head points at the head entry
+    // and a pop just bumps the 2-bit pointer - shifting entries on pop would put
+    // the pop decision on the enable of ~550 registers (that fanout was itself a
+    // critical path). Per entry, the run-merge predicates are PRECOMPUTED ON THE
+    // LANDING PATH and registered (gq_sok / gq_pair), so the 32-bit tag compares
+    // live on the relaxed RAM-to-register landing cycle, not in the COAL loop:
+    //   gq_sok[e][l]  = shade_mode | valid[l]        (lane shade-eligibility)
+    //   gq_pair[e][i] = lanes i,i+1 merge: same eligibility, and same tag when
+    //                   shaded (pairwise == chain to the run start, since
+    //                   eligibility is uniform inside a chain and tag equality
+    //                   is transitive - exactly the old extend condition)
     reg              sg_active;     // SPANGEN still walking (COAL may produce)
     reg [SLOTW-1:0]  sg_x;          // next pixel to coalesce a span at (0..NSLOT-1)
     reg              pf_active;     // prefetcher still has groups to present
     reg [SLOTW-3:0]  pf_grp;        // next group index to present (address counter)
     reg              gq_inflight;   // a read was presented last cycle; ti_* lands now
     reg [1:0]        gq_cnt;        // FIFO occupancy (0..3)
+    reg [1:0]        gq_head;       // ring head entry (0..2)
     reg [3:0]        gq_valid [0:2];
     reg [3:0]        gq_pt    [0:2];
     reg [31:0]       gq_tag   [0:2][0:3];
     reg [31:0]       gq_invw  [0:2][0:3];
+    reg [3:0]        gq_sok   [0:2];
+    reg [2:0]        gq_pair  [0:2];
 
     // ---- span descriptor latched at COAL, consumed (emitted) at EMIT ----
     reg              t_valid;       // EMIT stage occupied
@@ -237,19 +251,29 @@ module spanner_v2 import tsp_pkg::*; #(
     reg  [2:0] run_rep;                          // 1..4 (run length; advances sg_x)
     reg  [31:0] run_tag;
     reg        run_ok0;                          // start lane shaded? (span emitted iff 1)
-    integer rl;
+    // head-entry accessors (3:1 ring muxes off registers)
+    wire [3:0] hd_sok  = gq_sok [gq_head];
+    wire [2:0] hd_pair = gq_pair[gq_head];
+    // run length = 1 + length of the unbroken pair chain from sg_lane (the old
+    // extend loop, evaluated on the precomputed pair bits); run_to_end = the run
+    // reaches lane 3, i.e. this COAL exhausts the group.
+    reg run_to_end;
     always @(*) begin
-        run_tag    = gq_tag[0][sg_lane];
-        run_rep    = 3'd1;
-        run_ok0    = shade_mode | gq_valid[0][sg_lane];
-        for (rl = 0; rl < 4; rl = rl + 1) begin
-            // extend if in-group, contiguous, same shade-eligibility, and (if shaded) same tag.
-            if (rl > sg_lane && rl == sg_lane + run_rep
-                && ((shade_mode | gq_valid[0][rl]) == run_ok0)
-                && (run_ok0 ? (gq_tag[0][rl] == run_tag) : 1'b1)) begin
-                run_rep = run_rep + 3'd1;
-            end
-        end
+        run_tag    = gq_tag[gq_head][sg_lane];
+        run_ok0    = hd_sok[sg_lane];
+        case (sg_lane)
+        2'd0: run_rep = !hd_pair[0] ? 3'd1 : !hd_pair[1] ? 3'd2
+                                           : !hd_pair[2] ? 3'd3 : 3'd4;
+        2'd1: run_rep = !hd_pair[1] ? 3'd1 : !hd_pair[2] ? 3'd2 : 3'd3;
+        2'd2: run_rep = !hd_pair[2] ? 3'd1 : 3'd2;
+        2'd3: run_rep = 3'd1;
+        endcase
+        case (sg_lane)
+        2'd0: run_to_end = &hd_pair[2:0];
+        2'd1: run_to_end = &hd_pair[2:1];
+        2'd2: run_to_end = hd_pair[2];
+        2'd3: run_to_end = 1'b1;
+        endcase
     end
 
     wire [SLOTW-1:0] run_id = pc_slot(run_tag);
@@ -306,14 +330,18 @@ module spanner_v2 import tsp_pkg::*; #(
     wire coal_fires = sg_active && (gq_cnt != 2'd0) && !pipe_stall;
 
     // ---- group FIFO pop/land bookkeeping ----
-    // pop when COAL exhausts the head group (advances into the next group or wraps);
-    // land when the read presented last cycle arrives on ti_* this cycle. Present a
-    // new read whenever occupancy + in-flight leaves room (conservative: ignores a
-    // same-cycle pop; with depth 3 this still sustains 1 group/cycle steady-state).
-    wire gq_pop     = coal_fires && (walk_last
-                                     || (sg_x_next[SLOTW-1:2] != sg_x[SLOTW-1:2]));
+    // pop when COAL exhausts the head group (run_to_end: covers the group-crossing
+    // advance AND the final wrap); land when the read presented last cycle arrives
+    // on ti_* this cycle. Present a new read whenever occupancy + in-flight leaves
+    // room (conservative: ignores a same-cycle pop; with depth 3 this still
+    // sustains 1 group/cycle steady-state). Landing always targets the ring tail
+    // (head+cnt mod 3): a same-cycle pop frees the head slot, never the tail, and
+    // cnt <= 2 whenever a landing occurs (see pf_present), so the slot is free.
+    wire gq_pop     = coal_fires && run_to_end;
     wire pf_present = pf_active && ({1'b0, gq_cnt} + {2'd0, gq_inflight} < 3'd3);
-    wire [1:0] gq_land_idx = gq_pop ? (gq_cnt - 2'd1) : gq_cnt;
+    wire [2:0] gq_tail_sum  = {1'b0, gq_head} + {1'b0, gq_cnt};
+    wire [1:0] gq_land_slot = (gq_tail_sum >= 3'd3) ? (gq_tail_sum[1:0] - 2'd3)
+                                                    : gq_tail_sum[1:0];
 
     // ---- SINGLE dedup_ram write port (M10K-inferable) ----
     // dedup_ram has exactly TWO logical writers - the gen-wrap clear-walk and the EMIT
@@ -476,7 +504,7 @@ module spanner_v2 import tsp_pkg::*; #(
         if (reset) begin
             busy <= 1'b0; tsp_go <= 1'b0;
             sg_active <= 1'b0; sg_x <= '0; t_valid <= 1'b0;
-            pf_active <= 1'b0; pf_grp <= '0; gq_cnt <= 2'd0; gq_inflight <= 1'b0;
+            pf_active <= 1'b0; pf_grp <= '0; gq_cnt <= 2'd0; gq_inflight <= 1'b0; gq_head <= 2'd0;
             cur_gen <= GEN_MAX;           // force a clear-walk on the FIRST start (HW-safe
                                           // regardless of M10K power-up state)
             dd_clearing <= 1'b0;
@@ -494,28 +522,28 @@ module spanner_v2 import tsp_pkg::*; #(
             // ---------------- group prefetch FIFO (see decl comment) ----------------
             // Runs EVERY cycle, independent of pipe_stall: landing data is captured
             // even while COAL is frozen. The pass-start resets later in this block
-            // override these assignments (NBA last-write-wins).
+            // override these assignments (NBA last-write-wins). RING semantics: a
+            // pop only bumps gq_head (2 bits), entries never move; a landing writes
+            // the tail slot, including the precomputed merge predicates (the 32-bit
+            // tag compares thus live on this relaxed landing path).
             gq_inflight <= pf_present;
             if (pf_present) begin
                 pf_grp <= pf_grp + 1'b1;
                 if (pf_grp == {(SLOTW-2){1'b1}}) pf_active <= 1'b0; // last group presented
             end
-            if (gq_pop) begin
-                gq_valid[0] <= gq_valid[1]; gq_pt[0] <= gq_pt[1];
-                gq_valid[1] <= gq_valid[2]; gq_pt[1] <= gq_pt[2];
-                for (q = 0; q < 4; q = q + 1) begin
-                    gq_tag[0][q] <= gq_tag[1][q]; gq_invw[0][q] <= gq_invw[1][q];
-                    gq_tag[1][q] <= gq_tag[2][q]; gq_invw[1][q] <= gq_invw[2][q];
-                end
-            end
+            if (gq_pop) gq_head <= (gq_head == 2'd2) ? 2'd0 : gq_head + 2'd1;
             if (gq_inflight) begin
-                // landing is written AFTER the shift (same-index NBA: landing wins),
-                // which is exactly the popped-and-immediately-refilled entry case.
-                gq_valid[gq_land_idx] <= ti_valid;
-                gq_pt   [gq_land_idx] <= ti_pt;
+                gq_valid[gq_land_slot] <= ti_valid;
+                gq_pt   [gq_land_slot] <= ti_pt;
+                gq_sok  [gq_land_slot] <= {4{shade_mode}} | ti_valid;
+                for (q = 0; q < 3; q = q + 1)
+                    gq_pair[gq_land_slot][q] <=
+                        ((shade_mode | ti_valid[q+1]) == (shade_mode | ti_valid[q]))
+                        && ((shade_mode | ti_valid[q]) ? (ti_tag[q+1] == ti_tag[q])
+                                                       : 1'b1);
                 for (q = 0; q < 4; q = q + 1) begin
-                    gq_tag [gq_land_idx][q] <= ti_tag[q];
-                    gq_invw[gq_land_idx][q] <= ti_invw[q];
+                    gq_tag [gq_land_slot][q] <= ti_tag[q];
+                    gq_invw[gq_land_slot][q] <= ti_invw[q];
                 end
             end
             gq_cnt <= gq_cnt - {1'b0, gq_pop} + {1'b0, gq_inflight};
@@ -563,7 +591,7 @@ module spanner_v2 import tsp_pkg::*; #(
                     cur_gen <= cur_gen + 1'b1;
                     sg_x <= '0; sg_active <= 1'b1; t_valid <= 1'b0;
                     pf_active <= 1'b1; pf_grp <= '0;
-                    gq_cnt <= 2'd0; gq_inflight <= 1'b0;
+                    gq_cnt <= 2'd0; gq_inflight <= 1'b0; gq_head <= 2'd0;
                 end
             end
 
@@ -576,7 +604,7 @@ module spanner_v2 import tsp_pkg::*; #(
                     dd_clearing <= 1'b0; cur_gen <= {{(GEN_W-1){1'b0}}, 1'b1};   // gen=1
                     sg_x <= '0; sg_active <= 1'b1; t_valid <= 1'b0;
                     pf_active <= 1'b1; pf_grp <= '0;
-                    gq_cnt <= 2'd0; gq_inflight <= 1'b0;
+                    gq_cnt <= 2'd0; gq_inflight <= 1'b0; gq_head <= 2'd0;
                 end else dd_clr_addr <= dd_clr_addr + 1'b1;
             end
 
@@ -605,19 +633,19 @@ module spanner_v2 import tsp_pkg::*; #(
 `ifndef SYNTHESIS
                     if ($test$plusargs("coaltrace"))
                         $display("[COAL] sg_x=%0d rdgrp=%0d rdv=%b ti_tag=%08x %08x %08x %08x val=%b",
-                                 sg_x, rd_group, rd_valid, gq_tag[0][0], gq_tag[0][1], gq_tag[0][2], gq_tag[0][3], gq_valid[0]);
+                                 sg_x, rd_group, rd_valid, gq_tag[gq_head][0], gq_tag[gq_head][1], gq_tag[gq_head][2], gq_tag[gq_head][3], gq_valid[gq_head]);
                     // +peelzero: in PEEL mode (shade_mode=0), catch a span emitted for a
                     // lane whose invW==0 — the exact bad case (peel shading a pixel with
                     // valid=1 but zeroed invW). Shows the lane's valid/tag/invw.
                     if ($test$plusargs("peelzero") && !shade_mode && run_ok0
-                        && gq_invw[0][sg_lane] == 32'd0)
+                        && gq_invw[gq_head][sg_lane] == 32'd0)
                         $display("[PEELZERO] sg_x=%0d lane=%0d val=%b tag=%08x invw=%08x rep=%0d",
-                                 sg_x, sg_lane, gq_valid[0], gq_tag[0][sg_lane], gq_invw[0][sg_lane], run_rep);
+                                 sg_x, sg_lane, gq_valid[gq_head], gq_tag[gq_head][sg_lane], gq_invw[gq_head][sg_lane], run_rep);
                     // catch a COAL emit where the START lane is shaded (span will be written)
                     // AND its captured invw would be 0 in PEEL mode — the reader-fed bad px.
                     if ($test$plusargs("peelzero") && !shade_mode && run_ok0 && sg_x < 8)
                         $display("[COALDBG] sg_x=%0d lane=%0d val=%b tag=%08x invw[l]=%08x rep=%0d run_id=%0d",
-                                 sg_x, sg_lane, gq_valid[0], gq_tag[0][sg_lane], gq_invw[0][sg_lane], run_rep, run_id);
+                                 sg_x, sg_lane, gq_valid[gq_head], gq_tag[gq_head][sg_lane], gq_invw[gq_head][sg_lane], run_rep, run_id);
 `endif
                     t_valid  <= 1'b1;
                     t_x      <= sg_x;
@@ -625,9 +653,9 @@ module spanner_v2 import tsp_pkg::*; #(
                     t_tag    <= run_tag;
                     t_rep    <= run_rep;
                     t_ok     <= run_ok0;           // shaded run -> emit a span; else skip
-                    t_at     <= gq_pt[0][sg_lane];
+                    t_at     <= gq_pt[gq_head][sg_lane];
                     for (q = 0; q < 4; q = q + 1)
-                        t_invw[q] <= (q < run_rep) ? gq_invw[0][sg_lane + q[1:0]] : 32'd0;
+                        t_invw[q] <= (q < run_rep) ? gq_invw[gq_head][sg_lane + q[1:0]] : 32'd0;
                     // the dedup read for THIS descriptor is presented by the dedicated M10K
                     // block above (dd_re == coal_fires, dd_raddr == run_id); dd_rd_q resolves
                     // next cycle in EMIT. run_id/coal_fires are stable this cycle.
