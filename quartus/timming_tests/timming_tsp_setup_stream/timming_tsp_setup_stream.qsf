@@ -24,7 +24,7 @@ set_global_assignment -name SDC_FILE stage.sdc
 set_global_assignment -name VERILOG_MACRO "SYNTHESIS=1"
 
 set_global_assignment -name SEARCH_PATH .
-set_global_assignment -name SEARCH_PATH ../../rtl/tsp/gen
+set_global_assignment -name SEARCH_PATH ../../../polly2-core/rtl/gen
 
 set_global_assignment -name TOP_LEVEL_ENTITY timming_tsp_setup_stream
 set_global_assignment -name PARTITION_NETLIST_TYPE SOURCE -section_id Top

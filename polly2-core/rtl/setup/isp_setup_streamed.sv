@@ -8,7 +8,7 @@
 // no fat combinational float clouds and no multicycle SDC anywhere.
 //
 //   * units: 3x fp_add24_spp_ro (4clk, A0/A1/A2), 1x fp_add3_24_spp_ro (4clk, A3),
-//     4x fp_mul16_spp_ro (2clk, M0..M3), 1x fp_rcp_faster (5clk).
+//     4x fp_mul24_spp_ro (2clk, M0..M3, full 1.23 mantissa), 1x fp_rcp_faster (5clk).
 //   * ALL sign handling is a SIGN-BIT FLIP ({~f[31],f[30:0]}), never a multiply:
 //     the 8 post-sgn edge deltas, the reused negated diffs (X3-X1 = -(X1-X3), ...),
 //     -Aa/-Ba into the ddx/ddy products, and the subtractions folded into A3 addends.
@@ -50,7 +50,7 @@
 // for any latch spacing >= 15 either.
 //
 // Unit latencies (operands/valid registered at end of cnt K -> result y readable
-// during cnt K+L+1): mul16 L=2 (read @K+3), add24/add3 L=4 (read @K+5), rcp L=5
+// during cnt K+L+1): mul24 L=2 (read @K+3), add24/add3 L=4 (read @K+5), rcp L=5
 // (in_valid during K+1 -> y during K+6). "Live" reads take y exactly at its read cnt.
 //
 // FRONT (cnt-driven; sel @N -> A-lane result @N+5):
@@ -257,10 +257,10 @@ module isp_setup_streamed (
     reg [31:0] m0a,m0b, m1a,m1b, m2a,m2b, m3a,m3b;
     reg        m0v,m1v,m2v,m3v;
     wire [31:0] m0_y,m1_y,m2_y,m3_y;
-    fp_mul16_spp_ro M0 (.clk(clk),.reset(reset),.stall(stall),.in_valid(m0v),.a(m0a),.b(m0b),.out_valid(),.y(m0_y));
-    fp_mul16_spp_ro M1 (.clk(clk),.reset(reset),.stall(stall),.in_valid(m1v),.a(m1a),.b(m1b),.out_valid(),.y(m1_y));
-    fp_mul16_spp_ro M2 (.clk(clk),.reset(reset),.stall(stall),.in_valid(m2v),.a(m2a),.b(m2b),.out_valid(),.y(m2_y));
-    fp_mul16_spp_ro M3 (.clk(clk),.reset(reset),.stall(stall),.in_valid(m3v),.a(m3a),.b(m3b),.out_valid(),.y(m3_y));
+    fp_mul24_spp_ro M0 (.clk(clk),.reset(reset),.stall(stall),.in_valid(m0v),.a(m0a),.b(m0b),.out_valid(),.y(m0_y));
+    fp_mul24_spp_ro M1 (.clk(clk),.reset(reset),.stall(stall),.in_valid(m1v),.a(m1a),.b(m1b),.out_valid(),.y(m1_y));
+    fp_mul24_spp_ro M2 (.clk(clk),.reset(reset),.stall(stall),.in_valid(m2v),.a(m2a),.b(m2b),.out_valid(),.y(m2_y));
+    fp_mul24_spp_ro M3 (.clk(clk),.reset(reset),.stall(stall),.in_valid(m3v),.a(m3a),.b(m3b),.out_valid(),.y(m3_y));
 
     // ================================================================
     // A3: 3-input add - Aa, Ba, C1..C4, c_invw (7 issues, slots verified disjoint)
