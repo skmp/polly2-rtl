@@ -36,7 +36,8 @@ CWD  := $(shell pwd)
 
 .PHONY: clean test tex tex-addr tex-uv tex-filter tex-combiner \
         oparse region regfile regen sortcache itquad taginvw dense_span_buffer \
-        frontendtsplp spannerv2 mulc9 mul16sppro add24sppro mulc9sppro add3sppro
+        frontendtsplp spannerv2 mulc9 mul16sppro add24sppro mulc9sppro add3sppro \
+        mul24sppro mul24c9sppro
 
 # TSP module files (package first). ISP shared FP units come from rtl/isp_min.
 TSP_RTL = rtl/tsp/tsp_pkg.sv $(filter-out rtl/tsp/tsp_pkg.sv,$(wildcard rtl/tsp/*.sv))
@@ -187,6 +188,20 @@ add3sppro: | $(BUILD)
 	  rtl/isp_min/fp_add3_24.sv rtl/isp_min/fp_add3_24_spp_ro.sv tb/fp_add3_24_spp_ro_tb_top.sv \
 	  $(CWD)/tb/fp_add3_24_spp_ro_tb.cpp -CFLAGS -I$(CWD)/tb --Mdir $(BUILD)/obj_add3sppro -o tb
 	./$(BUILD)/obj_add3sppro/tb
+
+# full-mantissa (1.23) streaming muls: pipelined DUT vs combinational parent
+# (BIT-EXACT), AND the parent vs an independent C model in the same run.
+mul24sppro: | $(BUILD)
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module fp_mul24_spp_ro_tb_top \
+	  rtl/fp/fp_mul24.sv rtl/fp/fp_mul24_spp_ro.sv tb/fp_mul24_spp_ro_tb_top.sv \
+	  $(CWD)/tb/fp_mul24_spp_ro_tb.cpp -CFLAGS -I$(CWD)/tb --Mdir $(BUILD)/obj_mul24sppro -o tb
+	./$(BUILD)/obj_mul24sppro/tb
+
+mul24c9sppro: | $(BUILD)
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module fp_mul24_c9_spp_ro_tb_top \
+	  rtl/fp/fp_mul24_c9.sv rtl/fp/fp_mul24_c9_spp_ro.sv tb/fp_mul24_c9_spp_ro_tb_top.sv \
+	  $(CWD)/tb/fp_mul24_c9_spp_ro_tb.cpp -CFLAGS -I$(CWD)/tb --Mdir $(BUILD)/obj_mul24c9sppro -o tb
+	./$(BUILD)/obj_mul24c9sppro/tb
 
 # reg_file unit test: PVR scalar regs (generated) + FOG/PAL M10K tables.
 regfile: | $(BUILD)

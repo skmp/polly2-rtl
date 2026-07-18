@@ -7,12 +7,13 @@
 // a shallow registered select), so there are no fat combinational float clouds and no
 // multicycle SDC anywhere.
 //
-//   * units: fp_mul16_spp_ro 2clk, fp_mul_c9_spp_ro 2clk, fp_add24_spp_ro 4clk
-//     (split align), fp_add3_24_spp_ro 4clk (split align), fp_rcp_faster 5clk.
+//   * units: fp_mul24_spp_ro 2clk, fp_mul24_c9_spp_ro 2clk (both full 1.23
+//     mantissa), fp_add24_spp_ro 4clk (split align), fp_add3_24_spp_ro 4clk
+//     (split align), fp_rcp_faster 5clk.
 //   * min-magnitude anchor: c = p_anch - ddx*XLa - ddy*YTa,
 //     anchor = argmin_k max(|XLk|,|YTk|) (2-cycle tournament, cnt 9/10).
-//   * NO t15 truncation on the GEO deltas -> outputs differ from tsp_setup_min in low
-//     mantissa bits (slightly MORE accurate).
+//   * NO t15 truncation anywhere (full-mantissa muls, untruncated GEO deltas) ->
+//     outputs differ from tsp_setup_min in low mantissa bits (MORE accurate).
 //   * BUFFERING CONTRACT: this module is input-UNBUFFERED (the triangle inputs feed
 //     only the latch registers, sampled on start&&rdy - the producer holds them
 //     stable that cycle) and output-BUFFERED (every output, including rdy, is a
@@ -51,7 +52,7 @@
 //   cnt 14    : rcp in (fp_rcp_faster, 5clk)               [rcy ready cnt 20]
 //
 // Plane stepper (plane injected at T = 8 + 2k; offsets relative to T):
-//   +0  prime v1 (MP0) + v2 (MP1)         p_i = z_i * attr_i   (mul16 / mul_c9;
+//   +0  prime v1 (MP0) + v2 (MP1)         p_i = z_i * attr_i   (mul24 / mul24_c9;
 //                                          v1/v2 operands pre-registered at T-1)
 //   +1  prime v3 (MP0)
 //   +2  A1: da2 = p2 - p1                 (p1,p2 on the prime outputs NOW)
@@ -185,15 +186,15 @@ module tsp_setup_stream (
     // datapath operands are all registers (p?u_r/p?k_r/uv3_q/k3_q/Zr) muxed by the
     // registered d[1]; only the 1-bit in_valid sees the combinational scanner.
     wire [31:0] mu0_y, mc0_y, mu1_y, mc1_y;
-    fp_mul16_spp_ro  MU0 (.clk(clk),.reset(reset),.stall(1'b0),.in_valid(inject|d[1]),
+    fp_mul24_spp_ro    MU0 (.clk(clk),.reset(reset),.stall(1'b0),.in_valid(inject|d[1]),
         .a(d[1] ? Zr[2] : Zr[0]), .b(d[1] ? uv3_q : p1u_r),
         .out_valid(), .y(mu0_y));
-    fp_mul_c9_spp_ro MC0 (.clk(clk),.reset(reset),.stall(1'b0),.in_valid(inject|d[1]),
+    fp_mul24_c9_spp_ro MC0 (.clk(clk),.reset(reset),.stall(1'b0),.in_valid(inject|d[1]),
         .f(d[1] ? Zr[2] : Zr[0]), .k(d[1] ? k3_q : p1k_r),
         .out_valid(), .y(mc0_y));
-    fp_mul16_spp_ro  MU1 (.clk(clk),.reset(reset),.stall(1'b0),.in_valid(inject),
+    fp_mul24_spp_ro    MU1 (.clk(clk),.reset(reset),.stall(1'b0),.in_valid(inject),
         .a(Zr[1]), .b(p2u_r), .out_valid(), .y(mu1_y));
-    fp_mul_c9_spp_ro MC1 (.clk(clk),.reset(reset),.stall(1'b0),.in_valid(inject),
+    fp_mul24_c9_spp_ro MC1 (.clk(clk),.reset(reset),.stall(1'b0),.in_valid(inject),
         .f(Zr[1]), .k(p2k_r), .out_valid(), .y(mc1_y));
     wire [31:0] p_mp0 = kd1 ? mu0_y : mc0_y;
     wire [31:0] p_mp1 = kd1 ? mu1_y : mc1_y;
@@ -257,22 +258,22 @@ module tsp_setup_stream (
     wire [31:0] m1_a = m_area_r ? X31r : (d[7] ? X21r : X31r);
     wire [31:0] m1_b = m_area_r ? Y21r : a1_y;
     wire [31:0] m0_y, m1_y;
-    fp_mul16_spp_ro M0 (.clk(clk),.reset(reset),.stall(1'b0),
+    fp_mul24_spp_ro M0 (.clk(clk),.reset(reset),.stall(1'b0),
         .in_valid(m_area_r || d[6] || d[7]),
         .a(m0_a), .b(m0_b), .out_valid(), .y(m0_y));
-    fp_mul16_spp_ro M1 (.clk(clk),.reset(reset),.stall(1'b0),
+    fp_mul24_spp_ro M1 (.clk(clk),.reset(reset),.stall(1'b0),
         .in_valid(m_area_r || d[6] || d[7]),
         .a(m1_a), .b(m1_b), .out_valid(), .y(m1_y));
 
     // MD: ddx/ddy = -Aa/-Ba * rcy (direct issue)
     wire [31:0] md_y;
-    fp_mul16_spp_ro MD (.clk(clk),.reset(reset),.stall(1'b0),
+    fp_mul24_spp_ro MD (.clk(clk),.reset(reset),.stall(1'b0),
         .in_valid(d[13] || d[14]),
         .a(fneg(a2_y)), .b(rcy), .out_valid(), .y(md_y));
 
     // MF: f0/f1 = ddx*XLa / ddy*YTa (direct issue)
     wire [31:0] mf_y;
-    fp_mul16_spp_ro MF (.clk(clk),.reset(reset),.stall(1'b0),
+    fp_mul24_spp_ro MF (.clk(clk),.reset(reset),.stall(1'b0),
         .in_valid(d[15] || d[16]),
         .a(md_y), .b(d[15] ? aXLr : aYTr), .out_valid(), .y(mf_y));
 
