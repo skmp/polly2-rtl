@@ -6,8 +6,9 @@
 //
 //   - HPS plumbing: sysmem_lite (f2sdram atom wrapper: ram1/ram2/vbuf),
 //     h2f gp registers (loader reset handshake), HDMI I2C pass-through
-//     (minicast setup_hdmi programs the ADV7513), f2h vsync interrupt,
-//     lightweight-bridge MMIO (hps_lw_bridge + pvr_mmio @ 0xFF200000).
+//     (minicast setup_hdmi programs the ADV7513), f2h interrupts (IRQ0
+//     vsync, IRQ1 render done), lightweight-bridge MMIO (hps_lw_bridge +
+//     pvr_mmio @ 0xFF200000).
 //   - Core clock: rtl/pll (4 fixed outputs 75/90/100/112.5 MHz) through the
 //     soft glitch-free mux (clk_mux_gf), selected by the MMIO CLK register;
 //     reset window held around a switch.
@@ -288,10 +289,16 @@ cyclonev_hps_interface_peripheral_i2c hdmi_i2c
 	.sda(HDMI_I2C_SDA)
 );
 
-// vsync interrupt to the ARM (f2h IRQ0)
+// f2h interrupts to the ARM GIC. On Cyclone V f2h_irq[n] is GIC interrupt
+// ID 72+n (SPI 40+n in device-tree terms):
+//   IRQ0 (GIC ID 72): HDMI vsync, the raw VS line
+//   IRQ1 (GIC ID 73): PVR render done, a stretched pulse (see the
+//                     pvr_render_irq block below); driver/polly2 claims it
+//                     edge-triggered and forwards it to userspace as a
+//                     signal via /dev/polly2
 cyclonev_hps_interface_interrupts interrupts
 (
-	.irq({63'd0, HDMI_TX_VS})
+	.irq({62'd0, pvr_render_irq, HDMI_TX_VS})
 );
 
 //////////////////////////////////////////////////////////////////////////
@@ -481,6 +488,22 @@ always @(posedge clk_sys) begin
 	if (pvr_done & ~pvr_done_q) pvr_busy_led <= 1'b0;
 	if (pvr_mmio_go)            pvr_busy_led <= 1'b1;
 end
+
+// render-done interrupt (f2h IRQ1): done is a 1-clk pulse, stretched to 64
+// clk_sys cycles (~0.57us @ 112.5MHz) so the GIC's sampling can't miss it.
+// The Linux side configures the line edge-triggered, so no ack register is
+// needed; a render can't GO and complete within the stretch window, so
+// every render delivers its own edge. Gated by pvr_reset so a core being
+// reset (MMIO RESET / clock switch / loader handshake) can't raise a
+// spurious interrupt from done glitching while its state machines clear.
+wire pvr_render_irq;
+irq_stretch #(.CYCLES(64)) render_irq_stretch
+(
+	.clk(clk_sys),
+	.rst(pvr_reset),
+	.in (pvr_done),
+	.irq(pvr_render_irq)
+);
 
 //////////////////////////////////////////////////////////////////////////
 // Display: pll_hdmi (fixed 148.5 MHz) + SPG -> TX register stage -> pins.

@@ -1,0 +1,12 @@
+# kernel module build artifacts (out-of-tree kbuild)
+*.o
+*.ko
+*.mod
+*.mod.c
+.*.cmd
+.tmp_versions/
+modules.order
+Module.symvers
+
+# userspace demo binary (make demo)
+polly2_demo

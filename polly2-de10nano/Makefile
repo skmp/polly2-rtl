@@ -19,7 +19,17 @@ VFLAGS = -Wno-WIDTH -Wno-UNUSEDSIGNAL -j $(NJOBS) --build-jobs $(NJOBS) \
 
 TSP_PKG = ../polly2-core/rtl/gen/tsp_pkg.sv
 
-all: spg-sync pvr-burst spg-loopback audio-i2s spg-bands
+all: spg-sync pvr-burst spg-loopback audio-i2s spg-bands render-irq
+
+#   make render-irq - irq_stretch (render-done -> f2h IRQ1): a done edge
+#                     gives exactly one 64-cycle pulse (a held level does
+#                     not retrigger), edges mid-stretch coalesce without
+#                     the line dropping, a later edge gives a fresh pulse
+render-irq: obj_dir/irq_stretch_tb
+	./obj_dir/irq_stretch_tb
+
+obj_dir/irq_stretch_tb: rtl/irq_stretch.sv tb/irq_stretch_tb.cpp
+	$(VERILATOR) --cc --exe --build $(VFLAGS) rtl/irq_stretch.sv tb/irq_stretch_tb.cpp -o irq_stretch_tb
 
 #   make spg-bands - border bands: per-pixel compare of full frames (top
 #                    band / game window / bottom band / black borders),
@@ -78,4 +88,4 @@ obj_dir/pvr_burst_tb: rtl/simplex_pvr_top.sv tb/peel_core_stub.sv tb/pvr_burst_t
 clean:
 	rm -rf obj_dir
 
-.PHONY: all spg-sync pvr-burst spg-loopback audio-i2s spg-bands clean
+.PHONY: all spg-sync pvr-burst spg-loopback audio-i2s spg-bands render-irq clean

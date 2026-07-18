@@ -21,7 +21,8 @@
  *   0xFF20201C  REVISION   RO   MMIO interface revision. 0 = pre-audio
  *                          bitstream (slot was reserved, read 0), 1 = audio
  *                          (AUDIO_DATA + this register), 2 = border bands
- *                          (FB_TOP/FB_BOT).
+ *                          (FB_TOP/FB_BOT), 3 = render-done interrupt on
+ *                          f2h IRQ1 (GIC ID 73).
  *   0xFF202020  FB_TOP     RW   DDR byte address of a 640x30 RGB565 linear
  *                          framebuffer (stride 1280 bytes) shown 2x-doubled
  *                          as a 1280x60 band in the top border of the 1080p
@@ -29,6 +30,11 @@
  *                          0 = band off. Sampled once per frame at vblank
  *                          start.
  *   0xFF202024  FB_BOT     RW   same, bottom border
+ *
+ * REVISION >= 3 bitstreams also raise f2h IRQ1 (GIC ID 73) on render done.
+ * The polly2 kernel module (driver/polly2) claims it and sends SIGUSR1 to
+ * every process holding /dev/polly2 open - open the node, block SIGUSR1 in
+ * a sigmask, kick GO and sigwait() instead of polling STATUS.
  *
  * Prerequisites (load_fpga_bitstream already does both): L3 remap = 0x19
  * (lwhps2fpga visible) and brg_mod_reset = 0 (bridge out of reset).
@@ -59,6 +65,7 @@
 
 #define POLLY2_REV_AUDIO 1u   /* first revision with AUDIO_DATA + REVISION */
 #define POLLY2_REV_BANDS 2u   /* first revision with FB_TOP/FB_BOT */
+#define POLLY2_REV_IRQ   3u   /* first revision with render-done f2h IRQ1 */
 
 /* border band framebuffer geometry (source; displayed 2x as 1280x60) */
 #define POLLY2_BAND_W      640u
@@ -174,6 +181,14 @@ static inline int polly2_has_audio(void)
 static inline int polly2_has_bands(void)
 {
 	return polly2_revision() >= POLLY2_REV_BANDS;
+}
+
+/* Render done raises f2h IRQ1; with the polly2 kernel module loaded, every
+ * process holding /dev/polly2 open gets SIGUSR1. On older bitstreams the
+ * IRQ never fires - keep polling polly2_done() when this returns 0. */
+static inline int polly2_has_render_irq(void)
+{
+	return polly2_revision() >= POLLY2_REV_IRQ;
 }
 
 /* ddr_byte_addr: 128-byte-aligned DDR byte address of a 640x30 RGB565

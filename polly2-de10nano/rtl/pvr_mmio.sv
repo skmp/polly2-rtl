@@ -31,7 +31,11 @@
 //   0xFF20201C  REVISION     RO. MMIO interface revision. 0 = pre-audio
 //                            bitstreams (the then-reserved slot read 0),
 //                            1 = audio (AUDIO_DATA + this register),
-//                            2 = border bands (FB_TOP/FB_BOT).
+//                            2 = border bands (FB_TOP/FB_BOT),
+//                            3 = render done raised on f2h IRQ1 (GIC ID
+//                            73; sys_top stretches pvr_done onto the
+//                            f2h line, forwarded to userspace by the
+//                            driver/polly2 kernel module).
 //                            Writes ignored.
 //   0xFF202020  FB_TOP       RW. DDR BYTE address of a 640x30 RGB565
 //                            linear framebuffer (stride 1280 bytes),
@@ -94,10 +98,11 @@ module pvr_mmio
 localparam [8:0] RSTC = RST_CYCLES;
 /* verilator lint_on WIDTHTRUNC */
 
-// MMIO interface revision (REVISION reg): bump on every map change.
-// 2 = border bands (FB_TOP/FB_BOT); 1 = audio (AUDIO_DATA + REVISION
-// added); 0 = anything older.
-localparam [31:0] REVISION = 32'd2;
+// MMIO interface revision (REVISION reg): bump on every interface change.
+// 3 = render-done f2h IRQ1 (raised in sys_top, not here - see the
+// pvr_render_irq block there); 2 = border bands (FB_TOP/FB_BOT); 1 = audio
+// (AUDIO_DATA + REVISION added); 0 = anything older.
+localparam [31:0] REVISION = 32'd3;
 
 wire wr32     = avs_write && (avs_byteenable == 4'b1111);
 wire sel_regs = (avs_address[20:13] == 8'd0);     // 0x0000-0x1FFF
