@@ -98,6 +98,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/pvr_mmi
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/hps_lw_bridge.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/audio_i2s.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/clk_mux_gf.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/irq_stretch.sv
 
 # ---- vendored MiSTer HPS f2sdram plumbing (sysmem_lite, instantiated by
 #      sys_top) ----
