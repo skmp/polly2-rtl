@@ -214,6 +214,17 @@ package tsp_pkg;
         logic [5:0]    tile_y;        // control.tiley
         logic [4:0]    state;         // one-hot region_state_e
         logic [26:0]   list_ptr;      // byte addr of the list (op/pt/tr); 0 for clear/flush
+        logic          writeout;      // FLUSH only: !control.no_writeout (this entry writes
+                                       // out to VRAM). RSTATE_FLUSH is now emitted for EVERY
+                                       // entry as the end-of-entry marker (so per-entry PT/TL
+                                       // peels happen); writeout=0 means peel+accumulate but
+                                       // do NOT post the tile to VO yet.
+        logic          z_keep;        // CLEAR only: control.z_keep. RSTATE_CLEAR is now emitted
+                                       // for EVERY entry as the start-of-entry marker. z_keep=0
+                                       // => full clear (bg tag+depth). z_keep=1 => KEEP depth,
+                                       // only invalidate the tag buffer (so this entry's OP
+                                       // shade renders ONLY its own OP triangles, not the bg -
+                                       // refsw invalidates tags after each RenderParamTags).
     } region_out_t;
     typedef struct packed {
         logic      list_done;   // 1-cycle: consumer finished this state

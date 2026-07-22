@@ -121,11 +121,15 @@ module region_array_parser import tsp_pkg::*; (
     reg [5:0]    o_tx_r, o_ty_r;
     reg [4:0]    o_state_r;
     reg [26:0]   o_ptr_r;
+    reg          o_wo_r;              // FLUSH writeout flag (= flush_en = !no_writeout)
+    reg          o_zk_r;              // CLEAR z_keep flag (= !clear_en = control.z_keep)
     assign rout.list_ready  = o_ready_r;
     assign rout.tile_x      = o_tx_r;
     assign rout.tile_y      = o_ty_r;
     assign rout.state       = o_state_r;
     assign rout.list_ptr    = o_ptr_r;
+    assign rout.writeout    = o_wo_r;
+    assign rout.z_keep      = o_zk_r;
 
     // ---- entry storage ----
     reg [26:0] base;             // byte addr of current entry
@@ -153,11 +157,19 @@ module region_array_parser import tsp_pkg::*; (
     // is phase p enabled?
     function automatic phase_en(input [2:0] p);
         case (p)
-        3'd0: phase_en = clear_en;
+        // CLEAR is ALWAYS emitted as the start-of-entry marker (like FLUSH at the end),
+        // carrying control.z_keep out as region_out.z_keep. z_keep=0 => full clear;
+        // z_keep=1 => the consumer only invalidates the tag buffer (keeps depth) so a
+        // z_keep=1 entry's OP shade renders ONLY its own OP triangles, not the bg poly.
+        3'd0: phase_en = 1'b1;
         3'd1: phase_en = op_en;
         3'd2: phase_en = pt_en;
         3'd3: phase_en = tr_en;
-        3'd4: phase_en = flush_en;
+        // FLUSH is ALWAYS emitted as the end-of-entry marker so the consumer runs this
+        // entry's PT/TL peel now (refsw peels+accumulates per region entry). The
+        // control.no_writeout flag rides out as region_out.writeout (flush_en) so the
+        // consumer knows whether to actually post the tile to VRAM at this FLUSH.
+        3'd4: phase_en = 1'b1;
         default: phase_en = 1'b0;
         endcase
     endfunction
@@ -207,12 +219,13 @@ module region_array_parser import tsp_pkg::*; (
                 else if (!phase_en(phase)) phase <= phase + 3'd1;
                 else begin
                     o_tx_r <= tilex; o_ty_r <= tiley;
+                    o_wo_r <= 1'b0; o_zk_r <= 1'b0;
                     case (phase)
-                    3'd0: begin o_state_r<=RSTATE_CLEAR; o_ptr_r<=27'd0;             end
+                    3'd0: begin o_state_r<=RSTATE_CLEAR; o_ptr_r<=27'd0; o_zk_r<=~clear_en; end
                     3'd1: begin o_state_r<=RSTATE_OP;    o_ptr_r<={op_ptr,2'b00};    end
                     3'd2: begin o_state_r<=RSTATE_PT;    o_ptr_r<={pt_ptr,2'b00};    end
                     3'd3: begin o_state_r<=RSTATE_TR;    o_ptr_r<={tr_ptr,2'b00};    end
-                    default: begin o_state_r<=RSTATE_FLUSH; o_ptr_r<=27'd0;          end
+                    default: begin o_state_r<=RSTATE_FLUSH; o_ptr_r<=27'd0; o_wo_r<=flush_en; end
                     endcase
                     st <= S_EMIT;
                 end

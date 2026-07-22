@@ -233,7 +233,8 @@ module peel_core import tsp_pkg::*; (
 
     // ---- peel tile buffer control (typed ports; driven by the raster/shade/FSM) ----
     reg                    pb_ra_valid;         // (=ras_out_valid: stage-A read)
-    reg                    pb_clr_valid;        // CLEAR walk write
+    reg                    pb_clr_valid;        // CLEAR walk write (u_taginvw tag invalidate)
+    reg                    pb_clr_depth_valid;  // CLEAR walk write to u_peel DEPTH (z_keep=0 only)
     reg  [CHUNK_AW-1:0]    pb_clr_addr;
     reg                    pb_bufrd_valid;      // PeelBuffers read-ahead
     reg  [CHUNK_AW-1:0]    pb_bufrd_addr;
@@ -427,8 +428,9 @@ module peel_core import tsp_pkg::*; (
         // is tied off.
         .sh_rd_valid(1'b0), .sh_rd_id(10'd0),
         .sh_valid(), .sh_tag(), .sh_depth(),
-        // CLEAR
-        .clr_valid(pb_clr_valid), .clr_addr(pb_clr_addr),
+        // CLEAR (depth+tag). Gated on !zk_l: a z_keep=1 entry KEEPS depth (u_peel not
+        // touched); only u_taginvw's tags are invalidated below.
+        .clr_valid(pb_clr_depth_valid), .clr_addr(pb_clr_addr),
         .clr_depth(regs.isp_backgnd_d), .clr_tag(regs.isp_backgnd_t),
         // PeelBuffers RMW walk
         .pb_rd_valid(pb_bufrd_valid), .pb_rd_addr(pb_bufrd_addr),
@@ -853,13 +855,19 @@ module peel_core import tsp_pkg::*; (
     // ---- unified PT+TL layer-peel pass loop (TB-FSM; refsw do..while(MoreToDraw)) ----
     reg        more_to_draw;      // set by the raster consumer during a peel pass
     reg        op_shaded;         // OP shade (background/opaque -> col_buf) done this tile
-    reg [31:0] pt_ptr_l, tr_ptr_l;// latched PT / TL list pointers for this tile
-    reg        has_pt,  has_tr;   // this tile has a PT / TL list
+    reg [31:0] pt_ptr_l, tr_ptr_l;// latched PT / TL list pointers for this ENTRY
+    reg        has_pt,  has_tr;   // this ENTRY has a PT / TL list
+    reg        wo_l;              // latched region_out.writeout of the FLUSH being processed
+                                  // (1 => post the tile to VO at end of this entry's peel)
     reg        peel_which;        // 0 = rasterizing PT list, 1 = TL list (this pass)
     reg [7:0]  peel_pass;         // pass counter (safety bound)
     localparam integer PEEL_MAX_PASS = 64;
 
     // ---- M10K bulk-op walk counters (NCHUNK addresses = whole 32x32 tile) ----
+    reg        zk_l;             // z_keep of the CLEAR being walked: 1 => tag-invalidate
+                                 // ONLY (keep depth); 0 => full clear (bg tag + bg depth).
+    reg        zk_entry;         // this ENTRY was z_keep=1 (its OP shade must gate on valid
+                                 // so it renders only its OP triangles, not the background).
     reg [CHUNK_AW-1:0]  cl_i;     // CLEAR chunk-address counter 0..NCHUNK-1
     reg [CHUNK_AW-1:0]  pb_i;     // PeelBuffers chunk-address counter 0..NCHUNK-1
     reg [CHUNK_AW-1:0]  pb_rd;    // PeelBuffers read-ahead chunk (1 ahead of pb_i)
@@ -1244,7 +1252,10 @@ module peel_core import tsp_pkg::*; (
     always @(*) begin
         // ---- peel buffer ----
         pb_ra_valid    = ras_out_valid;               // stage-A read (chunk resolved)
-        pb_clr_valid   = (st == S_CLEAR_WR);          // CLEAR walk write
+        pb_clr_valid   = (st == S_CLEAR_WR);          // CLEAR walk write (u_taginvw tags)
+        // u_peel DEPTH clear only on a full clear (z_keep=0). A z_keep=1 CLEAR walk still
+        // invalidates u_taginvw tags (pb_clr_valid) but must PRESERVE u_peel depth.
+        pb_clr_depth_valid = (st == S_CLEAR_WR) && !zk_l;
         pb_clr_addr    = cl_i;
         pb_bufrd_valid = (st == S_PEEL_BUF_RUN);      // PeelBuffers read-ahead
         pb_bufrd_addr  = pb_rd;
@@ -1325,7 +1336,8 @@ module peel_core import tsp_pkg::*; (
             sc_chk_p<=1'b0; sc_hd_v<=1'b0; sc_hd_skip<=1'b0;
             eq_head<=0; eq_tail<=0; eq_count<=0;
             peeling<=1'b0; more_to_draw<=1'b0; peel_pass<=8'd0; op_shaded<=1'b0;
-            has_pt<=1'b0; has_tr<=1'b0; peel_which<=1'b0;
+            has_pt<=1'b0; has_tr<=1'b0; peel_which<=1'b0; wo_l<=1'b0;
+            zk_l<=1'b0; zk_entry<=1'b0;
             b_valid<=1'b0; cb_valid<=1'b0;
             cl_i<='0; pb_i<='0; pb_rd<='0; pb_pipe<=1'b0; first_peel<=1'b0;
             col_post<=1'b0;                   // color post-to-VO intent
@@ -1521,6 +1533,23 @@ module peel_core import tsp_pkg::*; (
                     && (pp_out_id[9:0]==10'd327 || pp_out_id[9:0]==10'd328))
                     $display("[BLEND] tile(7,4) id=%0d src=%08x tsp=%08x at=%b md_rp=%0d col_prod=%b",
                              pp_out_id[9:0], pp_out_argb, pp_out_tsp, pp_out_id[10], md_rp[MD_AW-1:0], tsp_col);
+                // +ptx=X +pty=Y : log every SRC (combiner-out) layer produced at screen (X,Y).
+                // screen_x = tile_x*32 + (id&31) ; screen_y = tile_y*32 + (id>>5).
+                if ($test$plusargs("ptx")) begin : pixtr
+                    integer px_t, py_t; reg [10:0] sx, sy;
+                    sx = {5'd0, md_tx[md_rp[MD_AW-1:0]]}*11'd32 + {6'd0, pp_out_id[4:0]};
+                    sy = {5'd0, md_ty[md_rp[MD_AW-1:0]]}*11'd32 + {6'd0, pp_out_id[9:5]};
+                    px_t = 0; py_t = 0;
+                    void'($value$plusargs("ptx=%d", px_t));
+                    void'($value$plusargs("pty=%d", py_t));
+                    // exact-pixel match, OR whole-tile match when +pixtile is given
+                    if ((sx == px_t[10:0] && sy == py_t[10:0])
+                        || ($test$plusargs("pixtile")
+                            && md_tx[md_rp[MD_AW-1:0]]==px_t[10:0]/6'd32
+                            && md_ty[md_rp[MD_AW-1:0]]==py_t[10:0]/6'd32))
+                        $display("[PIXTRACE] (%0d,%0d) src=%08x tsp=%08x at_en=%b pass=%0d",
+                                 sx, sy, pp_out_argb, pp_out_tsp, pp_out_id[10], peel_pass);
+                end
 `endif
             end
 `ifndef SYNTHESIS
@@ -1573,12 +1602,21 @@ module peel_core import tsp_pkg::*; (
                 // gate on !ti_ready[htile]: CLEAR writes u_taginvw[htile], which TSP may
                 // still be reading from an earlier pass (ping-pong back-pressure).
                 RSTATE_CLEAR: if (consumer_idle && fq_empty && !ti_ready[htile]) begin
-                    // as tile_engine_top TILE_CLEAR: {bg depth, bg CoreTag}. Every
-                    // pixel's tag = background tag and is "valid" for OP shading
-                    // (refsw ClearBuffers sets tagStatus.valid=true), so the OP
-                    // shade fills col_buf with the background color.
-                    op_shaded <= 1'b0;   // OP shade not yet run for this tile
-                    has_pt <= 1'b0; has_tr <= 1'b0;   // PT/TL lists for this tile: none yet
+                    // CLEAR is now emitted for EVERY entry (start-of-entry marker),
+                    // carrying ra_out.z_keep:
+                    //  z_keep=0 (full clear): as tile_engine_top TILE_CLEAR: write {bg
+                    //    depth, bg CoreTag} to the whole tile. The OP shade then fills
+                    //    col_buf with the background color (shade_mode=1 shades every
+                    //    pixel by tag). Fresh tile -> op_shaded=0.
+                    //  z_keep=1 (accumulation entry): KEEP depth (u_peel untouched); only
+                    //    INVALIDATE u_taginvw's tags (valid<-0) so this entry's OP shade
+                    //    renders ONLY its own OP triangles (gated on valid), NOT the bg -
+                    //    matching refsw invalidating tags after each RenderParamTags. The
+                    //    tile's accumulated col_buf and op_shaded state are preserved.
+                    zk_l     <= ra_out.z_keep;
+                    zk_entry <= ra_out.z_keep;
+                    if (!ra_out.z_keep) op_shaded <= 1'b0;   // full clear -> fresh tile
+                    has_pt <= 1'b0; has_tr <= 1'b0;   // PT/TL lists for this ENTRY: none yet
                     cl_i <= '0; st <= S_CLEAR_WR;
                 end
                 // OPAQUE: single pass, plain DepthMode compare (no peeling). Gate on
@@ -1601,13 +1639,19 @@ module peel_core import tsp_pkg::*; (
                     tr_ptr_l  <= ra_out.list_ptr; has_tr <= 1'b1;
                     ra_ack.list_done <= 1'b1; st <= S_RA_ACK;
                 end
-                // FLUSH: (1) if any PT/TL geometry, run the unified peel now (blends
-                // into col_buf); (2) then copy col_buf -> fb.
+                // FLUSH: END-OF-ENTRY marker (emitted for EVERY region entry now, not
+                // only writeout entries). refsw peels+accumulates the entry's PT/TL
+                // lists here, into the SAME u_col half (u_col flips only on POST, so it
+                // accumulates across all of a tile's region entries). ra_out.writeout
+                // (= !control.no_writeout) says whether to POST the finished tile to VO
+                // at this FLUSH. Latch it into wo_l for the peel-completion path.
                 RSTATE_FLUSH: if (consumer_idle && fq_empty) begin
+                    wo_l <= ra_out.writeout;
                     if (has_pt || has_tr) begin
-                        // Peel tile. If no OP region ran, the background OP shade must
-                        // run first (peel passes blend over it). It's a normal shade
-                        // handoff into htile (not last); S_PEEL_INIT follows.
+                        // Peel this entry. If no OP region ran for this tile yet, the
+                        // background OP shade must run first (peel passes blend over it).
+                        // It's a normal shade handoff into htile (not last); S_PEEL_INIT
+                        // follows. The peel-completion path (S_DRAIN) posts only if wo_l.
                         if (!op_shaded) begin
                             op_shaded <= 1'b1;
                             ti_ready[htile] <= 1'b1;
@@ -1622,14 +1666,21 @@ module peel_core import tsp_pkg::*; (
                         end
                         peeling <= 1'b1;
                         st <= S_PEEL_INIT;
+                    end else if (!ra_out.writeout) begin
+                        // Non-writeout entry with no PT/TL lists (only OP or nothing).
+                        // Any OP already accumulated into u_col; there is nothing to POST
+                        // at this intermediate FLUSH. Just reset the per-entry list flags
+                        // and advance to the next entry (u_col keeps accumulating).
+                        has_pt <= 1'b0; has_tr <= 1'b0;
+                        ra_ack.list_done <= 1'b1; st <= S_RA_ACK;
                     end else if (!op_shaded) begin
-                        // NO lists at all (no OP, no PT, no TL): nothing has shaded
-                        // this tile yet - u_taginvw still holds the CLEAR's background
-                        // tags and u_col was never written. The TSP pass must STILL
-                        // run so the background poly renders: hand a NORMAL OP shade
-                        // with ti_last so TSP shades the background into u_col and
-                        // THEN posts it to VO. (A post-only here handed a never-
-                        // written u_col -> garbage tile.)
+                        // WRITEOUT entry, NO lists at all (no OP, no PT, no TL): nothing
+                        // has shaded this tile yet - u_taginvw still holds the CLEAR's
+                        // background tags and u_col was never written. The TSP pass must
+                        // STILL run so the background poly renders: hand a NORMAL OP shade
+                        // with ti_last so TSP shades the background into u_col and THEN
+                        // posts it to VO. (A post-only here handed a never-written u_col
+                        // -> garbage tile.)
                         op_shaded <= 1'b1;
                         ti_ready[htile] <= 1'b1;
                         ti_mode [htile] <= 1'b0;             // OP (background)
@@ -1642,9 +1693,9 @@ module peel_core import tsp_pkg::*; (
 `endif
                         ra_ack.list_done <= 1'b1; st <= S_RA_ACK;
                     end else begin
-                        // OP-only tile: color already accumulated in u_col by the OP
-                        // shade. Issue a POST-ONLY handoff so TSP hands u_col to VO
-                        // (after the OP shade drains, in TSP's in-order queue).
+                        // WRITEOUT entry, OP-only tile: color already accumulated in u_col
+                        // by the OP shade(s). Issue a POST-ONLY handoff so TSP hands u_col
+                        // to VO (after the OP shade drains, in TSP's in-order queue).
                         ti_ready[htile] <= 1'b1;
                         ti_postonly[htile] <= 1'b1;
                         ti_last [htile] <= 1'b1;
@@ -1722,10 +1773,13 @@ module peel_core import tsp_pkg::*; (
                         // (set the ready credit) and RUN AHEAD: flip htile so the next
                         // pass rasters into the OTHER half while TSP shades this one.
                         // more_to_draw (set during this pass's raster) tells us if this
-                        // is the LAST pass -> ti_last so TSP posts the color to VO.
+                        // is the LAST pass. POST to VO only on the last pass AND when this
+                        // entry writes out (wo_l) - intermediate (no_writeout) entries peel
+                        // into u_col and accumulate WITHOUT posting; a later writeout entry
+                        // posts the finished tile.
                         ti_ready[htile] <= 1'b1;
                         ti_mode [htile] <= 1'b1;                 // PEEL
-                        ti_last [htile] <= !more_to_draw;
+                        ti_last [htile] <= !more_to_draw && wo_l;
                         ti_tx   [htile] <= cur_tx; ti_ty[htile] <= cur_ty;
                         htile <= ~htile;
 `ifndef SYNTHESIS
@@ -1734,9 +1788,13 @@ module peel_core import tsp_pkg::*; (
                         if (more_to_draw && peel_pass < PEEL_MAX_PASS[7:0])
                             st <= S_PEEL_BUF;    // do another pass (PeelBuffers+raster)
                         else begin
-                            // last pass: tile done producing. Ack region (FLUSH); TSP
-                            // will post the color when this final shade drains.
+                            // last pass: this ENTRY done producing. Reset the per-entry
+                            // list flags so the next region entry starts fresh (they no
+                            // longer reset only at CLEAR - z_keep=1 entries have no CLEAR).
+                            // Ack region (FLUSH); if wo_l, TSP posts the color when this
+                            // final shade drains.
                             peeling <= 1'b0;
+                            has_pt <= 1'b0; has_tr <= 1'b0;
                             ra_ack.list_done <= 1'b1; st <= S_RA_ACK;
                         end
                     end
@@ -1744,8 +1802,12 @@ module peel_core import tsp_pkg::*; (
                     // OP region fully rastered into u_taginvw[htile]. HAND to TSP and run
                     // ahead. NOT last: the tile's FLUSH state (later) issues the final
                     // post-only shade (ti_last) that hands color to VO.
+                    // ti_mode = zk_entry: a z_keep=0 (freshly cleared) tile shades ALL
+                    // pixels (shade_mode=1) so the bg poly fills the tile; a z_keep=1
+                    // accumulation entry shades ONLY its rastered OP triangles (ti_mode=1
+                    // -> shade_mode=0, gate on valid) so it doesn't re-render the bg.
                     ti_ready[htile] <= 1'b1;
-                    ti_mode [htile] <= 1'b0;                     // OP
+                    ti_mode [htile] <= zk_entry;                 // OP (shade-all vs valid-gated)
                     ti_last [htile] <= 1'b0;
                     ti_tx   [htile] <= cur_tx; ti_ty[htile] <= cur_ty;
                     htile <= ~htile;

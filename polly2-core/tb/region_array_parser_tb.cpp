@@ -1,8 +1,9 @@
 // region_array_parser unit test: builds region-array entries in a behavioral
 // VRAM and checks the emitted (tile,state) stream against a C golden mirroring
-// refsw RenderCORE's per-tile state ordering (clear -> op -> pt -> tr -> flush),
-// with disabled states skipped and empty tiles silently dropped. Terminates on
-// control.last_region or 16384 tiles.
+// refsw RenderCORE's per-tile state ordering (clear -> op -> pt -> tr -> flush).
+// CLEAR and FLUSH are emitted for EVERY entry (start/end-of-entry markers carrying
+// z_keep / writeout); OP/PT/TR appear only when enabled. No entry is skipped.
+// Terminates on control.last_region or 16384 tiles.
 #include "Vregion_array_parser_tb_top.h"
 #include "Vregion_array_parser_tb_top___024root.h"
 #include "verilated.h"
@@ -45,7 +46,7 @@ struct Entry {
     uint32_t tx,ty; bool z_keep, no_writeout, last;
     bool op_e, pt_e, tr_e; uint32_t op_p, pt_p, tr_p;
 };
-struct GoldState { uint32_t tx,ty,state,ptr; };
+struct GoldState { uint32_t tx,ty,state,ptr,wo,zk; };
 
 // build a v2 (24-byte) region entry at byte `base`
 static void build_entry(uint32_t base, const Entry&e){
@@ -57,13 +58,17 @@ static void build_entry(uint32_t base, const Entry&e){
     put_word(base+20, listptr(e.pt_p, !e.pt_e));
 }
 
-// golden: expand one entry into its ordered enabled states
+// golden: expand one entry into its ordered enabled states. CLEAR is now emitted for
+// EVERY entry as the start-of-entry marker (its `zk` = control.z_keep tells the consumer
+// full-clear vs keep-depth-tag-invalidate); FLUSH is emitted for EVERY entry as the
+// end-of-entry marker (its `wo` = !no_writeout tells the consumer whether to post the
+// tile to VRAM). OP/PT/TR appear only when their list is enabled.
 static void gold_entry(const Entry&e, std::vector<GoldState>&out){
-    if (!e.z_keep)      out.push_back({e.tx,e.ty,RS_CLEAR, 0});
-    if (e.op_e)         out.push_back({e.tx,e.ty,RS_OP,    e.op_p*4});
-    if (e.pt_e)         out.push_back({e.tx,e.ty,RS_PT,    e.pt_p*4});
-    if (e.tr_e)         out.push_back({e.tx,e.ty,RS_TR,    e.tr_p*4});
-    if (!e.no_writeout) out.push_back({e.tx,e.ty,RS_FLUSH, 0});
+    out.push_back({e.tx,e.ty,RS_CLEAR, 0, 0, e.z_keep?1u:0u});
+    if (e.op_e)         out.push_back({e.tx,e.ty,RS_OP,    e.op_p*4, 0, 0});
+    if (e.pt_e)         out.push_back({e.tx,e.ty,RS_PT,    e.pt_p*4, 0, 0});
+    if (e.tr_e)         out.push_back({e.tx,e.ty,RS_TR,    e.tr_p*4, 0, 0});
+    out.push_back({e.tx,e.ty,RS_FLUSH, 0, e.no_writeout?0u:1u, 0});
 }
 
 int fails=0, total=0;
@@ -91,11 +96,13 @@ static void run_case(const char* name, uint32_t base_words, std::vector<Entry>&e
                 printf("[%s] extra state #%zu (state=%d)\n",name,gi,dut->state); fails++;
             } else {
                 auto&g=gold[gi];
-                bool ok = (dut->tile_x==g.tx)&&(dut->tile_y==g.ty)&&(dut->state==g.state)&&(dut->list_ptr==g.ptr);
+                // writeout meaningful on FLUSH, z_keep on CLEAR; both required 0 elsewhere.
+                bool ok = (dut->tile_x==g.tx)&&(dut->tile_y==g.ty)&&(dut->state==g.state)&&(dut->list_ptr==g.ptr)
+                          &&(dut->writeout==g.wo)&&(dut->z_keep==g.zk);
                 if(!ok){
                     fails++;
-                    if(fails<20) printf("[%s] #%zu: hw(tx=%d ty=%d state=%02x ptr=%x) exp(tx=%d ty=%d state=%02x ptr=%x)\n",
-                        name,gi,dut->tile_x,dut->tile_y,dut->state,dut->list_ptr,g.tx,g.ty,g.state,g.ptr);
+                    if(fails<20) printf("[%s] #%zu: hw(tx=%d ty=%d state=%02x ptr=%x wo=%d zk=%d) exp(tx=%d ty=%d state=%02x ptr=%x wo=%d zk=%d)\n",
+                        name,gi,dut->tile_x,dut->tile_y,dut->state,dut->list_ptr,dut->writeout,dut->z_keep,g.tx,g.ty,g.state,g.ptr,g.wo,g.zk);
                 }
             }
             dut->consume=1; tick(); dut->consume=0;
@@ -116,15 +123,18 @@ int main(int argc,char**argv){
         {3,5, false,false,true, true,true,true, 0x100,0x200,0x300} };
       run_case("all_states", 0, e); }
 
-    // case 2: op only, z_keep set (no clear), writeout disabled (no flush)
+    // case 2: op only, z_keep set (no clear); no_writeout=1 -> FLUSH still emitted
+    // (end-of-entry marker) but with writeout=0
     { std::vector<Entry> e = {
         {1,1, true,true,true, true,false,false, 0x400,0,0} };
       run_case("op_only", 40, e); }
 
-    // case 3: empty tile (no states) -> silently skipped, then a real tile
+    // case 3: every entry now emits CLEAR(start) + FLUSH(end), so NO entry is skipped.
+    // entry 0: z_keep=1,no_writeout=1,no lists -> CLEAR(zk=1)+FLUSH(wo=0).
+    // entry 1: z_keep=0,writeout,no lists      -> CLEAR(zk=0)+FLUSH(wo=1).
     { std::vector<Entry> e = {
-        {2,2, true,true,false, false,false,false, 0,0,0},   // skipped entirely
-        {7,7, false,false,true, false,false,false, 0,0,0} };// clear+flush only
+        {2,2, true,true,false, false,false,false, 0,0,0},
+        {7,7, false,false,true, false,false,false, 0,0,0} };
       run_case("empty_then_real", 80, e); }
 
     // case 4: multi-tile sequence

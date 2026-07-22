@@ -14,7 +14,9 @@ module region_array_parser_tb_top import tsp_pkg::*; (
     output     [5:0]  tile_x,
     output     [5:0]  tile_y,
     output     [4:0]  state,
-    output     [26:0] list_ptr
+    output     [26:0] list_ptr,
+    output            writeout,
+    output            z_keep
 );
     region_out_t rout;
     region_ack_t ack;
@@ -24,6 +26,8 @@ module region_array_parser_tb_top import tsp_pkg::*; (
     assign tile_y     = rout.tile_y;
     assign state      = rout.state;
     assign list_ptr   = rout.list_ptr;
+    assign writeout   = rout.writeout;
+    assign z_keep     = rout.z_keep;
 
     ddr_rd_req_t  dreq;
     ddr_rd_resp_t dresp;
