@@ -188,7 +188,16 @@ module peel_tile_buffer import tsp_pkg::*; #(
             waddr = {NB{pb_wr_addr}};
             for (cw = 0; cw < NB; cw = cw + 1) begin
                 wdata[PEEL_W*cw + PW_DEPTH  +: 32] = FLT_MAX;
-                wdata[PEEL_W*cw + PW_DEPTH2 +: 32] = f_depth(rdata, cw);
+                // reference (zb2) <- zb (old depth), EXCEPT when zb is the FLT_MAX sentinel
+                // (this pixel peeled NOTHING last pass): then KEEP the old zb2. Without this,
+                // an entry's FIRST PeelBuffers would swap the sentinel in and discard the
+                // carried reference - which for a z_keep=1 entry whose opaque list is EMPTY
+                // is the only surviving copy of the opaque Z. That refsw2 bug wrongly z-fails
+                // the entry's TR (e.g. the THPS2 OSD occluded by the frozen scene). Merging
+                // odepth into zb2 this way needs no extra buffer - just the right reload.
+                wdata[PEEL_W*cw + PW_DEPTH2 +: 32] =
+                    (f_depth(rdata, cw) == FLT_MAX) ? f_depth2(rdata, cw)
+                                                    : f_depth (rdata, cw);
                 wdata[PEEL_W*cw + PW_TAG    +: 32] = f_tag  (rdata, cw);
                 wdata[PEEL_W*cw + PW_TAG2   +: 32] =
                     pb_first ? 32'hFFFFFFFF : f_tag(rdata, cw);
