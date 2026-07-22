@@ -840,7 +840,8 @@ module peel_core import tsp_pkg::*; (
                S_OP_DONE=32,
                // M10K bulk-op walks over the peel RAM ports (128 chunk addrs each):
                S_CLEAR_WR=34,              // CLEAR: write {bg_depth, bg_tag} chunks
-               S_PEEL_BUF_RUN=35;          // PeelBuffers RMW walk (read A -> write B)
+               S_PEEL_BUF_RUN=35,          // PeelBuffers RMW walk (read A -> write B)
+               S_ZK_INV=36;                // z_keep=1 OP: invalidate htile tags (keep depth)
     reg [5:0] st;
 
     // consumer sub-FSM (setup is now the streamed pipeline u_isp -> pq FIFO)
@@ -1252,9 +1253,10 @@ module peel_core import tsp_pkg::*; (
     always @(*) begin
         // ---- peel buffer ----
         pb_ra_valid    = ras_out_valid;               // stage-A read (chunk resolved)
-        pb_clr_valid   = (st == S_CLEAR_WR);          // CLEAR walk write (u_taginvw tags)
-        // u_peel DEPTH clear only on a full clear (z_keep=0). A z_keep=1 CLEAR walk still
-        // invalidates u_taginvw tags (pb_clr_valid) but must PRESERVE u_peel depth.
+        // u_taginvw tag write walk: full CLEAR (z_keep=0) OR the z_keep=1 OP pre-invalidate.
+        pb_clr_valid   = (st == S_CLEAR_WR) || (st == S_ZK_INV);
+        // u_peel DEPTH clear only on a full clear (z_keep=0, S_CLEAR_WR with zk_l=0). The
+        // z_keep=1 pre-invalidate (S_ZK_INV) NEVER touches depth.
         pb_clr_depth_valid = (st == S_CLEAR_WR) && !zk_l;
         pb_clr_addr    = cl_i;
         pb_bufrd_valid = (st == S_PEEL_BUF_RUN);      // PeelBuffers read-ahead
@@ -1467,9 +1469,10 @@ module peel_core import tsp_pkg::*; (
                 $display("[START] tsp_tag=%b spn tile(%0d,%0d) shade_mode(~ti)=%b ti_ready=%b", tsp_tag, ti_tx[tsp_tag], ti_ty[tsp_tag], ~ti_mode[tsp_tag], ti_ready);
             // +passtrace: log every shade handoff START (tile, OP/PEEL mode, last, postonly)
             if ($test$plusargs("passtrace") && spv_start)
-                $display("[PASS] tile(%0d,%0d) mode=%s last=%b postonly=%b",
+                $display("[PASS] tile(%0d,%0d) mode=%s shmode=%b last=%b postonly=%b",
                          ti_tx[tsp_tag], ti_ty[tsp_tag],
                          ti_mode[tsp_tag] ? "PEEL" : "OP  ",
+                         ~ti_mode[tsp_tag],
                          ti_last[tsp_tag], ti_postonly[tsp_tag]);
 `endif
             if (ras_out_valid) begin
@@ -1515,6 +1518,20 @@ module peel_core import tsp_pkg::*; (
                 && (cb_id==10'd327 || cb_id==10'd328))
                 $display("[BLENDCB] tile(7,4) id=%0d dst=%08x src=%08x tsp=%08x",
                          cb_id, col_rd_argb, cb_argb, cb_tsp);
+            // +ptx=X +pty=Y CB trace: dst the blend reads for the target pixel (result = blend(src,dst)).
+            if ($test$plusargs("ptx") && cb_valid) begin : cbtr
+                integer cpx, cpy; reg [10:0] csx, csy;
+                csx = {5'd0, md_tx[md_rp[MD_AW-1:0]]}*11'd32 + {6'd0, cb_id[4:0]};
+                csy = {5'd0, md_ty[md_rp[MD_AW-1:0]]}*11'd32 + {6'd0, cb_id[9:5]};
+                cpx = 0; cpy = 0;
+                void'($value$plusargs("ptx=%d", cpx));
+                void'($value$plusargs("pty=%d", cpy));
+                if ((csx == cpx[10:0] && csy == cpy[10:0])
+                    || ($test$plusargs("pixtile")
+                        && md_tx[md_rp[MD_AW-1:0]]==cpx[10:0]/6'd32
+                        && md_ty[md_rp[MD_AW-1:0]]==cpy[10:0]/6'd32 && cb_id[4:0]==cpx[10:0]%6'd32))
+                    $display("[CB] (%0d,%0d) dst=%08x src=%08x tsp=%08x", csx, csy, col_rd_argb, cb_argb, cb_tsp);
+            end
 `endif
             cb_valid <= 1'b0;
             if (pp_out_valid) begin                    // clean pulse; NOT gated on stall
@@ -1547,8 +1564,8 @@ module peel_core import tsp_pkg::*; (
                         || ($test$plusargs("pixtile")
                             && md_tx[md_rp[MD_AW-1:0]]==px_t[10:0]/6'd32
                             && md_ty[md_rp[MD_AW-1:0]]==py_t[10:0]/6'd32))
-                        $display("[PIXTRACE] (%0d,%0d) src=%08x tsp=%08x at_en=%b pass=%0d",
-                                 sx, sy, pp_out_argb, pp_out_tsp, pp_out_id[10], peel_pass);
+                        $display("[PIXTRACE] (%0d,%0d) src=%08x tsp=%08x at_en=%b peeling=%b pass=%0d",
+                                 sx, sy, pp_out_argb, pp_out_tsp, pp_out_id[10], peeling, peel_pass);
                 end
 `endif
             end
@@ -1617,15 +1634,32 @@ module peel_core import tsp_pkg::*; (
                     zk_entry <= ra_out.z_keep;
                     if (!ra_out.z_keep) op_shaded <= 1'b0;   // full clear -> fresh tile
                     has_pt <= 1'b0; has_tr <= 1'b0;   // PT/TL lists for this ENTRY: none yet
-                    cl_i <= '0; st <= S_CLEAR_WR;
+                    // z_keep=0: full clear walk (bg tag+depth). z_keep=1: the tag-invalidate
+                    // is DEFERRED to the OP raster (RSTATE_OP) so it only runs when an OP
+                    // shade actually follows, and lands on the same htile the OP rasters
+                    // into - never on a half TSP is still draining. Here z_keep=1 just acks.
+                    if (ra_out.z_keep) begin
+                        ra_ack.list_done <= 1'b1; st <= S_RA_ACK;
+                    end else begin
+                        cl_i <= '0; st <= S_CLEAR_WR;
+                    end
                 end
                 // OPAQUE: single pass, plain DepthMode compare (no peeling). Gate on
                 // !ti_ready[htile] (raster writes u_taginvw[htile]).
+                // For a z_keep=1 entry (zk_entry), FIRST invalidate this htile half's tags
+                // (S_ZK_INV walk) so the shade-mode=0 OP shade renders ONLY this entry's OP
+                // triangles, not stale/bg tags. Gating on !ti_ready[htile] here means the
+                // walk lands on a FREE half (TSP already drained it) - so it can never
+                // corrupt a shade in flight. z_keep=0 tiles were fully cleared already.
                 RSTATE_OP: if (!ti_ready[htile]) begin
                     peeling  <= 1'b0;
                     ol_list_ptr <= ra_out.list_ptr;
-                    ol_start <= 1'b1;
-                    st <= S_OL_RUN;
+                    if (zk_entry) begin
+                        cl_i <= '0; st <= S_ZK_INV;   // invalidate htile tags, then raster
+                    end else begin
+                        ol_start <= 1'b1;
+                        st <= S_OL_RUN;
+                    end
                 end
                 // PT / TR: just LATCH the list pointer + present flag and ack. The
                 // UNIFIED peel (both lists together, back-to-front) runs at FLUSH so
@@ -1718,6 +1752,17 @@ module peel_core import tsp_pkg::*; (
                 else cl_i <= cl_i + 1'b1;
             end
 
+            // z_keep=1 OP pre-walk: invalidate this htile half's tags (valid<-0), KEEP depth
+            // (pb_clr_valid drives u_taginvw; pb_clr_depth_valid stays 0 because zk_l=1), then
+            // start the OP object list. The OP raster then sets valid=1 only on its own
+            // triangles; the shade-mode=0 OP shade renders exactly those.
+            S_ZK_INV: begin
+                if (cl_i == CHUNK_AW'(NCHUNK-1)) begin
+                    ol_start <= 1'b1;
+                    st <= S_OL_RUN;
+                end else cl_i <= cl_i + 1'b1;
+            end
+
             // S_OL_RUN: PRODUCER - push each OL entry into the entry FIFO (eq) and
             // ack the OL parser so it decodes the next entry ahead. STRIP/TRI are
             // queued; QUAD is skipped. On list end (ol_done) -> BARRIER (S_DRAIN).
@@ -1780,6 +1825,9 @@ module peel_core import tsp_pkg::*; (
                         ti_ready[htile] <= 1'b1;
                         ti_mode [htile] <= 1'b1;                 // PEEL
                         ti_last [htile] <= !more_to_draw && wo_l;
+                        ti_postonly[htile] <= 1'b0;   // this is a real shade, NOT a post-only
+                                                      // (must clear a stale post-only left by a
+                                                      // prior tile's writeout on this half)
                         ti_tx   [htile] <= cur_tx; ti_ty[htile] <= cur_ty;
                         htile <= ~htile;
 `ifndef SYNTHESIS
@@ -1809,6 +1857,7 @@ module peel_core import tsp_pkg::*; (
                     ti_ready[htile] <= 1'b1;
                     ti_mode [htile] <= zk_entry;                 // OP (shade-all vs valid-gated)
                     ti_last [htile] <= 1'b0;
+                    ti_postonly[htile] <= 1'b0;   // real shade, NOT a post-only (clear stale)
                     ti_tx   [htile] <= cur_tx; ti_ty[htile] <= cur_ty;
                     htile <= ~htile;
 `ifndef SYNTHESIS
