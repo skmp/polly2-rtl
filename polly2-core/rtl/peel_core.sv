@@ -786,6 +786,22 @@ module peel_core import tsp_pkg::*; (
             $fwrite(sd_fd, "# seq id px py invw tsp tcw text_ctrl ptex pofs ddx0..9 ddy0..9 c0..9\n");
         end
     end
+    // +ptx=X +pty=Y invW trace at shade-input: every SHADED fragment (peel-accepted) at (X,Y),
+    // showing invW + tsp so OSD-vs-scene depth ordering is visible. (Rejected frags never shade,
+    // so absence here = rasterized-but-rejected OR not covered.)
+    always @(posedge clk) if (!reset && $test$plusargs("ptx") && pp_in_valid && !pp_stall) begin : iwtr
+        integer ipx, ipy; reg [10:0] isx, isy;
+        isx = {5'd0, md_tx[md_rp[MD_AW-1:0]]}*11'd32 + {6'd0, pp_px};
+        isy = {5'd0, md_ty[md_rp[MD_AW-1:0]]}*11'd32 + {6'd0, pp_py};
+        ipx = 0; ipy = 0;
+        void'($value$plusargs("ptx=%d", ipx));
+        void'($value$plusargs("pty=%d", ipy));
+        if ((isx == ipx[10:0] && isy == ipy[10:0])
+            || ($test$plusargs("pixtile")
+                && md_tx[md_rp[MD_AW-1:0]]==ipx[10:0]/6'd32
+                && md_ty[md_rp[MD_AW-1:0]]==ipy[10:0]/6'd32))
+            $display("[INVW] (%0d,%0d) invw=%08x tsp=%08x", isx, isy, pp_invw, pp_tsp);
+    end
     always @(posedge clk) begin
         if (!reset && sd_en && pp_in_valid && !pp_stall) begin
             $fwrite(sd_fd, "%0d %0d %0d %0d %0d %0d %08x %08x %08x %02x %0d %0d",
@@ -1529,7 +1545,7 @@ module peel_core import tsp_pkg::*; (
                 if ((csx == cpx[10:0] && csy == cpy[10:0])
                     || ($test$plusargs("pixtile")
                         && md_tx[md_rp[MD_AW-1:0]]==cpx[10:0]/6'd32
-                        && md_ty[md_rp[MD_AW-1:0]]==cpy[10:0]/6'd32 && cb_id[4:0]==cpx[10:0]%6'd32))
+                        && md_ty[md_rp[MD_AW-1:0]]==cpy[10:0]/6'd32))
                     $display("[CB] (%0d,%0d) dst=%08x src=%08x tsp=%08x", csx, csy, col_rd_argb, cb_argb, cb_tsp);
             end
 `endif
