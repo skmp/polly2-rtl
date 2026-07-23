@@ -752,8 +752,14 @@ module peel_core import tsp_pkg::*; (
     assign pp_pal_data[0] = pal_resp[0].rdata; assign pp_pal_data[1] = pal_resp[1].rdata;
     assign pp_pal_data[2] = pal_resp[2].rdata; assign pp_pal_data[3] = pal_resp[3].rdata;
 
+    // flush the tex/VQ caches at render start (go). The caches are address-tagged and have
+    // NO cross-render coherency; the guest re-streams textures/VQ codebooks into reused VRAM
+    // addresses between frames, so a persisted line would return stale texels (seen on HW as
+    // e.g. black transparent foliage). The DC re-reads textures from VRAM every render. `go`
+    // pulses once per render and the ~NLINE-cycle valid-clear sweep completes long before the
+    // first tile is shaded (raster/region-walk runs first), so this is free in practice.
     tsp_shade_v2_pp #(.IDW(11)) u_shade (
-        .clk(clk),.reset(reset),
+        .clk(clk),.reset(reset),.flush(go),
         .in_valid(pp_in_valid),.in_id(pp_in_id),.px(pp_px),.py(pp_py),.invw_in(pp_invw),
         .in_ddx(pp_ddx),.in_ddy(pp_ddy),.in_c(pp_c),
         .tsp(pp_tsp),.tcw(pp_tcw),.text_ctrl(regs.text_control[4:0]),

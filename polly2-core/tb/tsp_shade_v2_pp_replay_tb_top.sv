@@ -101,7 +101,7 @@ module tsp_shade_v2_pp_replay_tb_top import tsp_pkg::*; (
 
     // ---- DUT: tsp_shade_v2_pp (IDW=11, as peel_core instantiates it) ----
     tsp_shade_v2_pp #(.IDW(11)) u_shade (
-        .clk(clk),.reset(reset),
+        .clk(clk),.reset(reset),.flush(1'b0),   // single replay: cold cache from reset, no per-render flush needed
         .in_valid(pp_in_valid),.in_id(pp_in_id),.px(px),.py(py),.invw_in(invw_in),
         .in_ddx(a_ddx),.in_ddy(a_ddy),.in_c(a_c),
         .tsp(tsp),.tcw(tcw),.text_ctrl(text_ctrl),

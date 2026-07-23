@@ -43,6 +43,11 @@
 module tex_cache_4p_1c import tsp_pkg::*; (
     input                clk,
     input                reset,
+    input                flush,   // 1-cyc: re-run the valid-clear sweep (render start). The
+                                  // cache is address-tagged and has NO cross-render coherency;
+                                  // VRAM textures/VQ codebooks re-streamed to a reused address
+                                  // would hit stale lines. The Dreamcast re-reads textures from
+                                  // VRAM every render, so we invalidate here on every render.
     input  cache_req_t   creq  [0:3],
     output cache_resp_t  cresp [0:3],
     output ddr_rd_req_t  dreq,
@@ -187,6 +192,12 @@ module tex_cache_4p_1c import tsp_pkg::*; (
             for (i=0;i<5;i=i+1) stat_hit[i] <= 0;
             stat_n <= 0;
 `endif
+        end else if (flush) begin
+            // render start: re-enter the valid-clear sweep (invalidate all lines). Safe
+            // because the shade pipe is idle between renders (no fill in flight). Stats
+            // (sim-only) are intentionally left cumulative across renders.
+            st <= S_RST; rd_r <= 0; rst_i <= 0; retesting <= 0; m_wport <= 4'd0;
+            for (i=0;i<4;i=i+1) t_v[i]<=0;
         end else begin
             rd_r <= 1'b0;
             retesting <= 1'b0;

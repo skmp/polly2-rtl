@@ -29,7 +29,8 @@ module tex_fetch4_ob import tsp_pkg::*; #(
 ) (
     input             clk,
     input             reset,
-
+    input             flush,             // render-start: invalidate both tex caches (no
+                                         // cross-render texture coherency; see tex_cache_4p_1c)
     input             in_valid,
     input             tex,               // TEX: textured pixel
     input             vq,               // VQ:  VQ-compressed texture
@@ -50,9 +51,9 @@ module tex_fetch4_ob import tsp_pkg::*; #(
     // shared 4-read-port caches (data + VQ)
     cache_req_t   tc_req [0:3], vq_req [0:3];
     cache_resp_t  tc_resp[0:3], vq_resp[0:3];
-    tex_cache_4p_1c u_tc4 (.clk(clk),.reset(reset),
+    tex_cache_4p_1c u_tc4 (.clk(clk),.reset(reset),.flush(flush),
         .creq(tc_req),.cresp(tc_resp),.dreq(ddr_req[0]),.dresp(ddr_resp[0]));
-    tex_cache_4p_1c u_vq4 (.clk(clk),.reset(reset),
+    tex_cache_4p_1c u_vq4 (.clk(clk),.reset(reset),.flush(flush),
         .creq(vq_req),.cresp(vq_resp),.dreq(ddr_req[1]),.dresp(ddr_resp[1]));
 
     // per-corner data-cache word address + VQ byte lane (combinational off inputs)
