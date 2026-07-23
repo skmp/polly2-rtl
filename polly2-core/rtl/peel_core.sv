@@ -209,7 +209,9 @@ module peel_core import tsp_pkg::*; (
     //     stage-A read / stage-B RMW, the shade single-pixel read, the CLEAR walk and
     //     the PeelBuffers RMW walk. Bank = x[2:0], addr = {y[4:0], x[4:3]}.
     //   * color_tile_buffer (u_col): col_buf as a single 1024x32 M10K. It owns the
-    //     blend RMW (2-stage CA read / CB tsp_blend+write) and the FLUSH read.
+    //     blend RMW ports (2-stage CA read / CB write) and the FLUSH read; the blend
+    //     unit itself is ONE shared tsp_blend here in peel_core (only the producer
+    //     half blends at a time, so the ping-pong halves don't each carry one).
     // The registered reads force the raster compare and the blend into 2-stage
     // pipelines and CLEAR/PeelBuffers into 128-chunk walks; the peel_core barriers
     // serialize the raster / shade / bulk phases so each buffer's single read+write
@@ -252,6 +254,7 @@ module peel_core import tsp_pkg::*; (
     reg                    cb_fl_valid;         // FLUSH read
     reg  [9:0]             cb_fl_id;
     wire [31:0]            col_rd_argb;         // registered read (dst / flush pixel)
+    wire [31:0]            cb_blend_out;        // shared tsp_blend result -> u_col CB write
 
     // -------------------- int -> float (tile origin, 0..2016) --------------------
     function automatic [31:0] i2f(input [15:0] v);
@@ -553,8 +556,7 @@ module peel_core import tsp_pkg::*; (
         color_tile_buffer #(.DEPTH(TILE_W*TILE_H)) u_col (
             .clk(clk), .reset(reset),
             .bl_ca_valid(is_prod && cb_ca_valid), .bl_ca_id(cb_ca_id),
-            .bl_cb_valid(is_prod && cb_valid), .cb_id(cb_id), .cb_argb(cb_argb),
-            .cb_tsp(cb_tsp), .cb_at_en(cb_at_en), .alpha_ref(regs.pt_alpha_ref[7:0]),
+            .bl_cb_valid(is_prod && cb_valid), .cb_id(cb_id), .cb_data(cb_blend_out),
             .fl_rd_valid(is_vo && cb_fl_valid), .fl_id(cb_fl_id),
             .rd_argb(col_rd_argb_h[gcol])
         );
@@ -834,12 +836,15 @@ module peel_core import tsp_pkg::*; (
 `endif
 
     // -------- blend unit: the very end of the TSP pipeline (refsw BlendingUnit) --------
-    // The blend RMW now lives INSIDE u_col (color_tile_buffer): a 2-stage pipeline
-    // over the M10K color buffer.
+    // The blend RMW is a 2-stage pipeline over the u_col M10K, but the blend unit is
+    // this ONE shared tsp_blend: only the producer color half blends at a time, so
+    // the ping-pong u_col halves expose plain read/write ports instead of each
+    // embedding a blender.
     //   stage CA (on pp_out_valid && !pp_stall): latch cb_* and assert cb_ca_valid to
     //     present the col-RAM READ of cb_id; cb_valid<=1.
-    //   stage CB (next cycle, cb_valid): u_col reads OLD col_buf[cb_id] = the dst,
-    //     runs tsp_blend combinationally, and writes col_ram[cb_id] <- blend_out.
+    //   stage CB (next cycle, cb_valid): col_rd_argb = OLD col_buf[cb_id] (producer
+    //     half) = the dst; u_blend runs combinationally and u_col writes
+    //     col_ram[cb_id] <- cb_blend_out.
     // Because the shade sub-phase presents pixels in ASCENDING shp order and the pipe
     // is in-order, out ids never repeat within a sub-phase -> CA id N and CB id N-1
     // are always distinct, so no same-address RMW hazard. SH_DRAIN additionally waits
@@ -849,6 +854,15 @@ module peel_core import tsp_pkg::*; (
     reg  [9:0]   cb_id;
     reg  [31:0]  cb_argb, cb_tsp;
     reg          cb_at_en;    // alpha-test enable snapshot (peeling && dt_pt[id])
+    tsp_blend u_blend (
+        .src       (cb_argb),
+        .dst       (col_rd_argb),            // producer half's registered read (stage CA)
+        .src_instr (cb_tsp[31:29]),
+        .dst_instr (cb_tsp[28:26]),
+        .alpha_test(cb_at_en),
+        .alpha_ref (regs.pt_alpha_ref[7:0]),
+        .out       (cb_blend_out),
+        .at_pass   ());
 
     // -------------------- orchestration FSM --------------------
     // Decoupled producer / consumer (as frontend_isp_tb_top): the region->objlist
