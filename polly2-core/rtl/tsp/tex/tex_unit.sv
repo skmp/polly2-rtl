@@ -214,10 +214,10 @@ module tex_unit import tsp_pkg::*; #(
     // r_iss-aligned i_* (see the i1_/i2_/i_ delay lines below).
     // ============================================================================
     // payload layout: {off0,off1,off2,off3 (4b each), pixfmt(3), palfmt(2), scan(1),
-    //                  palsel(6), uf(8), vf(8), filt(2), igna(1), tex(1), id(IDW)}
-    localparam integer FPLW = 16 + 3 + 2 + 1 + 6 + 8 + 8 + 2 + 1 + 1 + IDW;
+    //                  twid(1), palsel(6), uf(8), vf(8), filt(2), igna(1), tex(1), id(IDW)}
+    localparam integer FPLW = 16 + 3 + 2 + 1 + 1 + 6 + 8 + 8 + 2 + 1 + 1 + IDW;
     wire [FPLW-1:0] fpl_in = { r_toff[0], r_toff[1], r_toff[2], r_toff[3],
-                               i_pixfmt, i_palfmt, i_scan, i_palsel,
+                               i_pixfmt, i_palfmt, i_scan, i_twid, i_palsel,
                                i_uf, i_vf, i_filt, i_igna, i_tex, i_id };
     wire [FPLW-1:0] fpl_out;
 
@@ -232,10 +232,10 @@ module tex_unit import tsp_pkg::*; #(
 
     // unpack the fetch-carried payload (aligned with f_ov / f_word).
     wire [3:0]  fo_off [0:3];
-    wire [2:0]  fo_pixfmt; wire [1:0] fo_palfmt; wire fo_scan; wire [5:0] fo_palsel;
+    wire [2:0]  fo_pixfmt; wire [1:0] fo_palfmt; wire fo_scan, fo_twid; wire [5:0] fo_palsel;
     wire [7:0]  fo_uf, fo_vf; wire [1:0] fo_filt; wire fo_igna, fo_tex; wire [IDW-1:0] fo_id;
     assign { fo_off[0], fo_off[1], fo_off[2], fo_off[3],
-             fo_pixfmt, fo_palfmt, fo_scan, fo_palsel,
+             fo_pixfmt, fo_palfmt, fo_scan, fo_twid, fo_palsel,
              fo_uf, fo_vf, fo_filt, fo_igna, fo_tex, fo_id } = fpl_out;
 
     // ============================================================================
@@ -260,21 +260,21 @@ module tex_unit import tsp_pkg::*; #(
     // config/fracs delayed to the fetch-ISSUE cycle (r_iss). issue is +3 from the uvmap-
     // aligned d_*[L]: +1 addroffs (i1_*), +1 offset register (i2_*), +1 address register
     // (i_*). Three delay stages.
-    reg [2:0]  i1_pixfmt; reg [1:0] i1_palfmt; reg i1_scan; reg [5:0] i1_palsel;
+    reg [2:0]  i1_pixfmt; reg [1:0] i1_palfmt; reg i1_scan, i1_twid; reg [5:0] i1_palsel;
     reg [7:0]  i1_uf, i1_vf; reg [1:0] i1_filt; reg i1_igna, i1_tex; reg [IDW-1:0] i1_id;
-    reg [2:0]  i2_pixfmt; reg [1:0] i2_palfmt; reg i2_scan; reg [5:0] i2_palsel;
+    reg [2:0]  i2_pixfmt; reg [1:0] i2_palfmt; reg i2_scan, i2_twid; reg [5:0] i2_palsel;
     reg [7:0]  i2_uf, i2_vf; reg [1:0] i2_filt; reg i2_igna, i2_tex; reg [IDW-1:0] i2_id;
-    reg [2:0]  i_pixfmt; reg [1:0] i_palfmt; reg i_scan; reg [5:0] i_palsel;
+    reg [2:0]  i_pixfmt; reg [1:0] i_palfmt; reg i_scan, i_twid; reg [5:0] i_palsel;
     reg [7:0]  i_uf, i_vf; reg [1:0] i_filt; reg i_igna, i_tex; reg [IDW-1:0] i_id;
     always @(posedge clk) if (!front_stall) begin
         // stage 1: uvmap-aligned -> addroffs-aligned (ao_ov)
-        i1_pixfmt<=bo_pixfmt; i1_palfmt<=bo_palfmt; i1_scan<=bo_scan; i1_palsel<=bo_palsel;
+        i1_pixfmt<=bo_pixfmt; i1_palfmt<=bo_palfmt; i1_scan<=bo_scan; i1_twid<=btwiddled; i1_palsel<=bo_palsel;
         i1_uf<=ufr; i1_vf<=vfr; i1_filt<=d_filt[L]; i1_igna<=d_igna[L]; i1_tex<=d_tex[L]; i1_id<=d_id[L];
         // stage 2: addroffs-aligned -> offset-register cycle (r1_iss)
-        i2_pixfmt<=i1_pixfmt; i2_palfmt<=i1_palfmt; i2_scan<=i1_scan; i2_palsel<=i1_palsel;
+        i2_pixfmt<=i1_pixfmt; i2_palfmt<=i1_palfmt; i2_scan<=i1_scan; i2_twid<=i1_twid; i2_palsel<=i1_palsel;
         i2_uf<=i1_uf; i2_vf<=i1_vf; i2_filt<=i1_filt; i2_igna<=i1_igna; i2_tex<=i1_tex; i2_id<=i1_id;
         // stage 3: offset-register -> address-register cycle (r_iss)
-        i_pixfmt<=i2_pixfmt; i_palfmt<=i2_palfmt; i_scan<=i2_scan; i_palsel<=i2_palsel;
+        i_pixfmt<=i2_pixfmt; i_palfmt<=i2_palfmt; i_scan<=i2_scan; i_twid<=i2_twid; i_palsel<=i2_palsel;
         i_uf<=i2_uf; i_vf<=i2_vf; i_filt<=i2_filt; i_igna<=i2_igna; i_tex<=i2_tex; i_id<=i2_id;
     end
     // ============================================================================
@@ -286,7 +286,7 @@ module tex_unit import tsp_pkg::*; #(
     generate for (gi=0; gi<4; gi=gi+1) begin : dec
         tex_decode u_dec (
             .clk(clk),.reset(reset),.in_valid(f_ov),
-            .pixfmt(fo_pixfmt),.pal_fmt(fo_palfmt),.scan_order(fo_scan),
+            .pixfmt(fo_pixfmt),.pal_fmt(fo_palfmt),.scan_order(fo_scan),.twiddled(fo_twid),
             .palsel(fo_palsel),.memtel(f_word[gi]),.offset(fo_off[gi]),
             .pal_addr(pal_addr[gi]),.pal_data(pal_data[gi]),
             .out_valid(dec_ov[gi]),.argb(dec_argb[gi]));

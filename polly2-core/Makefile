@@ -2,7 +2,7 @@
 #
 #   make test          - fast unit tests: TSP texture blocks + front-end blocks
 #   make tex           - TSP texture-pipeline block tests (randomized vs refsw):
-#                        tex-addr / tex-uv / tex-filter / tex-combiner
+#                        tex-addr / tex-uv / tex-decode / tex-filter / tex-combiner
 #   make frontendtsplp - front-end + ISP + TSP + layer peeling -> shaded_lp_<name>.bmp
 #   make spannerv2     - spanner_v2 standalone replay vs C++ golden
 #   make regen         - regenerate PVR register typedefs from minicast's pvr_regs.h
@@ -34,7 +34,7 @@ VFLAGS    = -Wno-WIDTH -Wno-UNOPTFLAT -Wno-UNSIGNED -Wno-DECLFILENAME -Irtl/tsp/
 BUILD = build
 CWD  := $(shell pwd)
 
-.PHONY: raster-topleft clean test tex tex-addr tex-uv tex-filter tex-combiner \
+.PHONY: raster-topleft clean test tex tex-addr tex-uv tex-decode tex-filter tex-combiner \
         oparse region regfile regen sortcache itquad taginvw dense_span_buffer \
         frontendtsplp spannerv2 mulc9 mul16sppro add24sppro mulc9sppro add3sppro \
         mul24sppro mul24c9sppro
@@ -72,8 +72,14 @@ raster-topleft: | $(BUILD)
 
 # ---- TSP texture-pipeline block tests (randomized vectors vs refsw) ----
 TSP = rtl/tsp
-tex: tex-addr tex-uv tex-filter tex-combiner
+tex: tex-addr tex-uv tex-decode tex-filter tex-combiner
 	@echo "=== all texture block tests passed ==="
+
+tex-decode: | $(BUILD)
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module tex_decode \
+	  $(TSP)/tex/tex_decode.sv $(CWD)/tb/tex_decode_tb.cpp \
+	  --Mdir $(BUILD)/obj_texdec -o tb
+	./$(BUILD)/obj_texdec/tb
 
 tex-addr: | $(BUILD)
 	+$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module tex_addr \

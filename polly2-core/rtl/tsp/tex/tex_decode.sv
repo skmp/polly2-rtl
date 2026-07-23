@@ -5,8 +5,15 @@
 //
 //   template<PixelFmt> u32 DecodeTextel(PalSelect, u64 memtel, u32 offset):
 //     1555/565/4444/BumpMap/Reserved : return memtel_16[offset & 3]   (RAW 16-bit)
-//     YUV422                         : YUV422(y=memtel8[1+(offset&2)], u=memtel8[0],
-//                                             v=memtel8[2]) of memtel_32[offset&1]
+//     YUV422                         : y = memtel8[2*(offset&3)+1] (own lane, both
+//                                      layouts); chroma depends on layout:
+//                                        twiddled: u=memtel8[2*(offset&1)]
+//                                                  v=memtel8[2*(offset&1)+4]
+//                                        planar:   u=memtel8[2*(offset&2)]
+//                                                  v=memtel8[2*(offset&2)+2]
+//                                      (twiddled 64b word = 2x2 quad, per-16b-texel
+//                                       twiddle: [U|Y00][U'|Y01][V|Y10][V'|Y11];
+//                                       planar = raster UYVY pairs)
 //     Pal4  : local = (memtel >> (offset&15)*4) & 15 ; idx = PalSelect*16 | local
 //     Pal8  : local = memtel_8[offset&7]            ; idx = (PalSelect/16)*256 | local
 //   PixelFmt: 0=1555 1=565 2=4444 3=YUV 4=Bump 5=Pal4 6=Pal8 7=Reserved
@@ -35,6 +42,7 @@ module tex_decode (
     input      [2:0]  pixfmt,       // TCW.PixelFmt (0..7)
     input      [1:0]  pal_fmt,      // palette-entry format: 0=1555 1=565 2=4444 3=8888
     input             scan_order,   // ExpandToARGB8888 pad: 1=zero-pad, 0=MSB-repeat
+    input             twiddled,     // vq | ~scan_e (tex_base_addr): YUV chroma-lane layout
     input      [5:0]  palsel,       // TCW.PalSelect
     input      [63:0] memtel,       // 64-bit memory word covering this texel
     input      [3:0]  offset,       // texel offset (sub-word / nibble / byte select)
@@ -70,12 +78,16 @@ module tex_decode (
     // C1 (off the early yu/yv) and registered, so C2 only does the adds/divides. This
     // splits the G channel's yu*11+yv*22 (two muls in C1, the sum in C2).
     // multstyle="logic" forces the products into fabric (NO DSP blocks).
-    wire [31:0] yuv32 = offset[0] ? memtel[63:32] : memtel[31:0];
-    wire [7:0]  yuv_y0 = yuv32[15:8];    // memtel_yuv8[1]  (offset&2==0)
-    wire [7:0]  yuv_y1 = yuv32[31:24];   // memtel_yuv8[3]  (offset&2==2)
-    wire [7:0]  yv_y_c = offset[1] ? yuv_y1 : yuv_y0;
-    wire signed [9:0] yu_c = $signed({2'b0, yuv32[7:0]})  - 10'sd128;   // u-128
-    wire signed [9:0] yv_c = $signed({2'b0, yuv32[23:16]}) - 10'sd128;  // v-128
+    // Y is the texel's own 16-bit lane high byte in both layouts (= w16_c). Chroma:
+    // twiddled quad [U|Y00][U'|Y01][V|Y10][V'|Y11] -> offset[0] (y parity) picks the
+    // row's U/V lanes; planar raster UYVY -> offset[1] picks which 32-bit pair.
+    wire [7:0]  yv_y_c  = w16_c[15:8];
+    wire [7:0]  yuv_u8 = twiddled ? (offset[0] ? memtel[23:16] : memtel[7:0])
+                                  : (offset[1] ? memtel[39:32] : memtel[7:0]);
+    wire [7:0]  yuv_v8 = twiddled ? (offset[0] ? memtel[55:48] : memtel[39:32])
+                                  : (offset[1] ? memtel[55:48] : memtel[23:16]);
+    wire signed [9:0] yu_c = $signed({2'b0, yuv_u8}) - 10'sd128;   // u-128
+    wire signed [9:0] yv_c = $signed({2'b0, yuv_v8}) - 10'sd128;   // v-128
     (* multstyle = "logic" *) wire signed [17:0] m_yu11_c  = yu_c * 18'sd11;
     (* multstyle = "logic" *) wire signed [17:0] m_yv11_c  = yv_c * 18'sd11;
     (* multstyle = "logic" *) wire signed [17:0] m_yv22_c  = yv_c * 18'sd22;
