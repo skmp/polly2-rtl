@@ -240,6 +240,7 @@ module peel_core import tsp_pkg::*; (
     reg  [CHUNK_AW-1:0]    pb_bufrd_addr;
     reg                    pb_bufwr_valid;      // PeelBuffers delayed write
     reg  [CHUNK_AW-1:0]    pb_bufwr_addr;
+    reg                    pb_zkeep;            // pb write = z_keep depth-restore (not peel swap)
     wire [RAS_LANES-1:0]   b_pass_lp;           // per-lane peel accept (for dt_pt)
     wire [RAS_LANES-1:0]   b_more;              // per-lane MoreToDraw
     wire [32*RAS_LANES-1:0] b_oldtag;           // per-lane resident pending tag (sort$)
@@ -435,7 +436,7 @@ module peel_core import tsp_pkg::*; (
         // PeelBuffers RMW walk
         .pb_rd_valid(pb_bufrd_valid), .pb_rd_addr(pb_bufrd_addr),
         .pb_wr_valid(pb_bufwr_valid), .pb_wr_addr(pb_bufwr_addr),
-        .pb_first(first_peel)
+        .pb_first(first_peel), .pb_zkeep(pb_zkeep)
     );
 
     // ---- SORT CACHE (u_sort): peel "fully rendered" triangle filter ----
@@ -1269,16 +1270,21 @@ module peel_core import tsp_pkg::*; (
     always @(*) begin
         // ---- peel buffer ----
         pb_ra_valid    = ras_out_valid;               // stage-A read (chunk resolved)
-        // u_taginvw tag write walk: full CLEAR (z_keep=0) OR the z_keep=1 OP pre-invalidate.
-        pb_clr_valid   = (st == S_CLEAR_WR) || (st == S_ZK_INV);
-        // u_peel DEPTH clear only on a full clear (z_keep=0, S_CLEAR_WR with zk_l=0). The
-        // z_keep=1 pre-invalidate (S_ZK_INV) NEVER touches depth.
+        // u_taginvw single-cursor tag write walk: full CLEAR only (z_keep=0). The z_keep=1
+        // OP pre-invalidate now rides the RMW pbc walk below (S_ZK_INV), not this port.
+        pb_clr_valid   = (st == S_CLEAR_WR);
+        // u_peel DEPTH clear only on a full clear (z_keep=0, S_CLEAR_WR with zk_l=0). A
+        // z_keep=1 entry keeps depth; its S_ZK_INV RMW restores the sentinel-poisoned zb.
         pb_clr_depth_valid = (st == S_CLEAR_WR) && !zk_l;
         pb_clr_addr    = cl_i;
-        pb_bufrd_valid = (st == S_PEEL_BUF_RUN);      // PeelBuffers read-ahead
+        // PeelBuffers RMW (read-ahead / delayed write) is SHARED by the peel pass swap
+        // (S_PEEL_BUF_RUN) and the z_keep=1 depth-restore pre-walk (S_ZK_INV). pb_zkeep
+        // selects the transform in u_peel; u_taginvw's pbc valid-clear fires either way.
+        pb_bufrd_valid = (st == S_PEEL_BUF_RUN) || (st == S_ZK_INV);
         pb_bufrd_addr  = pb_rd;
-        pb_bufwr_valid = (st == S_PEEL_BUF_RUN) && pb_pipe;  // PeelBuffers delayed write
+        pb_bufwr_valid = ((st == S_PEEL_BUF_RUN) || (st == S_ZK_INV)) && pb_pipe;
         pb_bufwr_addr  = pb_i;
+        pb_zkeep       = (st == S_ZK_INV);            // restore transform (else peel swap)
         // (stage-B write is driven by the b_valid port directly on u_peel)
 
         // ---- color buffer ----
@@ -1671,7 +1677,14 @@ module peel_core import tsp_pkg::*; (
                     peeling  <= 1'b0;
                     ol_list_ptr <= ra_out.list_ptr;
                     if (zk_entry) begin
-                        cl_i <= '0; st <= S_ZK_INV;   // invalidate htile tags, then raster
+                        // z_keep=1 OP pre-walk: RMW over u_peel to RESTORE depth
+                        // (zb<-zb2 where zb==FLT_MAX, undoing the prior peel's sentinel)
+                        // while u_taginvw's mirrored pbc walk invalidates tags. Prime the
+                        // two-cursor pb RMW (read-ahead / delayed write), same as PeelBuffers.
+                        pb_rd   <= '0;
+                        pb_i    <= '0;
+                        pb_pipe <= 1'b0;
+                        st <= S_ZK_INV;
                     end else begin
                         ol_start <= 1'b1;
                         st <= S_OL_RUN;
@@ -1768,15 +1781,23 @@ module peel_core import tsp_pkg::*; (
                 else cl_i <= cl_i + 1'b1;
             end
 
-            // z_keep=1 OP pre-walk: invalidate this htile half's tags (valid<-0), KEEP depth
-            // (pb_clr_valid drives u_taginvw; pb_clr_depth_valid stays 0 because zk_l=1), then
-            // start the OP object list. The OP raster then sets valid=1 only on its own
+            // z_keep=1 OP pre-walk (RMW, mirrors S_PEEL_BUF_RUN's two-cursor walk):
+            //  * u_peel : RESTORE depth zb<-(zb==FLT_MAX ? zb2 : zb) via pb_zkeep, undoing
+            //             the FLT_MAX sentinel a prior peel left (so this entry's OP depth-
+            //             tests against the real last-drawn depth, not FLT_MAX).
+            //  * u_taginvw: its pbc valid-clear walk (keyed to pb_bufwr_valid) invalidates
+            //             this htile half's tags (valid<-0) on the SAME cursor.
+            // Then start the OP object list: the OP raster sets valid=1 only on its own
             // triangles; the shade-mode=0 OP shade renders exactly those.
             S_ZK_INV: begin
-                if (cl_i == CHUNK_AW'(NCHUNK-1)) begin
+                pb_pipe <= 1'b1;
+                pb_i    <= pb_rd;
+                if (pb_pipe && pb_i == CHUNK_AW'(NCHUNK-1)) begin
                     ol_start <= 1'b1;
                     st <= S_OL_RUN;
-                end else cl_i <= cl_i + 1'b1;
+                end else if (pb_rd != CHUNK_AW'(NCHUNK-1)) begin
+                    pb_rd <= pb_rd + 1'b1;
+                end
             end
 
             // S_OL_RUN: PRODUCER - push each OL entry into the entry FIFO (eq) and
