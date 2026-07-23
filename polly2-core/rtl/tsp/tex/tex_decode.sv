@@ -47,9 +47,13 @@ module tex_decode (
     input      [63:0] memtel,       // 64-bit memory word covering this texel
     input      [3:0]  offset,       // texel offset (sub-word / nibble / byte select)
 
-    // injected palette RAM: pal_addr driven from the C1 register (1-cycle M10K read),
-    // pal_data consumed at C2.
-    output reg [9:0]  pal_addr,
+    // injected palette RAM: pal_addr driven COMBINATIONALLY from C1 so the
+    // external M10K's own address register IS the C1->C2 stage; pal_data is
+    // then THIS pixel's entry during C2 and s2_pal captures it aligned. (It
+    // was registered here first, making pal_data land one pixel LATE - every
+    // paletted pixel got its predecessor's entry: invisible on smooth
+    // palettes, but tile-column lines at stall boundaries, recv_logos.)
+    output     [9:0]  pal_addr,
     input      [31:0] pal_data,
 
     output            out_valid,
@@ -113,9 +117,11 @@ module tex_decode (
             s1_y      <= yv_y_c;
             s1_yu11   <= m_yu11_c;  s1_yv11 <= m_yv11_c;
             s1_yv22   <= m_yv22_c;  s1_yu110<= m_yu110_c;
-            pal_addr  <= pal_addr_c;      // registered -> external M10K -> pal_data at C2
         end
     end
+    // combinational: the external palette M10K registers this address, so its
+    // registered read output lands during C2, pixel-aligned with the s1_* regs
+    assign pal_addr = pal_addr_c;
 
     // ============================================================================
     // C2 combinational (off C1 regs): YUV adds/divides -> pre-clamp yR/yG/yB (products

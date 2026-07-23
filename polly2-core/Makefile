@@ -34,7 +34,7 @@ VFLAGS    = -Wno-WIDTH -Wno-UNOPTFLAT -Wno-UNSIGNED -Wno-DECLFILENAME -Irtl/tsp/
 BUILD = build
 CWD  := $(shell pwd)
 
-.PHONY: raster-topleft clean test tex tex-addr tex-uv tex-decode tex-filter tex-combiner \
+.PHONY: shade-drop raster-topleft clean test tex tex-addr tex-uv tex-decode tex-filter tex-combiner \
         oparse region regfile regen sortcache itquad taginvw dense_span_buffer \
         frontendtsplp spannerv2 mulc9 mul16sppro add24sppro mulc9sppro add3sppro \
         mul24sppro mul24c9sppro
@@ -62,6 +62,17 @@ test: tex oparse region regfile sortcache itquad raster-topleft
 # shared diagonal passes exactly through tile origins (C = +0): per-pixel
 # coverage vs a refsw2-rule model + corner-probe sanity. Guards the raw
 # C-1 bias wrap (+0 -> -NaN) that dropped whole tiles.
+# ---- shade-pipe pixel-drop regression ----
+# tsp_shade_v2_pp standalone under adversarial DDR latency: strict 1-in-1-out
+# in-order ids, 565 + YUV422 (the recv_logos tile-column-line drop hunt).
+shade-drop: | $(BUILD)
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ -Wno-PINCONNECTEMPTY \
+	  --top-module shade_drop_tb_top $(RTL_INC) \
+	  $(TSP_PKG) $(RTL_EXTRA) tb/shade_drop_tb_top.sv \
+	  $(CWD)/tb/shade_drop_tb.cpp \
+	  --Mdir $(BUILD)/obj_shadedrop -o tb
+	./$(BUILD)/obj_shadedrop/tb
+
 raster-topleft: | $(BUILD)
 	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ -Wno-PINCONNECTEMPTY \
 	  --top-module raster_topleft_tb_top $(RTL_INC) \
