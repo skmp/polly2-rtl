@@ -28,8 +28,10 @@
 //     sh_valid/sh_tag/sh_depth carry that pixel's staged fields.
 //   * CLEAR: clr_valid writes {clr_depth, clr_tag} to all banks at clr_addr.
 //   * PEELBUFFERS: an RMW walk - pb_rd_valid+pb_rd_addr read chunk N; the next cycle
-//     pb_wr_valid+pb_wr_addr write the transformed chunk (depth2<-depth, tag2<-tag
-//     or 0xFFFFFFFF when pb_first, depth<-FLT_MAX, valid<-0).
+//     pb_wr_valid+pb_wr_addr write the transformed chunk (depth2<-depth UNLESS depth is
+//     the FLT_MAX sentinel -> keep old depth2; tag2<-tag or 0xFFFFFFFF when pb_first;
+//     depth<-FLT_MAX, valid<-0). The sentinel guard preserves the opaque-Z reference a
+//     later z_keep=1 empty-opaque entry inherits (see the PW_DEPTH2 write comment).
 //
 module peel_tile_buffer import tsp_pkg::*; #(
     parameter integer LANES = 8
