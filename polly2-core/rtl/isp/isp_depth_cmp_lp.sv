@@ -66,15 +66,15 @@ module isp_depth_cmp_lp (
     endfunction
 
     localparam [23:0] SORT_MASK_HI = 24'hFFFFFF; // documents PARAMETER_TAG_SORT_MASK
-    // sort key = low 24 bits of the tag
+    // sort key = low 24 bits of the tag. `pb` (this pass's pending tag) is unused: refsw2's
+    // RM_TRANSLUCENT tie-break only compares against pb2 (the last-rendered tag at the ref
+    // plane); the invW==zb pending-tag stage a prior rework added is not in refsw2.
     wire [23:0] s_new = tag[23:0];
-    wire [23:0] s_pb  = pb [23:0];
     wire [23:0] s_pb2 = pb2[23:0];
 
     wire nw_gt_zb  = fgt(nw, zb);           // invW >  zb   (mode-3 LESS_EQUAL pre-test)
     wire nw_lt_zb2 = fgt(zb2, nw);          // invW <  zb2
     wire nw_eq_zb2 = feq(nw, zb2);          // invW == zb2
-    wire nw_eq_zb  = feq(nw, zb);           // invW == zb
     wire pb2_valid = (pb2 != 32'hFFFFFFFF); // last-rendered tag is real
 
     always @* begin
@@ -86,37 +86,29 @@ module isp_depth_cmp_lp (
         // (invW > zb). This is what makes each pass keep the FARTHEST fragment >= the
         // reference plane (peel far->near, blend back-to-front). Without it the pass
         // climbs to the nearest fragment and farther layers are lost.
+        // EXACT mirror of refsw2 PixelFlush_isp<RM_TRANSLUCENT> (mode 3), which is:
+        //   if (invW >  *zb)  { MoreToDraw = true; return; }          // pretest (defer nearer)
+        //   if (invW <  *zb2) return;                                 // (A) behind reference
+        //   if (invW == *zb2 && tag >= (*pb2 & ~TAG_INVALID)) return; // (B) coincident, later-tag
+        //   *zb = invW;  if (*pb != INVALID) MoreToDraw = true;  *pb = tag;   // accept, last-wins
+        // The coincident tie-break is `tag >= tagRendered` (reject the LATER-or-equal tag at the
+        // reference plane), which drives the coplanar sort order. A prior rework of this block
+        // (inverted `<=` + an extra invW==zb tag-ordering stage) reversed that order and broke
+        // coplanar sorting (shenmue_menu). There is no separate invW==zb tag check in refsw2:
+        // an invW==zb fragment simply accepts (last-wins) and sets MoreToDraw on displacement.
         if (nw_gt_zb) begin
-            // ZFAIL (mode 3: invW > zb) -> nearer than current best this pass.
-            // refsw sets MoreToDraw here for AUTOSORT: this nearer fragment still
-            // needs to be drawn in a later pass.
+            // invW > zb: nearer than this pass's best -> defer to a later pass.
             more = 1'b1;
         end else if (nw_lt_zb2) begin
-            // behind the reference plane -> reject (ZFAIL4)
-        end else if (nw_eq_zb2 && (s_new <= s_pb2) && pb2_valid) begin
-            // coincident with a fragment already peeled at the ref plane, and
-            // this one sorts earlier-or-same -> already handled (ZFAIL7)
+            // (A) invW < zb2: behind the reference plane -> reject.
+        end else if (nw_eq_zb2 && pb2_valid && (s_new >= s_pb2)) begin
+            // (B) coincident with the ref-plane fragment already rendered, and this one sorts
+            // LATER-or-equal (tag >= tagRendered) -> already handled -> reject.
         end else begin
-            // default: accept
+            // accept (last-wins). If a fragment was already staged this pass, it is displaced
+            // and must be re-drawn in a later pass (refsw: *pb != INVALID -> MoreToDraw).
             pass = 1'b1;
-
-            if (nw_eq_zb) begin
-                if ((s_new <= s_pb2) && pb2_valid) begin
-                    // earlier-or-same as last-rendered -> reject (ZFAIL5)
-                    pass = 1'b0;
-                end else if (valid) begin
-                    if (s_new > s_pb) begin
-                        // later than the current pending -> defer to a later pass
-                        more = 1'b1;   // ZFAIL6
-                        pass = 1'b0;
-                    end
-                    // else: earlier than pending -> replace (fall through, pass=1)
-                end
-            end
-
-            // if we accept and there was already a staged fragment this pass,
-            // that displaced fragment needs another peel pass.
-            if (pass && valid)
+            if (valid)
                 more = 1'b1;
         end
     end

@@ -800,7 +800,7 @@ module peel_core import tsp_pkg::*; (
             || ($test$plusargs("pixtile")
                 && md_tx[md_rp[MD_AW-1:0]]==ipx[10:0]/6'd32
                 && md_ty[md_rp[MD_AW-1:0]]==ipy[10:0]/6'd32))
-            $display("[INVW] (%0d,%0d) invw=%08x tsp=%08x", isx, isy, pp_invw, pp_tsp);
+            $display("[INVW] (%0d,%0d) invw=%08x tsp=%08x tcw=%08x", isx, isy, pp_invw, pp_tsp, pp_tcw);
     end
     always @(posedge clk) begin
         if (!reset && sd_en && pp_in_valid && !pp_stall) begin
