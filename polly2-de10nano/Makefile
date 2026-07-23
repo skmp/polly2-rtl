@@ -19,7 +19,23 @@ VFLAGS = -Wno-WIDTH -Wno-UNUSEDSIGNAL -j $(NJOBS) --build-jobs $(NJOBS) \
 
 TSP_PKG = ../polly2-core/rtl/gen/tsp_pkg.sv
 
-all: spg-sync pvr-burst spg-loopback audio-i2s spg-bands spg-depth render-irq
+all: spg-sync pvr-burst spg-loopback audio-i2s spg-bands spg-depth fb-write render-irq
+
+#   make fb-write - FB write master formats: every FB_W_CTRL packmode
+#                   (0555K/565/4444/1555/888/0888K/8888, refsw2 dither
+#                   quantization) x 32-bit split area / dense 64-bit
+#                   render-to-texture mirror (FB_W_SOF1[24]); exact DDR
+#                   byte-map compare incl. byte enables
+fb-write: obj_dir/fb_write_tb
+	./obj_dir/fb_write_tb
+
+obj_dir/fb_write_tb: rtl/simplex_pvr_top.sv tb/peel_core_stub.sv tb/fb_write_tb.cpp $(TSP_PKG)
+	$(VERILATOR) --cc --exe --build $(VFLAGS) \
+	    -Wno-UNUSEDPARAM -Wno-DECLFILENAME -Wno-PINMISSING \
+	    -I../polly2-core/rtl/gen \
+	    --top-module simplex_pvr_top \
+	    $(TSP_PKG) tb/peel_core_stub.sv rtl/simplex_pvr_top.sv tb/fb_write_tb.cpp \
+	    -o fb_write_tb
 
 #   make spg-depth - FB_R_CTRL read formats + per-line FB_R_SOF: all four
 #                    fb_depth modes (linear + split, misaligned bases,
@@ -99,4 +115,4 @@ obj_dir/pvr_burst_tb: rtl/simplex_pvr_top.sv tb/peel_core_stub.sv tb/pvr_burst_t
 clean:
 	rm -rf obj_dir
 
-.PHONY: all spg-sync pvr-burst spg-loopback audio-i2s spg-bands spg-depth render-irq clean
+.PHONY: all spg-sync pvr-burst spg-loopback audio-i2s spg-bands spg-depth fb-write render-irq clean

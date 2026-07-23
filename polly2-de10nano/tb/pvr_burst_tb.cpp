@@ -90,9 +90,13 @@ static void regwrite(int addr, uint32_t data) {
     tick();
 }
 
-static uint16_t px565(uint32_t pix) {     // argb = {pix16, pix16} -> RGB565
-    uint32_t a = ((pix & 0xFFFF) << 16) | (pix & 0xFFFF);
-    return (uint16_t)((((a >> 19) & 0x1F) << 11) | (((a >> 10) & 0x3F) << 5) | ((a >> 3) & 0x1F));
+// stub argb = hash32({py, px}) (xorpat 0 here); master 565-packs with refsw2
+// quantization (c*31/255, no dither)
+static int div255i(int x) { return (x + (x >> 8) + 1) >> 8; }
+static uint16_t px565(uint32_t pix) {
+    uint32_t a = (((pix / 640) << 11) | (pix % 640)) * 2654435761u;
+    int r = (a >> 16) & 0xFF, g = (a >> 8) & 0xFF, b = a & 0xFF;
+    return (uint16_t)((div255i(r * 31) << 11) | (div255i(g * 63) << 5) | div255i(b * 31));
 }
 
 int main(int argc, char** argv) {

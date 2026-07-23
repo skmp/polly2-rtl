@@ -101,13 +101,6 @@ module simplex_pvr_top import tsp_pkg::*; (
     assign FB_W_SOF2   = regs.fb_w_sof2;
     assign TEST_SELECT = regs.test_select;
 
-    // FB write base + split-VRAM half, from the core's OWN FB_W_SOF1 register.
-    // Byte offset [21:2] -> 64-bit word offset (2 ARGB px/word, "side" layout);
-    // bit 22 selects the 32-bit half. Was previously fed in as fb_base_word/
-    // fb_sel_upper - now internal so writes always follow FB_W_SOF1.
-    wire [28:0] fb_base_word = {9'd0, regs.fb_w_sof1[21:2]};
-    wire        fb_sel_upper = regs.fb_w_sof1[22];
-
     // ==================================================================
     // DDR READ master: peel_core ddr_req/ddr_resp  <->  DDRAM_* (Avalon read).
     // peel_core issues one 64-bit-word-addressed burst read at a time and holds
@@ -165,108 +158,273 @@ module simplex_pvr_top import tsp_pkg::*; (
     end
 
     // ==================================================================
-    // FRAMEBUFFER WRITE master (BURSTING): peel_core fbw_req (<=1 ARGB px/cycle at a
-    // linear index)  ->  DDRAM2_*, as 16bpp RGB565 in the Dreamcast split-VRAM
-    // layout that ASCAL's native 16bpp path (fb_split_word) reads back.
+    // FRAMEBUFFER WRITE master (BURSTING, all FB_W_CTRL fb_packmode formats,
+    // 32-bit "split" area or the dense 64-bit render-to-texture mirror).
     //
-    // ARGB8888 -> RGB565: {R[7:3], G[7:2], B[7:3]} = argb[23:19],argb[15:10],argb[7:3].
+    // peel_core presents <=1 shaded ARGB8888 pixel/cycle with its screen
+    // coordinate (px, py). Four stages, one register each:
     //
-    // Split-VRAM layout: only ONE 32-bit half of each 64-bit DDR word carries this
-    // framebuffer's pixels (the OTHER half belongs to the other 4 MB bank).
-    // fb_sel_upper (= FB_W_SOF1[22]) picks which:
-    //   fb_sel_upper=0 -> pixels in HIGH 32 bits [63:32]  (ASCAL: dr(63:32) useful)
-    //   fb_sel_upper=1 -> pixels in LOW  32 bits [31:0]
-    // Two horizontally-adjacent 16bpp pixels pack into that 32-bit half:
-    //   even linear index -> low 16 of the half, odd -> high 16 of the half.
-    // So one 64-bit DDR word holds 2 px; the interleave caps packing at 2 px/word
-    // (cannot use 4 - the other half is the other bank). Byte-enable masks the used
-    // half; f2sdram_safe_terminator passes byteenable per-beat, so every burst beat
-    // carries the same half-mask -> bursting is safe.
-    //
-    // BURSTING: peel_core's VO streams a tile row-major (pix_idx contiguous for the
-    // 32 px of a tile row, x=vo_i[4:0]); consecutive pixel PAIRS -> consecutive DDR
-    // words -> we COMBINE a contiguous run of packed words into ONE Avalon burst
-    // (BURSTCNT=N) instead of a single-beat write per pair. A run is flushed when:
-    // the next word's address isn't contiguous (tile-row boundary / off-screen gap),
-    // the run reaches BURST_MAX (one 32-px tile row = 16 words), or the core stops
-    // presenting pixels (idle gap). While the run buffer has room the core is NOT
-    // stalled (fbw_resp.busy low) -> pixels stream in at the VO rate, drain to DDR
-    // in efficient bursts. Replaces the old single-beat + full-stall-per-pair master.
-    //
-    // NOTE: layout mirrors the old geo-arbiter 16bpp writeback (word=SOF[.:2]+idx,
-    // half=bit22, 2 px/32-bit word). Verify vs a real frame; if bank-swapped, invert
-    // fb_sel_upper; if a burst straddles a wrong boundary, the run-break check below
-    // is where to adjust.
+    //  hs: SCALER_CTL.hscale x-scaling - horizontally-adjacent pixel PAIRS
+    //      are averaged per channel ((even+odd)>>1) into ONE pixel at
+    //      px>>1: a 1280-wide render writes out 640 wide (supersampled
+    //      anti-aliasing), a 640-wide one 320 wide (pairs with the display
+    //      side's VO_CONTROL.pixel_double). The VO streams tile rows
+    //      x-ascending, so pairing is positional (even latches, odd
+    //      emits).
+    //  s1: CONVERT to the fb_packmode wire format and compute the pixel's
+    //      FB-view byte address  FB_W_SOF1 + py*stride*8 + px*bpp  (stride
+    //      from FB_W_LINESTRIDE). Quantization follows refsw2's writeback:
+    //      q = (c*maxval + T) / 255 with the 4x4 Bayer bias T when
+    //      fb_dither (16-bit modes; T=0 otherwise). Formats:
+    //        0: 0555 KRGB  K=fb_kval[7]      1: 565 RGB
+    //        2: 4444 ARGB                    3: 1555 ARGB, A = (a8 >= fb_alpha_threshold)
+    //        4: 888 RGB, 3 bytes/px packed   5: 0888 KRGB, K byte = fb_kval
+    //        6: 8888 ARGB                    7: treated as 8888
+    //      (refsw2 quirks NOT copied: its mode-0 4-byte pixel advance is a
+    //      bug, and it writes K=0; modes 2/3/5 follow the DC spec since
+    //      refsw2 doesn't implement them.)
+    //  A : assemble the 2/3/4-byte pixels into FB-view 32-bit WORDS with
+    //      per-byte enables (packed 888 pixels straddle word boundaries;
+    //      a straddling pixel emits the completed word and keeps the tail).
+    //  B : place 32-bit words into 64-bit DDR BEATS:
+    //        FB_W_SOF1[24]=0 (32-bit area): FB word W -> DDR word W, in the
+    //          32-bit half selected by SOF bit 22 (split-VRAM layout, the
+    //          rule spg's fb_split scanout reads back; the other half is
+    //          the other 4 MB bank). 2 16bpp px per beat.
+    //        FB_W_SOF1[24]=1 (render to texture): the DENSE 64-bit-view
+    //          mirror textures are fetched from - FB byte F -> DDR byte F,
+    //          consecutive FB words pair into whole beats (4 16bpp px).
+    //  C : the run/burst engine: ADDRESS-CONTIGUOUS beats accumulate in
+    //      run_mem (up to BURST_MAX) and drain as ONE Avalon burst with
+    //      PER-BEAT byte enables (f2sdram_safe_terminator passes BE per
+    //      beat). A beat that can't extend the run (non-contiguous / full)
+    //      is held to seed the next run; an idle gap (no pixel 2 cycles)
+    //      cascades a flush s1 -> A -> B -> run -> DRAIN so a tile's tail
+    //      is never stranded. The core is stalled only while draining.
     // ==================================================================
-    localparam integer BURST_MAX = 16;      // 16 words = 32 px = one tile row
+    localparam integer BURST_MAX = 16;      // beats per burst (16 x 8 bytes)
 
-    function [15:0] argb_to_565(input [31:0] a);
-        argb_to_565 = {a[23:19], a[15:10], a[7:3]};   // R5 G6 B5
+    // exact x/255 for x <= 16383: (x + (x>>8) + 1) >> 8
+    function automatic [5:0] div255(input [13:0] x);
+        reg [14:0] t;
+        t = {1'b0, x} + {9'd0, x[13:8]} + 15'd1;
+        div255 = t[13:8];
+    endfunction
+    // refsw2's bayerBias[y&3][x&3] (= 4x4 Bayer * 16 + 8)
+    function automatic [7:0] bayer_t(input [3:0] yx);   // {py[1:0], px[1:0]}
+        case (yx)
+            4'd0:  bayer_t = 8'd8;    4'd1:  bayer_t = 8'd136;
+            4'd2:  bayer_t = 8'd40;   4'd3:  bayer_t = 8'd168;
+            4'd4:  bayer_t = 8'd200;  4'd5:  bayer_t = 8'd72;
+            4'd6:  bayer_t = 8'd232;  4'd7:  bayer_t = 8'd104;
+            4'd8:  bayer_t = 8'd56;   4'd9:  bayer_t = 8'd184;
+            4'd10: bayer_t = 8'd24;   4'd11: bayer_t = 8'd152;
+            4'd12: bayer_t = 8'd248;  4'd13: bayer_t = 8'd120;
+            4'd14: bayer_t = 8'd216;  default: bayer_t = 8'd88;
+        endcase
+    endfunction
+    function automatic [4:0] q5(input [7:0] c, input [7:0] t);
+        reg [5:0] q;
+        q  = div255({1'b0, c, 5'b00000} - {6'd0, c} + {6'd0, t});   // c*31 + t
+        q5 = q[4:0];
+    endfunction
+    function automatic [5:0] q6(input [7:0] c, input [7:0] t);
+        q6 = div255({c, 6'b000000} - {6'd0, c} + {6'd0, t});        // c*63 + t
+    endfunction
+    function automatic [3:0] q4(input [7:0] c, input [7:0] t);
+        reg [5:0] q;
+        q  = div255({2'b00, c, 4'b0000} - {6'd0, c} + {6'd0, t});   // c*15 + t
+        q4 = q[3:0];
     endfunction
 
-    // Two-phase model, no same-cycle races on shared state:
-    //   ACCUM (bst_busy=0): pair pixels, append packed words to run_mem while they
-    //     stay ADDRESS-CONTIGUOUS. On the first NON-contiguous word, on a full run
-    //     (BURST_MAX), or on an idle gap, latch a pending break-word (if any) and
-    //     drop into DRAIN. Pixels are accepted every cycle here (busy=0).
-    //   DRAIN (bst_busy=1): stream run_mem[0..run_len-1] as ONE Avalon burst; the
-    //     core is stalled (busy=1) for the few cycles this takes. Then re-seed the
-    //     run with any pending break-word and return to ACCUM.
-    // Since ACCUM never overlaps DRAIN, run_mem / run_len have a single writer per
-    // cycle and the pixel stream can't be dropped.
+    // ---- write-format config (from the core's own registers) ----
+    wire  [2:0] pm      = regs.fb_w_ctrl.fb_packmode;
+    wire        dith    = regs.fb_w_ctrl.fb_dither;
+    wire  [7:0] kval    = regs.fb_w_ctrl.fb_kval;
+    wire  [7:0] ath     = regs.fb_w_ctrl.fb_alpha_threshold;
+    wire [11:0] stride8 = {regs.fb_w_linestride.stride, 3'b000};   // bytes/line
+    wire        wrtt    = regs.fb_w_sof1[24];   // dense 64-bit-view mirror
+    wire [22:0] wbase   = wrtt ? regs.fb_w_sof1[22:0]
+                               : {1'b0, regs.fb_w_sof1[21:0]};
 
-    // ---- PACK: pair even/odd 565 pixels into one 32-bit half + its DDR word. ----
-    reg        have_lo;                      // even-index 565 latched, awaiting pair
-    reg [15:0] lo_px;
-    reg [19:0] lo_idx;
+    // ---- hs: SCALER_CTL.hscale pixel pairer (x 1/2, per-channel average) ----
+    wire        hs_en = regs.scaler_ctl.hscale;
+    reg  [31:0] hs_argb;                     // latched even-x pixel of the pair
 
-    // ---- RUN buffer + burst engine ----
-    reg  [31:0] run_mem [0:BURST_MAX-1];
-    reg  [4:0]  run_len;                     // words buffered (0..16)
-    reg  [28:0] run_base;                    // DDR word address of run_mem[0]
-    reg  [28:0] run_next;                    // expected DDR word addr of the next word
+    wire [8:0] hs_a = {1'b0, hs_argb[31:24]} + {1'b0, fbw_req.argb[31:24]};
+    wire [8:0] hs_r = {1'b0, hs_argb[23:16]} + {1'b0, fbw_req.argb[23:16]};
+    wire [8:0] hs_g = {1'b0, hs_argb[15:8]}  + {1'b0, fbw_req.argb[15:8]};
+    wire [8:0] hs_b = {1'b0, hs_argb[7:0]}   + {1'b0, fbw_req.argb[7:0]};
 
-    reg         bst_busy = 1'b0;             // 1 = DRAIN: streaming the burst
-    reg  [4:0]  bst_beat = 5'd0;             // beat index presented (0..run_len-1)
-    reg         bst_sel  = 1'b0;             // fb_sel_upper latched at DRAIN entry:
-                                             // the half-mask must stay constant for
-                                             // every beat of a burst, even if a reset
-                                             // clears the reg file mid-drain
+    // the pixel a write is produced for: with hscale only odd x completes a
+    // pair, emitting the average at x>>1
+    wire        px_pass  = !hs_en || fbw_req.px[0];
+    wire [31:0] sel_argb = hs_en ? {hs_a[8:1], hs_r[8:1], hs_g[8:1], hs_b[8:1]}
+                                 : fbw_req.argb;
+    wire [10:0] sel_px   = hs_en ? {1'b0, fbw_req.px[10:1]} : fbw_req.px;
 
-    // pending break-word: a packed word that couldn't extend the run (non-contig or
-    // full) and must seed the NEXT run once this one has drained.
-    reg         hold_v;
-    reg  [31:0] hold_half;
-    reg  [28:0] hold_addr;
-    reg         we_d;                        // for idle-gap detection
+    // ---- s0 (comb on the produced pixel): convert + address ----
+    wire [7:0] c_a = sel_argb[31:24], c_r = sel_argb[23:16],
+               c_g = sel_argb[15:8],  c_b = sel_argb[7:0];
+    wire [7:0] bT  = dith ? bayer_t({fbw_req.py[1:0], sel_px[1:0]}) : 8'd0;
 
-    // this cycle's packed word (combinational: the odd pixel completes a pair).
-    // pk_addr: the even pixel's linear index >>1 = its DDR 64-bit-word offset (2
-    // px/word). {10'd0, lo_idx[19:1]} is 29 bits to match fb_base_word.
-    //
-    // Pixel order within the 32-bit half: EVEN (lower-index, latched in lo_px) -> LOW
-    // 16 [15:0], ODD (this cycle) -> HIGH 16 [31:16], i.e. {odd, even}. This matches
-    // the scanout. (Tried {even, odd} to fix an apparent pair-swap - it made the image
-    // WORSE, so this order is correct; the swap artifact is elsewhere - likely TSP-
-    // pipeline ordering of pix_idx, not the pack order.)
-    wire [31:0] pk_half  = {argb_to_565(fbw_req.argb), lo_px};
-    wire [28:0] pk_addr  = fb_base_word + {10'd0, lo_idx[19:1]};
-    wire        pk_contig= run_len!=5'd0 && (pk_addr == run_next);
+    reg [15:0] s0_p16;
+    reg  [7:0] s0_b0, s0_b1, s0_b2, s0_b3;   // little-endian bytes at s0_addr
+    reg  [2:0] s0_nb;
+    always @* begin
+        case (pm)
+            3'd0:    s0_p16 = {kval[7],      q5(c_r,bT), q5(c_g,bT), q5(c_b,bT)};
+            3'd1:    s0_p16 = {q5(c_r,bT),   q6(c_g,bT),             q5(c_b,bT)};
+            3'd2:    s0_p16 = {q4(c_a,bT),   q4(c_r,bT), q4(c_g,bT), q4(c_b,bT)};
+            default: s0_p16 = {c_a >= ath,   q5(c_r,bT), q5(c_g,bT), q5(c_b,bT)};
+        endcase
+        if (pm[2]) begin                     // 4/5/6/7: byte formats, B,G,R[,K/A]
+            s0_b0 = c_b; s0_b1 = c_g; s0_b2 = c_r;
+            s0_b3 = (pm == 3'd5) ? kval : c_a;
+            s0_nb = (pm == 3'd4) ? 3'd3 : 3'd4;
+        end else begin                       // 16-bit formats
+            s0_b0 = s0_p16[7:0]; s0_b1 = s0_p16[15:8];
+            s0_b2 = 8'd0; s0_b3 = 8'd0;
+            s0_nb = 3'd2;
+        end
+    end
 
-    // Stall the core only while draining (can't accept into the run during a burst).
-    assign fbw_resp.busy = bst_busy;
+    wire [21:0] s0_row  = fbw_req.py * stride8;
+    wire [13:0] s0_xoff = pm[2] ? ((pm == 3'd4) ? {2'b00, sel_px, 1'b0} + {3'd0, sel_px}
+                                                : {1'b0, sel_px, 2'b00})
+                                : {2'b00, sel_px, 1'b0};
+    wire [22:0] s0_addr = wbase + {1'b0, s0_row} + {9'd0, s0_xoff};
+
+    // ---- s1: registered converted pixel ----
+    reg        s1_v = 1'b0;
+    reg [22:0] s1_addr;
+    reg  [7:0] s1_b [0:3];
+    reg  [2:0] s1_nb;
+
+    // ---- stage A state: FB-view 32-bit word being assembled ----
+    reg        aw_v = 1'b0;
+    reg [20:0] aw_w;                         // FB 32-bit word index (addr[22:2])
+    reg [31:0] aw_d;
+    reg  [3:0] aw_be;
+
+    // ---- stage B state: 64-bit DDR beat being assembled ----
+    reg        bw_v = 1'b0;
+    reg [19:0] bw_w;                         // DDR 64-bit word index
+    reg [63:0] bw_d;
+    reg  [7:0] bw_be;
+
+    // ---- stage C: run buffer + burst engine ----
+    reg [63:0] run_d  [0:BURST_MAX-1];
+    reg  [7:0] run_be [0:BURST_MAX-1];
+    reg  [4:0] run_len;                      // beats buffered (0..16)
+    reg [28:0] run_base;                     // DDR word address of run_d[0]
+    reg [28:0] run_next;                     // expected DDR word addr of the next beat
+
+    reg        bst_busy = 1'b0;              // 1 = DRAIN: streaming the burst
+    reg  [4:0] bst_beat = 5'd0;              // beat index presented (0..run_len-1)
+
+    // pending break-beat: couldn't extend the run (non-contig or full), seeds
+    // the NEXT run once this one has drained.
+    reg        hold_v;
+    reg [63:0] hold_d;
+    reg  [7:0] hold_be;
+    reg [28:0] hold_addr;
+    reg        acc_d;                        // a pixel was accepted last cycle
+
+    // ---- stage A input placement (comb from s1) ----
+    wire [20:0] a_w0  = s1_addr[22:2];
+    wire  [1:0] a_off = s1_addr[1:0];
+    wire        a_str = ({1'b0, a_off} + s1_nb) > 3'd4;   // spills into a_w0+1
+
+    reg [31:0] a_d0, a_d1;
+    reg  [3:0] a_be0, a_be1;
+    integer aj;
+    always @* begin
+        a_d0 = 32'd0; a_d1 = 32'd0; a_be0 = 4'd0; a_be1 = 4'd0;
+        for (aj = 0; aj < 4; aj = aj + 1) begin
+            if (aj >= {30'd0, a_off} && (aj - {30'd0, a_off}) < {29'd0, s1_nb}) begin
+                a_d0[8*aj +: 8] = s1_b[aj - {30'd0, a_off}];
+                a_be0[aj]       = 1'b1;
+            end
+            if ((aj + 4 - {30'd0, a_off}) < {29'd0, s1_nb}) begin
+                a_d1[8*aj +: 8] = s1_b[aj + 4 - {30'd0, a_off}];
+                a_be1[aj]       = 1'b1;
+            end
+        end
+    end
+
+    wire a_take  = s1_v;
+    wire a_match = aw_v && (a_w0 == aw_w);
+    // a jump AND a straddle would need two emissions in one cycle; stall the
+    // pixel one cycle instead (can't occur with a word-aligned SOF + stride,
+    // but packed-888 render targets make it cheap to be safe)
+    wire a_stall = a_take && aw_v && !a_match && a_str;
+
+    // idle-gap flush trigger: no pixel accepted this or last cycle
+    wire acc     = fbw_req.we && !fbw_resp.busy;
+    wire fl_idle = !acc && !acc_d;
+
+    // ---- stage A emission (comb) ----
+    reg         emA_v;
+    reg  [20:0] emA_w;
+    reg  [31:0] emA_d;
+    reg   [3:0] emA_be;
+    always @* begin
+        emA_v = 1'b0; emA_w = aw_w; emA_d = aw_d; emA_be = aw_be;
+        if (a_take) begin
+            if (aw_v && !a_match) begin
+                emA_v = 1'b1;                            // old word goes out
+            end else if (a_match && a_str) begin
+                emA_v  = 1'b1;                           // completed word goes out
+                emA_d  = aw_d | a_d0;
+                emA_be = aw_be | a_be0;
+            end else if (!aw_v && a_str) begin
+                emA_v  = 1'b1;                           // w0 part passes through
+                emA_w  = a_w0;
+                emA_d  = a_d0;
+                emA_be = a_be0;
+            end
+        end else if (fl_idle && aw_v) begin
+            emA_v = 1'b1;                                // flush the partial word
+        end
+    end
+
+    // ---- stage B mapping + emission (comb) ----
+    wire [19:0] b_dw = wrtt ? emA_w[20:1] : emA_w[19:0];
+    // which 32-bit half of the beat: RTT = dense (FB word parity); split area =
+    // the fixed half from SOF bit 22 (0 -> HIGH 32 bits, 1 -> LOW, the rule the
+    // scanout's fb_disp_half reads back)
+    wire        b_hi = wrtt ? emA_w[0] : ~regs.fb_w_sof1[22];
+    wire [63:0] b_d  = b_hi ? {emA_d, 32'd0} : {32'd0, emA_d};
+    wire  [7:0] b_be = b_hi ? {emA_be, 4'd0} : {4'd0, emA_be};
+    wire        b_match = bw_v && (b_dw == bw_w);
+
+    reg         emB_v;
+    reg  [19:0] emB_w;
+    reg  [63:0] emB_d;
+    reg   [7:0] emB_be;
+    always @* begin
+        emB_v = 1'b0; emB_w = bw_w; emB_d = bw_d; emB_be = bw_be;
+        if (emA_v && bw_v && !b_match)                        emB_v = 1'b1;
+        else if (!emA_v && fl_idle && !aw_v && bw_v)          emB_v = 1'b1;
+    end
+
+    wire [28:0] emB_addr  = {9'd0, emB_w};
+    wire        pk_contig = run_len != 5'd0 && (emB_addr == run_next);
+
+    // Stall the core while draining, or for the rare two-emission pixel.
+    assign fbw_resp.busy = bst_busy || a_stall;
 
     // ---- DDRAM2 burst outputs (driven in DRAIN) ----
     assign DDRAM2_WE       = bst_busy;
     assign DDRAM2_ADDR     = run_base;
     assign DDRAM2_BURSTCNT = {3'd0, run_len};
-    assign DDRAM2_DIN      = bst_sel ? {32'd0, run_mem[bst_beat]}
-                                     : {run_mem[bst_beat], 32'd0};
-    assign DDRAM2_BE       = bst_sel ? 8'b0000_1111 : 8'b1111_0000;
+    assign DDRAM2_DIN      = run_d[bst_beat];
+    assign DDRAM2_BE       = run_be[bst_beat];
 
     always @(posedge clk) begin
         if (reset) begin
-            // Pairing/run bookkeeping clears, but an IN-FLIGHT BURST IS NOT
+            // Pipeline/run bookkeeping clears, but an IN-FLIGHT BURST IS NOT
             // ABORTED: the f2sdram port has already latched BURSTCNT and
             // counts raw data beats - dropping WE short leaves the hard
             // bridge expecting the missing beats forever. It then eats the
@@ -276,69 +434,105 @@ module simplex_pvr_top import tsp_pkg::*; (
             // on reprogramming. So the DRAIN branch below keeps streaming
             // under reset until the burst completes - the leftover beats
             // rewrite stale FB bytes at their original addresses, harmless.
-            have_lo <= 1'b0; we_d <= 1'b0; hold_v <= 1'b0;
+            // (BE is captured per beat at append time, so a mid-drain reg
+            // file clear cannot change the mask of an in-flight burst.)
+            s1_v <= 1'b0; aw_v <= 1'b0; bw_v <= 1'b0;
+            acc_d <= 1'b0; hold_v <= 1'b0;
             if (!bst_busy) run_len <= 5'd0;
         end else begin
-            we_d <= fbw_req.we && !fbw_resp.busy;
+            acc_d <= acc;
 
             if (!bst_busy) begin
                 // ================= ACCUM =================
-                // idle gap: core presented no pixel this or last cycle -> flush a
-                // partial run so the tile's last words aren't stranded.
-                if (!(fbw_req.we && !fbw_resp.busy) && !we_d && run_len!=5'd0) begin
-                    bst_busy <= 1'b1; bst_beat <= 5'd0;      // -> DRAIN what we have
-                    bst_sel  <= fb_sel_upper;
+                // hs: latch the even-x pixel of an hscale pair
+                if (acc && hs_en && !fbw_req.px[0]) hs_argb <= fbw_req.argb;
+
+                // s1 load (held while a_stall splits a two-emission pixel)
+                if (!a_stall) begin
+                    s1_v <= acc && px_pass;
+                    if (acc) begin
+                        s1_addr <= s0_addr;
+                        s1_b[0] <= s0_b0; s1_b[1] <= s0_b1;
+                        s1_b[2] <= s0_b2; s1_b[3] <= s0_b3;
+                        s1_nb   <= s0_nb;
+                    end
                 end
 
-                if (fbw_req.we) begin
-                    if (!have_lo) begin
-                        // even pixel: latch, wait for the odd pair
-                        have_lo <= 1'b1;
-                        lo_px   <= argb_to_565(fbw_req.argb);
-                        lo_idx  <= fbw_req.pix_idx;
-                    end else begin
-                        // odd pixel: we now have a full packed word (pk_*)
-                        have_lo <= 1'b0;
-                        if (run_len==5'd0) begin
-                            // start a fresh run
-                            run_mem[0] <= pk_half;
-                            run_base   <= pk_addr;
-                            run_next   <= pk_addr + 29'd1;
-                            run_len    <= 5'd1;
-                        end else if (pk_contig && run_len!=BURST_MAX[4:0]) begin
-                            // extend the contiguous run
-                            run_mem[run_len] <= pk_half;
-                            run_next         <= run_next + 29'd1;
-                            run_len          <= run_len + 5'd1;
+                // stage A state
+                if (a_take && !a_stall) begin
+                    if (!aw_v || a_match) begin
+                        if (a_str) begin
+                            aw_v <= 1'b1; aw_w <= a_w0 + 21'd1;
+                            aw_d <= a_d1; aw_be <= a_be1;
+                        end else if (a_match) begin
+                            aw_d <= aw_d | a_d0; aw_be <= aw_be | a_be0;
                         end else begin
-                            // BREAK (non-contiguous) or run FULL: stash this word and
-                            // drain the current run; the stashed word seeds the next.
-                            hold_v    <= 1'b1;
-                            hold_half <= pk_half;
-                            hold_addr <= pk_addr;
-                            bst_busy  <= 1'b1; bst_beat <= 5'd0;   // -> DRAIN
-                            bst_sel   <= fb_sel_upper;
+                            aw_v <= 1'b1; aw_w <= a_w0;
+                            aw_d <= a_d0; aw_be <= a_be0;
                         end
+                    end else begin           // jump, no straddle: replace
+                        aw_w <= a_w0; aw_d <= a_d0; aw_be <= a_be0;
                     end
+                end else if (a_stall) begin
+                    aw_v <= 1'b0;            // emitted; s1 retries next cycle
+                end else if (fl_idle && aw_v) begin
+                    aw_v <= 1'b0;            // flushed
+                end
+
+                // stage B state
+                if (emA_v) begin
+                    if (b_match) begin
+                        bw_d <= bw_d | b_d; bw_be <= bw_be | b_be;
+                    end else begin
+                        bw_v <= 1'b1; bw_w <= b_dw;
+                        bw_d <= b_d;  bw_be <= b_be;
+                    end
+                end else if (emB_v) begin
+                    bw_v <= 1'b0;            // flushed
+                end
+
+                // stage C: append / hold+drain / idle drain
+                if (emB_v) begin
+                    if (run_len == 5'd0) begin
+                        run_d[0]  <= emB_d;
+                        run_be[0] <= emB_be;
+                        run_base  <= emB_addr;
+                        run_next  <= emB_addr + 29'd1;
+                        run_len   <= 5'd1;
+                    end else if (pk_contig && run_len != BURST_MAX[4:0]) begin
+                        run_d[run_len]  <= emB_d;
+                        run_be[run_len] <= emB_be;
+                        run_next        <= run_next + 29'd1;
+                        run_len         <= run_len + 5'd1;
+                    end else begin
+                        hold_v    <= 1'b1;
+                        hold_d    <= emB_d;
+                        hold_be   <= emB_be;
+                        hold_addr <= emB_addr;
+                        bst_busy  <= 1'b1; bst_beat <= 5'd0;   // -> DRAIN
+                    end
+                end else if (fl_idle && !aw_v && !bw_v && run_len != 5'd0) begin
+                    bst_busy <= 1'b1; bst_beat <= 5'd0;        // -> DRAIN (idle)
                 end
             end
         end
 
         // ================= DRAIN =================
-        // stream run_mem[0..run_len-1] as one burst (one beat / !BUSY cycle).
+        // stream run_d[0..run_len-1] as one burst (one beat / !BUSY cycle).
         // Runs UNDER RESET too - the accepted burst must complete (see the
         // reset note above).
         if (bst_busy && !DDRAM2_BUSY) begin
             if (bst_beat + 5'd1 >= run_len) begin
-                // burst done: re-seed from a held break-word, else empty.
+                // burst done: re-seed from a held break-beat, else empty.
                 bst_busy <= 1'b0;
                 bst_beat <= 5'd0;
                 if (hold_v && !reset) begin
-                    run_mem[0] <= hold_half;
-                    run_base   <= hold_addr;
-                    run_next   <= hold_addr + 29'd1;
-                    run_len    <= 5'd1;
-                    hold_v     <= 1'b0;
+                    run_d[0]  <= hold_d;
+                    run_be[0] <= hold_be;
+                    run_base  <= hold_addr;
+                    run_next  <= hold_addr + 29'd1;
+                    run_len   <= 5'd1;
+                    hold_v    <= 1'b0;
                 end else begin
                     run_len <= 5'd0;
                 end

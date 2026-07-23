@@ -1211,10 +1211,14 @@ module peel_core import tsp_pkg::*; (
     // pixel for the linear tile index vo_i (0..1023): x=vo_i[4:0], y=vo_i[9:5].
     wire [10:0] fw_px = {5'd0, vo_tx}*11'd32 + {6'd0, vo_i[4:0]};
     wire [10:0] fw_py = {5'd0, vo_ty}*11'd32 + {6'd0, vo_i[9:5]};
-    wire        fw_onscreen = (fw_px < 11'd640) && (fw_py < 11'd480);
+    // hscale renders are 1280 wide before the write master's x1/2 downscale
+    wire [10:0] fw_xlim = regs.scaler_ctl.hscale ? 11'd1280 : 11'd640;
+    wire        fw_onscreen = (fw_px < fw_xlim) && (fw_py < 11'd480);
     always @(*) begin
         fbw_req.we      = (vst==VO_WR) && fw_onscreen;
         fbw_req.pix_idx = fw_py*20'd640 + {9'd0, fw_px};
+        fbw_req.px      = fw_px;
+        fbw_req.py      = fw_py[9:0];
         fbw_req.argb    = vo_rd_argb;             // VO-half registered read of vo_i
     end
     // a pixel is consumed this cycle when: on-screen and the sink accepted it, OR

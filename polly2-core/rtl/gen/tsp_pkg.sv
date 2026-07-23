@@ -88,6 +88,9 @@ package tsp_pkg;
     typedef struct packed {
         logic        we;        // 1 = present a pixel this cycle (consumed when !busy)
         logic [19:0] pix_idx;   // linear pixel index (y*640 + x), 0..307199
+        logic [10:0] px;        // screen x (0..1279: SCALER_CTL.hscale renders
+                                // are 1280 wide before the x1/2 write-out)
+        logic [9:0]  py;        // screen y (0..479) - addressing + dither phase
         logic [31:0] argb;      // 32-bit ARGB colour
     } fb_wr_req_t;
     typedef struct packed {

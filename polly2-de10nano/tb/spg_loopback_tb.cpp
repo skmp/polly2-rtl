@@ -80,15 +80,15 @@ static void regwrite(int addr, uint32_t data) {
     tick();
 }
 
-// expected pixel: stub argb = {pix16^xor, pix16^xor}, write master 565-packs,
-// spg expands with fb_concat appended (refsw2 Present; concat = 0 here)
+// expected pixel: stub argb = hash32((y<<11)|x) ^ {xor,xor}, write master
+// 565-packs with refsw2 quantization (c*31/255, no dither), spg expands with
+// fb_concat appended (refsw2 Present; concat = 0 here)
+static int div255i(int x) { return (x + (x >> 8) + 1) >> 8; }
 static void expect_rgb(uint32_t pix, uint16_t xorpat, uint8_t* r, uint8_t* g, uint8_t* b) {
-    uint32_t v = (pix ^ xorpat) & 0xFFFF;
-    uint32_t a = (v << 16) | v;
-    uint32_t p = (((a >> 19) & 0x1F) << 11) | (((a >> 10) & 0x3F) << 5) | ((a >> 3) & 0x1F);
-    *r = (uint8_t)(((p >> 11) & 0x1F) << 3);
-    *g = (uint8_t)(((p >> 5) & 0x3F) << 2);
-    *b = (uint8_t)((p & 0x1F) << 3);
+    uint32_t a = (pix * 2654435761u) ^ (((uint32_t)xorpat << 16) | xorpat);
+    *r = (uint8_t)(div255i(((a >> 16) & 0xFF) * 31) << 3);
+    *g = (uint8_t)(div255i(((a >> 8) & 0xFF) * 63) << 2);
+    *b = (uint8_t)(div255i((a & 0xFF) * 31) << 3);
 }
 
 static void run_config(uint32_t sof, uint16_t xorpat, const char* name) {
@@ -134,7 +134,7 @@ static void run_config(uint32_t sof, uint16_t xorpat, const char* name) {
         if (dut->de) {
             if (y >= 60 && y < 1020 && x >= 320 && x < 1600) {
                 uint32_t sx = (uint32_t)(x - 320) / 2, sy = (uint32_t)(y - 60) / 2;
-                uint32_t pix = sy * 640 + sx;
+                uint32_t pix = (sy << 11) | sx;   // the stub's {py, px} hash key
                 uint8_t er, eg, eb;
                 expect_rgb(pix, xorpat, &er, &eg, &eb);
                 if (dut->red != er || dut->green != eg || dut->blue != eb) {
