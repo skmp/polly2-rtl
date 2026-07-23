@@ -5,7 +5,10 @@
 //
 // For tile-local pixel (x,y), x,y in 0..31 (pixel-center ignored):
 //    Xhs_n(x) = Cn + DXn*y - DYn*x        (n = 12,23,31,41)
-//    inside   = Xhs12>=0 && Xhs23>=0 && Xhs31>=0 && Xhs41>=0
+//    inside_n = Xhs_n > 0 || (tl[n] && Xhs_n == 0)   (refsw2 top-left rule:
+//               exactly-on-edge samples belong only to top-left edges; C is
+//               EXACT, the rule lives here in the compare - a C bias cannot
+//               survive the fp sums)
 //    invW(x)  = c_invw + ddx*x + ddy*y
 //
 // Pipeline (in_valid -> out_valid after LAT cycles):
@@ -36,6 +39,7 @@ module isp_raster_line #(
     input      [31:0] dx12,dx23,dx31,dx41,
     input      [31:0] dy12,dy23,dy31,dy41,
     input      [31:0] ddx,ddy,c_invw,
+    input      [3:0]  tl,           // {tl41,tl31,tl23,tl12} IsTopLeft per edge
 
     // ---- CORNER-PROBE mode (the "257th step"): trivial per-tile reject, REUSING this
     // pipeline's adders/multipliers (no duplicate FP hw). When `probe` is asserted with
@@ -154,9 +158,26 @@ module isp_raster_line #(
     // s3 stage-align of the edge bases: these are line-base values (independent of
     // x/lane), so ONE shared copy fans out to all LANES' s4a adders rather than a
     // redundant per-lane register (was 5*32 FF x LANES; now 5*32 FF total).
+    //
+    // Top-left rule (refsw2: inside = Xhs > 0 || (T && Xhs == 0)) folded in HERE,
+    // once per line per edge - NOT per lane: for finite floats
+    //     a > b   <=>   next_down(a) >= b     (exactly),
+    // so a non-top-left edge gets its line base stepped one float toward -inf and
+    // the per-lane fp_ge stays the plain inclusive compare. (A bias on C itself
+    // cannot work: it washes out of C + DX*y depending on per-pixel exponent
+    // alignment, and the old raw C-1 wrapped C=+0 to -NaN, dropping every tile
+    // whose origin lies exactly on the edge.) next_down(+-0) is the smallest
+    // negative DENORMAL: fp_ge is a pure ordering compare, so it orders denormals
+    // correctly even though the adders flush them.
+    function [31:0] fdown(input [31:0] f);
+        fdown = (f[30:0] == 31'd0) ? 32'h80000001
+              : f[31] ? (f + 32'd1) : (f - 32'd1);
+    endfunction
     reg [31:0] eb1_3,eb2_3,eb3_3,eb4_3,wbase_3;
     always @(posedge clk) begin
-        eb1_3<=eb1;eb2_3<=eb2;eb3_3<=eb3;eb4_3<=eb4;wbase_3<=wbase;
+        eb1_3<=tl[0]?eb1:fdown(eb1); eb2_3<=tl[1]?eb2:fdown(eb2);
+        eb3_3<=tl[2]?eb3:fdown(eb3); eb4_3<=tl[3]?eb4:fdown(eb4);
+        wbase_3<=wbase;
     end
 
     genvar gi;

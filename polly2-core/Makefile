@@ -34,7 +34,7 @@ VFLAGS    = -Wno-WIDTH -Wno-UNOPTFLAT -Wno-UNSIGNED -Wno-DECLFILENAME -Irtl/tsp/
 BUILD = build
 CWD  := $(shell pwd)
 
-.PHONY: clean test tex tex-addr tex-uv tex-filter tex-combiner \
+.PHONY: raster-topleft clean test tex tex-addr tex-uv tex-filter tex-combiner \
         oparse region regfile regen sortcache itquad taginvw dense_span_buffer \
         frontendtsplp spannerv2 mulc9 mul16sppro add24sppro mulc9sppro add3sppro \
         mul24sppro mul24c9sppro
@@ -55,7 +55,20 @@ RTL_EXTRA = rtl/fp/fp_add24.sv rtl/tsp/stage_interp.sv
 RTL_INC   = $(addprefix -y ,$(RTL_DIRS)) -Irtl/gen
 
 # ---- run the fast unit tests (TSP texture blocks + front-end block tests) ----
-test: tex oparse region regfile sortcache itquad
+test: tex oparse region regfile sortcache itquad raster-topleft
+
+# ---- top-left bias / exact-edge raster regression ----
+# isp_setup_streamed + isp_raster_line on a coplanar fullscreen quad whose
+# shared diagonal passes exactly through tile origins (C = +0): per-pixel
+# coverage vs a refsw2-rule model + corner-probe sanity. Guards the raw
+# C-1 bias wrap (+0 -> -NaN) that dropped whole tiles.
+raster-topleft: | $(BUILD)
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ -Wno-PINCONNECTEMPTY \
+	  --top-module raster_topleft_tb_top $(RTL_INC) \
+	  $(TSP_PKG) $(RTL_EXTRA) tb/raster_topleft_tb_top.sv \
+	  $(CWD)/tb/raster_topleft_tb.cpp \
+	  --Mdir $(BUILD)/obj_rastertl -o tb
+	./$(BUILD)/obj_rastertl/tb
 
 # ---- TSP texture-pipeline block tests (randomized vectors vs refsw) ----
 TSP = rtl/tsp
