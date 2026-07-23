@@ -193,7 +193,9 @@ module tex_decode (
 
     wire [31:0] argb_yuv    = {8'hFF, clamp8(s2_yR), clamp8(s2_yG), clamp8(s2_yB)};
     wire [31:0] argb_direct = expand16(s2_w16,       s2_pixfmt[1:0], s2_scan);
-    wire [31:0] argb_pal    = expand16(s2_pal[15:0], s2_palfmt,             s2_scan);
+    // pal_fmt 3 = ARGB8888 palette: the 32-bit entry IS the texel (no expand)
+    wire [31:0] argb_pal    = (s2_palfmt == 2'd3) ? s2_pal
+                            : expand16(s2_pal[15:0], s2_palfmt, s2_scan);
 
     // select: 3=YUV ; 4=Bump/7=Reserved -> raw passthrough {0,w16} ; 5/6=palette (pal_fmt
     // expand) ; 0/1/2=direct 16b expand (pixfmt).
