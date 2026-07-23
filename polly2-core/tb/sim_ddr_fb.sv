@@ -30,6 +30,15 @@ module sim_ddr_fb import tsp_pkg::*; #(
     (* verilator public_flat_rw *) reg [31:0] fb [0:640*480-1];
 
     // ==================== FAUX DDR READ CONTROLLER ====================
+    // +ddrvary : inject ADDRESS-DEPENDENT variable read latency (deterministic - no RNG).
+    // The real DDR3 controller's per-fill latency varies (row/bank/refresh/arbiter), which
+    // this fixed-RD_LAT model never reproduces. With +ddrvary each read waits
+    // RD_LAT + addr[3:0] dead cycles (8..23), so back-to-back reads - the 4 bilinear corners
+    // and the interleaved data/VQ-codebook reads - resolve STAGGERED, exposing any payload/
+    // texel alignment that silently relies on the constant sim latency (candidate cause of
+    // the on-HW black-transparency: the at_en/TSP payload slipping vs the texel).
+    reg ddrvary;
+    initial ddrvary = $test$plusargs("ddrvary");
     reg        d_busy;
     reg [19:0] d_word;
     reg [7:0]  d_beats, d_lat;
@@ -45,7 +54,7 @@ module sim_ddr_fb import tsp_pkg::*; #(
                 d_busy  <= 1'b1;
                 d_word  <= ddr_req.addr[19:0];
                 d_beats <= ddr_req.burst;
-                d_lat   <= RD_LAT[7:0];
+                d_lat   <= RD_LAT[7:0] + (ddrvary ? {4'd0, ddr_req.addr[3:0]} : 8'd0);
             end
         end else if (d_lat != 0) d_lat <= d_lat - 8'd1;
         else begin

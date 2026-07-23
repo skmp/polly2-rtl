@@ -26,6 +26,7 @@ module tex_unit import tsp_pkg::*; #(
 ) (
     input             clk,
     input             reset,
+    input             flush,   // render-start: invalidate the tex/VQ caches (no cross-render coherency)
 
     // ---- pixel in (float U/V + per-pixel texture config) ----
     input             in_valid,
@@ -223,7 +224,7 @@ module tex_unit import tsp_pkg::*; #(
     wire        f_ov;
     wire [63:0] f_word [0:3];
     tex_fetch4_ob #(.PLW(FPLW)) u_fetch (
-        .clk(clk),.reset(reset),
+        .clk(clk),.reset(reset),.flush(flush),
         .in_valid(r_iss),.tex(r_tex),.vq(r_vq),.in_ready(fetch_ready),
         .tex_addr(r_texaddr),.vq_addr(r_vqaddr),.tex_offset(r_boff),.in_pl(fpl_in),
         .out_valid(f_ov),.texel(f_word),.out_pl(fpl_out),
