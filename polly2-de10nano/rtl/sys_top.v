@@ -425,6 +425,7 @@ wire [28:0] vram_word_base = {pvr_vram_top, 21'd0};
 wire pvr_reset = reset_req | clk_switch_reset | pvr_mmio_rst;
 
 wire [31:0] spvr_fb_r_sof1, spvr_fb_r_sof2, spvr_fb_w_sof1, spvr_fb_w_sof2;
+wire [31:0] spvr_fb_r_ctrl, spvr_vo_control;
 
 // peel_core render DDR read channel (raw word offset; base added below)
 wire [28:0] spvr_rd_addr;
@@ -452,6 +453,8 @@ simplex_pvr_top simplex_pvr
 
 	.FB_R_SOF1  ( spvr_fb_r_sof1 ),
 	.FB_R_SOF2  ( spvr_fb_r_sof2 ),
+	.FB_R_CTRL  ( spvr_fb_r_ctrl ),
+	.VO_CONTROL ( spvr_vo_control ),
 	.FB_W_SOF1  ( spvr_fb_w_sof1 ),
 	.FB_W_SOF2  ( spvr_fb_w_sof2 ),
 	.TEST_SELECT( ),
@@ -525,8 +528,20 @@ wire clk_hdmi = hdmi_clk_out;
 
 // absolute DDR byte address of the displayed frame, straight from the core's
 // FB_R_SOF1 display register (side layout: 8 bytes per DC 32-bit word; SOF
-// bit 22 is the 64-bit-half select).
+// bit 22 is the 64-bit-half select). spg re-samples this per LINE (through
+// its stability filter), so mid-frame SOF writes land on the next line.
 wire [31:0] fb_disp_base = {pvr_vram_top, 24'd0} + {9'd0, spvr_fb_r_sof1[21:2], 3'd0};
+
+// FB_R_CTRL / VO_CONTROL display fields (quasi-static: spg latches them
+// per frame). FB-view bytes per line: (640 or, with VO_CONTROL
+// pixel_double, 320) pixels x 2/2/3/4 bytes by fb_depth.
+wire  [1:0] fb_disp_depth  = spvr_fb_r_ctrl[3:2];
+wire        fb_disp_pixdbl = spvr_vo_control[8];
+wire [13:0] fb_disp_str640 = (fb_disp_depth == 2'd2) ? 14'd1920
+                           : (fb_disp_depth == 2'd3) ? 14'd2560
+                                                     : 14'd1280;
+wire [13:0] fb_disp_stride = fb_disp_pixdbl ? {1'b0, fb_disp_str640[13:1]}
+                                            : fb_disp_str640;
 
 wire [23:0] hdmi_data;
 wire        hdmi_hs, hdmi_vs, hdmi_de, hdmi_vbl, hdmi_brd;
@@ -538,10 +553,14 @@ spg spg
 	.reset       (reset_req),
 
 	.fb_base     (fb_disp_base),
-	.fb_stride   (14'd1280),
-	.fb_line_dbl (1'b0),
+	.fb_stride   (fb_disp_stride),
+	.fb_line_dbl (spvr_fb_r_ctrl[1]),    // FB_R_CTRL.fb_line_double (240p)
+	.fb_pix_dbl  (fb_disp_pixdbl),       // VO_CONTROL.pixel_double (320-wide)
 	.fb_split    (1'b1),
 	.fb_disp_half(spvr_fb_r_sof1[22]),
+	.fb_depth    (fb_disp_depth),
+	.fb_concat   (spvr_fb_r_ctrl[6:4]),
+	.fb_enable   (spvr_fb_r_ctrl[0]),
 
 	.fb_top_base (fb_top_base),
 	.fb_bot_base (fb_bot_base),
