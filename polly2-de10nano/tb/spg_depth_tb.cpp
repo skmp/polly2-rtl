@@ -84,9 +84,9 @@ static void game_rgb(int s, int n, uint8_t* r, uint8_t* g, uint8_t* b) {
         *b = (uint8_t)(((p & 0x1F) << 3) + g_concat);
         break;
     }
-    case 2: { // 888 packed, the odd/even quirk: B,G,R at addr+-1
-        uint64_t a = F + 3 * n;
-        uint64_t f = (a & 1) ? a - 1 : a + 1;
+    case 2: { // 888 packed: STRAIGHT B,G,R at byte 3n (write-master layout;
+              // refsw2 Present's odd/even fetch quirk deliberately not copied)
+        uint64_t f = F + 3 * n;
         *b = fb8(f, half); *g = fb8(f + 1, half); *r = fb8(f + 2, half);
         break;
     }

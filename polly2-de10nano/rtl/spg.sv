@@ -14,8 +14,9 @@
 //  - All four FB_R_CTRL fb_depth read formats, with refsw2 Present()
 //    semantics (fb_concat appended below the 5/6-bit channels):
 //      0: 0555 RGB, 2 bytes/px     1: 565 RGB, 2 bytes/px
-//      2: 888 RGB packed, 3 bytes/px (incl. the odd/even byte-address
-//         fetch quirk refsw2 models)
+//      2: 888 RGB packed, 3 bytes/px, STRAIGHT B,G,R at byte 3n (the FB
+//         write master's packmode-4 layout; refsw2 Present's odd/even
+//         fetch quirk is NOT copied - see the read path note)
 //      3: 0888 RGB, 4 bytes/px
 //    fb_enable=0 blanks the game window (borders/bands unaffected).
 //  - FB_R_SOF is honoured PER LINE: fb_base/fb_disp_half are re-sampled
@@ -280,10 +281,10 @@ wire  [3:0] look_roff  = split_lat ? {1'b0, fbs_stable[3], 2'b00}
                                    : fbs_stable[3:0];
 /* verilator lint_off WIDTHTRUNC */
 wire  [8:0] bb_lin     = pd_lat
-                       ? ((dep_lat == 2'd2) ? 9'd61          // 976 >= 961 bytes
+                       ? ((dep_lat == 2'd2) ? SRC_W*3/32     // 60 (960 bytes)
                         : (dep_lat == 2'd3) ? SRC_W/8        // 80
                                             : SRC_W/16)      // 40
-                       : ((dep_lat == 2'd2) ? 9'd121         // 1936 >= 1921 bytes
+                       : ((dep_lat == 2'd2) ? SRC_W*3/16     // 120 (1920 bytes)
                         : (dep_lat == 2'd3) ? SRC_W/4        // 160
                                             : SRC_W/8);      // 80
 /* verilator lint_on WIDTHTRUNC */
@@ -494,21 +495,22 @@ wire  [9:0] src_cur = y_shf[9:0];
 assign      rbuf    = src_cur[0];
 
 // FB-view byte address of the lookahead pixel within the stored stream:
-// roff (the line base's sub-beat offset) + n * bytes-per-pixel, with the
-// packed-888 quirk: pixel at even FB addr reads bytes addr+1..addr+3, at
-// odd FB addr bytes addr-1..addr+1 (refsw2 Present) - so +-1 by the
-// parity of (base + 3n), which is roff[0] ^ n[0].
+// roff (the line base's sub-beat offset) + n * bytes-per-pixel. Packed 888
+// is STRAIGHT B,G,R at byte 3n - the layout the FB write master's packmode
+// 4 emits (refsw2's mode-4 writer). refsw2 Present()'s odd/even +-1 fetch
+// quirk is deliberately NOT copied: it contradicts refsw2's own writer
+// (overlapping pixels) and rotates channels across the write->scanout
+// round trip (SC pre-intro: red logo showed green, teal water pink, plus
+// a 1-px comb from the odd/even split - while the core render was right).
 // /2: source pixel 0..639; pixel_double game lines: /4, source 0..319
 // (bands are always 640 wide at 2x)
 wire  [9:0] n_pre    = (pd_lat && !band_v) ? x_pre[11:2] : x_pre[10:1];
 wire  [1:0] disp_dep = band_v ? 2'd1 : dep_lat;   // bands read as 16bpp
 wire  [3:0] roff_d   = band_v ? 4'd0 : line_roff[rbuf];
-wire        par24    = roff_d[0] ^ n_pre[0];
 wire [11:0] b_pre =
-	((disp_dep == 2'd2) ? ({1'b0, n_pre, 1'b0} + {2'b00, n_pre}
-	                       + (par24 ? 12'hFFF : 12'd1))    // 3n +- 1
-	:(disp_dep == 2'd3) ? {n_pre, 2'b00}                   // 4n
-	                    : {1'b0, n_pre, 1'b0})             // 2n
+	((disp_dep == 2'd2) ? ({1'b0, n_pre, 1'b0} + {2'b00, n_pre})   // 3n
+	:(disp_dep == 2'd3) ? {n_pre, 2'b00}                           // 4n
+	                    : {1'b0, n_pre, 1'b0})                     // 2n
 	+ {8'd0, roff_d};
 assign w0_pre = b_pre[11:2];
 
