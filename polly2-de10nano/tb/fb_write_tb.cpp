@@ -8,8 +8,8 @@
 //   6: 8888 ARGB
 // with refsw2's quantization for the 16-bit modes - (c*maxval + T)/255, T the
 // 4x4 Bayer bias when fb_dither - and both target layouts:
-//   FB_W_SOF1[24]=0: 32-bit "split" area (FB word W -> DDR word W, in the
-//                    32-bit half selected by SOF bit 22; BE-masked)
+//   FB_W_SOF1[24]=0: 32-bit "split" area (pvr_map32: FB word W -> DDR word
+//                    W, byte W*8 + bank*4, bank = SOF bit 22; BE-masked)
 //   FB_W_SOF1[24]=1: dense 64-bit-view render-to-texture mirror (FB byte F
 //                    -> DDR byte F; whole beats)
 // Addressing: SOF + py*FB_W_LINESTRIDE*8 + px*bpp. SCALER_CTL.hscale
@@ -156,7 +156,7 @@ static void run_config(const Cfg& c) {
             uint64_t F = wbase + (uint64_t)y * stride * 8 + (uint64_t)x * bpp;
             for (int k = 0; k < nb; k++) {
                 uint64_t f = F + k;
-                uint64_t d = c.rtt ? f : ((f >> 2) * 8 + (c.half ? 0 : 4) + (f & 3));
+                uint64_t d = c.rtt ? f : ((f >> 2) * 8 + (c.half ? 4 : 0) + (f & 3));
                 want[d] = by[k];
             }
         }

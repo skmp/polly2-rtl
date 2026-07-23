@@ -27,11 +27,11 @@
 //    adopted through a 2-sample stability filter (it originates in another
 //    clock domain); the sub-beat byte offset of each line's base is kept
 //    per line buffer for the read side.
-//  - fb_split replicates the Dreamcast 32-bit-view VRAM layout (same rule
-//    as ascal's fb_split_word): FB 32-bit word W lives at DDR byte W*8, in
-//    the low (fb_disp_half=1) or high (fb_disp_half=0) 32-bit half of each
-//    64-bit word (half re-sampled per line with the base, it is SOF bit
-//    22). A line is then fetched at 2x the FB-view byte count (2x
+//  - fb_split replicates the Dreamcast 32-bit-view VRAM layout (minicast's
+//    pvr_map32 rule): FB 32-bit word W lives at DDR byte W*8, in the LOW
+//    (fb_disp_half=0, bank 0) or HIGH (fb_disp_half=1, bank 1) 32-bit half
+//    of each 64-bit word - physical byte = W*8 + bank*4 (half re-sampled
+//    per line with the base, it is SOF bit 22). A line is then fetched at 2x the FB-view byte count (2x
 //    overfetch - still trivial bandwidth). fb_stride stays in FB-view
 //    bytes in both modes; the DDR advance doubles internally.
 //  - Two optional border bands: 640x30 RGB565 LINEAR framebuffers (stride
@@ -450,7 +450,8 @@ for (gb = 0; gb < 4; gb = gb + 1) begin : bank
 	wire [63:0] h64  = o2[0] ? avl_readdata[127:64] : avl_readdata[63:0];
 	wire [31:0] w32  = o2[1] ? (o2[0] ? avl_readdata[127:96] : avl_readdata[95:64])
 	                         : (o2[0] ? avl_readdata[63:32]  : avl_readdata[31:0]);
-	wire [31:0] wd   = cur_split ? (cur_half ? h64[31:0] : h64[63:32]) : w32;
+	// pvr_map32: bank 0 (half=0) = LOW 32 bits, bank 1 = HIGH
+	wire [31:0] wd   = cur_split ? (cur_half ? h64[63:32] : h64[31:0]) : w32;
 
 	always @(posedge avl_clk) begin
 		if (fetching && avl_readdatavalid && ok) mem[{req_buf, n[9:2]}] <= wd;

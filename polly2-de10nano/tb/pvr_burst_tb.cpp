@@ -107,7 +107,7 @@ int main(int argc, char** argv) {
     dut->reset = 0;
     for (int i = 0; i < 4; i++) tick();
 
-    const uint32_t SOF = (1u << 22) | 0x100;  // lower half (BE=0F), base word 0x40
+    const uint32_t SOF = (1u << 22) | 0x100;  // bank 1 = upper half (BE=F0), base word 0x40
     const uint64_t FB_BASE = (SOF & 0x3FFFFC) >> 2;
     regwrite(12, SOF);
 
@@ -136,7 +136,7 @@ int main(int argc, char** argv) {
     for (uint32_t i = 0; i < 64; i++) {
         uint32_t pix = 4096 + i;
         uint64_t word = FB_BASE + (pix >> 1);
-        uint64_t byte0 = word * 8 + ((pix & 1) ? 2 : 0);  // lower 32-bit half
+        uint64_t byte0 = word * 8 + 4 + ((pix & 1) ? 2 : 0);  // bank 1 = upper 32-bit half
         uint16_t want = px565(pix);
         uint16_t got = (uint16_t)(mem.count(byte0) ? mem[byte0] : 0)
                      | (uint16_t)((mem.count(byte0 + 1) ? mem[byte0 + 1] : 0) << 8);

@@ -188,9 +188,10 @@ module simplex_pvr_top import tsp_pkg::*; (
     //      a straddling pixel emits the completed word and keeps the tail).
     //  B : place 32-bit words into 64-bit DDR BEATS:
     //        FB_W_SOF1[24]=0 (32-bit area): FB word W -> DDR word W, in the
-    //          32-bit half selected by SOF bit 22 (split-VRAM layout, the
-    //          rule spg's fb_split scanout reads back; the other half is
-    //          the other 4 MB bank). 2 16bpp px per beat.
+    //          32-bit half selected by SOF bit 22 (minicast's pvr_map32
+    //          split-VRAM rule: bank 0 = LOW half, bank 1 = HIGH; the spg
+    //          scanout and CPU area-1 accesses use the same mapping, so
+    //          CPU-written FBs like ip.bin's read back). 2 16bpp px/beat.
     //        FB_W_SOF1[24]=1 (render to texture): the DENSE 64-bit-view
     //          mirror textures are fetched from - FB byte F -> DDR byte F,
     //          consecutive FB words pair into whole beats (4 16bpp px).
@@ -392,9 +393,9 @@ module simplex_pvr_top import tsp_pkg::*; (
     // ---- stage B mapping + emission (comb) ----
     wire [19:0] b_dw = wrtt ? emA_w[20:1] : emA_w[19:0];
     // which 32-bit half of the beat: RTT = dense (FB word parity); split area =
-    // the fixed half from SOF bit 22 (0 -> HIGH 32 bits, 1 -> LOW, the rule the
-    // scanout's fb_disp_half reads back)
-    wire        b_hi = wrtt ? emA_w[0] : ~regs.fb_w_sof1[22];
+    // the fixed half from SOF bit 22, pvr_map32 rule: bank 0 -> LOW 32 bits,
+    // bank 1 -> HIGH (the same rule the scanout's fb_disp_half reads back)
+    wire        b_hi = wrtt ? emA_w[0] : regs.fb_w_sof1[22];
     wire [63:0] b_d  = b_hi ? {emA_d, 32'd0} : {32'd0, emA_d};
     wire  [7:0] b_be = b_hi ? {emA_be, 4'd0} : {4'd0, emA_be};
     wire        b_match = bw_v && (b_dw == bw_w);

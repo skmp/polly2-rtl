@@ -49,11 +49,11 @@ static uint32_t base_input(uint64_t base_fb) {
     return (uint32_t)(g_split ? base_fb * 2 : base_fb);
 }
 
-// absolute FB-view byte -> DDR byte (split: FB word W in the fb_disp_half
-// 32-bit half of 64-bit DDR word W; half=1 low bytes 0-3, half=0 high 4-7)
+// absolute FB-view byte -> DDR byte (split: pvr_map32 rule - FB word W at
+// DDR byte W*8 + bank*4; half/bank=0 low bytes 0-3, half=1 high 4-7)
 static uint64_t f2d(uint64_t A, int half) {
     if (!g_split) return A;
-    return (A >> 2) * 8 + (half ? 0 : 4) + (A & 3);
+    return (A >> 2) * 8 + (half ? 4 : 0) + (A & 3);
 }
 static uint8_t  fb8(uint64_t A, int half) { return pat(f2d(A, half)); }
 static uint16_t fb16(uint64_t A, int half) {

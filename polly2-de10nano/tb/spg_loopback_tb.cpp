@@ -162,10 +162,10 @@ int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     dut = new Vspg_loopback_top;
 
-    // config A: half 0 (pixels in high 32 bits), even 64-bit base word
+    // config A: half/bank 0 (pixels in LOW 32 bits, pvr_map32), even base word
     run_config(0x000000u | (0u << 22), 0x0000, "half0/even");
-    // config B: half 1 (low 32 bits), ODD 64-bit base word (sof byte 4 ->
-    // DDR byte 8 -> fb_base[3]=1, the odd0 fetch path) + inverted pattern
+    // config B: half/bank 1 (HIGH 32 bits), ODD 64-bit base word (sof byte 4
+    // -> DDR byte 8 -> fb_base[3]=1, the mid-beat fetch path) + inverted pattern
     run_config(0x000004u | (1u << 22), 0x5A5A, "half1/odd");
 
     printf(errors ? "FAIL (%d errors)\n" : "PASS\n", errors);
