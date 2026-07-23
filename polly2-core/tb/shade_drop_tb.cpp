@@ -102,9 +102,9 @@ static uint32_t twiddle(uint32_t x, uint32_t y) {
 static uint32_t pal8_expected(int px, int py) {
     uint32_t idx = tex_byte(g_texbase_byte + twiddle(px, py));
     uint32_t entry = (idx << 22) | (idx << 12) | (idx << 2) | 3;
-    // pal_fmt=3 currently decodes as 16-bit passthrough (known separate
-    // limitation: real DC 8888 palettes are 32-bit entries) - match that
-    return entry & 0xFFFF;
+    // pal_fmt=3 = ARGB8888 palette: the full 32-bit entry IS the texel
+    // (recv_ingame_inv rendered all-black when this was truncated to 16b)
+    return entry;
 }
 
 static void run_config(const char* name, uint32_t tsp, uint32_t tcw,
