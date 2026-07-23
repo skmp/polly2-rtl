@@ -19,7 +19,18 @@ VFLAGS = -Wno-WIDTH -Wno-UNUSEDSIGNAL -j $(NJOBS) --build-jobs $(NJOBS) \
 
 TSP_PKG = ../polly2-core/rtl/gen/tsp_pkg.sv
 
-all: spg-sync pvr-burst spg-loopback audio-i2s spg-bands render-irq
+all: spg-sync pvr-burst spg-loopback audio-i2s spg-bands spg-depth render-irq
+
+#   make spg-depth - FB_R_CTRL read formats + per-line FB_R_SOF: all four
+#                    fb_depth modes (linear + split, misaligned bases,
+#                    fb_concat, the packed-888 fetch quirk) against a
+#                    refsw2 Present() software model; mid-frame SOF change
+#                    lands line-exactly; fb_enable=0 blanks the window
+spg-depth: obj_dir/spg_depth_tb
+	./obj_dir/spg_depth_tb
+
+obj_dir/spg_depth_tb: rtl/spg.sv tb/spg_depth_tb.cpp
+	$(VERILATOR) --cc --exe --build $(VFLAGS) rtl/spg.sv tb/spg_depth_tb.cpp -o spg_depth_tb
 
 #   make render-irq - irq_stretch (render-done -> f2h IRQ1): a done edge
 #                     gives exactly one 64-cycle pulse (a held level does
@@ -88,4 +99,4 @@ obj_dir/pvr_burst_tb: rtl/simplex_pvr_top.sv tb/peel_core_stub.sv tb/pvr_burst_t
 clean:
 	rm -rf obj_dir
 
-.PHONY: all spg-sync pvr-burst spg-loopback audio-i2s spg-bands render-irq clean
+.PHONY: all spg-sync pvr-burst spg-loopback audio-i2s spg-bands spg-depth render-irq clean

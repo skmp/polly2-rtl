@@ -47,6 +47,8 @@ module simplex_pvr_top import tsp_pkg::*; (
     // Exposed as plain vectors so the emu top need not import tsp_pkg.
     output     [31:0] FB_R_SOF1,
     output     [31:0] FB_R_SOF2,
+    output     [31:0] FB_R_CTRL,
+    output     [31:0] VO_CONTROL,
     output     [31:0] FB_W_SOF1,
     output     [31:0] FB_W_SOF2,
     // TEST_SELECT (reg 0x18): minicast writes 0xCAFEBABE here as the "regs are
@@ -93,6 +95,8 @@ module simplex_pvr_top import tsp_pkg::*; (
 
     assign FB_R_SOF1   = regs.fb_r_sof1;
     assign FB_R_SOF2   = regs.fb_r_sof2;
+    assign FB_R_CTRL   = regs.fb_r_ctrl;
+    assign VO_CONTROL  = regs.vo_control;
     assign FB_W_SOF1   = regs.fb_w_sof1;
     assign FB_W_SOF2   = regs.fb_w_sof2;
     assign TEST_SELECT = regs.test_select;

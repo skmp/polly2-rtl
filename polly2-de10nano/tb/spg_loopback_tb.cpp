@@ -81,14 +81,14 @@ static void regwrite(int addr, uint32_t data) {
 }
 
 // expected pixel: stub argb = {pix16^xor, pix16^xor}, write master 565-packs,
-// spg MSB-replicates to 888
+// spg expands with fb_concat appended (refsw2 Present; concat = 0 here)
 static void expect_rgb(uint32_t pix, uint16_t xorpat, uint8_t* r, uint8_t* g, uint8_t* b) {
     uint32_t v = (pix ^ xorpat) & 0xFFFF;
     uint32_t a = (v << 16) | v;
     uint32_t p = (((a >> 19) & 0x1F) << 11) | (((a >> 10) & 0x3F) << 5) | ((a >> 3) & 0x1F);
-    *r = (uint8_t)(((p >> 11) & 0x1F) << 3 | ((p >> 11) & 0x1F) >> 2);
-    *g = (uint8_t)(((p >> 5) & 0x3F) << 2 | ((p >> 5) & 0x3F) >> 4);
-    *b = (uint8_t)((p & 0x1F) << 3 | (p & 0x1F) >> 2);
+    *r = (uint8_t)(((p >> 11) & 0x1F) << 3);
+    *g = (uint8_t)(((p >> 5) & 0x3F) << 2);
+    *b = (uint8_t)((p & 0x1F) << 3);
 }
 
 static void run_config(uint32_t sof, uint16_t xorpat, const char* name) {
@@ -111,6 +111,9 @@ static void run_config(uint32_t sof, uint16_t xorpat, const char* name) {
     dut->fb_line_dbl  = 0;
     dut->fb_split     = 1;
     dut->fb_disp_half = (sof >> 22) & 1;
+    dut->fb_depth     = 1;    // 565
+    dut->fb_concat    = 0;
+    dut->fb_enable    = 1;
     dut->spg_reset = 0;
 
     // let the raster free-run one frame to settle prefetch, then align to the

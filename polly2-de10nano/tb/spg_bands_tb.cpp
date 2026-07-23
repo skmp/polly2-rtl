@@ -37,6 +37,7 @@ int main(int argc, char** argv) {
     dut->reset = 1;
     dut->fb_base = GAME; dut->fb_stride = STRIDE;
     dut->fb_line_dbl = 0; dut->fb_split = 0; dut->fb_disp_half = 0;
+    dut->fb_depth = 1; dut->fb_concat = 0; dut->fb_enable = 1;   // 565 game FB
     dut->fb_top_base = 0; dut->fb_bot_base = 0;   // bands off at cold start
     dut->avl_waitrequest = 0; dut->avl_readdatavalid = 0;
 
@@ -72,18 +73,21 @@ int main(int argc, char** argv) {
     int x = 0, y = -1, prev_de = 0, frame = -1;
     bool top_en = false, bot_en = false;
 
-    auto expected = [&](int px_, int py, uint16_t* out) -> bool {
+    auto expected = [&](int px_, int py, uint16_t* out, bool* band) -> bool {
         // returns false for black; out = RGB565 source pixel otherwise
         if (px_ < X0 || px_ >= X1) return false;
         uint32_t sx = (uint32_t)(px_ - X0) >> 1;
         if (py < Y0) {
             if (!top_en) return false;
             *out = pix(TOP + (uint32_t)(py >> 1) * STRIDE + sx * 2);
+            *band = true;
         } else if (py < Y1) {
             *out = pix(GAME + (uint32_t)((py - Y0) >> 1) * STRIDE + sx * 2);
+            *band = false;
         } else {
             if (!bot_en) return false;
             *out = pix(BOT + (uint32_t)((py - Y1) >> 1) * STRIDE + sx * 2);
+            *band = true;
         }
         return true;
     };
@@ -103,11 +107,18 @@ int main(int argc, char** argv) {
                 gap = 0;
                 if (check && y >= 0) {
                     uint16_t p = 0;
+                    bool band = false;
                     uint8_t er = 0, eg = 0, eb = 0;
-                    if (expected(x, y, &p)) {
-                        er = (uint8_t)(((p >> 11) & 0x1F) << 3 | ((p >> 13) & 0x7));
-                        eg = (uint8_t)(((p >> 5) & 0x3F) << 2 | ((p >> 9) & 0x3));
-                        eb = (uint8_t)((p & 0x1F) << 3 | ((p >> 2) & 0x7));
+                    if (expected(x, y, &p, &band)) {
+                        if (band) {   // bands: MSB-replicated expansion
+                            er = (uint8_t)(((p >> 11) & 0x1F) << 3 | ((p >> 13) & 0x7));
+                            eg = (uint8_t)(((p >> 5) & 0x3F) << 2 | ((p >> 9) & 0x3));
+                            eb = (uint8_t)((p & 0x1F) << 3 | ((p >> 2) & 0x7));
+                        } else {      // game: refsw2 565, fb_concat (0) appended
+                            er = (uint8_t)(((p >> 11) & 0x1F) << 3);
+                            eg = (uint8_t)(((p >> 5) & 0x3F) << 2);
+                            eb = (uint8_t)((p & 0x1F) << 3);
+                        }
                     }
                     if (dut->red != er || dut->green != eg || dut->blue != eb) {
                         if (errors < 10)
