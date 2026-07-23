@@ -66,9 +66,12 @@ module taginvw_tile_buffer import tsp_pkg::*; #(
     output reg [31:0]           sh_depth,       // depthBufferA (invW)   (1-cyc latency)
     output reg                  sh_pt,          // PT-list-won bit       (1-cyc latency)
 
-    // ---- SPANNER: 4-wide ALIGNED read (group = x & ~3). REQUIRES LANES==4: the 4 aligned
-    // pixels {g..g+3} then map exactly to banks 0..3, so one read of all banks at
-    // addr {g[9:5], g[4:2]} returns the whole group. Lane l = pixel (g|l). 1-cyc latency.
+    // ---- SPANNER: 4-wide ALIGNED read (group = x & ~3). FIXED 4-wide regardless of
+    // LANES (the spanner is not lane-count-parameterized): the aligned pixels {g..g+3}
+    // occupy 4 CONSECUTIVE banks starting at bank (g[BANK_BITS-1:0] & ~3) - all of the
+    // chunk when LANES==4, the g[2]-selected half of the 8-bank chunk when LANES==8 -
+    // so one read of all banks at addr {g[9:5], g[4:BANK_BITS]} returns the whole
+    // group. Lane l = pixel (g|l). 1-cyc latency.
     input                       rd4_valid,
     input      [9:0]            rd4_group,
     output     [3:0]            g4_valid,
@@ -112,15 +115,26 @@ module taginvw_tile_buffer import tsp_pkg::*; #(
         else if (sh_rd_valid) raddr = {NB{ {sh_rd_id[9:5],  sh_rd_id[4:BANK_BITS]}  }};
     end
 
-    // 4-wide group outputs: with LANES==4, banks 0..3 ARE lanes 0..3 of the aligned group
+    // 4-wide group outputs: select the 4-bank slice holding the aligned group
     // (combinational off the registered read rdata, 1-cyc after rd4_group presented).
+    // The slice base is the group's position within the LANES-bank chunk - constant 0
+    // when LANES==4, the latched g[2] half-select when LANES==8 (latched at the read,
+    // like sh_lane_r, so it tracks the registered rdata). G4B stays 1 bit when
+    // LANES==4 so the declarations elaborate; the base is then forced to 0.
+    localparam integer G4B = (BANK_BITS > 2) ? BANK_BITS - 2 : 1;
+    reg [G4B-1:0] g4_half_r;
+    always @(posedge clk) begin
+        if (reset) g4_half_r <= '0;
+        else if (rd4_valid) g4_half_r <= (BANK_BITS > 2) ? rd4_group[2 +: G4B] : '0;
+    end
     genvar gl;
     generate
       for (gl = 0; gl < 4; gl = gl + 1) begin : g4lane
-        assign g4_valid[gl] = rdata[TI_W*gl + TW_VALID];
-        assign g4_pt   [gl] = rdata[TI_W*gl + TW_PT];
-        assign g4_tag  [gl] = rdata[TI_W*gl + TW_TAG  +: 32];
-        assign g4_invw [gl] = rdata[TI_W*gl + TW_INVW +: 32];
+        wire [TI_W-1:0] lw = rdata[TI_W*(4*g4_half_r + gl) +: TI_W];
+        assign g4_valid[gl] = lw[TW_VALID];
+        assign g4_pt   [gl] = lw[TW_PT];
+        assign g4_tag  [gl] = lw[TW_TAG  +: 32];
+        assign g4_invw [gl] = lw[TW_INVW +: 32];
       end
     endgenerate
 

@@ -14,7 +14,13 @@
 //   frontend_tsp_lp_tb_top : faux DDR controller (behavioral vram[]) + fb[]  (sim)
 //   mister_top             : real HPS Avalon ram1 read + framebuffer write  (synth)
 //
-module peel_core import tsp_pkg::*; (
+module peel_core import tsp_pkg::*; #(
+    // Raster/tile-buffer lane count, 4 or 8. The peel/taginvw tile buffers, the
+    // raster line, the sort cache and the bulk-op walks all scale with it; the
+    // SPANNER does NOT - its taginvw read stays a fixed 4-wide aligned group
+    // (see taginvw_tile_buffer's rd4 port for the 8-bank half-select).
+    parameter integer RAS_LANES = 8
+) (
     input             clk,
     input             reset,
     // register/command load (host writes the PVR reg dump before `go`)
@@ -224,10 +230,10 @@ module peel_core import tsp_pkg::*; (
     // it_pf_busy barrier (#2), and the 1px/cycle combinational FLUSH (#4) are also
     // applied.
     localparam integer TILE_W = 32, TILE_H = 32;
-    // Raster/tile-buffer lane count. The tile buffer is banked LANES-wide; the
+    // Raster/tile-buffer lane count: RAS_LANES is a MODULE PARAMETER (4 or 8; the
+    // spanner stays 4-wide either way). The tile buffer is banked LANES-wide; the
     // per-bank chunk address is CHUNK_AW bits and the CLEAR/PeelBuffers walk runs
     // over NCHUNK chunks. (LANES=8 -> 7-bit addr, 128 chunks; 4 -> 8-bit, 256.)
-    localparam integer RAS_LANES = 4;
     localparam integer NCHUNK   = (TILE_W/RAS_LANES) * TILE_H;   // chunks/tile
     localparam integer CHUNK_AW = $clog2(NCHUNK);                // per-bank addr width
     localparam [31:0] FLT_MAX = 32'h7F7FFFFF;  // refsw PeelBuffers depth clear value
@@ -338,8 +344,8 @@ module peel_core import tsp_pkg::*; (
     reg [3:0]  isp_tl;
 
     // -------------------- ISP rasterize (as tile_engine_top) --------------------
-    // 8 depth lanes/clock, matching the real FPGA (32 lanes is DSP-heavy). Sim
-    // models the same 8 lanes so cycle counts reflect hardware.
+    // RAS_LANES depth lanes/clock, matching the real FPGA (32 lanes is DSP-heavy).
+    // Sim models the same lane count so cycle counts reflect hardware.
     reg  [4:0]  ras_y, ras_x;
     reg  [4:0]  rbx0, rbx1, rby1;   // active bbox sweep bounds (chunk-aligned x)
     // combinational: issue a chunk every raster-sweep cycle, in phase with ras_x/y
@@ -449,7 +455,8 @@ module peel_core import tsp_pkg::*; (
     );
 
     // ---- SORT CACHE (u_sort): peel "fully rendered" triangle filter ----
-    // ENTER: every peel-pass triangle popped to setup writes {tag,1} to all 4 ways.
+    // ENTER: every peel-pass triangle popped to setup writes {tag,1} to all ways
+    // (one way per raster lane, WAYS=RAS_LANES).
     // DEMOTE: every stage-B `more` event is EXACTLY a "this fragment needs a later
     // pass" event (see isp_depth_cmp_lp): pass=1 -> the displaced RESIDENT pending
     // tag (b_oldtag), pass=0 -> the deferred INCOMING fragment (b_tag). b_more is
@@ -479,7 +486,7 @@ module peel_core import tsp_pkg::*; (
         assign sc_wr_tag[32*gsc +: 32] = b_pass_lp[gsc] ? b_oldtag[32*gsc +: 32] : b_tag;
       end
     endgenerate
-    sort_cache u_sort (
+    sort_cache #(.WAYS(RAS_LANES)) u_sort (
         .clk(clk), .reset(reset), .ready(sc_ready),
         .en_valid(sc_enter),      .en_tag(fq_out[FF_TAG +: 32]),
         .wr_valid(sc_wr_valid),   .wr_tag(sc_wr_tag),

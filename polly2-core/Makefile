@@ -168,9 +168,11 @@ dense_span_buffer: | $(BUILD)
 # compare (isp_depth_cmp_lp) with dual depth/tag buffers + a per-pixel valid bit,
 # re-running the object list per peel pass, and blending at the end of the TSP
 # pipe -> shaded_lp_<name>.bmp.
+# RASLANES=4/8/16 overrides default
 frontendtsplp-build: | $(BUILD)
 	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ --public-flat-rw \
 	  --top-module frontend_tsp_lp_tb_top $(RTL_INC) \
+	  $(if $(RASLANES),-GRAS_LANES=$(RASLANES),) \
 	  $(TSP_PKG) $(RTL_EXTRA) tb/frontend_tsp_lp_tb_top.sv tb/sim_ddr_fb.sv \
 	  $(CWD)/tb/frontend_tsp_lp_tb.cpp --Mdir $(BUILD)/obj_frontendtsplp -o tb
 

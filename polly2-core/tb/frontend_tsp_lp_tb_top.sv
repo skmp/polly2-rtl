@@ -5,7 +5,9 @@
 // dump through wr_* before `go`, preloads vram[] (at u_sim.vram), and reads fb[]
 // (at u_sim.fb) after `done` to write the BMP.
 //
-module frontend_tsp_lp_tb_top import tsp_pkg::*; (
+module frontend_tsp_lp_tb_top import tsp_pkg::*; #(
+    parameter integer RAS_LANES = 8     // override with verilator -GRAS_LANES=4
+) (
     input             clk,
     input             reset,
     // register write path (C++ TB loads the PVR reg dump through this before go)
@@ -27,7 +29,7 @@ module frontend_tsp_lp_tb_top import tsp_pkg::*; (
     );
 
     // the render core
-    peel_core u_core (
+    peel_core #(.RAS_LANES(RAS_LANES)) u_core (
         .clk(clk), .reset(reset),
         .wr_en(wr_en), .wr_addr(wr_addr), .wr_data(wr_data),
         .go(go), .done(done),
