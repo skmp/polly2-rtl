@@ -10,7 +10,7 @@
 //   tex_add_mip (comb)    : + mip, *fbpp -> 4 byte offsets
 //   tex_fetch4_q (var,stall): 4 raw 64-bit words (owns the 2 caches). QUEUED +
 //                           COALESCING: dedups corner words into 4-slot rows and
-//                           decouples via 64-deep FIFOs so miss-fills overlap the
+//                           decouples via deep FIFOs (256-px PIXQ) so miss-fills overlap the
 //                           drain (tex_fetch4_ob is the retired lockstep version,
 //                           kept as the golden model for the texfetchq TB)
 //   tex_decode x4 (3)     : 4 raw words -> 4 ARGB texels (injected palette, x4 ports)
@@ -357,16 +357,18 @@ module tex_unit import tsp_pkg::*; #(
         if (reset) begin tw_inflight <= 0; tw_if_fired <= 1'b0; end
         else if (tw_en) begin
             tw_inflight <= tw_inflight + (tu_accept_dbg?1:0) - (out_valid?1:0);
-            // Total pipe latency (uvmap..filter) is ~20 cycles under all-hits. So >40 in
-            // flight already means results have PAUSED. Trace continuously past 40 so we see
-            // exactly where the valid chain (f_ov -> dec_ov -> filt_ov) dies.
-            if (tw_inflight >= 40)
+            // With the queued fetch (tex_fetch4_q: 256-px PIXQ) legit in-flight is
+            // bounded by the shade pl FIFO's pl_room cap (PLD-4 = 124) before the
+            // front stalls. So >144 in flight means results have PAUSED. Trace
+            // continuously past 144 so we see exactly where the valid chain
+            // (f_ov -> dec_ov -> filt_ov) dies.
+            if (tw_inflight >= 144)
                 $display("  [tex_unit] t=%0t inflight=%0d | in_valid=%b(accept=%b) r_iss=%b f_ov=%b dec_ov0=%b filt_ov=%b out_valid=%b | fetch_ready=%b front_stall=%b | tc:rd=%b busy=%b dready=%b vq:rd=%b busy=%b dready=%b",
                          $time, tw_inflight, in_valid, tu_accept_dbg, r_iss, f_ov, dec_ov[0], filt_ov, out_valid,
                          fetch_ready, front_stall,
                          ddr_req[0].rd, ddr_resp[0].busy, ddr_resp[0].dready,
                          ddr_req[1].rd, ddr_resp[1].busy, ddr_resp[1].dready);
-            if (tw_inflight > 60 && !tw_if_fired) begin
+            if (tw_inflight > 160 && !tw_if_fired) begin
                 tw_if_fired <= 1'b1;
                 $display("  [tex_unit] RESULT PAUSE: %0d pixels accepted but not emitted (valid chain died - see trace above).", tw_inflight);
             end

@@ -69,7 +69,11 @@ module tex_fetch4_q import tsp_pkg::*; #(
     output ddr_rd_req_t  ddr_req  [0:1],
     input  ddr_rd_resp_t ddr_resp [0:1]
 );
-    localparam integer QDEPTH  = 64;   // PIXQ / ROWQ / DATQ depth
+    localparam integer QDEPTH  = 64;   // ROWQ / DATQ depth
+    localparam integer PIXQ_D  = 256;  // PIXQ depth (the pixel budget: how far the
+                                       // front can run ahead of the expander; also
+                                       // bounds ROWQ's reachable occupancy at
+                                       // ~PIXQ_D / pixels-per-row)
     localparam integer ROW_AGE = 4;    // max cycles a non-empty row stays open
 
     wire clear = reset || flush;
@@ -230,10 +234,11 @@ module tex_fetch4_q import tsp_pkg::*; #(
     wire              rowq_ov;
     wire [ROWQ_W-1:0] rowq_rdata;
     wire              rowq_pop;
+    wire [$clog2(QDEPTH)+2:0] rowq_count;
     tfq_fifo #(.W(ROWQ_W), .DEPTH(QDEPTH)) u_rowq (
         .clk(clk), .reset(clear),
         .push(rowq_push), .wdata(rowq_wdata), .full(rowq_full),
-        .ovalid(rowq_ov), .odata(rowq_rdata), .pop(rowq_pop), .count());
+        .ovalid(rowq_ov), .odata(rowq_rdata), .pop(rowq_pop), .count(rowq_count));
 
     wire [3:0]  lk_mask_in = rowq_rdata[ROWQ_W-1 -: 4];
     wire [28:0] lk_wa_in [0:3];
@@ -250,10 +255,11 @@ module tex_fetch4_q import tsp_pkg::*; #(
     wire              pixq_ov;
     wire [PIXQ_W-1:0] pixq_rdata;
     wire              pixq_pop;
-    tfq_fifo #(.W(PIXQ_W), .DEPTH(QDEPTH)) u_pixq (
+    wire [$clog2(PIXQ_D)+2:0] pixq_count;
+    tfq_fifo #(.W(PIXQ_W), .DEPTH(PIXQ_D)) u_pixq (
         .clk(clk), .reset(clear),
         .push(f1_proc), .wdata(pixq_wdata), .full(pixq_full),
-        .ovalid(pixq_ov), .odata(pixq_rdata), .pop(pixq_pop), .count());
+        .ovalid(pixq_ov), .odata(pixq_rdata), .pop(pixq_pop), .count(pixq_count));
 
     wire         px_first, px_tex, px_vq;
     wire [1:0]   pxr  [0:3];
@@ -415,6 +421,24 @@ module tex_fetch4_q import tsp_pkg::*; #(
         if (f0_v || row_open || rowq_ov || pixq_ov || datq_ov || lk_v || t1_v || t2_v)
             $error("tex_fetch4_q %m: flush with pixels/rows in flight");
     end
+    // ---- +texqtrace: per-cycle queue occupancy trace ----
+    // pixq/rowq/datq = total entries in each FIFO (RAM + in-flight + output buffer);
+    // open = slots in the packer's open row; lk = a row group in the cache REPLY
+    // stage; rdy/tcrdy = in_ready / data-cache ready; t1/t2 = V-stage occupancy.
+    reg     tq_trace;
+    integer tq_cyc;
+    initial tq_trace = $test$plusargs("texqtrace");
+    always @(posedge clk) begin
+        if (reset) tq_cyc <= 0;
+        else begin
+            tq_cyc <= tq_cyc + 1;
+            if (tq_trace)
+                $display("[TEXQ] c=%0d pixq=%0d rowq=%0d datq=%0d open=%0d lk=%b rdy=%b tcrdy=%b t1=%b t2=%b",
+                         tq_cyc, pixq_count, rowq_count, datq_count,
+                         row_cnt, lk_v, in_ready, tc_ready, t1_v, t2_v);
+        end
+    end
+
     // ---- stats ----
     integer st_px, st_tpx, st_rows, st_slots, st_free_px;
     integer st_rowsz [1:4];
