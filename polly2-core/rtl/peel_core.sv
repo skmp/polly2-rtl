@@ -1387,6 +1387,34 @@ module peel_core import tsp_pkg::*; #(
     wire [4:0] rp_row0     = ctz32(rp_rowwin);
     reg  [31:0] rb_rows;               // active sweep row set (this triangle)
 
+    // ==================== COVERAGE CACHE (cov$) ====================
+    // A triangle's sampled coverage in a tile is PASS-INVARIANT (same planes,
+    // same fill rule -> identical inside-masks every pass). Record each rastered
+    // triangle's covered-row MASK from the stage-A exit stream; from the 2nd
+    // pass of a peel/PT sequence on, AND it into the sweep's row set at
+    // RS_CORNER - leading/trailing sub-pixel fringe rows and gappy sliver
+    // interiors are skipped EXACTLY, and a zero-coverage triangle skips whole
+    // (its missing demotes then retire it from the sort$).
+    // Freshness: any triangle reaching RS_POP in pass p>=2 was rastered (or
+    // cov-aborted, which preserves its entry) in pass p-1 of the SAME tile, so
+    // a tag-matching entry is same-tile-fresh; aliasing mismatches -> no clip.
+    (* ramstyle = "M10K, no_rw_check" *) reg [63:0] cov_mem [0:1023]; // {tag, rowmask}
+    function automatic [9:0] cov_idx(input [31:0] t);   // same spread as sort$
+        cov_idx = t[12:3] ^ {7'd0, t[2:0]};
+    endfunction
+    reg         cov_we;                // 1-cyc write pulse (exit-stream commit)
+    reg  [9:0]  cov_waddr;
+    reg  [31:0] cov_wtag, cov_wmask;
+    reg  [63:0] cov_rd;                // registered read (presented at RS_POP)
+    always @(posedge clk) begin
+        if (cov_we) cov_mem[cov_waddr] <= {cov_wtag, cov_wmask};
+        cov_rd <= cov_mem[cov_idx(pq_rdw[QF_TAG +: 32])];
+    end
+    wire cov_en = (peeling && (peel_pass >= 8'd2)) || (pt_phase && (pt_pass >= 8'd2));
+    // exit-stream per-triangle aggregation (triangle boundary = ras_qi change)
+    reg  [1:0]  ee_qi;   reg ee_pend;
+    reg  [31:0] ee_mask;               // covered rows of the aggregating triangle
+
     // consumer fully idle: entry FIFO empty, iterator authoritative-idle (it_pf_busy
     // clear: no record buffered/being read/emitted/outstanding), streamed setup
     // idle (!su_busy), raster idle, and the plane FIFO empty. Using it_pf_busy (not
@@ -1459,6 +1487,12 @@ module peel_core import tsp_pkg::*; #(
     integer pc_pt_tiles;        // entries that ran a PT-resolve phase
     integer pc_pt_maxp;         // deepest pt_pass reached (PT_MAX_PASS hit = truncation)
     integer pc_pt_trunc;        // entries whose resolve was TRUNCATED at PT_MAX_PASS
+    // early-row-exit opportunity probe (stats only; ee_qi/ee_mask/ee_pend are
+    // the REAL cov$ aggregation regs, declared with the cache)
+    integer pc_ee_tail, pc_ee_viol, pc_ee_tri, pc_ee_rows;
+    integer pc_cov_abort, pc_cov_cliprows;
+    reg [4:0] ee_row; reg [5:0] ee_tail;
+    reg ee_rowcov, ee_seen, ee_gap, ee_viol;
     integer pc_ptbb_skip;       // PT triangles sweep-skipped by the fail bbox
     integer pc_plbb_skip;       // peel triangles sweep-skipped by the survivor bbox
     // TSP / shade engine (classified by top FSM `st` when in a shade sub-phase)
@@ -1689,10 +1723,15 @@ module peel_core import tsp_pkg::*; #(
             pc_m_promote<=0; pc_m_waithit<=0; pc_m_waitmiss<=0; pc_m_cold<=0;
             pc_sort_skip<=0; pc_pt_pass<=0; pc_pt_tiles<=0; pc_ptbb_skip<=0;
             pc_plbb_skip<=0; pc_pt_maxp<=0; pc_pt_trunc<=0;
+            pc_ee_tail<=0; pc_ee_viol<=0; pc_ee_tri<=0; pc_ee_rows<=0;
+            pc_cov_abort<=0; pc_cov_cliprows<=0;
+            ee_row<=5'd0; ee_tail<='0;
+            ee_rowcov<=1'b0; ee_seen<=1'b0; ee_gap<=1'b0; ee_viol<=1'b0;
             pt_c_px<=0; pt_c_stall<=0; pt_c_look<=0; pt_c_fillw<=0; pt_c_spn<=0;
             pt_c_drain<=0; pt_c_idle<=0; pt_c_blend<=0; pt_c_acc<=0;
 `endif
             rs_st<=RS_IDLE; tri_qi<=2'd0;
+            ee_qi<=2'd3; ee_pend<=1'b0; ee_mask<='0;
             pq_head<=0; pq_tail<=0; pq_count<=0;
             fq_head<=0; fq_tail<=0; fq_count<=0; fq_out_valid<=1'b0;
             eq_head<=0; eq_tail<=0; eq_count<=0;
@@ -1832,7 +1871,7 @@ module peel_core import tsp_pkg::*; #(
                 end
             end
 `endif
-            done<=0; ra_start<=0; ol_start<=0; ol_kick<=1'b0;
+            done<=0; ra_start<=0; ol_start<=0; ol_kick<=1'b0; cov_we<=1'b0;
             pt_hand_p<=1'b0; pt_free_p<=1'b0;    // 1-cyc PT shade hand/free strobes
             spv_start<=1'b0; spv_rd_done<=1'b0;  // 1-cyc spanner start / ring-free strobes
             ra_ack.list_done<=0; ol_ack.entry_done<=0; it_ack.triangle_done<=0;
@@ -1901,6 +1940,66 @@ module peel_core import tsp_pkg::*; #(
                 end
             end
             ras_inflight <= ras_inflight + (ras_in_valid ? 1 : 0) - (ras_out_valid ? 1 : 0);
+
+            // ---- cov$ AGGREGATION: per-triangle covered-row mask off the exit
+            // stream (issue-ordered; triangle boundary = ras_qi change). Commit
+            // writes the cache at the boundary, or on a quiet pipe (last
+            // triangle of a pass has no successor exit). Zero-coverage
+            // triangles commit an EMPTY mask - the next pass skips them whole.
+            if (ras_out_valid) begin
+                if (ee_qi != ras_qi) begin              // new triangle in the exit stream
+                    if (ee_pend) begin
+                        cov_we    <= 1'b1;
+                        cov_waddr <= cov_idx(tq_tag[ee_qi]);
+                        cov_wtag  <= tq_tag[ee_qi];
+                        cov_wmask <= ee_mask;
+                    end
+                    ee_qi   <= ras_qi;
+                    ee_pend <= 1'b1;
+                    ee_mask <= (|ras_inside) ? (32'd1 << ras_oy) : 32'd0;
+                end else if (|ras_inside)
+                    ee_mask <= ee_mask | (32'd1 << ras_oy);
+            end else if (ee_pend && ras_inflight == 0) begin
+                cov_we    <= 1'b1;                      // quiet pipe: commit the last one
+                cov_waddr <= cov_idx(tq_tag[ee_qi]);
+                cov_wtag  <= tq_tag[ee_qi];
+                cov_wmask <= ee_mask;
+                ee_pend   <= 1'b0;
+            end
+`ifndef SYNTHESIS
+            // ---- EARLY-ROW-EXIT opportunity probe (stats only) ----
+            // (a) tail rows swept after the last covered row, (b) violations: a
+            // covered row AFTER a fully-empty row (naive early-out would drop it)
+            if (ras_out_valid) begin
+                if (ee_qi != ras_qi) begin
+                    if (ee_seen) begin
+                        pc_ee_tail <= pc_ee_tail + int'(ee_tail)
+                                    + ((ee_rowcov) ? 0 : 1);
+                        if (ee_viol) pc_ee_viol <= pc_ee_viol + 1;
+                        pc_ee_tri <= pc_ee_tri + 1;
+                    end
+                    ee_row <= ras_oy;
+                    ee_rowcov <= |ras_inside; ee_seen <= |ras_inside;
+                    ee_tail <= '0; ee_gap <= 1'b0; ee_viol <= 1'b0;
+                end else begin
+                    if (ras_oy != ee_row) begin
+                        if (!ee_rowcov && ee_seen) begin
+                            ee_gap  <= 1'b1;
+                            ee_tail <= ee_tail + 6'd1;
+                        end else if (ee_rowcov)
+                            ee_tail <= '0;
+                        ee_row <= ras_oy; ee_rowcov <= |ras_inside;
+                    end else
+                        ee_rowcov <= ee_rowcov | (|ras_inside);
+                    if (|ras_inside) begin
+                        ee_seen <= 1'b1;
+                        if (ee_gap) ee_viol <= 1'b1;
+                        ee_gap <= 1'b0;
+                    end
+                end
+                pc_ee_rows <= pc_ee_rows + ((ras_oy != ee_row || ee_qi != ras_qi) ? 1 : 0);
+            end
+`endif
 
             // ============ shade pipeline CONSUMER: blend stage CA -> CB ============
             // A fresh result is present when out_valid && !stall (out_valid holds
@@ -2606,6 +2705,11 @@ module peel_core import tsp_pkg::*; #(
                     pc_ptbb_skip);
                 $display("     PEEL-BBOX:   survivor-bbox sweep-skips=%0d  pt-maxpass=%0d truncated=%0d",
                     pc_plbb_skip, pc_pt_maxp, pc_pt_trunc);
+                $display("     ROW-EXIT:    swept-rows=%0d tail-rows=%0d (%0d%%) over %0d covered-tris, naive-rule violations=%0d",
+                    pc_ee_rows, pc_ee_tail, (pc_ee_tail*100)/(pc_ee_rows?pc_ee_rows:1),
+                    pc_ee_tri, pc_ee_viol);
+                $display("     COV$:        tri-skips=%0d rows-clipped=%0d",
+                    pc_cov_abort, pc_cov_cliprows);
                 $display("     OL-REPLAY:   %0d walks replayed from the ring, %0d walked DDR, %0d entries dropped pre-eq",
                     pc_olr_hit, pc_olr_walk, pc_olr_drop);
                 $display("     PT-TSP: px=%0d texstall=%0d look=%0d fillw=%0d spn=%0d drain=%0d idle=%0d  blend=%0d (accepted=%0d)",
@@ -3148,19 +3252,10 @@ module peel_core import tsp_pkg::*; #(
                 isp_tl<=pq_rdw[QF_TL +:4];
                 isp_word<=pq_rdw[QF_ISP +:32]; tri_tag<=pq_rdw[QF_TAG +:32];
                 tri_is_pt<=pq_rdw[QF_PT];
-                // identity sideband: claim the next slot for this triangle (its
-                // chunks carry the slot index through u_line to stage A). A
-                // clip-skipped triangle issues NO chunks and must NOT claim -
-                // 1-cycle skip chains would otherwise wrap the 4 slots onto a
-                // still-in-flight triangle. Real claims are >= 3 cycles apart
-                // (POP+CORNER+sweep), so 4 slots cover the 7-deep pipe.
-                if (!ptc_empty) begin
-                    tri_qi <= tri_qi + 2'd1;
-                    tq_tag  [tri_qi + 2'd1] <= pq_rdw[QF_TAG +:32];
-                    tq_mode [tri_qi + 2'd1] <= pq_rdw[QF_ISP+29 +: 3];
-                    tq_zwdis[tri_qi + 2'd1] <= pq_rdw[QF_ISP+26];
-                    tq_ispt [tri_qi + 2'd1] <= pq_rdw[QF_PT];
-                end
+                // (identity-sideband slot claim happens at RS_CORNER now, after
+                // BOTH skip decisions - ptc_empty here and the cov$ clip there -
+                // so only triangles that actually sweep claim a slot; claims
+                // stay >= 3 cycles apart and 4 slots cover the 7-deep pipe.)
                 tri_count<=tri_count+1;
                 // chunk-aligned x range + row range from the bbox, CLIPPED to the
                 // PT alpha-fail bbox when active (ptc_* = pass-through otherwise)
@@ -3215,6 +3310,40 @@ module peel_core import tsp_pkg::*; #(
                 cr_issue <= 1'b0;      // 1-cycle probe issue pulse
                 cr_cnt   <= CR_LAT[3:0];
                 rs_st <= RS_RAS;
+                // cov$ clip: cov_rd (presented at RS_POP) holds {tag, rowmask}.
+                // On a tag hit in a clip-eligible pass, AND last pass's ACTUAL
+                // covered rows into the sweep's row set - exact, since coverage
+                // is pass-invariant. Empty -> skip the sweep entirely.
+                begin : covclip
+                    reg [31:0] nrows;
+                    nrows = (cov_en && cov_rd[63:32] == tri_tag)
+                          ? (rb_rows & cov_rd[31:0]) : rb_rows;
+                    if (nrows == 32'd0) begin
+                        if (ch_pop && !pq_empty) begin
+                            pq_rdw  <= pq_ram[pq_head[2:0]];
+                            pq_head <= (pq_head==PQ_N-1) ? 4'd0 : pq_head+4'd1;
+                            pq_pop   = 1'b1;
+                            rs_st   <= RS_POP;
+                        end else rs_st <= RS_DRAIN;   // DRAIN, never IDLE, from live sweep
+`ifndef SYNTHESIS
+                        pc_cov_abort <= pc_cov_abort + 1;
+`endif
+                    end else begin
+                        rb_rows <= nrows;
+                        ras_y   <= ctz32(nrows);      // first coverable row
+                        // identity-sideband slot claim (moved from RS_POP): only
+                        // sweeping triangles claim, so claims stay >=3 cyc apart
+                        tri_qi <= tri_qi + 2'd1;
+                        tq_tag  [tri_qi + 2'd1] <= tri_tag;
+                        tq_mode [tri_qi + 2'd1] <= isp_word[31:29];
+                        tq_zwdis[tri_qi + 2'd1] <= isp_word[26];
+                        tq_ispt [tri_qi + 2'd1] <= tri_is_pt;
+`ifndef SYNTHESIS
+                        pc_cov_cliprows <= pc_cov_cliprows
+                            + int'($countones(rb_rows)) - int'($countones(nrows));
+`endif
+                    end
+                end
             end
             RS_RAS: begin
                 // Overlapped reject: the verdict lands cr_cnt cycles after issue, sampled by

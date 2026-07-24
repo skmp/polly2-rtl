@@ -28,22 +28,23 @@ by pass kind/number). Identify the biggest serialization bucket → fix → re-m
 | 11 | + OL replay ring | 3,320,507 | −21k | ✅ |
 | 12 | + OL ring entry drops (entskip feedback) | 3,249,207 | −71k | ✅ |
 | 13 | + PT fail-row / peel survivor-row sweep masks | 3,198,385 | −51k | ✅ |
-| 14 | + back-to-back triangle chaining | **2,981,810** | −217k | ✅ |
+| 14 | + back-to-back triangle chaining | 2,981,810 | −217k | ✅ |
+| 15 | + coverage cache (cov$: exact per-triangle covered-row masks) | **2,909,579** | −72k | ✅ |
 
-Total: **−47%** (5.66M → 2.98M).
+Total: **−49%** (5.66M → 2.91M).
 
 ## Final numbers per scene (all bit-exact vs `+nochain` and vs golden hashes)
 
-| scene | cycles (final) | vs pre-chaining | notes |
-|---|---|---|---|
-| shenmue_intro2 | 2,981,810 | −216,575 | hash 537947… unchanged |
-| sonic | 2,705,724 | −148,682 | biggest relative chaining win |
-| hotd2_car_fire | 1,681,190 | −14,959 | |
-| shenmue_menu | 1,453,386 | −10,710 | |
-| hotd2_gargoyle | 1,335,145 | −8,022 | |
-| daytona_intro | 1,283,970 | −13,964 | exposed the RS_IDLE barrier bug (assert) |
-| menu2 | 1,004,594 | −69,417 | |
-| hotd2_selfie | 982,597 | −1,039 | |
+| scene | cycles (final) | chaining Δ | cov$ Δ | cov$ tri-skips / rows-clipped |
+|---|---|---|---|---|
+| shenmue_intro2 | 2,909,579 | −216,575 | −72,231 | 451 / 61,246 |
+| sonic | 2,673,058 | −148,682 | −32,666 | 42 / 23,543 |
+| hotd2_car_fire | 1,678,069 | −14,959 | −3,121 | 699 / 21,652 |
+| shenmue_menu | 1,453,595 | −10,710 | +209 | 3 / 4,013 |
+| hotd2_gargoyle | 1,333,727 | −8,022 | −1,418 | 170 / 11,374 |
+| daytona_intro | 1,283,886 | −13,964 | −84 | 1,381 / 7,017 |
+| menu2 | 994,823 | −69,417 | −9,771 | 194 / 28,112 |
+| hotd2_selfie | 982,494 | −1,039 | −103 | 18 / 2,375 |
 
 ## What was tried — detail
 
@@ -66,6 +67,8 @@ Total: **−47%** (5.66M → 2.98M).
 | **Row-mask sweep clips** | −51k | Fail/survivor sets tracked as 32-bit row masks; the sweep's row-advance jumps to the next set row (ctz32). Bbox y-window folded into the same row set → clipped and unclipped walks share one exit test. Less than the 900k PT-sweep bucket suggested: shenmue's fail rows are dense. | 4×32b masks + 2 encoders |
 | **Triangle chaining** | −217k intro2, −149k sonic | RS_DRAIN between same-pass triangles (full u_line flush, 10-15 cy/tri, 336k total) replaced by direct chaining: sweep-end / probe-abort / clip-skip pop the next pq entry immediately. Safe because (a) pq only ever holds same-pass triangles, (b) the stage-A/B RAW window is ±1 exit cycle and POP+CORNER guarantee a 2-cycle gap, (c) triangle identity rides u_line as a 2-bit slot index (qi/out_qi) into a 4-slot sideband. Per-site kill switches: `+nochain`, `+nc_pop`, `+nc_abort`, `+nc_row`. | the subtlest change of the campaign — see bug patterns below |
 
+| **Coverage cache (cov$)** | −72k intro2, −33k sonic, −10k menu2 | A triangle's sampled coverage in a tile is **pass-invariant** (same planes, same fill rule). The stage-A exit stream aggregates each rastered triangle's covered-row mask (32b) into a 1024×{tag,mask} M10K; from pass ≥2 of a peel/PT sequence, RS_CORNER ANDs a tag-matching mask into the sweep's row set. Exact by construction: skips leading/trailing sub-pixel fringe rows AND gappy sliver interiors; zero-coverage triangles skip whole and demote-starve out of the sort$. Freshness mirrors the sort$ argument (anything popping in pass p≥2 was rastered — or exactly cov-skipped — in pass p-1 of the same tile; aliases mismatch the stored tag → no clip). Rows excluded by other clips in the recording pass can never stage again (monotone shrink, grounded at the unclipped pass 1), so the under-approximation is sound. | 8 M10K (1024×64) + a 32b AND/ctz at RS_CORNER |
+
 ### Neutral / rejected
 
 | experiment | result | verdict / lesson |
@@ -74,6 +77,7 @@ Total: **−47%** (5.66M → 2.98M).
 | Unthrottled PT speculation | avg 8 passes/entry, +2.3% shenmue_menu | Speculation must be bounded by verdict depth, not queue capacity. |
 | PT throttle depth 3 | 3,250,539 (worse than depth 2), 1681 passes | Wasted passes outweigh overlap even with cheap replayed walks. |
 | Row-mask clips as a "PT sweep killer" | only −51k of a 900k bucket | Spatial clips die on spatially-dense fail sets; the remaining PT sweep cost is triangle count × area, not wasted rows. |
+| Naive "fully-empty row ends the triangle" early-out | measured, not built | Geometrically true (convex ⇒ contiguous row coverage) but false at pixel sampling: the bbox is vertex-tight, so empty rows are sub-pixel fringe, and slivers cover rows sporadically. Measured on intro2: 14% of swept rows are post-coverage tail (the prize), but 1350/29,358 triangles resume coverage after an empty row — naive abort would drop their pixels. Led directly to cov$, which captures the entire prize exactly. |
 
 ## Bug patterns worth remembering (found by the chaining work)
 
