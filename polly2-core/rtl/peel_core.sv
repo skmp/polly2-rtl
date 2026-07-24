@@ -1242,6 +1242,11 @@ module peel_core import tsp_pkg::*; #(
     localparam integer RI_CLEAR=0, RI_PEELBUF=1, RI_OL=2, RI_BARRIER=3, RI_SHWAIT=4,
                        RI_SHADE=5, RI_OTHER=6, RI_N=7;
     integer pc_ras_idle_by [0:RI_N-1];
+    // ---- RI_OL sub-breakdown: WHY is the raster starved during the OL phase?
+    // Classified by the FIRST occupied stage from the bottom of the entry->triangle
+    // pipeline (walker -> eq -> iterator/record-fetch -> fq -> sort$-check -> setup
+    // -> pq -> raster): the stage everything below is waiting on is the limiter.
+    integer pc_olb_walk, pc_olb_iter, pc_olb_sc, pc_olb_setup, pc_olb_other;
 `endif
 
     // ---- COMBINATIONAL framebuffer-write (VIDEO-OUT / FLUSH), valid/ready ----
@@ -1401,6 +1406,7 @@ module peel_core import tsp_pkg::*; #(
             pc_shwait<=0; pc_post_stall<=0; pc_op_ff<=0;
             for (pc_i=0; pc_i<IA_N; pc_i=pc_i+1) pc_isp_alone[pc_i]<=0;
             for (pc_i=0; pc_i<RI_N; pc_i=pc_i+1) pc_ras_idle_by[pc_i]<=0;
+            pc_olb_walk<=0; pc_olb_iter<=0; pc_olb_sc<=0; pc_olb_setup<=0; pc_olb_other<=0;
             pc_hand<=0; pc_span<=0; pc_drain<=0; pc_blend<=0; pc_swrite<=0;
             pc_prefetch<=0; pc_pf_hit<=0; pc_pf_wasted<=0;
             pc_m_promote<=0; pc_m_waithit<=0; pc_m_waitmiss<=0; pc_m_cold<=0;
@@ -1512,7 +1518,23 @@ module peel_core import tsp_pkg::*; #(
                     if (rs_st==RS_IDLE) begin
                         if      (st==S_CLEAR_WR)                    pc_ras_idle_by[RI_CLEAR]   <= pc_ras_idle_by[RI_CLEAR]   + 1;
                         else if (st==S_PEEL_BUF_RUN)                pc_ras_idle_by[RI_PEELBUF] <= pc_ras_idle_by[RI_PEELBUF] + 1;
-                        else if (st==S_OL_RUN)                      pc_ras_idle_by[RI_OL]      <= pc_ras_idle_by[RI_OL]      + 1;
+                        else if (st==S_OL_RUN) begin
+                            pc_ras_idle_by[RI_OL] <= pc_ras_idle_by[RI_OL] + 1;
+                            // first occupied stage from the bottom = the limiter
+                            if (su_busy || su_out_valid)
+                                pc_olb_setup <= pc_olb_setup + 1;      // setup latency
+                            else if (fq_out_valid) begin
+                                if (sc_chk_p || (sc_skip_en && !sc_hd_v))
+                                     pc_olb_sc    <= pc_olb_sc + 1;    // sort$ check latency
+                                else pc_olb_setup <= pc_olb_setup + 1; // setup intake stall
+                            end
+                            else if (it_pf_busy || !eq_empty)
+                                pc_olb_iter <= pc_olb_iter + 1;        // iterator / record fetch
+                            else if (ol_busy)
+                                pc_olb_walk <= pc_olb_walk + 1;        // OL walker itself
+                            else
+                                pc_olb_other <= pc_olb_other + 1;
+                        end
                         else if (st==S_DRAIN)                       pc_ras_idle_by[RI_BARRIER] <= pc_ras_idle_by[RI_BARRIER] + 1;
                         else if (st==S_PEEL_BUF && ti_ready[htile]) pc_ras_idle_by[RI_SHWAIT]  <= pc_ras_idle_by[RI_SHWAIT]  + 1;
                         else if (e_spn || e_tsp)                    pc_ras_idle_by[RI_SHADE]   <= pc_ras_idle_by[RI_SHADE]   + 1;
@@ -2059,6 +2081,14 @@ module peel_core import tsp_pkg::*; #(
                     pc_ras_idle_by[RI_SHWAIT],  (pc_ras_idle_by[RI_SHWAIT]*100) /(pc_ras_idle?pc_ras_idle:1),
                     pc_ras_idle_by[RI_SHADE],   (pc_ras_idle_by[RI_SHADE]*100)  /(pc_ras_idle?pc_ras_idle:1),
                     pc_ras_idle_by[RI_OTHER],   (pc_ras_idle_by[RI_OTHER]*100)  /(pc_ras_idle?pc_ras_idle:1));
+                // WHY is raster idle during the OL phase specifically? First occupied
+                // stage from the bottom of walker->eq->iterator->fq->sort$->setup->pq.
+                $display("     OL-idle by stage: WALKER=%0d(%0d%%) ITER/record-fetch=%0d(%0d%%) SORT$-chk=%0d(%0d%%) SETUP=%0d(%0d%%) OTHER=%0d(%0d%%)",
+                    pc_olb_walk,  (pc_olb_walk*100) /(pc_ras_idle_by[RI_OL]?pc_ras_idle_by[RI_OL]:1),
+                    pc_olb_iter,  (pc_olb_iter*100) /(pc_ras_idle_by[RI_OL]?pc_ras_idle_by[RI_OL]:1),
+                    pc_olb_sc,    (pc_olb_sc*100)   /(pc_ras_idle_by[RI_OL]?pc_ras_idle_by[RI_OL]:1),
+                    pc_olb_setup, (pc_olb_setup*100)/(pc_ras_idle_by[RI_OL]?pc_ras_idle_by[RI_OL]:1),
+                    pc_olb_other, (pc_olb_other*100)/(pc_ras_idle_by[RI_OL]?pc_ras_idle_by[RI_OL]:1));
                 // NOTE: single-bucket classifier (reader wins when both busy), so these
                 // are LOWER bounds on the spanner's work when it overlaps the reader; the
                 // ENGINES/OCCUPANCY cross-tab below is the non-collapsed truth.

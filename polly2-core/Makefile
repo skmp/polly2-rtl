@@ -119,7 +119,7 @@ tex-combiner: | $(BUILD)
 # object_list_parser unit test: list walker (direct-DDR reader) + behav burst DDR.
 oparse: | $(BUILD)
 	+$(VERILATOR) --cc --exe --build $(VFLAGS) --public-flat-rw --top-module object_list_parser_tb_top \
-	  $(TSP)/tsp_pkg.sv tb/object_list_parser_tb_top.sv $(TSP)/object_list_parser.sv \
+	  $(RTL_INC) $(TSP_PKG) tb/object_list_parser_tb_top.sv \
 	  $(CWD)/tb/object_list_parser_tb.cpp --Mdir $(BUILD)/obj_oparse -o tb
 	./$(BUILD)/obj_oparse/tb
 
