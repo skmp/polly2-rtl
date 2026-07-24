@@ -60,6 +60,15 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
     output reg             skp_pulse,        // 1-cyc: skipped skp_cnt triangles pre-fetch
     output reg [2:0]       skp_cnt,
 
+    // ---- OL-replay feedback: entry fully pre-skipped (no record fetched) ----
+    // entry_oidx = {valid, ring index} tag riding the entry (from the OL replay
+    // ring). When an entry retires with EVERY record pre-skipped, pulse it back:
+    // "fully rendered" is a permanent predicate within the peel sequence, so the
+    // ring can DROP this entry from all later replays of the same walk.
+    input      [9:0]       entry_oidx,
+    output reg             entskip_pulse,    // 1-cyc: whole entry pre-skipped clean
+    output reg [8:0]       entskip_oidx,
+
     // direct DDR3 read port (64-bit beats, via shared arbiter)
     output ddr_rd_req_t    dreq,
     input  ddr_rd_resp_t   dresp
@@ -87,6 +96,7 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
     reg        ex_array;
     reg        ex_quad;                // array entry is a QUAD array (4 verts/record)
     reg [2:0]  ex_skip;   reg ex_shadow;   reg [5:0] ex_mask;
+    reg [9:0]  ex_oidx;   reg ex_clean;    // replay-ring tag + no-record-fetched-yet
     reg        ex_ispt;                // list-kind of the entry being expanded
     reg [20:0] ex_po;                  // running param_offs of the next record
     reg [26:0] ex_base;                // running byte base of the next record
@@ -276,11 +286,13 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
             b_ready[0]<=0; b_ready[1]<=0; b_done[0]<=0; b_done[1]<=0;
             tri_ready_r<=0;
             pe_en<=0; pc_v<=0; pcs<=PC_IDLE; chk_valid<=0; skp_pulse<=0;
+            entskip_pulse<=0;
         end else begin
             entry_ack <= 1'b0;
             dreq_rd_r <= 1'b0;
             chk_valid <= 1'b0;
             skp_pulse <= 1'b0;
+            entskip_pulse <= 1'b0;
 
             // ============ PRE-FETCH SORT$ CHECK (concurrent with exg_*) ============
             // Collect a verdict for the NEXT record (ex_po cursor). The sort-cache
@@ -327,6 +339,8 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
                     // pull a new entry to expand (if the target buffer is free)
                     if (entry_valid && !b_ready[rd_buf]) begin
                         ex_active <= 1'b1;
+                        ex_oidx   <= entry_oidx;
+                        ex_clean  <= 1'b1;      // no record of this entry fetched yet
                         ex_array  <= (entry_type != ENT_STRIP);
                         ex_quad   <= (entry_type == ENT_QUAD);
                         ex_skip   <= entry.skip;
@@ -367,7 +381,14 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
                         ex_count <= ex_count - 5'd1;
                         ex_base  <= ex_base + exg_recb_r;
                         ex_po    <= ex_po   + exg_recw_r;
-                    end else ex_active <= 1'b0;        // entry done expanding
+                    end else begin
+                        ex_active <= 1'b0;             // entry done expanding
+                        // every record pre-skipped: report the entry droppable
+                        if (ex_clean && ex_oidx[9]) begin
+                            entskip_pulse <= 1'b1;
+                            entskip_oidx  <= ex_oidx[8:0];
+                        end
+                    end
                 end else if (!b_ready[rd_buf]) begin
                     // start the next record of the current entry into rd_buf.
                     // Strips carry the FILTERED mask (pre-checked done triangles
@@ -391,6 +412,7 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
                     rd_stride_r    <= exg_stride_r;
                     rd_rec_bytes_r <= exg_recb_r;
                     rd_rec_words_r <= exg_recw_r;
+                    ex_clean  <= 1'b0;   // a record of this entry IS being fetched
                     rst       <= R_REQ;
                 end
             end

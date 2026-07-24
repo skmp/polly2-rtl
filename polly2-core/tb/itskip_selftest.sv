@@ -40,6 +40,7 @@ module itskip_selftest import tsp_pkg::*; ;
         .chk_valid(chk_valid), .chk_tag(chk_tag),
         .chk_valid_q(chk_valid_q), .chk_done(chk_done),
         .skp_pulse(skp_pulse), .skp_cnt(skp_cnt),
+        .entry_oidx(10'd0), .entskip_pulse(), .entskip_oidx(),
         .dreq(dreq), .dresp(dresp));
 
     // ---- sort cache (WAYS=8 as in the 8-lane core) ----
