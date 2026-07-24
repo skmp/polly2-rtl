@@ -54,6 +54,17 @@ module peel_tile_buffer import tsp_pkg::*; #(
     input      [2:0]            b_mode,      // ISP DepthMode (opaque path)
     input                       b_zwdis,     // ZWriteDis (opaque path)
     input                       b_peeling,   // 1 = layer-peel compare, 0 = opaque
+    // ---- FORWARD punch-through resolve compare (b_peeling must be 0) ----
+    // Plane mapping during the PT phase: zb = this pass's working best (nearest
+    // candidate so far, seeded 0), zb2 = forward boundary (select strictly
+    // NEARER-THAN-BEST and BEHIND-BOUNDARY, seeded FLT_MAX), tag2 = Zceil (the
+    // opaque depth: candidate must beat it per the frag's ISP DepthMode - this
+    // reuses the opaque comparator with its ob input muxed to tag2). All depths
+    // are (0, FLT_MAX) positives, so the taps compare like integers. zwrite_dis
+    // does not apply to PT/OP.
+    input                       b_fwd,       // 1 = forward PT-resolve compare
+    input      [LANES-1:0]      b_res,       // per-lane RESOLVED bit (alpha passed
+                                             // in an earlier PT pass): lane inert
     output     [LANES-1:0]      b_pass_lp,   // per-lane peel accept (for dt_pt)
     output     [LANES-1:0]      b_more,      // per-lane MoreToDraw (peel)
     output     [32*LANES-1:0]   b_oldtag,    // per-lane RESIDENT pending tag (tagBufferA
@@ -83,6 +94,27 @@ module peel_tile_buffer import tsp_pkg::*; #(
     input                       pb_wr_valid,
     input      [10-$clog2(LANES)-1:0] pb_wr_addr,
     input                       pb_first,    // fold SetTagToMax: tag2 <- 0xFFFFFFFF
+    // ---- PT forward-resolve walks (reuse the pb_rd/pb_wr cursors) ----
+    //  pb_ptinit: seed the PT phase:  tag2 <- zb (Zceil = opaque depth),
+    //             zb2 <- FLT_MAX (boundary = nearest), zb <- 0 (working seed),
+    //             valid <- 0. tag kept.
+    //  pb_ptswap: between PT passes:  zb2 <- (zb==0 ? zb2 : zb) (boundary
+    //             advances only where the pass staged something - this also
+    //             PRESERVES a resolved pixel's depth in zb2 forever, since a
+    //             resolved lane never stages again), zb <- 0, valid <- 0.
+    //             tag/tag2 kept.
+    //  pb_ptfix : end of the PT phase: zb <- (pb_res ? pb_zres : tag2) = the
+    //             final opaque reference Zfinal (the BLEND-written resolved
+    //             depth, else the original opaque depth), valid <- 0. The
+    //             following TL PeelBuffers then copies zb into zb2 and
+    //             overwrites tag2, so nothing else needs restoring. pb_zres is
+    //             the external Zres RAM's chunk read (same read-ahead cursor,
+    //             same 1-cycle latency as this buffer's own read).
+    input                       pb_ptinit,
+    input                       pb_ptswap,
+    input                       pb_ptfix,
+    input      [LANES-1:0]      pb_res,      // per-lane resolved bit for pb_wr chunk
+    input      [32*LANES-1:0]   pb_zres,     // per-lane blend-resolved depth
     // ---- z_keep depth-restore RMW (reuses the pb_rd/pb_wr cursors) ----
     // When pb_zkeep is asserted alongside the pb_wr write, the transform is NOT the
     // PeelBuffers reference-swap: instead it RESTORES the kept depth for a z_keep=1 OP
@@ -141,14 +173,18 @@ module peel_tile_buffer import tsp_pkg::*; #(
     // -------------------- internal depth compare (stage B) --------------------
     // Runs off the read-back chunk (rdata = the chunk stage A read last cycle) using
     // the latched b_* fragment fields.
-    wire [NB-1:0] ras_pass_op, ras_pass_lp, ras_more_lp;
+    wire [NB-1:0] ras_pass_op, ras_pass_lp, ras_more_lp, ras_pass_fwd, ras_more_fwd;
+    wire [NB-1:0] lp_gt_zb, lp_lt_zb2;
     genvar gd;
     generate
         for (gd = 0; gd < NB; gd = gd + 1) begin : dcmp
+            // forward mode: the opaque comparator doubles as the Zceil test
+            // (candidate must beat the OPAQUE depth per the frag's DepthMode);
+            // its ob input muxes to tag2, which holds Zceil during the PT phase.
             isp_depth_cmp u_cmp (
                 .mode(b_mode),
                 .nw  (b_invw[32*gd +: 32]),
-                .ob  (f_depth(rdata, gd)),
+                .ob  (b_fwd ? f_tag2(rdata, gd) : f_depth(rdata, gd)),
                 .pass(ras_pass_op[gd]));
             isp_depth_cmp_lp u_cmp_lp (
                 .nw   (b_invw[32*gd +: 32]),
@@ -159,18 +195,35 @@ module peel_tile_buffer import tsp_pkg::*; #(
                 .pb2  (f_tag2  (rdata, gd)),
                 .valid(f_valid (rdata, gd)),
                 .pass (ras_pass_lp[gd]),
-                .more (ras_more_lp[gd]));
+                .more (ras_more_lp[gd]),
+                .o_nw_gt_zb (lp_gt_zb[gd]),
+                .o_nw_lt_zb2(lp_lt_zb2[gd]));
             assign b_oldtag[32*gd +: 32] = f_tag(rdata, gd);
+            // FORWARD accept: beats Zceil (ras_pass_op with the ob mux), strictly
+            // behind the boundary (nw < zb2), nearer than the working best
+            // (nw > zb), and the lane not already resolved. No new comparators -
+            // the lp taps are on exactly the right planes.
+            wire fwd_cand = ras_pass_op[gd] && lp_lt_zb2[gd] && !b_res[gd];
+            assign ras_pass_fwd[gd] = fwd_cand && lp_gt_zb[gd];
+            // FORWARD MoreToDraw (drives the sort$ demote, exactly mirroring the
+            // backward peel): a fragment is a FUTURE candidate iff it is in-window
+            // but lost to the current best (the boundary will descend past the
+            // winner, re-exposing it), or it is the displaced staged resident.
+            // Consumed (z>=boundary), ceiling-occluded and resolved lanes get NO
+            // demote - those fragments can never be selected again, so the sort$
+            // skip set GROWS as pixels resolve.
+            assign ras_more_fwd[gd] = (fwd_cand && !lp_gt_zb[gd])
+                                   || (ras_pass_fwd[gd] && f_valid(rdata, gd));
         end
     endgenerate
-    // peel accept / more are only meaningful on peeling lanes that are inside
-    assign b_pass_lp = ras_pass_lp & b_inside & {NB{b_peeling}};
-    assign b_more    = ras_more_lp & b_inside & {NB{b_peeling}};
-    // per-lane stage-B write-enable = inside & (peel accept | opaque accept). This is
-    // exactly the `we[cw]` computed in the write mux below; expose it so u_taginvw can
-    // duplicate the accepted {valid,tag,invW} write with an identical mask.
+    // peel accept / more are only meaningful on peel/forward lanes that are inside
+    assign b_pass_lp = (b_peeling ? ras_pass_lp : b_fwd ? ras_pass_fwd : '0) & b_inside;
+    assign b_more    = (b_peeling ? ras_more_lp : b_fwd ? ras_more_fwd : '0) & b_inside;
+    // per-lane stage-B write-enable = inside & (peel | forward | opaque accept).
+    // Exactly the `we[cw]` computed in the write mux below; exposed so u_taginvw
+    // can duplicate the accepted {valid,tag,invW} write with an identical mask.
     assign b_we = ras_b_valid ? (b_inside &
-                  (b_peeling ? ras_pass_lp : ras_pass_op)) : '0;
+                  (b_peeling ? ras_pass_lp : b_fwd ? ras_pass_fwd : ras_pass_op)) : '0;
 
     // -------------------- READ port mux --------------------
     always @(*) begin
@@ -194,6 +247,43 @@ module peel_tile_buffer import tsp_pkg::*; #(
                 wdata[PEEL_W*cw + PW_DEPTH +: 32] = clr_depth;
                 wdata[PEEL_W*cw + PW_TAG   +: 32] = clr_tag;
                 // depth2/tag2/valid don't-care for OP; PeelBuffers sets them.
+            end
+        end else if (pb_wr_valid && pb_ptinit) begin // PT phase seed
+            we    = {NB{1'b1}};
+            waddr = {NB{pb_wr_addr}};
+            for (cw = 0; cw < NB; cw = cw + 1) begin
+                wdata[PEEL_W*cw + PW_TAG2   +: 32] = f_depth(rdata, cw); // Zceil <- Zop
+                wdata[PEEL_W*cw + PW_DEPTH2 +: 32] = FLT_MAX;            // boundary
+                wdata[PEEL_W*cw + PW_DEPTH  +: 32] = 32'h0;              // working seed
+                wdata[PEEL_W*cw + PW_TAG    +: 32] = f_tag(rdata, cw);
+                wdata[PEEL_W*cw + PW_VALID]        = 1'b0;
+            end
+        end else if (pb_wr_valid && pb_ptswap) begin // PT boundary advance
+            we    = {NB{1'b1}};
+            waddr = {NB{pb_wr_addr}};
+            for (cw = 0; cw < NB; cw = cw + 1) begin
+                // advance only where the pass staged (zb!=0 seed): keeps a
+                // resolved lane's depth parked in zb2, and an unstaged lane's
+                // boundary where it was.
+                wdata[PEEL_W*cw + PW_DEPTH2 +: 32] =
+                    (f_depth(rdata, cw) == 32'h0) ? f_depth2(rdata, cw)
+                                                  : f_depth (rdata, cw);
+                wdata[PEEL_W*cw + PW_DEPTH  +: 32] = 32'h0;
+                wdata[PEEL_W*cw + PW_TAG    +: 32] = f_tag (rdata, cw);
+                wdata[PEEL_W*cw + PW_TAG2   +: 32] = f_tag2(rdata, cw);  // Zceil kept
+                wdata[PEEL_W*cw + PW_VALID]        = 1'b0;
+            end
+        end else if (pb_wr_valid && pb_ptfix) begin // PT phase close: zb <- Zfinal
+            we    = {NB{1'b1}};
+            waddr = {NB{pb_wr_addr}};
+            for (cw = 0; cw < NB; cw = cw + 1) begin
+                wdata[PEEL_W*cw + PW_DEPTH  +: 32] =
+                    pb_res[cw] ? pb_zres[32*cw +: 32]  // blend-resolved depth
+                               : f_tag2  (rdata, cw);  // untouched: opaque depth
+                wdata[PEEL_W*cw + PW_DEPTH2 +: 32] = f_depth2(rdata, cw);
+                wdata[PEEL_W*cw + PW_TAG    +: 32] = f_tag (rdata, cw);
+                wdata[PEEL_W*cw + PW_TAG2   +: 32] = f_tag2(rdata, cw);
+                wdata[PEEL_W*cw + PW_VALID]        = 1'b0;
             end
         end else if (pb_wr_valid && pb_zkeep) begin // z_keep depth-restore RMW
             // zb <- (zb==FLT_MAX ? zb2 : zb); keep tag/tag2/valid/depth2. Undoes the
@@ -235,8 +325,10 @@ module peel_tile_buffer import tsp_pkg::*; #(
             waddr = pack_addr(b_y, b_x);
             for (cw = 0; cw < NB; cw = cw + 1) begin
                 if (b_inside[cw]) begin
-                    if (b_peeling) begin
-                        if (ras_pass_lp[cw]) begin // peel accept: zb,pb,valid; keep B
+                    if (b_peeling || b_fwd) begin
+                        // peel accept AND forward accept write the same fields:
+                        // zb <- invW, pb <- tag, valid <- 1; boundary/Zceil kept.
+                        if (b_peeling ? ras_pass_lp[cw] : ras_pass_fwd[cw]) begin
                             we[cw] = 1'b1;
                             wdata[PEEL_W*cw + PW_DEPTH  +: 32] = b_invw[32*cw +: 32];
                             wdata[PEEL_W*cw + PW_TAG    +: 32] = b_tag;
