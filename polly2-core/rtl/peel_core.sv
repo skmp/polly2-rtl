@@ -1049,6 +1049,18 @@ module peel_core import tsp_pkg::*; #(
     reg          pt_stop;         // a completed pass had pt_more==0 -> stop issuing
     reg [10:0]   pt_more;         // per-pass: staged+unresolved+alpha-FAIL count
                                   // (cleared by the reader when it frees the pass)
+    // ---- alpha-FAIL bounding box: cheap raster clip for later PT passes ----
+    // Only pixels that FAILED in pass k can stage in pass k+1 (resolved pixels
+    // are locked, unstaged pixels are exhausted), and the fail set shrinks
+    // monotonically - so the fail bbox of the LAST COMPLETED pass is a valid
+    // conservative clip for every later-issued pass, even 2 behind under
+    // pipelining. The blend builds pt_fbb_* per pass; the reader's verdict
+    // point snapshots it into the active clip pt_bb_*. Triangles whose bbox
+    // misses it are skipped whole (which also - correctly - starves them of
+    // demotes, so sort$ drops them from later fetches).
+    reg [4:0]    pt_fbb_x0, pt_fbb_x1, pt_fbb_y0, pt_fbb_y1;  // building (this pass)
+    reg [4:0]    pt_bb_x0,  pt_bb_x1,  pt_bb_y0,  pt_bb_y1;   // active clip
+    reg          pt_bb_v;         // active clip valid (a pass has completed)
     reg [1023:0] pt_res;          // per-pixel resolved (alpha passed); blend-owned
     reg          cb_ptres;        // CB stage: blend belongs to a PT-resolve pass
     reg          ti_ptres [0:1];  // per-half: handed pass is a PT-resolve pass
@@ -1258,6 +1270,22 @@ module peel_core import tsp_pkg::*; #(
     assign pq_wrw[QF_BY0  +:  5] = w_by0;  assign pq_wrw[QF_BY1  +:  5] = w_by1;
     assign pq_wrw[QF_TL   +:  4] = w_tl;
 
+    // ---- PT alpha-fail bbox clip (consumed at RS_POP): intersect the popped
+    // triangle's tile bbox with the active fail bbox; an empty intersection
+    // skips the whole sweep (the triangle can only touch resolved/exhausted
+    // pixels - and its missing demotes correctly retire it from sort$ too).
+    wire       ptc_en    = pt_phase && pt_bb_v;
+    wire [4:0] rp_bx0    = pq_rdw[QF_BX0 +: 5];
+    wire [4:0] rp_bx1    = pq_rdw[QF_BX1 +: 5];
+    wire [4:0] rp_by0    = pq_rdw[QF_BY0 +: 5];
+    wire [4:0] rp_by1    = pq_rdw[QF_BY1 +: 5];
+    wire       ptc_empty = ptc_en && (pt_bb_x1 < rp_bx0 || pt_bb_x0 > rp_bx1
+                                   || pt_bb_y1 < rp_by0 || pt_bb_y0 > rp_by1);
+    wire [4:0] ptc_x0 = (ptc_en && pt_bb_x0 > rp_bx0) ? pt_bb_x0 : rp_bx0;
+    wire [4:0] ptc_x1 = (ptc_en && pt_bb_x1 < rp_bx1) ? pt_bb_x1 : rp_bx1;
+    wire [4:0] ptc_y0 = (ptc_en && pt_bb_y0 > rp_by0) ? pt_bb_y0 : rp_by0;
+    wire [4:0] ptc_y1 = (ptc_en && pt_bb_y1 < rp_by1) ? pt_bb_y1 : rp_by1;
+
     // consumer fully idle: entry FIFO empty, iterator authoritative-idle (it_pf_busy
     // clear: no record buffered/being read/emitted/outstanding), streamed setup
     // idle (!su_busy), raster idle, and the plane FIFO empty. Using it_pf_busy (not
@@ -1328,6 +1356,7 @@ module peel_core import tsp_pkg::*; #(
     integer pc_sort_skip;       // triangles skipped by the sort cache (fully rendered)
     integer pc_pt_pass;         // forward PT-resolve passes run
     integer pc_pt_tiles;        // entries that ran a PT-resolve phase
+    integer pc_ptbb_skip;       // PT triangles sweep-skipped by the fail bbox
     // TSP / shade engine (classified by top FSM `st` when in a shade sub-phase)
     integer pc_sh_present;      // SH_PRESENT accepted: pixel issued into shade pipe
     integer pc_sh_tex_stall;    // SH_PRESENT && pp_stall: blocked on texture fetch
@@ -1536,7 +1565,7 @@ module peel_core import tsp_pkg::*; #(
             pc_hand<=0; pc_span<=0; pc_drain<=0; pc_blend<=0; pc_swrite<=0;
             pc_prefetch<=0; pc_pf_hit<=0; pc_pf_wasted<=0;
             pc_m_promote<=0; pc_m_waithit<=0; pc_m_waitmiss<=0; pc_m_cold<=0;
-            pc_sort_skip<=0; pc_pt_pass<=0; pc_pt_tiles<=0;
+            pc_sort_skip<=0; pc_pt_pass<=0; pc_pt_tiles<=0; pc_ptbb_skip<=0;
 `endif
             rs_st<=RS_IDLE;
             pq_head<=0; pq_tail<=0; pq_count<=0;
@@ -1760,7 +1789,14 @@ module peel_core import tsp_pkg::*; #(
             // CURRENT cb2_* (non-blocking assigns above take effect next cycle).
             if (cb2_valid && cb2_ptres && !pt_res[cb2_id]) begin
                 if (bl_at_pass) pt_res[cb2_id] <= 1'b1;     // pixel locks here
-                else            pt_more <= pt_more + 11'd1; // resolve continues deeper
+                else begin
+                    pt_more <= pt_more + 11'd1;             // resolve continues deeper
+                    // grow this pass's alpha-fail bbox
+                    if (cb2_id[4:0] < pt_fbb_x0) pt_fbb_x0 <= cb2_id[4:0];
+                    if (cb2_id[4:0] > pt_fbb_x1) pt_fbb_x1 <= cb2_id[4:0];
+                    if (cb2_id[9:5] < pt_fbb_y0) pt_fbb_y0 <= cb2_id[9:5];
+                    if (cb2_id[9:5] > pt_fbb_y1) pt_fbb_y1 <= cb2_id[9:5];
+                end
             end
 
             cb_valid <= 1'b0;
@@ -1983,6 +2019,9 @@ module peel_core import tsp_pkg::*; #(
                             pt_pass    <= 8'd1;
                             pt_stop    <= 1'b0;
                             pt_more    <= 11'd0;
+                            pt_bb_v    <= 1'b0;                   // no clip until a verdict
+                            pt_fbb_x0  <= 5'd31; pt_fbb_x1 <= 5'd0;
+                            pt_fbb_y0  <= 5'd31; pt_fbb_y1 <= 5'd0;
                             peel_which <= 1'b0;
                             ol_list_ptr <= pt_ptr_l; ol_start <= 1'b1; ol_walk_done <= 1'b0;
                             has_pt     <= 1'b0;
@@ -2332,8 +2371,9 @@ module peel_core import tsp_pkg::*; #(
                     tri_count ? pc_ras_corner/tri_count : 0, pc_corner_cull*256);
                 $display("  SORT-CACHE:  skipped=%0d peel triangles (fetch+setup+raster avoided)",
                     pc_sort_skip);
-                $display("  PT-RESOLVE:  %0d forward passes over %0d entries (avg %0d passes/entry)",
-                    pc_pt_pass, pc_pt_tiles, pc_pt_tiles ? pc_pt_pass/pc_pt_tiles : 0);
+                $display("  PT-RESOLVE:  %0d forward passes over %0d entries (avg %0d passes/entry)  bbox-skips=%0d",
+                    pc_pt_pass, pc_pt_tiles, pc_pt_tiles ? pc_pt_pass/pc_pt_tiles : 0,
+                    pc_ptbb_skip);
                 // WHY is raster IDLE? Partition RS_IDLE by top `st`. %% is of the IDLE total.
                 // SHADE = overlapped (good: raster done, spanner/reader still shading); the
                 // rest is serial ISP overhead with no downstream running.
@@ -2708,6 +2748,12 @@ module peel_core import tsp_pkg::*; #(
                         pt_free_p <= 1'b1;
                         if (pt_more == 11'd0) pt_stop <= 1'b1;
                         pt_more <= 11'd0;
+                        // publish this pass's fail bbox as the active raster clip
+                        pt_bb_x0 <= pt_fbb_x0; pt_bb_x1 <= pt_fbb_x1;
+                        pt_bb_y0 <= pt_fbb_y0; pt_bb_y1 <= pt_fbb_y1;
+                        pt_bb_v  <= 1'b1;
+                        pt_fbb_x0 <= 5'd31; pt_fbb_x1 <= 5'd0;   // reset to empty
+                        pt_fbb_y0 <= 5'd31; pt_fbb_y1 <= 5'd0;
                     end
                     tsp_st <= R_IDLE;
                 end
@@ -2730,6 +2776,11 @@ module peel_core import tsp_pkg::*; #(
                     pt_free_p <= 1'b1;                 //  never md_last today)
                     if (pt_more == 11'd0) pt_stop <= 1'b1;
                     pt_more <= 11'd0;
+                    pt_bb_x0 <= pt_fbb_x0; pt_bb_x1 <= pt_fbb_x1;
+                    pt_bb_y0 <= pt_fbb_y0; pt_bb_y1 <= pt_fbb_y1;
+                    pt_bb_v  <= 1'b1;
+                    pt_fbb_x0 <= 5'd31; pt_fbb_x1 <= 5'd0;
+                    pt_fbb_y0 <= 5'd31; pt_fbb_y1 <= 5'd0;
                 end
                 tsp_st <= R_IDLE;
             end
@@ -2856,12 +2907,13 @@ module peel_core import tsp_pkg::*; #(
                 isp_word<=pq_rdw[QF_ISP +:32]; tri_tag<=pq_rdw[QF_TAG +:32];
                 tri_is_pt<=pq_rdw[QF_PT];
                 tri_count<=tri_count+1;
-                // chunk-aligned x range + row range from the bbox
-                rbx0 <= pq_rdw[QF_BX0 +:5] & 5'(~(RAS_LANES-1));
-                rbx1 <= pq_rdw[QF_BX1 +:5] & 5'(~(RAS_LANES-1));
-                rby1 <= pq_rdw[QF_BY1 +:5];
-                ras_y <= pq_rdw[QF_BY0 +:5];
-                ras_x <= pq_rdw[QF_BX0 +:5] & 5'(~(RAS_LANES-1));
+                // chunk-aligned x range + row range from the bbox, CLIPPED to the
+                // PT alpha-fail bbox when active (ptc_* = pass-through otherwise)
+                rbx0 <= ptc_x0 & 5'(~(RAS_LANES-1));
+                rbx1 <= ptc_x1 & 5'(~(RAS_LANES-1));
+                rby1 <= ptc_y1;
+                ras_y <= ptc_y0;
+                ras_x <= ptc_x0 & 5'(~(RAS_LANES-1));
                 // PIPELINED "257th step": spend ONE cycle (RS_CORNER) issuing the probe into
                 // u_line, then sweep IMMEDIATELY (RS_RAS) WITHOUT waiting for the verdict.
                 // The probe rides the shared raster pipeline alongside the first sweep chunks;
@@ -2874,6 +2926,15 @@ module peel_core import tsp_pkg::*; #(
                 cr_seen  <= 1'b0;      // verdict not yet sampled for this triangle
                 cr_cnt   <= 4'd0;
                 rs_st <= cr_en ? RS_CORNER : RS_RAS;
+                // PT fail-bbox clip: no overlap with any still-failing pixel ->
+                // skip the sweep (and the probe) entirely.
+                if (ptc_empty) begin
+                    cr_issue <= 1'b0;
+                    rs_st    <= RS_IDLE;
+`ifndef SYNTHESIS
+                    pc_ptbb_skip <= pc_ptbb_skip + 1;
+`endif
+                end
             end
             // one dedicated probe-issue cycle (no sweep chunk this cycle so the probe gets a
             // clean pipeline slot), then straight into the overlapped sweep. Start the
@@ -3066,7 +3127,7 @@ module peel_core import tsp_pkg::*; #(
         oc_sfetch, oc_spanner, oc_depth, oc_ras, oc_pq, oc_setup, oc_sortc, oc_fq,
         oc_iter, oc_eq, oc_ol, oc_region };
 
-    localparam integer OCC_NV = 26;
+    localparam integer OCC_NV = 27;
     function automatic integer occ_val(input integer idx);
         case (idx)
             0:  occ_val = int'(st);
@@ -3101,6 +3162,7 @@ module peel_core import tsp_pkg::*; #(
                                 u_spanner.emit_stall_ring,
                                 u_spanner.emit_stall_fifo});
             25: occ_val = int'(u_spanner.sf_wp - u_spanner.sf_rp) & 15;  // setup-req FIFO depth
+            26: occ_val = int'(pt_pass);   // forward PT-resolve pass counter
             default: occ_val = 0;
         endcase
     endfunction
@@ -3128,7 +3190,7 @@ module peel_core import tsp_pkg::*; #(
             $fwrite(occ_fd, "V 9 spn_tx\nV 10 spn_ty\nV 11 mdq_n\nV 12 spans_inflight\n");
             $fwrite(occ_fd, "V 13 reader_st\nV 14 vo_tx\nV 15 vo_ty\nV 16 ddr_q\nV 17 ddr_owner\n");
             $fwrite(occ_fd, "V 18 shade_fifo\nV 19 halves\nV 20 ti_ready\nV 21 col_full\n");
-            $fwrite(occ_fd, "V 22 spanner_st\nV 23 vo_st\nV 24 spn_stall\nV 25 sf_n\n");
+            $fwrite(occ_fd, "V 22 spanner_st\nV 23 vo_st\nV 24 spn_stall\nV 25 sf_n\nV 26 pt_pass\n");
             $fwrite(occ_fd, "E 0 0:IDLE,1:RA,2:STATE,4:OL_RUN,9:RA_ACK,10:DONE,11:DRAIN,28:PEEL_INIT,29:PEEL_BUF,32:OP_DONE,34:CLEAR_WR,35:PEEL_BUF_RUN,36:ZK_INV,39:PT_BUF,40:PT_INIT,41:PT_SWAP,42:PT_FIX,43:PT_WAIT,44:PT_NEXT\n");
             $fwrite(occ_fd, "E 5 0:IDLE,1:POP,2:RAS,3:DRAIN,4:CORNER\n");
             $fwrite(occ_fd, "E 13 0:IDLE,1:RUN,3:DRAIN,4:POST\n");
