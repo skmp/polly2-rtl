@@ -933,6 +933,9 @@ module peel_core import tsp_pkg::*; #(
                                   // (1 => post the tile to VO at end of this entry's peel)
     reg        peel_which;        // 0 = rasterizing PT list, 1 = TL list (this pass)
     reg [7:0]  peel_pass;         // pass counter (safety bound)
+    reg        ol_walk_done;      // all lists of the kicked-off OL walk presented
+                                  // (set by the unconditional ol_done handler;
+                                  //  cleared wherever ol_start is pulsed)
     localparam integer PEEL_MAX_PASS = 64;
 
     // ---- M10K bulk-op walk counters (NCHUNK addresses = whole 32x32 tile) ----
@@ -1419,6 +1422,7 @@ module peel_core import tsp_pkg::*; #(
             fq_head<=0; fq_tail<=0; fq_count<=0; fq_out_valid<=1'b0;
             eq_head<=0; eq_tail<=0; eq_count<=0;
             peeling<=1'b0; more_to_draw<=1'b0; peel_pass<=8'd0; op_shaded<=1'b0;
+            ol_walk_done<=1'b0;
             has_pt<=1'b0; has_tr<=1'b0; peel_which<=1'b0; wo_l<=1'b0;
             zk_l<=1'b0; zk_entry<=1'b0;
             b_valid<=1'b0; cb_valid<=1'b0;
@@ -1654,6 +1658,41 @@ module peel_core import tsp_pkg::*; #(
             if (sp_we) pc_swrite <= pc_swrite + 1;   // spans written to the dense buffer
 `endif
 
+            // ============ OL->eq PRODUCER + list-done / PT->TL chain ============
+            // Runs EVERY cycle (not only in S_OL_RUN): a peel pass's OL walk is
+            // kicked off at the pass DECISION point (S_DRAIN another-pass branch,
+            // S_PEEL_INIT, RSTATE_OP), so the walker / iterator / ISP setup fill
+            // eq/fq/pq WHILE the PeelBuffers swap / z_keep restore walk still owns
+            // the tile buffers; only the raster consumer is fenced (RS_IDLE gate).
+            // ol_walk_done = every list of the kicked-off walk fully presented;
+            // the S_OL_RUN state just waits on it.
+            if (ol_prim.entry_ready && !ol_ack.entry_done && !eq_full) begin
+                eq_etype[eq_tail[2:0]] <= ol_prim.entry_type;
+                eq_entry[eq_tail[2:0]] <= ol_prim.entry;
+                eq_ispt [eq_tail[2:0]] <= (peel_which==1'b0);  // list-kind tag
+                eq_tail <= (eq_tail==EQ_N-1) ? 4'd0 : eq_tail+4'd1;
+                eq_push = 1'b1;
+                ol_ack.entry_done <= 1'b1;
+            end
+            if (ol_done) begin
+                // PT->TL MERGE: within a peel pass, chain the TL list DIRECTLY onto
+                // the PT list (no barrier between) - both stream into eq/iterator/
+                // setup/pq back-to-back and raster in FIFO order (PT before TL),
+                // each triangle carrying its own is_pt bit (eq_ispt).
+                if (peeling && peel_which==1'b0 && has_tr) begin
+                    peel_which  <= 1'b1;             // now queuing the TL list
+                    ol_list_ptr <= tr_ptr_l; ol_start <= 1'b1;
+`ifndef SYNTHESIS
+                    if ($test$plusargs("mergetrace")) $display("[PT->TL MERGE] tile(%0d,%0d) has_pt=%b has_tr=%b", cur_tx, cur_ty, has_pt, has_tr);
+`endif
+                end else begin
+`ifndef SYNTHESIS
+                    if ($test$plusargs("mergetrace") && peeling) $display("[OL WALK DONE peel] tile(%0d,%0d) peel_which=%b has_pt=%b has_tr=%b", cur_tx, cur_ty, peel_which, has_pt, has_tr);
+`endif
+                    ol_walk_done <= 1'b1;
+                end
+            end
+
             case (st)
             S_IDLE: if (go) begin ra_start<=1; st<=S_RA; end
 
@@ -1735,6 +1774,9 @@ module peel_core import tsp_pkg::*; #(
                 RSTATE_OP: if (!ti_ready[htile]) begin
                     peeling  <= 1'b0;
                     ol_list_ptr <= ra_out.list_ptr;
+                    ol_start <= 1'b1;          // walk starts NOW either way: during
+                    ol_walk_done <= 1'b0;      // S_ZK_INV the walker/iterator/setup
+                                               // fill eq/fq/pq (raster is fenced)
                     if (zk_entry) begin
                         // z_keep=1 OP pre-walk: RMW over u_peel to RESTORE depth
                         // (zb<-zb2 where zb==FLT_MAX, undoing the prior peel's sentinel)
@@ -1745,7 +1787,6 @@ module peel_core import tsp_pkg::*; #(
                         pb_pipe <= 1'b0;
                         st <= S_ZK_INV;
                     end else begin
-                        ol_start <= 1'b1;
                         st <= S_OL_RUN;
                     end
                 end
@@ -1852,52 +1893,17 @@ module peel_core import tsp_pkg::*; #(
                 pb_pipe <= 1'b1;
                 pb_i    <= pb_rd;
                 if (pb_pipe && pb_i == CHUNK_AW'(NCHUNK-1)) begin
-                    ol_start <= 1'b1;
-                    st <= S_OL_RUN;
+                    st <= S_OL_RUN;    // OL walk already running (started at RSTATE_OP)
                 end else if (pb_rd != CHUNK_AW'(NCHUNK-1)) begin
                     pb_rd <= pb_rd + 1'b1;
                 end
             end
 
-            // S_OL_RUN: PRODUCER - push each OL entry into the entry FIFO (eq) and
-            // ack the OL parser so it decodes the next entry ahead. STRIP/TRI are
-            // queued; QUAD is skipped. On list end (ol_done) -> BARRIER (S_DRAIN).
-            // The iterator CONSUMER (it_cst) runs concurrently, popping eq into the
-            // triangle FIFO independent of `st`.
-            S_OL_RUN: begin
-                if (ol_done) begin
-                    // PT->TL MERGE: within a peel pass, chain the TL list DIRECTLY onto the PT
-                    // list (no S_DRAIN between) - both stream into eq/iterator/setup/pq back-to-
-                    // back and raster in FIFO order (PT before TL), each triangle carrying its
-                    // own is_pt bit (eq_ispt). This removes one full raster-drain barrier per
-                    // pass. Only the end of the TL list (or a non-peel list) hits S_DRAIN.
-                    if (peeling && peel_which==1'b0 && has_tr) begin
-                        peel_which  <= 1'b1;             // now queuing the TL list
-                        ol_list_ptr <= tr_ptr_l; ol_start <= 1'b1;
-                        // stay in S_OL_RUN; the TL entries push behind the PT entries in eq
-`ifndef SYNTHESIS
-                        if ($test$plusargs("mergetrace")) $display("[PT->TL MERGE] tile(%0d,%0d) has_pt=%b has_tr=%b", cur_tx, cur_ty, has_pt, has_tr);
-`endif
-                    end else begin
-`ifndef SYNTHESIS
-                        if ($test$plusargs("mergetrace") && peeling) $display("[S_DRAIN peel] tile(%0d,%0d) peel_which=%b has_pt=%b has_tr=%b", cur_tx, cur_ty, peel_which, has_pt, has_tr);
-`endif
-                        st <= S_DRAIN;
-                    end
-                end
-                else if (ol_prim.entry_ready && !ol_ack.entry_done) begin
-                    // strips, tri arrays AND quad arrays all queue to the iterator
-                    // (quads used to be ack-and-dropped here - sprite geometry vanished)
-                    if (!eq_full) begin
-                        eq_etype[eq_tail[2:0]] <= ol_prim.entry_type;
-                        eq_entry[eq_tail[2:0]] <= ol_prim.entry;
-                        eq_ispt [eq_tail[2:0]] <= (peel_which==1'b0);  // list-kind tag
-                        eq_tail <= (eq_tail==EQ_N-1) ? 4'd0 : eq_tail+4'd1;
-                        eq_push = 1'b1;
-                        ol_ack.entry_done <= 1'b1;
-                    end
-                end
-            end
+            // S_OL_RUN: the OL walk itself runs in the UNCONDITIONAL producer block
+            // above (it may have started during the PeelBuffers/z_keep walk); this
+            // state just waits until every list of the walk has been presented,
+            // then closes the pass with the barrier.
+            S_OL_RUN: if (ol_walk_done) st <= S_DRAIN;
 
             // BARRIER at list end: wait for the entry FIFO + iterator + triangle
             // FIFO + setup/raster to all drain before letting region advance.
@@ -1929,9 +1935,19 @@ module peel_core import tsp_pkg::*; #(
 `ifndef SYNTHESIS
                         pc_hand <= pc_hand + 1;
 `endif
-                        if (more_to_draw && peel_pass < PEEL_MAX_PASS[7:0])
+                        if (more_to_draw && peel_pass < PEEL_MAX_PASS[7:0]) begin
+                            // another pass: advance the counter and kick off its OL
+                            // walk NOW - the walker/iterator/setup run through the
+                            // credit wait + PeelBuffers swap (raster is fenced).
+                            peel_pass <= peel_pass + 8'd1;
+                            if (has_pt) begin
+                                peel_which <= 1'b0; ol_list_ptr <= pt_ptr_l;
+                            end else begin
+                                peel_which <= 1'b1; ol_list_ptr <= tr_ptr_l;
+                            end
+                            ol_start <= 1'b1; ol_walk_done <= 1'b0;
                             st <= S_PEEL_BUF;    // do another pass (PeelBuffers+raster)
-                        else begin
+                        end else begin
                             // last pass: this ENTRY done producing. Reset the per-entry
                             // list flags so the next region entry starts fresh (they no
                             // longer reset only at CLEAR - z_keep=1 entries have no CLEAR).
@@ -1983,8 +1999,18 @@ module peel_core import tsp_pkg::*; #(
             // pb2 = 0xFFFFFFFF, zb2 = OP depth.
             S_PEEL_INIT: begin
                 peeling    <= 1'b1;  // (pre-peel OP shade may have cleared it)
-                peel_pass  <= 8'd0;  // reset the pass counter for THIS tile's peel
+                peel_pass  <= 8'd1;  // pass 1 (counter now advances at the pass
+                                     // DECISION, not the walk end, so sc_skip_en
+                                     // is correct for the early-started OL walk)
                 first_peel <= 1'b1;  // fold SetTagToMax into the first PeelBuffers
+                // kick off pass 1's OL walk NOW: it fills eq/fq/pq while the
+                // credit wait + PeelBuffers swap run (raster is fenced).
+                if (has_pt) begin
+                    peel_which <= 1'b0; ol_list_ptr <= pt_ptr_l;
+                end else begin
+                    peel_which <= 1'b1; ol_list_ptr <= tr_ptr_l;
+                end
+                ol_start <= 1'b1; ol_walk_done <= 1'b0;
                 st <= S_PEEL_BUF;    // S_PEEL_BUF gates on !ti_ready[htile]
             end
 
@@ -2018,17 +2044,11 @@ module peel_core import tsp_pkg::*; #(
                 pb_pipe <= 1'b1;
                 pb_i    <= pb_rd;
                 if (pb_pipe && pb_i == CHUNK_AW'(NCHUNK-1)) begin
-                    // whole tile transformed -> issue the object list for this pass.
+                    // whole tile transformed. The pass's OL walk (+ fetch/setup
+                    // into fq/pq) has been running since the pass decision; with
+                    // the swap done the RS_IDLE fence lifts and raster starts on
+                    // an already-primed plane FIFO.
                     first_peel <= 1'b0;
-                    peel_pass  <= peel_pass + 8'd1;
-                    // start with the PT list if present, else the TL list.
-                    if (has_pt) begin
-                        peel_which <= 1'b0;                 // rasterizing PT list
-                        ol_list_ptr <= pt_ptr_l; ol_start <= 1'b1;
-                    end else begin
-                        peel_which <= 1'b1;                 // TL list
-                        ol_list_ptr <= tr_ptr_l; ol_start <= 1'b1;
-                    end
                     st <= S_OL_RUN;
                 end else if (pb_rd != CHUNK_AW'(NCHUNK-1)) begin
                     pb_rd <= pb_rd + 1'b1;
@@ -2531,9 +2551,15 @@ module peel_core import tsp_pkg::*; #(
             // Only sweep the chunks/rows the triangle's tile-local bbox covers.
             // x bounds are chunk-aligned (down to a RAS_LANES-wide chunk); rows go
             // by0..by1 inclusive. The rasterizer's inside-test still gates writes.
+            // GATE (ras_fence): the pass's OL walk / record fetch / ISP setup now
+            // START DURING the PeelBuffers swap / z_keep restore / credit wait
+            // (they only touch DDR + the eq/fq/pq FIFOs), so pq can hold planes
+            // while a bulk walk still owns the peel-RAM ports and the tile state
+            // is pre-swap. Raster alone must wait for the walk to finish.
             pq_pop = 1'b0;
             case (rs_st)
-            RS_IDLE: if (!pq_empty) begin
+            RS_IDLE: if (!pq_empty && !(st == S_PEEL_BUF || st == S_PEEL_BUF_RUN
+                                        || st == S_ZK_INV)) begin
                 // issue the M10K read; head advances now, data lands in pq_rdw next cyc
                 pq_rdw <= pq_ram[pq_head[2:0]];
                 pq_head <= (pq_head==PQ_N-1) ? 4'd0 : pq_head+4'd1;
