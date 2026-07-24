@@ -2695,4 +2695,185 @@ module peel_core import tsp_pkg::*; #(
             endcase
         end
     end
+
+`ifndef SYNTHESIS
+    // ==================== +occlog : per-clock unit-occupancy trace ====================
+    // One line per clock IN WHICH ANYTHING CHANGED (RLE - repeat cycles are implicit),
+    // covering every pipeline unit's occupancy state plus slow-moving "position" values
+    // (tile x/y, peel pass, FIFO depths, FSM phases). Decoded by tools/occview.html.
+    //
+    // Per-unit state (2 bits each, packed LSB-first into occ_vec, printed as hex):
+    //   0 = UNDERFLOW - waiting for data (starved, incl. waiting for a DDR grant)
+    //   1 = BUSY      - actively processing / transferring
+    //   2 = OVERFLOW  - has output but downstream can't accept (blocked)
+    //
+    // Format (text):
+    //   POLLY2OCC 1
+    //   U <idx> <name>            unit directory (idx = 2-bit lane in the hex vector)
+    //   V <idx> <name>            value directory
+    //   E <vidx> <n>:<NAME>,...   enum decode for value <vidx>
+    //   R <cycle>                 render start (go)
+    //   @<cycle> <hex> [v<i>=<n> ...]   state vector + CHANGED values only
+    //   D <cycle>                 render done
+    localparam integer OCC_NU = 20;
+    localparam [1:0] OC_U = 2'd0, OC_B = 2'd1, OC_O = 2'd2;
+
+    // --- geometry front end ---
+    wire [1:0] oc_region = ra_out.list_ready ? OC_O
+                         : (ra_busy && !(pend[5] || d_oc[5] != 2'd0)) ? OC_B : OC_U;
+    wire [1:0] oc_ol     = (ol_prim.entry_ready && eq_full) ? OC_O
+                         : ol_busy ? ((pend[4] || d_oc[4] != 2'd0) ? OC_U : OC_B) : OC_U;
+    wire [1:0] oc_eq     = eq_full ? OC_O : eq_empty ? OC_U : OC_B;
+    wire [1:0] oc_iter   = (it_trio.triangle_ready && fq_full) ? OC_O
+                         : it_pf_busy ? ((pend[3] || d_oc[3] != 2'd0) ? OC_U : OC_B) : OC_U;
+    wire [1:0] oc_fq     = fq_full ? OC_O : (fq_empty && !fq_out_valid) ? OC_U : OC_B;
+    wire [1:0] oc_sortc  = sc_chk_p ? OC_B : OC_U;
+    // --- ISP setup / raster ---
+    wire [1:0] oc_setup  = (su_out_valid && pq_full) ? OC_O
+                         : (su_busy || su_out_valid) ? OC_B
+                         : (fq_out_valid && pq_count > 5'd4) ? OC_O : OC_U;
+    wire [1:0] oc_pq     = pq_full ? OC_O : pq_empty ? OC_U : OC_B;
+    // idle raster is BLOCKED (not starved) while a tile-buffer bulk op owns the
+    // depth/tag RAM ports (CLEAR / PeelBuffers swap / z_keep invalidate) or the
+    // ping-pong credit is held: the FSM fences the whole pass behind those, so no
+    // geometry can reach it by construction. UNDER = genuinely waiting for planes.
+    wire [1:0] oc_ras    = (rs_st != RS_IDLE) ? OC_B
+                         : (st == S_CLEAR_WR || st == S_PEEL_BUF_RUN || st == S_ZK_INV
+                            || (st == S_PEEL_BUF && ti_ready[htile])) ? OC_O : OC_U;
+    // DEPTH = peel/tag tile buffers. BUSY for raster stage A/B traffic AND for the
+    // bulk walks (CLEAR / PeelBuffers swap / z_keep invalidate - the unit's own
+    // work; the FSM barriers mean raster never contends, and the TSP side keeps
+    // reading the OTHER taginvw half concurrently). The viewer annotates which op
+    // from the phase value. OVERFLOW only for the real block: waiting on the
+    // taginvw ping-pong credit (TSP hasn't freed the half ISP must write next).
+    wire [1:0] oc_depth  = (b_valid || ras_out_valid || st == S_CLEAR_WR
+                            || st == S_PEEL_BUF_RUN || st == S_ZK_INV) ? OC_B
+                         : (st == S_PEEL_BUF && ti_ready[htile]) ? OC_O : OC_U;
+    // --- spanner / TSP ---
+    wire [1:0] oc_spanner = spv_busy ? ((u_spanner.emit_stall_fifo || u_spanner.emit_stall_ring
+                                         || u_spanner.emit_stall_span_ring) ? OC_O : OC_B)
+                          : (spn == G_IDLE && ti_ready[tsp_tag] && md_full) ? OC_O
+                          : (spn != G_IDLE) ? OC_B : OC_U;
+    wire [1:0] oc_sfetch  = u_spanner.fetch_busy ? ((d_oc[2] != 2'd0) ? OC_B : OC_U) : OC_U;
+    wire [1:0] oc_ssetup  = u_spanner.su_run ? OC_B : OC_U;
+    wire [1:0] oc_mdq     = md_full ? OC_O : md_empty ? OC_U : OC_B;
+    wire [1:0] oc_reader  = (tsp_st == R_RUN)  ? (pp_stall ? OC_O : OC_B)
+                          : (tsp_st == R_POST && col_full[tsp_col]) ? OC_O
+                          : (tsp_st != R_IDLE) ? OC_B : OC_U;
+    wire [1:0] oc_shade   = pp_stall ? OC_O
+                          : (pp_in_valid || pp_out_valid || u_shade.iv_ov) ? OC_B : OC_U;
+    // TEX: during a miss-fill, BUSY while beats stream, UNDERFLOW while waiting for the
+    // DDR channel grant (contention). When ready, BUSY only while pixels pass through.
+    wire [1:0] oc_tex     = !u_shade.tu_ready ? ((d_oc[0] != 2'd0 || d_oc[1] != 2'd0) ? OC_B : OC_U)
+                          : (u_shade.tu_ov || u_shade.iv_ov) ? OC_B : OC_U;
+    wire [1:0] oc_blend   = (cb_valid || pp_out_valid) ? OC_B : OC_U;
+    wire [1:0] oc_vo      = (vst != VO_IDLE) ? ((fbw_req.we && fbw_resp.busy) ? OC_O : OC_B)
+                                             : OC_U;
+    wire [1:0] oc_ddr     = ((ddr_req.rd && ddr_resp.busy) || (any_pend && of_full)) ? OC_O
+                          : (!of_empty || any_pend) ? OC_B : OC_U;
+
+    // unit 0 in bits [1:0] .. unit 19 in bits [39:38] (matches the U directory below)
+    wire [2*OCC_NU-1:0] occ_vec = {
+        oc_ddr, oc_vo, oc_blend, oc_tex, oc_shade, oc_reader, oc_mdq, oc_ssetup,
+        oc_sfetch, oc_spanner, oc_depth, oc_ras, oc_pq, oc_setup, oc_sortc, oc_fq,
+        oc_iter, oc_eq, oc_ol, oc_region };
+
+    localparam integer OCC_NV = 24;
+    function automatic integer occ_val(input integer idx);
+        case (idx)
+            0:  occ_val = int'(st);
+            1:  occ_val = int'(cur_tx);
+            2:  occ_val = int'(cur_ty);
+            3:  occ_val = int'(peel_pass);
+            4:  occ_val = int'(peeling);
+            5:  occ_val = int'(rs_st);
+            6:  occ_val = int'(eq_count);
+            7:  occ_val = int'(fq_count);
+            8:  occ_val = int'(pq_count);
+            9:  occ_val = int'(spn_tx);
+            10: occ_val = int'(spn_ty);
+            11: occ_val = int'(md_wp - md_rp) & 15;   // wrapping 4-bit ptrs: mask, else full prints -8
+            12: occ_val = spans_inflight;
+            13: occ_val = int'(tsp_st);
+            14: occ_val = int'(vo_tx);
+            15: occ_val = int'(vo_ty);
+            16: occ_val = int'(of_wp - of_rp) & 7;    // wrapping 3-bit ptrs: mask (full = 4, not -4)
+            17: occ_val = int'(d_owner);
+            18: occ_val = int'(u_shade.pl_cnt);
+            19: occ_val = int'({col_vo, tsp_col, tsp_tag, htile});
+            20: occ_val = int'(ti_ready);
+            21: occ_val = int'(col_full);
+            22: occ_val = int'(spn);
+            23: occ_val = int'(vst != VO_IDLE);   // collapsed: RD/WR toggles per pixel
+            default: occ_val = 0;
+        endcase
+    endfunction
+
+    integer      occ_fd = 0;
+    reg          occ_log_en = 1'b0;
+    reg [1023:0] occ_fname;
+    reg          occ_run = 1'b0;
+    reg          occ_first = 1'b1;
+    longint      occ_cyc = 0;
+    reg [2*OCC_NU-1:0] occ_prev = '1;    // state 3 is unused -> forces a first line
+    integer      occ_pv [0:OCC_NV-1];
+    initial begin
+        if ($value$plusargs("occlog=%s", occ_fname)) occ_log_en = 1'b1;
+        else if ($test$plusargs("occlog")) begin occ_log_en = 1'b1; occ_fname = "occ.log"; end
+        if (occ_log_en) begin
+            occ_fd = $fopen(occ_fname, "w");
+            $fwrite(occ_fd, "POLLY2OCC 1\n");
+            $fwrite(occ_fd, "U 0 REGION\nU 1 OLWALK\nU 2 EQ\nU 3 ITER\nU 4 FQ\n");
+            $fwrite(occ_fd, "U 5 SORTC\nU 6 SETUP\nU 7 PQ\nU 8 RASTER\nU 9 DEPTH\n");
+            $fwrite(occ_fd, "U 10 SPANNER\nU 11 SFETCH\nU 12 SSETUP\nU 13 MDQ\nU 14 READER\n");
+            $fwrite(occ_fd, "U 15 SHADE\nU 16 TEX\nU 17 BLEND\nU 18 VO\nU 19 DDR\n");
+            $fwrite(occ_fd, "V 0 phase\nV 1 tile_x\nV 2 tile_y\nV 3 peel_pass\nV 4 peeling\n");
+            $fwrite(occ_fd, "V 5 raster_st\nV 6 eq_n\nV 7 fq_n\nV 8 pq_n\n");
+            $fwrite(occ_fd, "V 9 spn_tx\nV 10 spn_ty\nV 11 mdq_n\nV 12 spans_inflight\n");
+            $fwrite(occ_fd, "V 13 reader_st\nV 14 vo_tx\nV 15 vo_ty\nV 16 ddr_q\nV 17 ddr_owner\n");
+            $fwrite(occ_fd, "V 18 shade_fifo\nV 19 halves\nV 20 ti_ready\nV 21 col_full\n");
+            $fwrite(occ_fd, "V 22 spanner_st\nV 23 vo_st\n");
+            $fwrite(occ_fd, "E 0 0:IDLE,1:RA,2:STATE,4:OL_RUN,9:RA_ACK,10:DONE,11:DRAIN,28:PEEL_INIT,29:PEEL_BUF,32:OP_DONE,34:CLEAR_WR,35:PEEL_BUF_RUN,36:ZK_INV\n");
+            $fwrite(occ_fd, "E 5 0:IDLE,1:POP,2:RAS,3:DRAIN,4:CORNER\n");
+            $fwrite(occ_fd, "E 13 0:IDLE,1:RUN,3:DRAIN,4:POST\n");
+            $fwrite(occ_fd, "E 17 0:TEX,1:VQ,2:SPN_FETCH,3:PARAM,4:OLWALK,5:REGION\n");
+            $fwrite(occ_fd, "E 22 0:IDLE,1:START,2:RUN\n");
+            $fwrite(occ_fd, "E 23 0:IDLE,1:ACTIVE\n");
+        end
+    end
+    always @(posedge clk) if (occ_log_en && !reset) begin : occemit
+        reg     occ_any;
+        integer occ_i, occ_vv;
+        if (go) begin
+            occ_run = 1'b1;
+            $fwrite(occ_fd, "R %0d\n", occ_cyc);
+        end
+        if (occ_run) begin
+            occ_any = (occ_vec != occ_prev);
+            for (occ_i = 0; occ_i < OCC_NV; occ_i = occ_i + 1)
+                if (occ_first || occ_val(occ_i) != occ_pv[occ_i]) occ_any = 1'b1;
+            if (occ_any) begin
+                $fwrite(occ_fd, "@%0d %h", occ_cyc, occ_vec);
+                for (occ_i = 0; occ_i < OCC_NV; occ_i = occ_i + 1) begin
+                    occ_vv = occ_val(occ_i);
+                    if (occ_first || occ_vv != occ_pv[occ_i]) begin
+                        $fwrite(occ_fd, " v%0d=%0d", occ_i, occ_vv);
+                        occ_pv[occ_i] = occ_vv;
+                    end
+                end
+                $fwrite(occ_fd, "\n");
+                occ_prev  = occ_vec;
+                occ_first = 1'b0;
+            end
+            // keyed on st (not `done`): the TB stops clocking the edge `done` rises,
+            // so the registered pulse would never be sampled here.
+            if (st == 6'(S_DONE)) $fwrite(occ_fd, "D %0d\n", occ_cyc);
+            occ_cyc = occ_cyc + 1;
+        end
+    end
+    final if (occ_log_en && occ_fd != 0) begin
+        $fflush(occ_fd); $fclose(occ_fd);
+        $display("[peel_core] occupancy trace: %0d clocks -> %0s", occ_cyc, occ_fname);
+    end
+`endif
 endmodule

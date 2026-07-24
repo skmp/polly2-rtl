@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>polly2 occupancy viewer</title>
+<style>
+  :root {
+    --c-under: #e2b93d;   /* underflow - waiting for data */
+    --c-busy:  #3fa34d;   /* busy */
+    --c-over:  #d64541;   /* overflow - blocked on output */
+    --c-idle:  #2a2a30;
+    --bg: #16161a; --panel: #1f1f24; --fg: #d8d8dc; --dim: #8a8a92;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font: 13px/1.4 "Segoe UI", system-ui, sans-serif; }
+  #drop-wrap { display:flex; justify-content:center; align-items:center; height:100vh; }
+  #drop-area { width:70vw; height:45vh; border:3px dashed #555; border-radius:14px;
+               display:flex; flex-direction:column; gap:12px; justify-content:center;
+               align-items:center; color:var(--dim); font-size:1.15rem; }
+  #drop-area.highlight { border-color:var(--c-busy); color:var(--fg); }
+  #progress { display:none; position:fixed; inset:0; background:rgba(0,0,0,.7);
+              z-index:50; justify-content:center; align-items:center; flex-direction:column; gap:10px; }
+  #progress .bar { width:40vw; height:10px; background:#333; border-radius:5px; overflow:hidden; }
+  #progress .bar div { height:100%; width:0%; background:var(--c-busy); }
+  #app { display:none; padding:8px 10px; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  #topbar { margin-bottom:6px; }
+  #topbar b { color:#fff; }
+  .legend span { display:inline-flex; align-items:center; gap:4px; margin-right:10px; }
+  .swatch { display:inline-block; width:12px; height:12px; border-radius:2px; }
+  canvas { display:block; }
+  #overview { width:100%; height:56px; background:var(--panel); border-radius:4px; cursor:crosshair; }
+  #tracks   { width:100%; background:var(--panel); border-radius:4px; cursor:crosshair; margin-top:6px; }
+  #seekrow  { margin-top:6px; }
+  #seek { flex:1; }
+  input[type=number] { width:110px; background:#26262c; color:var(--fg);
+                       border:1px solid #444; border-radius:3px; padding:2px 6px; }
+  button { background:#2c2c34; color:var(--fg); border:1px solid #4a4a52;
+           border-radius:3px; padding:2px 10px; cursor:pointer; }
+  button:hover { background:#3a3a44; }
+  #main { display:flex; gap:10px; margin-top:8px; align-items:flex-start; }
+  #svgbox { background:var(--panel); border-radius:4px; padding:4px; flex:0 0 auto; }
+  #valuesbox { background:var(--panel); border-radius:4px; padding:8px 10px; flex:1 1 auto;
+               max-height:560px; overflow-y:auto; }
+  #valuesbox table { border-collapse:collapse; width:100%; }
+  #valuesbox td { padding:1px 8px 1px 0; font-family:Consolas,monospace; font-size:12px; }
+  #valuesbox td.n { color:var(--dim); }
+  #tooltip { display:none; position:fixed; background:#000c; color:#fff; padding:3px 8px;
+             border-radius:3px; font-family:Consolas,monospace; font-size:12px;
+             pointer-events:none; z-index:60; white-space:pre; }
+  .hint { color:var(--dim); font-size:12px; }
+</style>
+</head>
+<body>
+
+<div id="drop-wrap">
+  <div id="drop-area">
+    <div>Drop a <b>+occlog</b> trace here (occ.log)</div>
+    <div>or</div>
+    <input type="file" id="file-input" accept=".log,text/plain"/>
+    <div class="hint">generate with: ./tb &lt;scene&gt; +occlog=occ.log &nbsp;(frontendtsplp)</div>
+  </div>
+</div>
+
+<div id="progress"><div>parsing…</div><div class="bar"><div id="pbar"></div></div></div>
+
+<div id="app">
+  <div class="row" id="topbar">
+    <b id="fname"></b>
+    <span>cycle <b id="curcyc">0</b> / <span id="totcyc">0</span></span>
+    <span class="legend">
+      <span><i class="swatch" style="background:var(--c-under)"></i>underflow (waiting for data)</span>
+      <span><i class="swatch" style="background:var(--c-busy)"></i>busy</span>
+      <span><i class="swatch" style="background:var(--c-over)"></i>overflow (blocked)</span>
+    </span>
+    <span class="hint">wheel: zoom &nbsp; drag: pan &nbsp; click: seek &nbsp; &larr;/&rarr;: step change &nbsp; shift+&larr;/&rarr;: &plusmn;1% </span>
+  </div>
+  <canvas id="overview"></canvas>
+  <canvas id="tracks"></canvas>
+  <div class="row" id="seekrow">
+    <button id="prevch">&larr; change</button>
+    <input type="range" id="seek" min="0" max="1000000" value="0"/>
+    <button id="nextch">change &rarr;</button>
+    <input type="number" id="cycin" value="0"/>
+    <button id="goto">go</button>
+  </div>
+  <div id="main">
+    <div id="svgbox"></div>
+    <div id="valuesbox"><table id="valtable"></table></div>
+  </div>
+</div>
+<div id="tooltip"></div>
+
+<script>
+'use strict';
+// ============================== data model ==============================
+const DB = {
+  units: [], vals: [], enums: {},           // header
+  sCyc: null, sLo: null, sHi: null, nS: 0,  // state-change records
+  vCyc: [], vVal: [],                       // per-value-id change arrays
+  marks: [],                                // {c, t:'R'|'D'}
+  total: 0,
+};
+const NSTATE = 3;
+const COLORS = ['#e2b93d', '#3fa34d', '#d64541'];   // under, busy, over
+const IDLE = '#2a2a30';
+
+function stateOf(lo, hi, u) {
+  return u < 16 ? (lo >>> (2*u)) & 3 : (hi >>> (2*(u-16))) & 3;
+}
+// last index i with arr[i] <= c  (-1 if none)
+function idxAt(arr, n, c) {
+  let lo = 0, hi = n - 1, r = -1;
+  while (lo <= hi) { const m = (lo+hi) >> 1;
+    if (arr[m] <= c) { r = m; lo = m+1; } else hi = m-1; }
+  return r;
+}
+function stateAtCycle(c, u) {
+  const i = idxAt(DB.sCyc, DB.nS, c);
+  if (i < 0) return -1;
+  return stateOf(DB.sLo[i], DB.sHi[i], u);
+}
+function valAtCycle(c, vid) {
+  const a = DB.vCyc[vid]; if (!a || !a.length) return null;
+  const i = idxAt(a, a.length, c);
+  return i < 0 ? null : DB.vVal[vid][i];
+}
+function enumName(vid, v) {
+  const e = DB.enums[vid];
+  return e && (v in e) ? e[v] : String(v);
+}
+
+// ============================== parser ==============================
+function parseLog(text, done, progress) {
+  const units = [], vals = [], enums = {};
+  let sCyc = new Float64Array(1<<16), sLo = new Uint32Array(1<<16),
+      sHi = new Uint32Array(1<<16), nS = 0;
+  const vCyc = [], vVal = [];
+  const marks = [];
+  let total = 0, pLo = -1, pHi = -1;
+
+  let pos = 0, lineNo = 0;
+  const len = text.length;
+  if (!text.startsWith('POLLY2OCC')) { alert('not a POLLY2OCC log'); return; }
+
+  function growS() {
+    const c2 = new Float64Array(sCyc.length*2); c2.set(sCyc); sCyc = c2;
+    const l2 = new Uint32Array(sLo.length*2); l2.set(sLo); sLo = l2;
+    const h2 = new Uint32Array(sHi.length*2); h2.set(sHi); sHi = h2;
+  }
+  function step() {
+    const CHUNK = 2_000_000;                       // chars per slice
+    const end = Math.min(pos + CHUNK, len);
+    while (pos < len) {
+      let nl = text.indexOf('\n', pos);
+      if (nl === -1) nl = len;
+      const line = text.substring(pos, nl);
+      pos = nl + 1; lineNo++;
+      if (line.length) {
+        const c0 = line.charCodeAt(0);
+        if (c0 === 64) {                            // '@cyc HEX [v..]'
+          const sp1 = line.indexOf(' ');
+          const cyc = +line.substring(1, sp1);
+          let sp2 = line.indexOf(' ', sp1+1);
+          if (sp2 === -1) sp2 = line.length;
+          const hex = line.substring(sp1+1, sp2);
+          const hi = parseInt(hex.substring(0, hex.length-8), 16) || 0;
+          const lo = parseInt(hex.substring(hex.length-8), 16) >>> 0;
+          if (lo !== pLo || hi !== pHi) {
+            if (nS === sCyc.length) growS();
+            sCyc[nS] = cyc; sLo[nS] = lo; sHi[nS] = hi; nS++;
+            pLo = lo; pHi = hi;
+          }
+          let p = sp2 + 1;
+          while (p < line.length) {                 // ' v<i>=<n>' tokens
+            let sp = line.indexOf(' ', p);
+            if (sp === -1) sp = line.length;
+            const eq = line.indexOf('=', p);
+            if (eq > p && eq < sp && line.charCodeAt(p) === 118) {  // 'v'
+              const vid = +line.substring(p+1, eq);
+              const vv  = +line.substring(eq+1, sp);
+              (vCyc[vid] || (vCyc[vid] = [])).push(cyc);
+              (vVal[vid] || (vVal[vid] = [])).push(vv);
+            }
+            p = sp + 1;
+          }
+          total = Math.max(total, cyc);
+        } else if (c0 === 85) {                     // 'U i NAME'
+          const t = line.split(' '); units[+t[1]] = t[2];
+        } else if (c0 === 86) {                     // 'V i name'
+          const t = line.split(' '); vals[+t[1]] = t[2];
+        } else if (c0 === 69) {                     // 'E vid a:N,b:N'
+          const t = line.split(' '); const m = {};
+          for (const kv of t[2].split(',')) { const [k, n] = kv.split(':'); m[+k] = n; }
+          enums[+t[1]] = m;
+        } else if (c0 === 82 || c0 === 68) {        // 'R c' / 'D c'
+          const t = line.split(' ');
+          marks.push({ c: +t[1], t: line[0] });
+          total = Math.max(total, +t[1]);
+        }
+      }
+      if (pos >= end) break;
+    }
+    progress(pos / len);
+    if (pos < len) { setTimeout(step, 0); return; }
+    DB.units = units; DB.vals = vals; DB.enums = enums;
+    DB.sCyc = sCyc; DB.sLo = sLo; DB.sHi = sHi; DB.nS = nS;
+    DB.vCyc = vCyc.map(a => a ? Float64Array.from(a) : null);
+    DB.vVal = vVal.map(a => a ? Float64Array.from(a) : null);
+    DB.marks = marks; DB.total = total + 1;
+    done();
+  }
+  setTimeout(step, 0);
+}
+
+// ============================== track rendering ==============================
+const GUTTER = 78, ROW_H = 20, ROW_GAP = 2, AXIS_H = 18;
+let view = { t0: 0, t1: 1 };
+let cursor = 0;
+const trkCv = document.getElementById('tracks');
+const ovCv  = document.getElementById('overview');
+let ovImg = null;                       // offscreen full-run render
+
+function nUnits() { return DB.units.length; }
+
+// paint the span [t0,t1) of unit rows into ctx at x-range [x0,x1) with W px columns
+function paintBins(ctx, t0, t1, x0, W, rowH, rowGap, topY) {
+  const NU = nUnits();
+  const bins = new Float32Array(W * NU * NSTATE);
+  const span = t1 - t0;
+  let i = idxAt(DB.sCyc, DB.nS, t0); if (i < 0) i = 0;
+  for (; i < DB.nS; i++) {
+    const c0 = Math.max(DB.sCyc[i], t0);
+    const c1 = Math.min(i+1 < DB.nS ? DB.sCyc[i+1] : DB.total, t1);
+    if (c0 >= t1) break;
+    if (c1 <= c0) continue;
+    const lo = DB.sLo[i], hi = DB.sHi[i];
+    let px0 = Math.floor((c0 - t0) / span * W);
+    let px1 = Math.ceil ((c1 - t0) / span * W);
+    if (px1 > W) px1 = W; if (px0 < 0) px0 = 0;
+    for (let u = 0; u < NU; u++) {
+      const st = stateOf(lo, hi, u);
+      const base = u * NSTATE + st;
+      if (px1 - px0 === 1) {
+        bins[(px0 * NU * NSTATE) + base] += (c1 - c0);
+      } else {
+        for (let px = px0; px < px1; px++) {
+          const pc0 = t0 + px    / W * span;
+          const pc1 = t0 + (px+1) / W * span;
+          const ov = Math.min(c1, pc1) - Math.max(c0, pc0);
+          if (ov > 0) bins[(px * NU * NSTATE) + base] += ov;
+        }
+      }
+    }
+  }
+  for (let u = 0; u < NU; u++) {
+    const y = topY + u * (rowH + rowGap);
+    ctx.fillStyle = IDLE;
+    ctx.fillRect(x0, y, W, rowH);
+    let runStart = 0, runColor = null;
+    for (let px = 0; px < W; px++) {
+      const o = px * NU * NSTATE + u * NSTATE;
+      let best = -1, bv = 0;
+      for (let s = 0; s < NSTATE; s++) if (bins[o+s] > bv) { bv = bins[o+s]; best = s; }
+      const col = best < 0 ? IDLE : COLORS[best];
+      if (col !== runColor) {
+        if (runColor !== null && runColor !== IDLE) {
+          ctx.fillStyle = runColor; ctx.fillRect(x0+runStart, y, px-runStart, rowH);
+        }
+        runStart = px; runColor = col;
+      }
+    }
+    if (runColor !== null && runColor !== IDLE) {
+      ctx.fillStyle = runColor; ctx.fillRect(x0+runStart, y, W-runStart, rowH);
+    }
+  }
+}
+
+function drawTracks() {
+  const NU = nUnits();
+  const cssW = trkCv.clientWidth || trkCv.parentElement.clientWidth;
+  const H = AXIS_H + NU * (ROW_H + ROW_GAP);
+  const dpr = window.devicePixelRatio || 1;
+  trkCv.width = cssW * dpr; trkCv.height = H * dpr;
+  trkCv.style.height = H + 'px';
+  const ctx = trkCv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, H);
+  const W = cssW - GUTTER;
+
+  // axis
+  ctx.fillStyle = '#26262c'; ctx.fillRect(GUTTER, 0, W, AXIS_H);
+  ctx.fillStyle = '#9a9aa2'; ctx.font = '11px Consolas, monospace';
+  const span = view.t1 - view.t0;
+  const step = Math.pow(10, Math.floor(Math.log10(span / 6)));
+  const nice = span/step > 30 ? step*5 : span/step > 12 ? step*2 : step;
+  for (let c = Math.ceil(view.t0/nice)*nice; c < view.t1; c += nice) {
+    const x = GUTTER + (c - view.t0) / span * W;
+    ctx.fillStyle = '#3a3a42'; ctx.fillRect(x, AXIS_H, 1, H - AXIS_H);
+    ctx.fillStyle = '#9a9aa2'; ctx.fillText(c.toLocaleString(), x+3, 12);
+  }
+  // unit names
+  ctx.font = '12px Consolas, monospace';
+  for (let u = 0; u < NU; u++) {
+    const y = AXIS_H + u * (ROW_H + ROW_GAP);
+    ctx.fillStyle = '#bcbcc4';
+    ctx.fillText(DB.units[u], 6, y + ROW_H - 6);
+  }
+  paintBins(ctx, view.t0, view.t1, GUTTER, Math.max(1, Math.floor(W)), ROW_H, ROW_GAP, AXIS_H);
+
+  // render marks
+  for (const m of DB.marks) {
+    if (m.c < view.t0 || m.c > view.t1) continue;
+    const x = GUTTER + (m.c - view.t0) / span * W;
+    ctx.fillStyle = m.t === 'R' ? '#5aa0ff' : '#ff7ad0';
+    ctx.fillRect(x, 0, 1, H);
+    ctx.fillText(m.t, x+2, AXIS_H + 10);
+  }
+  // cursor
+  if (cursor >= view.t0 && cursor <= view.t1) {
+    const x = GUTTER + (cursor - view.t0) / span * W;
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(x, 0, 1, H);
+  }
+}
+
+function buildOverview() {
+  const NU = nUnits();
+  const OW = 2048, rowH = 2, gap = 0;
+  const oc = document.createElement('canvas');
+  oc.width = OW; oc.height = NU * rowH;
+  paintBins(oc.getContext('2d'), 0, DB.total, 0, OW, rowH, gap, 0);
+  ovImg = oc;
+}
+function drawOverview() {
+  const cssW = ovCv.clientWidth || ovCv.parentElement.clientWidth;
+  const H = 56;
+  const dpr = window.devicePixelRatio || 1;
+  ovCv.width = cssW * dpr; ovCv.height = H * dpr;
+  const ctx = ovCv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#1f1f24'; ctx.fillRect(0, 0, cssW, H);
+  if (ovImg) ctx.drawImage(ovImg, 0, 0, ovImg.width, ovImg.height, 0, 2, cssW, H-4);
+  // view window
+  const x0 = view.t0 / DB.total * cssW, x1 = view.t1 / DB.total * cssW;
+  ctx.strokeStyle = '#ffffffaa'; ctx.lineWidth = 1;
+  ctx.strokeRect(x0, 0.5, Math.max(2, x1-x0), H-1);
+  ctx.fillStyle = '#ffffff18'; ctx.fillRect(x0, 0, Math.max(2, x1-x0), H);
+  // cursor
+  const cx = cursor / DB.total * cssW;
+  ctx.fillStyle = '#fff'; ctx.fillRect(cx, 0, 1, H);
+}
+
+// ============================== SVG pipeline diagram ==============================
+// unit: index into DB.units (colored by state); u:null boxes are passive (gray)
+const LAYOUT = {
+  w: 640, h: 560,
+  blocks: [
+    // geometry row
+    { id:'REGION',  u:0,  x: 10, y: 26, w: 84, h: 34, label:'region\narray' },
+    { id:'OLWALK',  u:1,  x:114, y: 26, w: 84, h: 34, label:'OL walker' },
+    { id:'EQ',      u:2,  x:218, y: 26, w: 54, h: 34, label:'EQ' },
+    { id:'ITER',    u:3,  x:292, y: 26, w: 84, h: 34, label:'iterator/\nparam fetch' },
+    { id:'FQ',      u:4,  x:396, y: 26, w: 54, h: 34, label:'FQ' },
+    { id:'SETUP',   u:6,  x:470, y: 26, w: 84, h: 34, label:'ISP setup' },
+    { id:'SORTC',   u:5,  x:470, y: 78, w: 84, h: 26, label:'sort $' },
+    { id:'PQ',      u:7,  x: 10, y:132, w: 54, h: 34, label:'PQ' },
+    { id:'RASTER',  u:8,  x: 84, y:132, w: 90, h: 34, label:'raster' },
+    { id:'DEPTH',   u:9,  x:194, y:132, w:110, h: 34, label:'depth/tag\nbuffers' },
+    // spanner / tsp row
+    { id:'SPANNER', u:10, x: 10, y:236, w:110, h: 38, label:'spanner_v2' },
+    { id:'SFETCH',  u:11, x: 10, y:290, w: 52, h: 26, label:'fetch' },
+    { id:'SSETUP',  u:12, x: 68, y:290, w: 52, h: 26, label:'setup' },
+    { id:'MDQ',     u:13, x:140, y:236, w: 54, h: 38, label:'MDQ' },
+    { id:'READER',  u:14, x:214, y:236, w: 84, h: 38, label:'TSP reader' },
+    { id:'SHADE',   u:15, x:318, y:236, w: 84, h: 38, label:'shade pipe' },
+    { id:'TEX',     u:16, x:318, y:290, w: 84, h: 26, label:'tex unit' },
+    { id:'BLEND',   u:17, x:422, y:236, w: 70, h: 38, label:'blend' },
+    { id:'COLBUF',  u:null,x:512, y:236, w: 54, h: 38, label:'col buf' },
+    { id:'VO',      u:18, x:512, y:310, w: 54, h: 38, label:'VO' },
+    { id:'FB',      u:null,x:512, y:384, w: 54, h: 30, label:'FB' },
+    // memory
+    { id:'DDR',     u:19, x: 10, y:436, w:380, h: 40, label:'DDR channel (64-bit, 4 outstanding)' },
+  ],
+  arrows: [
+    ['REGION','OLWALK'], ['OLWALK','EQ'], ['EQ','ITER'], ['ITER','FQ'], ['FQ','SETUP'],
+    ['SETUP','SORTC','v'], ['SETUP','PQ','wrap'], ['PQ','RASTER'], ['RASTER','DEPTH'],
+    ['DEPTH','SPANNER','wrap'],
+    ['SPANNER','SFETCH','v'], ['SPANNER','SSETUP','v'],
+    ['SPANNER','MDQ'], ['MDQ','READER'], ['READER','SHADE'], ['SHADE','BLEND'],
+    ['SHADE','TEX','v'], ['BLEND','COLBUF'], ['COLBUF','VO','v'], ['VO','FB','v'],
+    ['DDR','REGION','mem'], ['DDR','OLWALK','mem'], ['DDR','ITER','mem'],
+    ['DDR','SFETCH','mem'], ['DDR','TEX','mem'],
+  ],
+};
+
+function buildSvg() {
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('width', LAYOUT.w); svg.setAttribute('height', LAYOUT.h);
+  svg.setAttribute('viewBox', `0 0 ${LAYOUT.w} ${LAYOUT.h}`);
+  const defs = document.createElementNS(NS, 'defs');
+  defs.innerHTML = `<marker id="arr" viewBox="0 0 10 10" refX="9" refY="5"
+      markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#8a8a92"/></marker>`;
+  svg.appendChild(defs);
+
+  const byId = {};
+  for (const b of LAYOUT.blocks) byId[b.id] = b;
+
+  // arrows first (under blocks)
+  for (const [f, t, kind] of LAYOUT.arrows) {
+    const A = byId[f], B = byId[t];
+    const p = document.createElementNS(NS, 'path');
+    let d;
+    if (kind === 'v') {
+      d = `M${A.x+A.w/2} ${A.y+A.h} L${B.x+B.w/2} ${B.y}`;
+      if (A.y > B.y) d = `M${A.x+A.w/2} ${A.y} L${B.x+B.w/2} ${B.y+B.h}`;
+    } else if (kind === 'wrap') {       // end of a row -> start of the next row
+      const midY = (A.y + A.h + B.y) / 2;
+      d = `M${A.x+A.w/2} ${A.y+A.h} L${A.x+A.w/2} ${midY} L${B.x+B.w/2} ${midY} L${B.x+B.w/2} ${B.y}`;
+    } else if (kind === 'mem') {
+      const midY = (A.y + B.y + B.h) / 2;
+      d = `M${B.x+B.w/2+8} ${B.y+B.h} L${B.x+B.w/2+8} ${A.y}`;
+      p.setAttribute('stroke-dasharray', '3 3');
+      p.setAttribute('marker-start', 'url(#arr)');
+    } else {
+      d = `M${A.x+A.w} ${A.y+A.h/2} L${B.x} ${B.y+B.h/2}`;
+    }
+    p.setAttribute('d', d);
+    p.setAttribute('fill', 'none'); p.setAttribute('stroke', '#8a8a92');
+    p.setAttribute('stroke-width', '1.4');
+    if (kind !== 'mem') p.setAttribute('marker-end', 'url(#arr)');
+    svg.appendChild(p);
+  }
+  // blocks
+  for (const b of LAYOUT.blocks) {
+    const g = document.createElementNS(NS, 'g');
+    const r = document.createElementNS(NS, 'rect');
+    r.setAttribute('x', b.x); r.setAttribute('y', b.y);
+    r.setAttribute('width', b.w); r.setAttribute('height', b.h);
+    r.setAttribute('rx', 4);
+    r.setAttribute('fill', IDLE); r.setAttribute('stroke', '#55555f');
+    r.id = 'blk-' + b.id;
+    g.appendChild(r);
+    const lines = b.label.split('\n');
+    lines.forEach((ln, i) => {
+      const t = document.createElementNS(NS, 'text');
+      t.setAttribute('x', b.x + b.w/2);
+      t.setAttribute('y', b.y + b.h/2 + (i - (lines.length-1)/2) * 12 + 4);
+      t.setAttribute('text-anchor', 'middle');
+      t.setAttribute('fill', '#101014'); t.setAttribute('font-size', '11');
+      t.setAttribute('font-weight', '600');
+      t.setAttribute('id', `blklbl-${b.id}-${i}`);
+      t.textContent = ln;
+      g.appendChild(t);
+    });
+    // per-block dynamic annotation (below or above the box)
+    const a = document.createElementNS(NS, 'text');
+    a.setAttribute('x', b.x + b.w/2); a.setAttribute('y', b.y - 4);
+    a.setAttribute('text-anchor', 'middle');
+    a.setAttribute('fill', '#9a9aa2');
+    a.setAttribute('font-size', '10'); a.setAttribute('font-family', 'Consolas, monospace');
+    a.id = 'ann-' + b.id;
+    g.appendChild(a);
+    svg.appendChild(g);
+  }
+  // global header annotation
+  const hdr = document.createElementNS(NS, 'text');
+  hdr.setAttribute('x', 10); hdr.setAttribute('y', 14);
+  hdr.setAttribute('fill', '#d8d8dc'); hdr.setAttribute('font-size', '12');
+  hdr.setAttribute('font-family', 'Consolas, monospace');
+  hdr.id = 'ann-hdr';
+  svg.appendChild(hdr);
+  document.getElementById('svgbox').appendChild(svg);
+}
+
+function fmtVal(vid) {
+  const v = valAtCycle(cursor, vid);
+  return v === null ? '-' : enumName(vid, v);
+}
+function updateSvg() {
+  const c = cursor;
+  for (const b of LAYOUT.blocks) {
+    const r = document.getElementById('blk-' + b.id);
+    if (!r) continue;
+    if (b.u === null) { r.setAttribute('fill', '#3a3a44'); continue; }
+    const s = stateAtCycle(c, b.u);
+    r.setAttribute('fill', s < 0 ? IDLE : COLORS[s]);
+    for (let i = 0; ; i++) {
+      const t = document.getElementById(`blklbl-${b.id}-${i}`);
+      if (!t) break;
+      t.setAttribute('fill', s < 0 ? '#777' : '#101014');
+    }
+  }
+  const ann = (id, txt) => { const e = document.getElementById('ann-' + id); if (e) e.textContent = txt; };
+  ann('hdr', `phase=${fmtVal(0)}  tile(${fmtVal(1)},${fmtVal(2)})  pass=${fmtVal(3)}` +
+             `  peeling=${fmtVal(4)}  halves=${fmtVal(19)}`);
+  ann('EQ',      `${fmtVal(6)}/8`);
+  ann('FQ',      `${fmtVal(7)}/8`);
+  ann('PQ',      `${fmtVal(8)}/8`);
+  ann('RASTER',  `${fmtVal(5)}  tile(${fmtVal(1)},${fmtVal(2)})`);
+  const depthOp = { CLEAR_WR:'CLEAR', PEEL_BUF_RUN:'PB-SWAP', ZK_INV:'ZK-INV',
+                    PEEL_BUF:'SWAP-WAIT' }[fmtVal(0)] || '';
+  ann('DEPTH',   `${depthOp} ti_ready=${fmtVal(20)}`);
+  ann('SPANNER', `${fmtVal(22)}  tile(${fmtVal(9)},${fmtVal(10)})`);
+  ann('MDQ',     `${fmtVal(11)}/8 sp=${fmtVal(12)}`);
+  ann('READER',  `${fmtVal(13)}`);
+  ann('SHADE',   `fifo=${fmtVal(18)}`);
+  ann('COLBUF',  `full=${fmtVal(21)}`);
+  ann('VO',      `tile(${fmtVal(14)},${fmtVal(15)})`);
+  ann('DDR',     `q=${fmtVal(16)} owner=${fmtVal(17)}`);
+}
+
+function updateValues() {
+  const rows = [];
+  for (let i = 0; i < DB.vals.length; i++) {
+    if (!DB.vals[i]) continue;
+    rows.push(`<tr><td class="n">v${i} ${DB.vals[i]}</td><td>${fmtVal(i)}</td></tr>`);
+  }
+  document.getElementById('valtable').innerHTML = rows.join('');
+}
+
+// ============================== interaction ==============================
+const seek = document.getElementById('seek');
+function setCursor(c, recenters) {
+  cursor = Math.max(0, Math.min(DB.total - 1, Math.round(c)));
+  document.getElementById('curcyc').textContent = cursor.toLocaleString();
+  document.getElementById('cycin').value = cursor;
+  seek.value = Math.round(cursor / DB.total * 1000000);
+  if (recenters && (cursor < view.t0 || cursor > view.t1)) {
+    const span = view.t1 - view.t0;
+    view.t0 = Math.max(0, cursor - span/2);
+    view.t1 = Math.min(DB.total, view.t0 + span);
+  }
+  drawTracks(); drawOverview(); updateSvg(); updateValues();
+}
+function clampView() {
+  const span = Math.max(10, Math.min(DB.total, view.t1 - view.t0));
+  view.t0 = Math.max(0, Math.min(DB.total - span, view.t0));
+  view.t1 = view.t0 + span;
+}
+function trackTime(ev) {
+  const rect = trkCv.getBoundingClientRect();
+  const x = ev.clientX - rect.left - GUTTER;
+  const W = rect.width - GUTTER;
+  return view.t0 + Math.max(0, Math.min(1, x / W)) * (view.t1 - view.t0);
+}
+
+trkCv.addEventListener('wheel', ev => {
+  ev.preventDefault();
+  const t = trackTime(ev);
+  const f = ev.deltaY > 0 ? 1.3 : 1/1.3;
+  view.t0 = t - (t - view.t0) * f;
+  view.t1 = t + (view.t1 - t) * f;
+  clampView(); drawTracks(); drawOverview();
+}, { passive: false });
+
+let drag = null;
+trkCv.addEventListener('mousedown', ev => {
+  drag = { x: ev.clientX, t0: view.t0, t1: view.t1, moved: false };
+});
+window.addEventListener('mousemove', ev => {
+  if (drag) {
+    const rect = trkCv.getBoundingClientRect();
+    const W = rect.width - GUTTER;
+    const dt = (ev.clientX - drag.x) / W * (drag.t1 - drag.t0);
+    if (Math.abs(ev.clientX - drag.x) > 3) drag.moved = true;
+    view.t0 = drag.t0 - dt; view.t1 = drag.t1 - dt;
+    clampView(); drawTracks(); drawOverview();
+  } else if (ev.target === trkCv) {
+    // hover tooltip
+    const rect = trkCv.getBoundingClientRect();
+    const u = Math.floor((ev.clientY - rect.top - AXIS_H) / (ROW_H + ROW_GAP));
+    const tt = document.getElementById('tooltip');
+    if (u >= 0 && u < nUnits() && ev.clientX - rect.left > GUTTER) {
+      const t = Math.round(trackTime(ev));
+      const s = stateAtCycle(t, u);
+      tt.textContent = `${DB.units[u]} @ ${t.toLocaleString()}\n` +
+        (s < 0 ? 'no data' : ['UNDERFLOW (waiting for data)','BUSY','OVERFLOW (blocked)'][s]);
+      tt.style.display = 'block';
+      tt.style.left = (ev.clientX + 14) + 'px';
+      tt.style.top  = (ev.clientY + 12) + 'px';
+    } else tt.style.display = 'none';
+  }
+});
+window.addEventListener('mouseup', ev => {
+  if (drag && !drag.moved && ev.target === trkCv) setCursor(trackTime(ev), false);
+  drag = null;
+});
+trkCv.addEventListener('mouseleave', () =>
+  document.getElementById('tooltip').style.display = 'none');
+
+let ovDrag = false;
+function ovSeek(ev) {
+  const rect = ovCv.getBoundingClientRect();
+  const t = (ev.clientX - rect.left) / rect.width * DB.total;
+  const span = view.t1 - view.t0;
+  view.t0 = t - span/2; view.t1 = t + span/2;
+  clampView(); setCursor(t, false);
+}
+ovCv.addEventListener('mousedown', ev => { ovDrag = true; ovSeek(ev); });
+window.addEventListener('mousemove', ev => { if (ovDrag) ovSeek(ev); });
+window.addEventListener('mouseup', () => ovDrag = false);
+
+seek.addEventListener('input', () => setCursor(+seek.value / 1000000 * DB.total, true));
+document.getElementById('goto').addEventListener('click', () =>
+  setCursor(+document.getElementById('cycin').value, true));
+document.getElementById('cycin').addEventListener('keydown', ev => {
+  if (ev.key === 'Enter') setCursor(+document.getElementById('cycin').value, true);
+});
+function stepChange(dir) {
+  let i = idxAt(DB.sCyc, DB.nS, cursor);
+  i += dir > 0 ? 1 : (DB.sCyc[i] === cursor ? -1 : 0);
+  if (i < 0) i = 0; if (i >= DB.nS) i = DB.nS - 1;
+  setCursor(DB.sCyc[i], true);
+}
+document.getElementById('prevch').addEventListener('click', () => stepChange(-1));
+document.getElementById('nextch').addEventListener('click', () => stepChange(+1));
+window.addEventListener('keydown', ev => {
+  if (ev.target.tagName === 'INPUT' && ev.target.type !== 'range') return;
+  if (ev.key === 'ArrowLeft')  { ev.shiftKey ? setCursor(cursor - DB.total/100, true) : stepChange(-1); ev.preventDefault(); }
+  if (ev.key === 'ArrowRight') { ev.shiftKey ? setCursor(cursor + DB.total/100, true) : stepChange(+1); ev.preventDefault(); }
+});
+window.addEventListener('resize', () => { drawTracks(); drawOverview(); });
+
+// ============================== file loading ==============================
+const dropArea = document.getElementById('drop-area');
+['dragenter','dragover','dragleave','drop'].forEach(n => {
+  document.body.addEventListener(n, e => e.preventDefault());
+  dropArea.addEventListener(n, e => e.preventDefault());
+});
+['dragenter','dragover'].forEach(n =>
+  dropArea.addEventListener(n, () => dropArea.classList.add('highlight')));
+['dragleave','drop'].forEach(n =>
+  dropArea.addEventListener(n, () => dropArea.classList.remove('highlight')));
+dropArea.addEventListener('drop', e => {
+  if (e.dataTransfer.files.length) loadFile(e.dataTransfer.files[0]);
+});
+document.body.addEventListener('drop', e => {   // allow re-drop anywhere once loaded
+  if (e.dataTransfer.files.length) loadFile(e.dataTransfer.files[0]);
+});
+document.getElementById('file-input').addEventListener('change', e => {
+  if (e.target.files.length) loadFile(e.target.files[0]);
+});
+
+function loadFile(file) {
+  const prog = document.getElementById('progress');
+  prog.style.display = 'flex';
+  const rd = new FileReader();
+  rd.onload = ev => {
+    // reset DB for re-drop
+    DB.vCyc = []; DB.vVal = []; DB.marks = []; DB.total = 0;
+    document.getElementById('svgbox').innerHTML = '';
+    parseLog(ev.target.result, () => {
+      prog.style.display = 'none';
+      document.getElementById('drop-wrap').style.display = 'none';
+      document.getElementById('app').style.display = 'block';
+      document.getElementById('fname').textContent = file.name;
+      document.getElementById('totcyc').textContent = DB.total.toLocaleString();
+      view = { t0: 0, t1: DB.total };
+      buildSvg();
+      buildOverview();
+      setCursor(0, false);
+    }, f => document.getElementById('pbar').style.width = (f*100).toFixed(1) + '%');
+  };
+  rd.readAsText(file);
+}
+</script>
+</body>
+</html>
