@@ -33,9 +33,11 @@ module tex_fetch4_q_tb_top import tsp_pkg::*; (
     wire [21:0] g_off [0:3];
     assign g_off[0]=g_off0; assign g_off[1]=g_off1; assign g_off[2]=g_off2; assign g_off[3]=g_off3;
 
-    // 4 DDR channels: 0=q.tc 1=q.vq 2=g.tc 3=g.vq
-    ddr_rd_req_t  dreq [0:3];
-    ddr_rd_resp_t dresp[0:3];
+    // 5 DDR channels: 0=q.tc 1=q.vq 2=q.PREFETCH 3=g.tc 4=g.vq - the DUT's
+    // lookahead fill client gets its own randomized-latency channel so the
+    // overlapped prefetch path is exercised against the lockstep golden.
+    ddr_rd_req_t  dreq [0:4];
+    ddr_rd_resp_t dresp[0:4];
 
     wire [63:0] q_texel [0:3];
     wire [63:0] g_texel [0:3];
@@ -48,7 +50,7 @@ module tex_fetch4_q_tb_top import tsp_pkg::*; (
         .tex_addr(q_texaddr),.vq_addr(q_vqaddr),.tex_offset(q_off),.in_pl(q_pl),
         .in_ready(q_ready),
         .out_valid(q_ov),.texel(q_texel),.out_pl(q_opl),
-        .ddr_req(dreq[0:1]),.ddr_resp(dresp[0:1]));
+        .ddr_req(dreq[0:2]),.ddr_resp(dresp[0:2]));
 
     tex_fetch4_ob #(.PLW(PLW)) u_gold (
         .clk(clk),.reset(reset),.flush(flush),
@@ -56,13 +58,13 @@ module tex_fetch4_q_tb_top import tsp_pkg::*; (
         .tex_addr(g_texaddr),.vq_addr(g_vqaddr),.tex_offset(g_off),.in_pl(g_pl),
         .in_ready(g_ready),
         .out_valid(g_ov),.texel(g_texel),.out_pl(g_opl),
-        .ddr_req(dreq[2:3]),.ddr_resp(dresp[2:3]));
+        .ddr_req(dreq[3:4]),.ddr_resp(dresp[3:4]));
 
     // ---- shared VRAM + 4 independent burst DDR models, RANDOM per-request latency ----
     (* verilator public_flat_rw *) reg [63:0] vram [0:1048575];
 
     genvar gc;
-    generate for (gc = 0; gc < 4; gc = gc + 1) begin : ch
+    generate for (gc = 0; gc < 5; gc = gc + 1) begin : ch
         reg        d_busy; reg [19:0] d_word; reg [7:0] d_beats, d_lat;
         reg [63:0] d_do; reg d_dv;
         reg        pend; reg [28:0] pa; reg [7:0] pb;

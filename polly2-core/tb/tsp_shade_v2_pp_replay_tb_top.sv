@@ -73,8 +73,12 @@ module tsp_shade_v2_pp_replay_tb_top import tsp_pkg::*; (
 
     // v2 exposes ddr_req/ddr_resp as 2-element arrays ([0]=tc data, [1]=vq codebook).
     `DDRBURST(pd) `DDRBURST(pq)
-    ddr_rd_req_t  sh_ddr_req  [0:1];
-    ddr_rd_resp_t sh_ddr_resp [0:1];
+    ddr_rd_req_t  sh_ddr_req  [0:2];
+    ddr_rd_resp_t sh_ddr_resp [0:2];
+    // tex-cache prefetch client PARKED in this tb (busy high -> never issues)
+    assign sh_ddr_resp[2].busy = 1'b1;
+    assign sh_ddr_resp[2].dout = '0;
+    assign sh_ddr_resp[2].dready = 1'b0;
     assign pd_dreq = sh_ddr_req[0];  assign sh_ddr_resp[0] = pd_dresp;
     assign pq_dreq = sh_ddr_req[1];  assign sh_ddr_resp[1] = pq_dresp;
 

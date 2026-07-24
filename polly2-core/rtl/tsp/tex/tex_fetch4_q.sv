@@ -66,8 +66,8 @@ module tex_fetch4_q import tsp_pkg::*; #(
     output     [PLW-1:0] out_pl,
 
     // two DDR read ports to the parent arbiter ([0]=tc data, [1]=vq codebook)
-    output ddr_rd_req_t  ddr_req  [0:1],
-    input  ddr_rd_resp_t ddr_resp [0:1]
+    output ddr_rd_req_t  ddr_req  [0:2],
+    input  ddr_rd_resp_t ddr_resp [0:2]
 );
     localparam integer QDEPTH  = 64;   // ROWQ / DATQ depth
     localparam integer PIXQ_D  = 256;  // PIXQ depth (the pixel budget: how far the
@@ -91,14 +91,23 @@ module tex_fetch4_q import tsp_pkg::*; #(
     wire [28:0] vqp_waddr [0:3];
     assign vqp_waddr[0] = 29'd0; assign vqp_waddr[1] = 29'd0;
     assign vqp_waddr[2] = 29'd0; assign vqp_waddr[3] = 29'd0;
+    // VQ has no queue ahead of it (no probe) -> its prefetch client is parked
+    // (busy held high: the pf machinery never issues).
+    ddr_rd_req_t  vq_pf_nc;
+    ddr_rd_resp_t vq_pf_parked;
+    assign vq_pf_parked.busy = 1'b1;
+    assign vq_pf_parked.dout = '0;
+    assign vq_pf_parked.dready = 1'b0;
     tex_cache_4p_1c u_tc4 (.clk(clk),.reset(reset),.flush(flush),
         .creq(tc_req),.cresp(tc_resp),
         .probe_valid(tcp_valid),.probe_mask(tcp_mask),.probe_waddr(tcp_waddr),
-        .dreq(ddr_req[0]),.dresp(ddr_resp[0]));
+        .dreq(ddr_req[0]),.dresp(ddr_resp[0]),
+        .pf_dreq(ddr_req[2]),.pf_dresp(ddr_resp[2]));   // lookahead fill client
     tex_cache_4p_1c u_vq4 (.clk(clk),.reset(reset),.flush(flush),
         .creq(vq_req),.cresp(vq_resp),
         .probe_valid(1'b0),.probe_mask(4'd0),.probe_waddr(vqp_waddr),
-        .dreq(ddr_req[1]),.dresp(ddr_resp[1]));
+        .dreq(ddr_req[1]),.dresp(ddr_resp[1]),
+        .pf_dreq(vq_pf_nc),.pf_dresp(vq_pf_parked));
 
     wire tc_ready = tc_resp[0].ready;      // all ports gate together
     wire vq_ready = vq_resp[0].ready;

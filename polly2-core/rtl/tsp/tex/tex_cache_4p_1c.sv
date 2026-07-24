@@ -72,7 +72,16 @@ module tex_cache_4p_1c import tsp_pkg::*; (
     input  [28:0]        probe_waddr [0:3],
 
     output ddr_rd_req_t  dreq,
-    input  ddr_rd_resp_t dresp
+    input  ddr_rd_resp_t dresp,
+
+    // ---- PREFETCH DDR port: its own arbiter client, so the probe's lookahead
+    //      fill OVERLAPS the demand fill instead of chaining behind its last
+    //      beat. Independent single-outstanding receiver; beats of the two
+    //      ports never collide (one channel beat per cycle globally). Tie
+    //      pf_dresp.busy HIGH to park the prefetcher (probe machinery idles
+    //      after one latched candidate; demand path unaffected). ----
+    output ddr_rd_req_t  pf_dreq,
+    input  ddr_rd_resp_t pf_dresp
 );
     localparam integer NLINE = 1024;
     localparam integer IXW   = 10;
@@ -219,11 +228,33 @@ module tex_cache_4p_1c import tsp_pkg::*; (
     // ============ prefetch candidate ============
     reg [LAW-1:0] pf_line;
 
-    // DDR request pulse
+    // ============ PREFETCH RECEIVER: own DDR client, overlaps the demand fill ============
+    reg            pfr_busy;
+    reg [LAW-1:0]  pfr_line;
+    reg [1:0]      pfr_beat;
+    reg [191:0]    pfr_acc;
+    wire [IXW-1:0] pfr_ix       = pfr_line[IXW-1:0];
+    wire           pfr_beat_now = pfr_busy && pf_dresp.dready;
+    wire           pfr_last     = pfr_beat_now && (pfr_beat == 2'd3);
+    // same live alias-skip write mask as the demand receiver, for pfr_line
+    wire [3:0] pfr_wm;
+    generate
+      for (gi=0; gi<4; gi=gi+1) begin : pwm
+        assign pfr_wm[gi] = !t_v[gi]
+                         || (t_line[gi] == pfr_line)
+                         || (t_line[gi][IXW-1:0] != pfr_ix);
+      end
+    endgenerate
+
+    // DDR request pulses (demand + prefetch clients)
     reg        rd_r;   reg [28:0] addr_r;
     assign dreq.rd    = rd_r;
     assign dreq.addr  = addr_r;
     assign dreq.burst = 8'd4;
+    reg        pf_rd_r; reg [28:0] pf_addr_r;
+    assign pf_dreq.rd    = pf_rd_r;
+    assign pf_dreq.addr  = pf_addr_r;
+    assign pf_dreq.burst = 8'd4;
 
     // scheduler can issue when the receiver is free THIS cycle or freeing (last beat):
     // the sequential block below lets the issue's fr_* assignments win over the
@@ -240,6 +271,7 @@ module tex_cache_4p_1c import tsp_pkg::*; (
         if (reset || flush) begin
             st <= S_RST; rd_r <= 0; rst_i <= 0; retesting <= 0;
             fr_busy <= 1'b0; g_miss <= 4'd0; g_req <= 4'd0;
+            pf_rd_r <= 0; pfr_busy <= 1'b0;
             pf_have <= 1'b0; pr_evd <= 1'b0; pr_rdp <= 1'b0;
             for (i=0;i<4;i=i+1) t_v[i]<=0;
 `ifndef SYNTHESIS
@@ -247,13 +279,56 @@ module tex_cache_4p_1c import tsp_pkg::*; (
                 for (i=0;i<5;i=i+1) stat_hit[i] <= 0;
                 stat_n <= 0; st_pf_iss <= 0; st_fills <= 0;
             end
-            if (flush && !reset && fr_busy)
+            if (flush && !reset && (fr_busy || pfr_busy))
                 $error("tex_cache_4p_1c %m: flush with a fill in flight");
 `endif
         end else begin
             rd_r <= 1'b0;
+            pf_rd_r <= 1'b0;
             retesting <= 1'b0;
             pr_rdp <= pr_want;
+
+            // -------- prefetch receiver: consume its own client's beats --------
+            // (never the same cycle as a demand beat - one channel beat globally)
+            if (pfr_beat_now) begin
+                pfr_beat <= pfr_beat + 2'd1;
+                if (pfr_beat != 2'd3) pfr_acc[64*pfr_beat +: 64] <= pf_dresp.dout;
+                else begin
+                    if (pfr_wm[0]) begin data0[pfr_ix] <= { pf_dresp.dout, pfr_acc }; meta0[pfr_ix] <= {1'b1, pfr_line[LAW-1:IXW]}; end
+                    if (pfr_wm[1]) begin data1[pfr_ix] <= { pf_dresp.dout, pfr_acc }; meta1[pfr_ix] <= {1'b1, pfr_line[LAW-1:IXW]}; end
+                    if (pfr_wm[2]) begin data2[pfr_ix] <= { pf_dresp.dout, pfr_acc }; meta2[pfr_ix] <= {1'b1, pfr_line[LAW-1:IXW]}; end
+                    if (pfr_wm[3]) begin data3[pfr_ix] <= { pf_dresp.dout, pfr_acc }; meta3[pfr_ix] <= {1'b1, pfr_line[LAW-1:IXW]}; end
+                    pfr_busy <= 1'b0;
+                    for (k=0;k<4;k=k+1) if (t_line[k] == pfr_line) g_miss[k] <= 1'b0;
+                    pr_evd <= 1'b0;          // tags changed: allow a fresh probe pass
+`ifndef SYNTHESIS
+                    st_fills <= st_fills + 1;
+`endif
+                end
+            end
+
+            // -------- prefetch issue: fires WHILE the demand fill streams --------
+            // A candidate that a LATER-frozen group also misses on would be
+            // double-fetched by the demand scheduler - drop it instead (the
+            // demand path owns it now).
+            begin : pfiss
+                reg pf_dup;
+                pf_dup = (st == S_WAITFILL) &&
+                         ((t_v[0] && t_line[0] == pf_line) ||
+                          (t_v[1] && t_line[1] == pf_line) ||
+                          (t_v[2] && t_line[2] == pf_line) ||
+                          (t_v[3] && t_line[3] == pf_line));
+                if (pf_have && pf_dup) pf_have <= 1'b0;
+                else if (pf_have && !pfr_busy && !pf_rd_r && !pf_dresp.busy) begin
+                    pf_rd_r   <= 1'b1;
+                    pf_addr_r <= {4'b0011, pf_line[22:0], 2'b00};
+                    pfr_busy  <= 1'b1; pfr_line <= pf_line; pfr_beat <= 2'd0;
+                    pf_have   <= 1'b0;
+`ifndef SYNTHESIS
+                    st_pf_iss <= st_pf_iss + 1;
+`endif
+                end
+            end
 
             // -------- fill receiver: consume qualified beats in ANY state --------
             if (fr_beat_now) begin
@@ -285,8 +360,10 @@ module tex_cache_4p_1c import tsp_pkg::*; (
                         found = 1'b1; cand = pr_line[k];
                     end
                 // don't prefetch a line the group will fill anyway / already in flight
+                // (on either the demand or the prefetch client)
                 if (found) begin
-                    if (fr_busy && fr_line == cand) found = 1'b0;
+                    if (fr_busy  && fr_line  == cand) found = 1'b0;
+                    if (pfr_busy && pfr_line == cand) found = 1'b0;
                     for (k=0;k<4;k=k+1)
                         if (g_miss[k] && t_line[k] == cand) found = 1'b0;
                 end
@@ -294,7 +371,8 @@ module tex_cache_4p_1c import tsp_pkg::*; (
                 pr_evd <= 1'b1;              // one evaluation per fill episode
             end
 
-            // -------- request scheduler: group lines first, then the prefetch --------
+            // -------- demand request scheduler: the frozen group's lines only --------
+            // (the prefetch issues on its OWN client above, overlapping this fill)
             if (fr_can_issue) begin
                 if ((st == S_WAITFILL) && !nq[2]) begin
                     rd_r    <= 1'b1;
@@ -302,14 +380,6 @@ module tex_cache_4p_1c import tsp_pkg::*; (
                     fr_busy <= 1'b1; fr_line <= t_line[nq[1:0]]; fr_beat <= 2'd0;
                     for (k=0;k<4;k=k+1)
                         if (t_line[k] == t_line[nq[1:0]]) g_req[k] <= 1'b1;
-                end else if (pf_have) begin
-                    rd_r    <= 1'b1;
-                    addr_r  <= {4'b0011, pf_line[22:0], 2'b00};
-                    fr_busy <= 1'b1; fr_line <= pf_line; fr_beat <= 2'd0;
-                    pf_have <= 1'b0;
-`ifndef SYNTHESIS
-                    st_pf_iss <= st_pf_iss + 1;
-`endif
                 end
             end
 
@@ -337,14 +407,17 @@ module tex_cache_4p_1c import tsp_pkg::*; (
 `endif
                 if (!fm[2]) begin
                     // freeze the WHOLE group (hitting ports stay valid so all ack
-                    // together after the fills). A port whose line matches the fill
-                    // completing THIS cycle is already resident; one matching an
-                    // in-flight fill is marked requested (no double fetch).
+                    // together after the fills). A port whose line matches a fill
+                    // completing THIS cycle (either client) is already resident;
+                    // one matching an in-flight fill (either client) is marked
+                    // requested (no double fetch).
                     for (k=0;k<4;k=k+1) begin
                         retest_ix[k] <= t_line[k][IXW-1:0];
                         g_miss[k] <= t_v[k] && !t_hit[k]
-                                     && !(fr_last && t_line[k] == fr_line);
-                        g_req[k]  <= fr_busy && !fr_last && (t_line[k] == fr_line);
+                                     && !(fr_last  && t_line[k] == fr_line)
+                                     && !(pfr_last && t_line[k] == pfr_line);
+                        g_req[k]  <= (fr_busy  && !fr_last  && (t_line[k] == fr_line))
+                                  || (pfr_busy && !pfr_last && (t_line[k] == pfr_line));
                     end
                     pr_evd <= 1'b0;
                     st <= S_WAITFILL;
@@ -365,7 +438,8 @@ module tex_cache_4p_1c import tsp_pkg::*; (
             S_WAITFILL: begin : wf
                 reg [3:0] g_miss_now;
                 for (k=0;k<4;k=k+1)
-                    g_miss_now[k] = g_miss[k] && !(fr_last && t_line[k] == fr_line);
+                    g_miss_now[k] = g_miss[k] && !(fr_last  && t_line[k] == fr_line)
+                                              && !(pfr_last && t_line[k] == pfr_line);
                 if (g_miss_now == 4'd0) begin
                     retesting <= 1'b1;
                     st <= S_RETEST;

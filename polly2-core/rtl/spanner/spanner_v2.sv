@@ -338,17 +338,24 @@ module spanner_v2 import tsp_pkg::*; #(
     // N+1 OVERLAPS the plane setup of triangle N (they were serial before: ~144 fetch +
     // ~257 setup = ~400 cyc/triangle back-to-back):
     //   FETCH  : pop the setup FIFO into record_fetcher whenever it is free.
-    //   pend_* : 1-deep skid holding the decoded record until tsp_setup_min is free
-    //            (frees the fetcher to start the next fetch).
-    //   SETUP  : latch pend_* into cur_*/fv_* (held stable for the whole run) + start
-    //            tsp_setup_min; on tsp_done pulse ts_pend -> ts_we write.
+    //   pd_*   : 4-DEEP FIFO of decoded records awaiting setup. Replaces the old
+    //            1-deep pend skid: a DDR-contended slow fetch no longer stalls
+    //            setup (it drains the bank), and fast fetches run ahead and bank
+    //            up instead of blocking on a busy setup.
+    //   SETUP  : latch the FIFO head into cur_*/fv_* (held stable for the whole
+    //            run) + start tsp_setup_min; on tsp_done pulse ts_pend -> ts_we.
     reg              fetch_busy;    // a fetch is in flight (fx_start..fx_done)
     reg [SLOTW-1:0]  fx_id;         // the in-flight fetch's setup id
-    reg              pend_v;        // pend_* holds a decoded record awaiting setup
-    reg [SLOTW-1:0]  pend_id;
-    reg [31:0]       pend_isp, pend_tsp, pend_tcw;
-    reg [31:0]       pend_x[0:2], pend_y[0:2], pend_z[0:2];
-    reg [31:0]       pend_u[0:2], pend_v3[0:2], pend_col[0:2], pend_ofs[0:2];
+    localparam integer PD_N = 4;
+    reg [1:0]        pd_h, pd_t;    // head/tail
+    reg [2:0]        pd_n;          // occupancy 0..4
+    wire             pd_empty = (pd_n == 3'd0);
+    wire             pd_full  = (pd_n == 3'(PD_N));
+    reg [SLOTW-1:0]  pd_id  [0:PD_N-1];
+    reg [31:0]       pd_isp [0:PD_N-1], pd_tsp [0:PD_N-1], pd_tcw [0:PD_N-1];
+    reg [31:0]       pd_x  [0:PD_N-1][0:2], pd_y  [0:PD_N-1][0:2], pd_z  [0:PD_N-1][0:2];
+    reg [31:0]       pd_u  [0:PD_N-1][0:2], pd_v3 [0:PD_N-1][0:2];
+    reg [31:0]       pd_col[0:PD_N-1][0:2], pd_ofs[0:PD_N-1][0:2];
     reg              su_run;        // tsp_setup_min busy (tsp_start..tsp_done)
     reg              ts_pend;       // write triangle_setups this cycle (cycle after tsp_done)
     reg [SLOTW-1:0]  su_id;         // the active setup's id (write target)
@@ -473,7 +480,8 @@ module spanner_v2 import tsp_pkg::*; #(
             sf_wp <= '0; sf_rp <= '0;
             top_tag <= '0; tail <= '0; gf_wp <= '0; gf_rp <= '0;
             span_head <= '0; span_tail <= '0; span_pass_base <= '0;
-            fetch_busy <= 1'b0; pend_v <= 1'b0; su_run <= 1'b0; ts_pend <= 1'b0;
+            fetch_busy <= 1'b0; su_run <= 1'b0; ts_pend <= 1'b0;
+            pd_h <= 2'd0; pd_t <= 2'd0; pd_n <= 3'd0;
             fx_start <= 1'b0; tsp_start <= 1'b0;
         end else begin
             fx_start  <= 1'b0;
@@ -612,68 +620,83 @@ module spanner_v2 import tsp_pkg::*; #(
             end
 
             // =================== SETUP path (streaming stages) ===================
+            // decoded-record FIFO handshake decisions (this cycle):
+            //   pd_byp : setup idle + FIFO empty + a fetch completing NOW -> feed
+            //            setup straight off fx_* (order-safe only when empty)
+            //   pd_push: completing fetch banks into the FIFO (not bypassed)
+            //   pd_pop : setup accepts the FIFO head
+            begin : pdfifo
+                reg su_can, pd_byp, pd_push, pd_pop;
+                su_can  = !su_run && !ts_pend;
+                pd_byp  = su_can && pd_empty && fetch_busy && fx_done;
+                pd_push = fetch_busy && fx_done && !pd_byp;
+                pd_pop  = su_can && !pd_empty;
+
 `ifndef SYNTHESIS
-            su_dbg_cyc <= start ? 0 : su_dbg_cyc + 1;
-            if ($test$plusargs("sutrace")) begin
-                if (!fetch_busy && !pend_v && !sf_empty)
-                    $display("[SU c%0d] FETCH issue tag=%08x id=%0d", su_dbg_cyc, sf_head[31:0], sf_head[SF_W-1:32]);
-                if (fetch_busy && fx_done)      $display("[SU c%0d] FETCH done id=%0d", su_dbg_cyc, fx_id);
-                if (!su_run && !ts_pend && (pend_v || fx_done))
-                                                $display("[SU c%0d] SETUP start id=%0d", su_dbg_cyc, fx_done ? fx_id : pend_id);
-                if (su_run && tsp_done)         $display("[SU c%0d] SETUP done id=%0d", su_dbg_cyc, su_id);
-                if (ts_pend)                    $display("[SU c%0d] WRITE id=%0d", su_dbg_cyc, su_id);
-            end
+                su_dbg_cyc <= start ? 0 : su_dbg_cyc + 1;
+                if ($test$plusargs("sutrace")) begin
+                    if (!fetch_busy && !pd_full && !sf_empty)
+                        $display("[SU c%0d] FETCH issue tag=%08x id=%0d", su_dbg_cyc, sf_head[31:0], sf_head[SF_W-1:32]);
+                    if (fetch_busy && fx_done)      $display("[SU c%0d] FETCH done id=%0d (pd_n=%0d)", su_dbg_cyc, fx_id, pd_n);
+                    if (pd_pop || pd_byp)
+                                                    $display("[SU c%0d] SETUP start id=%0d", su_dbg_cyc, pd_byp ? fx_id : pd_id[pd_h]);
+                    if (su_run && tsp_done)         $display("[SU c%0d] SETUP done id=%0d", su_dbg_cyc, su_id);
+                    if (ts_pend)                    $display("[SU c%0d] WRITE id=%0d", su_dbg_cyc, su_id);
+                end
 `endif
-            // ---- FETCH issue: pop the FIFO into the fetcher whenever it is free and the
-            // pend skid is empty (the skid frees when setup accepts, so fetch N+1 runs
-            // DURING setup N). fetch_busy covers the fx_start..fx_busy visibility gap.
-            if (!fetch_busy && !pend_v && !sf_empty) begin
-                fx_tag     <= sf_head[31:0];
-                fx_id      <= sf_head[SF_W-1:32];
-                fx_start   <= 1'b1;
-                sf_rp      <= sf_rp + 1'b1;    // pop
-                fetch_busy <= 1'b1;
-            end
-
-            // ---- FETCH complete -> pend skid (or straight into setup if it is idle) ----
-            if (fetch_busy && fx_done) begin
-                fetch_busy <= 1'b0;
-                pend_v     <= 1'b1;
-                pend_id    <= fx_id;
-                pend_isp <= fx_isp; pend_tsp <= fx_tsp; pend_tcw <= fx_tcw;
-                for (q = 0; q < 3; q = q + 1) begin
-                    pend_x[q]<=fx_x[q]; pend_y[q]<=fx_y[q]; pend_z[q]<=fx_z[q];
-                    pend_u[q]<=fx_u[q]; pend_v3[q]<=fx_v[q];
-                    pend_col[q]<=fx_col[q]; pend_ofs[q]<=fx_ofs[q];
+                // ---- FETCH issue: pop the request FIFO into the fetcher whenever it is
+                // free and the record FIFO has room for the result (occupancy can only
+                // shrink between issue and completion, so !pd_full at issue guarantees
+                // room at push). Fetch N+k runs DURING setup N. ----
+                if (!fetch_busy && !pd_full && !sf_empty) begin
+                    fx_tag     <= sf_head[31:0];
+                    fx_id      <= sf_head[SF_W-1:32];
+                    fx_start   <= 1'b1;
+                    sf_rp      <= sf_rp + 1'b1;    // pop
+                    fetch_busy <= 1'b1;
                 end
-            end
 
-            // ---- SETUP accept: whenever tsp_setup_min is idle (and the previous write
-            // retired), latch the pending record into cur_*/fv_* (held stable for the whole
-            // run) and start. Bypass: accept straight off fx_done the same cycle. ----
-            if (!su_run && !ts_pend && (pend_v || fx_done)) begin
-                if (pend_v) begin
-                    cur_isp <= pend_isp; cur_tsp <= pend_tsp; cur_tcw <= pend_tcw;
+                // ---- FETCH complete -> bank into the record FIFO (unless bypassed) ----
+                if (fetch_busy && fx_done) fetch_busy <= 1'b0;
+                if (pd_push) begin
+                    pd_id [pd_t] <= fx_id;
+                    pd_isp[pd_t] <= fx_isp; pd_tsp[pd_t] <= fx_tsp; pd_tcw[pd_t] <= fx_tcw;
                     for (q = 0; q < 3; q = q + 1) begin
-                        fv_x[q]<=pend_x[q]; fv_y[q]<=pend_y[q]; fv_z[q]<=pend_z[q];
-                        fv_u[q]<=pend_u[q]; fv_v[q]<=pend_v3[q];
-                        fv_col[q]<=pend_col[q]; fv_ofs[q]<=pend_ofs[q];
+                        pd_x[pd_t][q]<=fx_x[q]; pd_y[pd_t][q]<=fx_y[q]; pd_z[pd_t][q]<=fx_z[q];
+                        pd_u[pd_t][q]<=fx_u[q]; pd_v3[pd_t][q]<=fx_v[q];
+                        pd_col[pd_t][q]<=fx_col[q]; pd_ofs[pd_t][q]<=fx_ofs[q];
                     end
-                    su_id  <= pend_id;
-                    pend_v <= 1'b0;
-                end else begin  // fx_done bypass (skid empty, setup idle)
-                    cur_isp <= fx_isp; cur_tsp <= fx_tsp; cur_tcw <= fx_tcw;
-                    for (q = 0; q < 3; q = q + 1) begin
-                        fv_x[q]<=fx_x[q]; fv_y[q]<=fx_y[q]; fv_z[q]<=fx_z[q];
-                        fv_u[q]<=fx_u[q]; fv_v[q]<=fx_v[q];
-                        fv_col[q]<=fx_col[q]; fv_ofs[q]<=fx_ofs[q];
-                    end
-                    su_id  <= fx_id;
-                    pend_v <= 1'b0;   // consumed in flight, skid stays empty
+                    pd_t <= pd_t + 2'd1;
                 end
-                acc_ddx <= '0; acc_ddy <= '0; acc_c <= '0;
-                tsp_start <= 1'b1;
-                su_run <= 1'b1;
+
+                // ---- SETUP accept: FIFO head (in order), or the completing fetch when
+                // the FIFO is empty. cur_*/fv_* held stable for the whole run. ----
+                if (pd_pop || pd_byp) begin
+                    if (pd_pop) begin
+                        cur_isp <= pd_isp[pd_h]; cur_tsp <= pd_tsp[pd_h]; cur_tcw <= pd_tcw[pd_h];
+                        for (q = 0; q < 3; q = q + 1) begin
+                            fv_x[q]<=pd_x[pd_h][q]; fv_y[q]<=pd_y[pd_h][q]; fv_z[q]<=pd_z[pd_h][q];
+                            fv_u[q]<=pd_u[pd_h][q]; fv_v[q]<=pd_v3[pd_h][q];
+                            fv_col[q]<=pd_col[pd_h][q]; fv_ofs[q]<=pd_ofs[pd_h][q];
+                        end
+                        su_id <= pd_id[pd_h];
+                        pd_h  <= pd_h + 2'd1;
+                    end else begin  // fx_done bypass (FIFO empty, setup idle)
+                        cur_isp <= fx_isp; cur_tsp <= fx_tsp; cur_tcw <= fx_tcw;
+                        for (q = 0; q < 3; q = q + 1) begin
+                            fv_x[q]<=fx_x[q]; fv_y[q]<=fx_y[q]; fv_z[q]<=fx_z[q];
+                            fv_u[q]<=fx_u[q]; fv_v[q]<=fx_v[q];
+                            fv_col[q]<=fx_col[q]; fv_ofs[q]<=fx_ofs[q];
+                        end
+                        su_id <= fx_id;
+                    end
+                    acc_ddx <= '0; acc_ddy <= '0; acc_c <= '0;
+                    tsp_start <= 1'b1;
+                    su_run <= 1'b1;
+                end
+
+                // single-point occupancy update (push/pop may coincide)
+                pd_n <= pd_n + (pd_push ? 3'd1 : 3'd0) - (pd_pop ? 3'd1 : 3'd0);
             end
 
             // ---- SETUP run: collect streamed planes; done -> 1-cycle write pulse ----
@@ -696,7 +719,7 @@ module spanner_v2 import tsp_pkg::*; #(
             // plane END pointer (top_tag) and the span END pointer (span_head) so tsp_done can
             // later free this pass's plane AND span ring ranges together (shared gf_wp/gf_rp).
             if (busy && !start && !dd_clearing && !sg_active && !t_valid && sf_empty
-                && !fetch_busy && !pend_v && !su_run && !ts_pend) begin
+                && !fetch_busy && pd_empty && !su_run && !ts_pend) begin
                 busy   <= 1'b0;
                 tsp_go <= 1'b1;
                 gf_mem [gf_wp[GF_AW-1:0]] <= top_tag;

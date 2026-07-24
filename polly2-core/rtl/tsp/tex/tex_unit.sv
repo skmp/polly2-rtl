@@ -62,8 +62,8 @@ module tex_unit import tsp_pkg::*; #(
     input      [31:0] pal_data [0:3],
 
     // ---- two DDR read ports to the parent arbiter ([0]=tc, [1]=vq) ----
-    output ddr_rd_req_t  ddr_req  [0:1],
-    input  ddr_rd_resp_t ddr_resp [0:1]
+    output ddr_rd_req_t  ddr_req  [0:2],
+    input  ddr_rd_resp_t ddr_resp [0:2]
 );
     genvar gi;
     integer d;

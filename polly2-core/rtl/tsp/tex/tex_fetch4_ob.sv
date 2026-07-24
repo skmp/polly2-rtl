@@ -54,14 +54,22 @@ module tex_fetch4_ob import tsp_pkg::*; #(
     wire [28:0] nop_waddr [0:3];
     assign nop_waddr[0] = 29'd0; assign nop_waddr[1] = 29'd0;
     assign nop_waddr[2] = 29'd0; assign nop_waddr[3] = 29'd0;
+    // prefetch clients PARKED (no probe here -> pf machinery never issues)
+    ddr_rd_req_t  pf_nc0, pf_nc1;
+    ddr_rd_resp_t pf_parked;
+    assign pf_parked.busy = 1'b1;
+    assign pf_parked.dout = '0;
+    assign pf_parked.dready = 1'b0;
     tex_cache_4p_1c u_tc4 (.clk(clk),.reset(reset),.flush(flush),
         .creq(tc_req),.cresp(tc_resp),
         .probe_valid(1'b0),.probe_mask(4'd0),.probe_waddr(nop_waddr),
-        .dreq(ddr_req[0]),.dresp(ddr_resp[0]));
+        .dreq(ddr_req[0]),.dresp(ddr_resp[0]),
+        .pf_dreq(pf_nc0),.pf_dresp(pf_parked));
     tex_cache_4p_1c u_vq4 (.clk(clk),.reset(reset),.flush(flush),
         .creq(vq_req),.cresp(vq_resp),
         .probe_valid(1'b0),.probe_mask(4'd0),.probe_waddr(nop_waddr),
-        .dreq(ddr_req[1]),.dresp(ddr_resp[1]));
+        .dreq(ddr_req[1]),.dresp(ddr_resp[1]),
+        .pf_dreq(pf_nc1),.pf_dresp(pf_parked));
 
     // per-corner data-cache word address + VQ byte lane (combinational off inputs)
     wire [28:0] tc_waddr [0:3];

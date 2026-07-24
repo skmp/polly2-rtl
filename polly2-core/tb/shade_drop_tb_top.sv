@@ -53,8 +53,13 @@ module shade_drop_tb_top import tsp_pkg::*; (
             pal_data[gi] <= {pal_addr[gi], pal_addr[gi], pal_addr[gi], 2'b11};
     end endgenerate
 
-    ddr_rd_req_t  ddr_req  [0:1];
-    ddr_rd_resp_t ddr_resp [0:1];
+    ddr_rd_req_t  ddr_req  [0:2];
+    ddr_rd_resp_t ddr_resp [0:2];
+    // tex-cache prefetch client PARKED in this tb (busy high -> never issues);
+    // the demand-path drop-hunt behavior is unchanged.
+    assign ddr_resp[2].busy = 1'b1;
+    assign ddr_resp[2].dout = '0;
+    assign ddr_resp[2].dready = 1'b0;
     assign rd0 = ddr_req[0].rd; assign addr0 = ddr_req[0].addr; assign burst0 = ddr_req[0].burst;
     assign rd1 = ddr_req[1].rd; assign addr1 = ddr_req[1].addr; assign burst1 = ddr_req[1].burst;
     always_comb begin
