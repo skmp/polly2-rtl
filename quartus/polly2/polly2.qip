@@ -75,7 +75,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/tsp/color_c
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/tsp/tsp_blend.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/tsp/tsp_shade_v2_pp.sv
 
-# ---- texture path (tex_unit -> tex_fetch4_ob -> tex_cache_4p_1c) ----
+# ---- texture path (tex_unit -> tex_fetch4_q -> tex_cache_4p_1c) ----
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/tsp/tex/tex_decode.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/tsp/tex/tex_uvmap.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/tsp/tex/tex_filter.sv
@@ -84,7 +84,8 @@ set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/tsp/tex/tex
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/tsp/tex/tex_add_mip.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/tsp/tex/tsp_miplevel.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/tsp/tex/tex_cache_4p_1c.sv
-set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/tsp/tex/tex_fetch4_ob.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/tsp/tex/tfq_fifo.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/tsp/tex/tex_fetch4_q.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/tsp/tex/tex_unit.sv
 
 # ---- the render core ----
