@@ -115,7 +115,20 @@ const DB = {
   vCyc: [], vVal: [],                       // per-value-id change arrays
   marks: [],                                // {c, t:'R'|'D'}
   total: 0,
+  order: [],                                // track DISPLAY order (row -> unit idx)
 };
+// Display order: log unit indices are stable, but SORTC moved architecturally
+// (pre-fetch check: it now gates records BEFORE the iterator's param fetch), so
+// show its row between EQ and ITER. Falls back to identity for unknown names.
+function computeOrder() {
+  const o = DB.units.map((_, i) => i);
+  const si = DB.units.indexOf('SORTC'), ei = DB.units.indexOf('EQ');
+  if (si >= 0 && ei >= 0) {
+    o.splice(o.indexOf(si), 1);
+    o.splice(o.indexOf(ei) + 1, 0, si);
+  }
+  return o;
+}
 const NSTATE = 3;
 const COLORS = ['#e2b93d', '#3fa34d', '#d64541'];   // under, busy, over
 const IDLE = '#2a2a30';
@@ -268,8 +281,9 @@ function paintBins(ctx, t0, t1, x0, W, rowH, rowGap, topY) {
       }
     }
   }
-  for (let u = 0; u < NU; u++) {
-    const y = topY + u * (rowH + rowGap);
+  for (let r = 0; r < NU; r++) {
+    const u = DB.order[r] ?? r;
+    const y = topY + r * (rowH + rowGap);
     ctx.fillStyle = IDLE;
     ctx.fillRect(x0, y, W, rowH);
     let runStart = 0, runColor = null;
@@ -314,12 +328,12 @@ function drawTracks() {
     ctx.fillStyle = '#3a3a42'; ctx.fillRect(x, AXIS_H, 1, H - AXIS_H);
     ctx.fillStyle = '#9a9aa2'; ctx.fillText(c.toLocaleString(), x+3, 12);
   }
-  // unit names
+  // unit names (display order)
   ctx.font = '12px Consolas, monospace';
-  for (let u = 0; u < NU; u++) {
-    const y = AXIS_H + u * (ROW_H + ROW_GAP);
+  for (let r = 0; r < NU; r++) {
+    const y = AXIS_H + r * (ROW_H + ROW_GAP);
     ctx.fillStyle = '#bcbcc4';
-    ctx.fillText(DB.units[u], 6, y + ROW_H - 6);
+    ctx.fillText(DB.units[DB.order[r] ?? r], 6, y + ROW_H - 6);
   }
   paintBins(ctx, view.t0, view.t1, GUTTER, Math.max(1, Math.floor(W)), ROW_H, ROW_GAP, AXIS_H);
 
@@ -370,13 +384,13 @@ function drawOverview() {
 const LAYOUT = {
   w: 640, h: 560,
   blocks: [
-    // geometry row (sort$ inline: it gates the FQ head before setup issue)
+    // geometry row (sort$ PRE-FETCH: gates records before the iterator's fetch)
     { id:'REGION',  u:0,  x: 10, y: 26, w: 80, h: 34, label:'region\narray' },
     { id:'OLWALK',  u:1,  x:100, y: 26, w: 76, h: 34, label:'OL walker' },
     { id:'EQ',      u:2,  x:186, y: 26, w: 44, h: 34, label:'EQ' },
-    { id:'ITER',    u:3,  x:240, y: 26, w: 84, h: 34, label:'iterator/\nparam fetch' },
-    { id:'FQ',      u:4,  x:334, y: 26, w: 44, h: 34, label:'FQ' },
-    { id:'SORTC',   u:5,  x:388, y: 26, w: 64, h: 34, label:'sort $' },
+    { id:'SORTC',   u:5,  x:240, y: 26, w: 64, h: 34, label:'sort $' },
+    { id:'ITER',    u:3,  x:314, y: 26, w: 84, h: 34, label:'iterator/\nparam fetch' },
+    { id:'FQ',      u:4,  x:408, y: 26, w: 44, h: 34, label:'FQ' },
     { id:'SETUP',   u:6,  x:462, y: 26, w: 84, h: 34, label:'ISP setup' },
     { id:'PQ',      u:7,  x: 10, y:132, w: 54, h: 34, label:'PQ' },
     { id:'RASTER',  u:8,  x: 84, y:132, w: 90, h: 34, label:'raster' },
@@ -397,8 +411,8 @@ const LAYOUT = {
     { id:'DDR',     u:19, x: 10, y:436, w:380, h: 40, label:'DDR channel (64-bit, 4 outstanding)' },
   ],
   arrows: [
-    ['REGION','OLWALK'], ['OLWALK','EQ'], ['EQ','ITER'], ['ITER','FQ'],
-    ['FQ','SORTC'], ['SORTC','SETUP'], ['DEPTH','SORTC','dash'],
+    ['REGION','OLWALK'], ['OLWALK','EQ'], ['EQ','SORTC'], ['SORTC','ITER'],
+    ['ITER','FQ'], ['FQ','SETUP'], ['DEPTH','SORTC','dash'],
     ['SETUP','PQ','wrap'], ['PQ','RASTER'], ['RASTER','DEPTH'],
     ['DEPTH','SPANNER','wrap'],
     ['SPANNER','SFETCH','vdown'], ['SFETCH','SSETUP'], ['SSETUP','SPANNER','vup'],
@@ -600,9 +614,10 @@ window.addEventListener('mousemove', ev => {
   } else if (ev.target === trkCv) {
     // hover tooltip
     const rect = trkCv.getBoundingClientRect();
-    const u = Math.floor((ev.clientY - rect.top - AXIS_H) / (ROW_H + ROW_GAP));
+    const row = Math.floor((ev.clientY - rect.top - AXIS_H) / (ROW_H + ROW_GAP));
     const tt = document.getElementById('tooltip');
-    if (u >= 0 && u < nUnits() && ev.clientX - rect.left > GUTTER) {
+    if (row >= 0 && row < nUnits() && ev.clientX - rect.left > GUTTER) {
+      const u = DB.order[row] ?? row;
       const t = Math.round(trackTime(ev));
       const s = stateAtCycle(t, u);
       tt.textContent = `${DB.units[u]} @ ${t.toLocaleString()}\n` +
@@ -685,6 +700,7 @@ function loadText(name, text) {
     document.getElementById('app').style.display = 'block';
     document.getElementById('fname').textContent = name;
     document.getElementById('totcyc').textContent = DB.total.toLocaleString();
+    DB.order = computeOrder();
     view = { t0: 0, t1: DB.total };
     buildSvg();
     buildOverview();
