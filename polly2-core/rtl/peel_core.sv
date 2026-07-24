@@ -724,6 +724,7 @@ module peel_core import tsp_pkg::*; #(
 
     // ---- spanner_v2 control glue ----
     reg         spv_start;            // 1-cyc: begin a tile pass
+    reg  [4:0]  spn_y0, spn_y1;       // staged-row scan clip for the started pass
     wire        spv_busy;
     wire        spv_tsp_go;           // ring go pulse (go-FIFO auto-records the tile end)
     reg         spv_rd_done;          // 1-cyc: reader freed the oldest handed tile's ring range
@@ -757,6 +758,7 @@ module peel_core import tsp_pkg::*; #(
                  .SPAN_NSLOT(SPAN_NSLOT), .SPAN_W(SPAN_AW)) u_spanner (
         .clk(clk), .reset(reset),
         .start(spv_start), .busy(spv_busy), .shade_mode(spv_shade_mode),
+        .scan_y0(spn_y0), .scan_y1(spn_y1),
         .xbase(spn_xbase), .ybase(spn_ybase), .param_base(param_base),
         .intensity_shadow(regs.fpu_shad_scale.intensity_shadow),
         .tsp_go(spv_tsp_go), .tsp_rd_done(spv_rd_done),
@@ -1150,6 +1152,13 @@ module peel_core import tsp_pkg::*; #(
     reg        ti_postonly[0:1]; // per-half: no shade, just post u_col to VO (OP-only
                                  // tile's FLUSH: color already accumulated by the OP shade)
     reg  [5:0] ti_tx [0:1], ti_ty [0:1];  // per-half tile coords (for the VO post)
+    // per-half STAGED-ROW range for the spanner's scan clip: the min/max tile rows
+    // raster stage B accepted into the half. Valid-gated shades (PEEL / PT / z_keep
+    // OP) can only have valid pixels there, so the spanner walks just those rows;
+    // shade-all handoffs pass {0,31}. Tracked in sb_y0/sb_y1 during the pass and
+    // snapshotted (then reset) at each handoff.
+    reg  [4:0] ti_y0 [0:1], ti_y1 [0:1];
+    reg  [4:0] sb_y0, sb_y1;              // running staged-row min/max (31/0 = empty)
 
     // ---- entry FIFO (object_list_parser -> iterator), depth 8 ----
     localparam integer EQ_N = 8;
@@ -1565,6 +1574,9 @@ module peel_core import tsp_pkg::*; #(
             pt_hand_p<=1'b0; pt_free_p<=1'b0; pt_stop<=1'b0;
             pt_res<='0; cb_ptres<=1'b0; ti_ptres[0]<=1'b0; ti_ptres[1]<=1'b0;
             b_fwd<=1'b0;
+            sb_y0<=5'd31; sb_y1<=5'd0;
+            ti_y0[0]<=5'd0; ti_y1[0]<=5'd31; ti_y0[1]<=5'd0; ti_y1[1]<=5'd31;
+            spn_y0<=5'd0; spn_y1<=5'd31;
             has_pt<=1'b0; has_tr<=1'b0; peel_which<=1'b0; wo_l<=1'b0;
             zk_l<=1'b0; zk_entry<=1'b0;
             b_valid<=1'b0; cb_valid<=1'b0;
@@ -1728,6 +1740,11 @@ module peel_core import tsp_pkg::*; #(
                         dt_pt[{27'd0,b_oy}*TILE_W + {27'd0,b_ox} + l] = b_which;
                     if (b_more[l]) more_to_draw <= 1'b1;
                     /* verilator lint_on WIDTH */
+                end
+                // staged-row range for the spanner scan clip
+                if (|b_we) begin
+                    if (b_oy < sb_y0) sb_y0 <= b_oy;
+                    if (b_oy > sb_y1) sb_y1 <= b_oy;
                 end
             end
             ras_inflight <= ras_inflight + (ras_in_valid ? 1 : 0) - (ras_out_valid ? 1 : 0);
@@ -1981,6 +1998,8 @@ module peel_core import tsp_pkg::*; #(
                             ti_last [htile] <= 1'b0;
                             ti_postonly[htile] <= 1'b0;
                             ti_ptres[htile] <= 1'b0;
+                            ti_y0[htile] <= 5'd0; ti_y1[htile] <= 5'd31;  // shade-all
+                            sb_y0 <= 5'd31; sb_y1 <= 5'd0;
                             ti_tx[htile] <= cur_tx; ti_ty[htile] <= cur_ty;
                             htile <= ~htile;
 `ifndef SYNTHESIS
@@ -2026,6 +2045,8 @@ module peel_core import tsp_pkg::*; #(
                         ti_mode [htile] <= 1'b0;             // OP (background)
                         ti_last [htile] <= 1'b1;             // final shade -> post to VO
                         ti_ptres[htile] <= 1'b0;
+                        ti_y0[htile] <= 5'd0; ti_y1[htile] <= 5'd31;      // shade-all
+                        sb_y0 <= 5'd31; sb_y1 <= 5'd0;
                         ti_postonly[htile] <= 1'b0;
                         ti_tx[htile] <= cur_tx; ti_ty[htile] <= cur_ty;
                         htile <= ~htile;
@@ -2171,6 +2192,8 @@ module peel_core import tsp_pkg::*; #(
                     ti_last [htile] <= 1'b0;
                     ti_postonly[htile] <= 1'b0;
                     ti_ptres[htile] <= 1'b1;
+                    ti_y0[htile] <= sb_y0; ti_y1[htile] <= sb_y1;  // staged rows only
+                    sb_y0 <= 5'd31; sb_y1 <= 5'd0;
                     ti_tx[htile] <= cur_tx; ti_ty[htile] <= cur_ty;
                     htile <= ~htile;
                     pt_hand_p <= 1'b1;
@@ -2198,6 +2221,8 @@ module peel_core import tsp_pkg::*; #(
                         ti_mode [htile] <= 1'b1;                 // PEEL
                         ti_last [htile] <= !more_to_draw && wo_l;
                         ti_ptres[htile] <= 1'b0;
+                        ti_y0[htile] <= sb_y0; ti_y1[htile] <= sb_y1;  // staged rows only
+                        sb_y0 <= 5'd31; sb_y1 <= 5'd0;
                         ti_postonly[htile] <= 1'b0;   // this is a real shade, NOT a post-only
                                                       // (must clear a stale post-only left by a
                                                       // prior tile's writeout on this half)
@@ -2241,6 +2266,10 @@ module peel_core import tsp_pkg::*; #(
                     ti_mode [htile] <= zk_entry;                 // OP (shade-all vs valid-gated)
                     ti_last [htile] <= 1'b0;
                     ti_ptres[htile] <= 1'b0;
+                    // z_keep OP shades only its staged triangles; plain OP shades all
+                    ti_y0[htile] <= zk_entry ? sb_y0 : 5'd0;
+                    ti_y1[htile] <= zk_entry ? sb_y1 : 5'd31;
+                    sb_y0 <= 5'd31; sb_y1 <= 5'd0;
                     ti_postonly[htile] <= 1'b0;   // real shade, NOT a post-only (clear stale)
                     ti_tx   [htile] <= cur_tx; ti_ty[htile] <= cur_ty;
                     htile <= ~htile;
@@ -2453,6 +2482,7 @@ module peel_core import tsp_pkg::*; #(
                     // and pulse start. tsp_tag stays put during the run (the 4-wide read and
                     // the span write both reference it).
                     spn_tx <= ti_tx[tsp_tag]; spn_ty <= ti_ty[tsp_tag];
+                    spn_y0 <= ti_y0[tsp_tag]; spn_y1 <= ti_y1[tsp_tag];
                     spn_xbase <= i2f({4'd0, ti_tx[tsp_tag]} * 16'd32);
                     spn_ybase <= i2f({4'd0, ti_ty[tsp_tag]} * 16'd32);
                     // POLARITY: peel_core ti_mode is 0=OP,1=PEEL; spanner_v2 shade_mode is

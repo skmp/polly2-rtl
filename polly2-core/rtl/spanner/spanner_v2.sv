@@ -48,6 +48,13 @@ module spanner_v2 import tsp_pkg::*; #(
     input                       start,       // 1-cyc: begin resolving one tile pass
     output reg                  busy,         // start .. SPANGEN done && setup drained
     input                       shade_mode,  // 1=OP (shade all px); 0=PEEL (gate on valid)
+    // STAGED-ROW CLIP: walk only tile rows scan_y0..scan_y1 (inclusive). The ISP
+    // side tracks the pass's staged min/max rows at raster stage B and hands them
+    // with the ti_* metadata; valid pixels can only exist inside that range, so
+    // the 256-group scan collapses to the staged rows. Shade-all (OP) passes are
+    // handed {0,31}. y0 > y1 = nothing staged: no walk at all.
+    input      [4:0]            scan_y0,
+    input      [4:0]            scan_y1,
     input      [31:0]           xbase, ybase,// this tile's origin (for tsp_setup_min)
     input      [26:0]           param_base,
     input                       intensity_shadow, // regs.fpu_shad_scale.intensity_shadow
@@ -292,7 +299,8 @@ module spanner_v2 import tsp_pkg::*; #(
 
     // ---- COAL advance: sg_x steps by run_rep; group exhausted when it crosses the group ----
     wire [SLOTW-1:0] sg_x_next   = sg_x + { {(SLOTW-3){1'b0}}, run_rep };
-    wire walk_last              = (sg_x_next == '0);          // wrapped past pixel 1023
+    wire walk_last              = (sg_x_next == '0)           // wrapped past pixel 1023
+                               || (sg_x_next[SLOTW-1:5] > scan_y1);  // crossed the staged clip
     // COAL produces a descriptor this cycle iff walking, the group read has landed
     // (g_ready), and the pipeline isn't frozen.
     wire coal_fires = sg_active && g_ready && !pipe_stall;
@@ -529,7 +537,9 @@ module spanner_v2 import tsp_pkg::*; #(
                     dd_clearing <= 1'b1; dd_clr_addr <= '0;   // SPANGEN idle until clear done
                 end else begin
                     cur_gen <= cur_gen + 1'b1;
-                    sg_x <= '0; sg_active <= 1'b1; t_valid <= 1'b0; g_ready <= 1'b0;
+                    sg_x <= {scan_y0, 5'd0};                       // start at the staged clip
+                    sg_active <= (scan_y0 <= scan_y1);            // empty clip: no walk
+                    t_valid <= 1'b0; g_ready <= 1'b0;
                 end
             end
 
@@ -540,7 +550,9 @@ module spanner_v2 import tsp_pkg::*; #(
             if (dd_clearing) begin
                 if (dd_clr_addr == NSLOT-1) begin
                     dd_clearing <= 1'b0; cur_gen <= {{(GEN_W-1){1'b0}}, 1'b1};   // gen=1
-                    sg_x <= '0; sg_active <= 1'b1; t_valid <= 1'b0; g_ready <= 1'b0;
+                    sg_x <= {scan_y0, 5'd0};                       // start at the staged clip
+                    sg_active <= (scan_y0 <= scan_y1);            // empty clip: no walk
+                    t_valid <= 1'b0; g_ready <= 1'b0;
                 end else dd_clr_addr <= dd_clr_addr + 1'b1;
             end
 
