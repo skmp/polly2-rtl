@@ -4,18 +4,19 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>polly2 occupancy viewer</title>
-<!-- social embeds (x/twitter, facebook, discord). Crawlers resolve the relative
-     image against the page URL when hosted; keep occview-diagram.png beside this file. -->
+<!-- social embeds (x/twitter, facebook, discord). Discord/FB require ABSOLUTE
+     image URLs; hosted at https://drk.emudev.org/occview/ with the PNG beside this file. -->
 <meta property="og:type" content="website"/>
+<meta property="og:url" content="https://drk.emudev.org/occview/"/>
 <meta property="og:title" content="polly2 occupancy viewer"/>
 <meta property="og:description" content="Seekable per-clock pipeline occupancy visualizer for the polly2 Dreamcast PVR core: per-unit underflow/busy/overflow tracks + live dataflow diagram."/>
-<meta property="og:image" content="occview-diagram.png"/>
+<meta property="og:image" content="https://drk.emudev.org/occview/occview-diagram.png"/>
 <meta property="og:image:width" content="970"/>
 <meta property="og:image:height" content="816"/>
 <meta name="twitter:card" content="summary_large_image"/>
 <meta name="twitter:title" content="polly2 occupancy viewer"/>
 <meta name="twitter:description" content="Seekable per-clock pipeline occupancy visualizer for the polly2 Dreamcast PVR core."/>
-<meta name="twitter:image" content="occview-diagram.png"/>
+<meta name="twitter:image" content="https://drk.emudev.org/occview/occview-diagram.png"/>
 <style>
   :root {
     --c-under: #e2b93d;   /* underflow - waiting for data */
