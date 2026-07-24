@@ -2740,6 +2740,12 @@ module peel_core import tsp_pkg::*; #(
     wire [1:0] oc_mdq     = md_full ? OC_O : md_empty ? OC_U : OC_B;
     wire [1:0] oc_reader  = (tsp_st == R_RUN)  ? (pp_stall ? OC_O : OC_B)
                           : (tsp_st == R_POST && col_full[tsp_col]) ? OC_O
+                          // R_IDLE with a real pass pending but the blend target half
+                          // still held by VO: blocked on the u_col credit (this stall
+                          // was invisible in the old counters - they only saw R_POST).
+                          : (tsp_st == R_IDLE && !md_empty
+                             && !md_post[md_rp[MD_AW-1:0]] && md_cnt[md_rp[MD_AW-1:0]] != '0
+                             && col_full[tsp_col]) ? OC_O
                           : (tsp_st != R_IDLE) ? OC_B : OC_U;
     wire [1:0] oc_shade   = pp_stall ? OC_O
                           : (pp_in_valid || pp_out_valid || u_shade.iv_ov) ? OC_B : OC_U;
@@ -2759,7 +2765,7 @@ module peel_core import tsp_pkg::*; #(
         oc_sfetch, oc_spanner, oc_depth, oc_ras, oc_pq, oc_setup, oc_sortc, oc_fq,
         oc_iter, oc_eq, oc_ol, oc_region };
 
-    localparam integer OCC_NV = 24;
+    localparam integer OCC_NV = 26;
     function automatic integer occ_val(input integer idx);
         case (idx)
             0:  occ_val = int'(st);
@@ -2786,6 +2792,14 @@ module peel_core import tsp_pkg::*; #(
             21: occ_val = int'(col_full);
             22: occ_val = int'(spn);
             23: occ_val = int'(vst != VO_IDLE);   // collapsed: RD/WR toggles per pixel
+            // spanner emit-stall cause bitmask: which resource blocks SPANGEN.
+            // bit0 = setup-request FIFO full (blocked on own fetch+setup throughput)
+            // bit1 = triangle_setups ring full (waiting on reader frees)
+            // bit2 = span ring full (waiting on reader drain)
+            24: occ_val = int'({u_spanner.emit_stall_span_ring,
+                                u_spanner.emit_stall_ring,
+                                u_spanner.emit_stall_fifo});
+            25: occ_val = int'(u_spanner.sf_wp - u_spanner.sf_rp) & 15;  // setup-req FIFO depth
             default: occ_val = 0;
         endcase
     endfunction
@@ -2813,7 +2827,7 @@ module peel_core import tsp_pkg::*; #(
             $fwrite(occ_fd, "V 9 spn_tx\nV 10 spn_ty\nV 11 mdq_n\nV 12 spans_inflight\n");
             $fwrite(occ_fd, "V 13 reader_st\nV 14 vo_tx\nV 15 vo_ty\nV 16 ddr_q\nV 17 ddr_owner\n");
             $fwrite(occ_fd, "V 18 shade_fifo\nV 19 halves\nV 20 ti_ready\nV 21 col_full\n");
-            $fwrite(occ_fd, "V 22 spanner_st\nV 23 vo_st\n");
+            $fwrite(occ_fd, "V 22 spanner_st\nV 23 vo_st\nV 24 spn_stall\nV 25 sf_n\n");
             $fwrite(occ_fd, "E 0 0:IDLE,1:RA,2:STATE,4:OL_RUN,9:RA_ACK,10:DONE,11:DRAIN,28:PEEL_INIT,29:PEEL_BUF,32:OP_DONE,34:CLEAR_WR,35:PEEL_BUF_RUN,36:ZK_INV\n");
             $fwrite(occ_fd, "E 5 0:IDLE,1:POP,2:RAS,3:DRAIN,4:CORNER\n");
             $fwrite(occ_fd, "E 13 0:IDLE,1:RUN,3:DRAIN,4:POST\n");

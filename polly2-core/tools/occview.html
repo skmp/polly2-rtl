@@ -357,14 +357,14 @@ function drawOverview() {
 const LAYOUT = {
   w: 640, h: 560,
   blocks: [
-    // geometry row
-    { id:'REGION',  u:0,  x: 10, y: 26, w: 84, h: 34, label:'region\narray' },
-    { id:'OLWALK',  u:1,  x:114, y: 26, w: 84, h: 34, label:'OL walker' },
-    { id:'EQ',      u:2,  x:218, y: 26, w: 54, h: 34, label:'EQ' },
-    { id:'ITER',    u:3,  x:292, y: 26, w: 84, h: 34, label:'iterator/\nparam fetch' },
-    { id:'FQ',      u:4,  x:396, y: 26, w: 54, h: 34, label:'FQ' },
-    { id:'SETUP',   u:6,  x:470, y: 26, w: 84, h: 34, label:'ISP setup' },
-    { id:'SORTC',   u:5,  x:470, y: 78, w: 84, h: 26, label:'sort $' },
+    // geometry row (sort$ inline: it gates the FQ head before setup issue)
+    { id:'REGION',  u:0,  x: 10, y: 26, w: 80, h: 34, label:'region\narray' },
+    { id:'OLWALK',  u:1,  x:100, y: 26, w: 76, h: 34, label:'OL walker' },
+    { id:'EQ',      u:2,  x:186, y: 26, w: 44, h: 34, label:'EQ' },
+    { id:'ITER',    u:3,  x:240, y: 26, w: 84, h: 34, label:'iterator/\nparam fetch' },
+    { id:'FQ',      u:4,  x:334, y: 26, w: 44, h: 34, label:'FQ' },
+    { id:'SORTC',   u:5,  x:388, y: 26, w: 64, h: 34, label:'sort $' },
+    { id:'SETUP',   u:6,  x:462, y: 26, w: 84, h: 34, label:'ISP setup' },
     { id:'PQ',      u:7,  x: 10, y:132, w: 54, h: 34, label:'PQ' },
     { id:'RASTER',  u:8,  x: 84, y:132, w: 90, h: 34, label:'raster' },
     { id:'DEPTH',   u:9,  x:194, y:132, w:110, h: 34, label:'depth/tag\nbuffers' },
@@ -384,10 +384,11 @@ const LAYOUT = {
     { id:'DDR',     u:19, x: 10, y:436, w:380, h: 40, label:'DDR channel (64-bit, 4 outstanding)' },
   ],
   arrows: [
-    ['REGION','OLWALK'], ['OLWALK','EQ'], ['EQ','ITER'], ['ITER','FQ'], ['FQ','SETUP'],
-    ['SETUP','SORTC','v'], ['SETUP','PQ','wrap'], ['PQ','RASTER'], ['RASTER','DEPTH'],
+    ['REGION','OLWALK'], ['OLWALK','EQ'], ['EQ','ITER'], ['ITER','FQ'],
+    ['FQ','SORTC'], ['SORTC','SETUP'], ['DEPTH','SORTC','dash'],
+    ['SETUP','PQ','wrap'], ['PQ','RASTER'], ['RASTER','DEPTH'],
     ['DEPTH','SPANNER','wrap'],
-    ['SPANNER','SFETCH','v'], ['SPANNER','SSETUP','v'],
+    ['SPANNER','SFETCH','vdown'], ['SFETCH','SSETUP'], ['SSETUP','SPANNER','vup'],
     ['SPANNER','MDQ'], ['MDQ','READER'], ['READER','SHADE'], ['SHADE','BLEND'],
     ['SHADE','TEX','v'], ['BLEND','COLBUF'], ['COLBUF','VO','v'], ['VO','FB','v'],
     ['DDR','REGION','mem'], ['DDR','OLWALK','mem'], ['DDR','ITER','mem'],
@@ -420,6 +421,14 @@ function buildSvg() {
     } else if (kind === 'wrap') {       // end of a row -> start of the next row
       const midY = (A.y + A.h + B.y) / 2;
       d = `M${A.x+A.w/2} ${A.y+A.h} L${A.x+A.w/2} ${midY} L${B.x+B.w/2} ${midY} L${B.x+B.w/2} ${B.y}`;
+    } else if (kind === 'vdown') {         // straight down at B's column (A wider than B)
+      d = `M${B.x+B.w/2} ${A.y+A.h} L${B.x+B.w/2} ${B.y}`;
+    } else if (kind === 'vup') {           // straight up at A's column (B wider than A)
+      d = `M${A.x+A.w/2} ${A.y} L${A.x+A.w/2} ${B.y+B.h}`;
+    } else if (kind === 'dash') {          // side-channel (demote writes etc):
+      // elbow route - out of A's right edge, across, then up into B's bottom edge
+      d = `M${A.x+A.w} ${A.y+A.h/2} L${B.x+B.w/2} ${A.y+A.h/2} L${B.x+B.w/2} ${B.y+B.h}`;
+      p.setAttribute('stroke-dasharray', '3 3');
     } else if (kind === 'mem') {
       const midY = (A.y + B.y + B.h) / 2;
       d = `M${B.x+B.w/2+8} ${B.y+B.h} L${B.x+B.w/2+8} ${A.y}`;
@@ -504,7 +513,13 @@ function updateSvg() {
   const depthOp = { CLEAR_WR:'CLEAR', PEEL_BUF_RUN:'PB-SWAP', ZK_INV:'ZK-INV',
                     PEEL_BUF:'SWAP-WAIT' }[fmtVal(0)] || '';
   ann('DEPTH',   `${depthOp} ti_ready=${fmtVal(20)}`);
-  ann('SPANNER', `${fmtVal(22)}  tile(${fmtVal(9)},${fmtVal(10)})`);
+  const spnStall = valAtCycle(cursor, 24);
+  const stallTxt = spnStall > 0
+    ? ' ⛔' + [spnStall & 1 ? 'SF-FIFO' : '', spnStall & 2 ? 'TRI-RING' : '',
+                   spnStall & 4 ? 'SPAN-RING' : ''].filter(Boolean).join('+')
+    : '';
+  ann('SPANNER', `${fmtVal(22)}  tile(${fmtVal(9)},${fmtVal(10)})${stallTxt}`);
+  ann('SFETCH',  `sf=${fmtVal(25)}/8`);
   ann('MDQ',     `${fmtVal(11)}/8 sp=${fmtVal(12)}`);
   ann('READER',  `${fmtVal(13)}`);
   ann('SHADE',   `fifo=${fmtVal(18)}`);
