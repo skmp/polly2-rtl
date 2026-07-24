@@ -203,9 +203,8 @@ frontendtsplp: | $(BUILD)
 # pass "<dir> <first> <count>" (default: spanner_test_vectors 0 8).
 spannerv2: | $(BUILD)
 	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ --public-flat-rw \
-	  --top-module spanner_v2_tb_top \
-	  $(TSP_RTL) tb/spanner_v2_tb_top.sv tb/sim_ddr_fb.sv \
-	  $(wildcard rtl/isp_min/*.sv) \
+	  --top-module spanner_v2_tb_top $(RTL_INC) \
+	  $(TSP_PKG) $(RTL_EXTRA) tb/spanner_v2_tb_top.sv tb/sim_ddr_fb.sv \
 	  $(CWD)/tb/spanner_v2_tb.cpp --Mdir $(BUILD)/obj_spannerv2 -o tb
 	./$(BUILD)/obj_spannerv2/tb $(ARGS)
 
@@ -258,9 +257,9 @@ mul24c9sppro: | $(BUILD)
 
 # reg_file unit test: PVR scalar regs (generated) + FOG/PAL M10K tables.
 regfile: | $(BUILD)
-	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ --public-flat-rw -Irtl/tsp/gen \
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ --public-flat-rw -Irtl/gen \
 	  --top-module reg_file_tb_top \
-	  $(TSP)/tsp_pkg.sv tb/reg_file_tb_top.sv $(TSP)/reg_file.sv \
+	  $(TSP_PKG) tb/reg_file_tb_top.sv rtl/buffers/reg_file.sv \
 	  $(CWD)/tb/reg_file_tb.cpp --Mdir $(BUILD)/obj_regfile -o tb
 	./$(BUILD)/obj_regfile/tb
 
