@@ -102,16 +102,19 @@ module simplex_pvr_top import tsp_pkg::*; (
     assign TEST_SELECT = regs.test_select;
 
     // ==================================================================
-    // DDR READ master: peel_core ddr_req/ddr_resp  <->  DDRAM_* (Avalon read).
-    // peel_core issues one 64-bit-word-addressed burst read at a time and holds
-    // ddr_req.rd until accepted. Avalon: assert read+address+burstcount until
-    // !waitrequest (accepted), then `burst` readdatavalid beats stream back.
+    // DDR READ master: peel_core ddr_req/ddr_resp  <->  DDRAM_* (Avalon read),
+    // MULTI-OUTSTANDING: the core's arbiter pipelines up to 4 bursts (its order
+    // FIFO routes returned beats by issue order, which the bridge preserves), so
+    // this master accepts a new command whenever the bridge takes it and the
+    // outstanding-BEAT budget allows, while earlier bursts still stream back.
+    // Avalon: assert read+address+burstcount until !waitrequest (accepted), then
+    // `burst` readdatavalid beats stream back, in command order.
     // ==================================================================
-    reg        rd_inflight = 1'b0;  // a read has been accepted, beats still returning
-    reg [7:0]  rd_left     = 8'd0;  // beats remaining to return
-    reg        rd_flush    = 1'b0;  // burst orphaned by a reset: swallow its beats
-    // issue while the core requests, no read in flight, and not in reset
-    wire       rd_issue = ddr_req.rd && !rd_inflight && !reset;
+    localparam integer RD_MAX_BEATS = 64;   // outstanding-beat budget (4x8-beat wc)
+    reg [9:0]  rd_beats   = 10'd0;  // beats accepted but not yet returned
+    reg        rd_flush   = 1'b0;   // bursts orphaned by a reset: swallow their beats
+    wire       rd_cap     = ({2'd0, rd_beats} + {4'd0, ddr_req.burst}) <= 12'(RD_MAX_BEATS);
+    wire       rd_issue   = ddr_req.rd && !reset && !rd_flush && rd_cap;
     assign DDRAM_RD       = rd_issue;
     // peel_core tags every read address as {4'b0011, word[24:0]} - the DC 64-bit
     // VRAM CS region marker (region/objlist/param/tex caches). The physical 64-bit
@@ -121,40 +124,32 @@ module simplex_pvr_top import tsp_pkg::*; (
     assign DDRAM_ADDR     = {4'b0000, ddr_req.addr[24:0]};
     assign DDRAM_BURSTCNT = ddr_req.burst;
 
-    // core-facing response: busy while a read is accepted-and-returning, or while
-    // our issue is still waiting on the bridge (waitrequest). dready is GATED on
-    // rd_inflight: a readdatavalid pulse with no read outstanding (stray/late beat
-    // from the DDR3 bridge) must never reach the core's arbiter - an uncounted
-    // beat desyncs its d_beats bookkeeping and hangs the burst clients
-    // (record_fetcher stuck mid-burst -> spanner_v2 busy=1 deadlock).
-    assign ddr_resp.busy   = rd_inflight || (rd_issue && DDRAM_BUSY);
+    wire       rd_accept  = rd_issue && !DDRAM_BUSY;
+    wire       rd_beat    = DDRAM_DOUT_READY && (rd_beats != 10'd0);
+
+    // core-facing response: busy = cannot ACCEPT a command this cycle (bridge
+    // waitrequest, budget exhausted, or flushing). dready is GATED on rd_beats:
+    // a readdatavalid pulse with nothing outstanding (stray/late beat from the
+    // DDR3 bridge) must never reach the core's arbiter - an unexpected beat
+    // desyncs its order-FIFO bookkeeping and hangs the burst clients.
+    assign ddr_resp.busy   = DDRAM_BUSY || !rd_cap || rd_flush || reset;
     assign ddr_resp.dout   = DDRAM_DOUT;
-    assign ddr_resp.dready = DDRAM_DOUT_READY && rd_inflight && !rd_flush;
+    assign ddr_resp.dready = rd_beat && !rd_flush;
 
-    // rd_inflight/rd_left are deliberately NOT cleared by reset: a burst the
-    // bridge accepted before the reset still returns ALL its beats afterwards
-    // (the HPS SDRAM controller executes accepted commands regardless of
-    // fabric state). Keep counting so those stale beats are consumed here
-    // instead of miscounting against the next render's first burst, which
-    // would shift every later read until the fabric is reprogrammed. A reset
-    // with a burst in flight sets rd_flush: the remaining beats are counted
-    // but dready is suppressed, so the freshly-reset core's arbiter never
-    // sees a beat it didn't request (an uncounted beat desyncs its d_beats
-    // bookkeeping - see the note above). New issues stay blocked meanwhile
-    // (ddr_resp.busy = rd_inflight, and rd_issue is gated on !reset).
+    // rd_beats is deliberately NOT cleared by reset: bursts the bridge accepted
+    // before the reset still return ALL their beats afterwards (the HPS SDRAM
+    // controller executes accepted commands regardless of fabric state). Keep
+    // counting so those stale beats are consumed here instead of miscounting
+    // against the next render's first burst. A reset with beats in flight sets
+    // rd_flush: the remaining beats are counted but dready is suppressed, so the
+    // freshly-reset core's arbiter never sees a beat it didn't request. New
+    // issues stay blocked meanwhile (busy includes rd_flush/reset).
     always @(posedge clk) begin
-        if (reset && rd_inflight) rd_flush <= 1'b1;
-        else if (!rd_inflight)    rd_flush <= 1'b0;
+        if (reset && rd_beats != 10'd0) rd_flush <= 1'b1;
+        else if (rd_beats == 10'd0)     rd_flush <= 1'b0;
 
-        if (!rd_inflight) begin
-            if (rd_issue && !DDRAM_BUSY) begin  // accepted this cycle
-                rd_inflight <= 1'b1;
-                rd_left     <= ddr_req.burst;
-            end
-        end else if (DDRAM_DOUT_READY) begin
-            if (rd_left <= 8'd1) rd_inflight <= 1'b0;
-            rd_left <= rd_left - 8'd1;
-        end
+        rd_beats <= rd_beats + (rd_accept ? {2'd0, ddr_req.burst} : 10'd0)
+                             - (rd_beat   ? 10'd1                 : 10'd0);
     end
 
     // ==================================================================
