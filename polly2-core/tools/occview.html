@@ -4,6 +4,18 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>polly2 occupancy viewer</title>
+<!-- social embeds (x/twitter, facebook, discord). Crawlers resolve the relative
+     image against the page URL when hosted; keep occview-diagram.png beside this file. -->
+<meta property="og:type" content="website"/>
+<meta property="og:title" content="polly2 occupancy viewer"/>
+<meta property="og:description" content="Seekable per-clock pipeline occupancy visualizer for the polly2 Dreamcast PVR core: per-unit underflow/busy/overflow tracks + live dataflow diagram."/>
+<meta property="og:image" content="occview-diagram.png"/>
+<meta property="og:image:width" content="970"/>
+<meta property="og:image:height" content="816"/>
+<meta name="twitter:card" content="summary_large_image"/>
+<meta name="twitter:title" content="polly2 occupancy viewer"/>
+<meta name="twitter:description" content="Seekable per-clock pipeline occupancy visualizer for the polly2 Dreamcast PVR core."/>
+<meta name="twitter:image" content="occview-diagram.png"/>
 <style>
   :root {
     --c-under: #e2b93d;   /* underflow - waiting for data */
@@ -645,27 +657,45 @@ document.getElementById('file-input').addEventListener('change', e => {
   if (e.target.files.length) loadFile(e.target.files[0]);
 });
 
-function loadFile(file) {
+function loadText(name, text) {
   const prog = document.getElementById('progress');
   prog.style.display = 'flex';
+  // reset DB for re-drop
+  DB.vCyc = []; DB.vVal = []; DB.marks = []; DB.total = 0;
+  document.getElementById('svgbox').innerHTML = '';
+  parseLog(text, () => {
+    prog.style.display = 'none';
+    document.getElementById('drop-wrap').style.display = 'none';
+    document.getElementById('app').style.display = 'block';
+    document.getElementById('fname').textContent = name;
+    document.getElementById('totcyc').textContent = DB.total.toLocaleString();
+    view = { t0: 0, t1: DB.total };
+    buildSvg();
+    buildOverview();
+    setCursor(0, false);
+  }, f => document.getElementById('pbar').style.width = (f*100).toFixed(1) + '%');
+}
+function loadFile(file) {
   const rd = new FileReader();
-  rd.onload = ev => {
-    // reset DB for re-drop
-    DB.vCyc = []; DB.vVal = []; DB.marks = []; DB.total = 0;
-    document.getElementById('svgbox').innerHTML = '';
-    parseLog(ev.target.result, () => {
-      prog.style.display = 'none';
-      document.getElementById('drop-wrap').style.display = 'none';
-      document.getElementById('app').style.display = 'block';
-      document.getElementById('fname').textContent = file.name;
-      document.getElementById('totcyc').textContent = DB.total.toLocaleString();
-      view = { t0: 0, t1: DB.total };
-      buildSvg();
-      buildOverview();
-      setCursor(0, false);
-    }, f => document.getElementById('pbar').style.width = (f*100).toFixed(1) + '%');
-  };
+  rd.onload = ev => loadText(file.name, ev.target.result);
   rd.readAsText(file);
+}
+
+// ?logfile=relpath : auto-fetch a log relative to this page's URL (needs http(s);
+// file:// pages can't fetch - serve the dir, e.g. `python3 -m http.server`).
+{
+  const lf = new URLSearchParams(location.search).get('logfile');
+  if (lf) {
+    document.getElementById('progress').style.display = 'flex';
+    fetch(lf)
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.text(); })
+      .then(text => loadText(lf, text))
+      .catch(err => {
+        document.getElementById('progress').style.display = 'none';
+        alert(`failed to fetch "${lf}": ${err.message}` +
+              (location.protocol === 'file:' ? '\n(file:// cannot fetch - serve the directory over http)' : ''));
+      });
+  }
 }
 </script>
 </body>
