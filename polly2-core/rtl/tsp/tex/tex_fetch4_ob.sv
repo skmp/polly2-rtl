@@ -48,13 +48,20 @@ module tex_fetch4_ob import tsp_pkg::*; #(
     output ddr_rd_req_t  ddr_req  [0:1],
     input  ddr_rd_resp_t ddr_resp [0:1]
 );
-    // shared 4-read-port caches (data + VQ)
+    // shared 4-read-port caches (data + VQ); no lookahead queue here - probes tied off
     cache_req_t   tc_req [0:3], vq_req [0:3];
     cache_resp_t  tc_resp[0:3], vq_resp[0:3];
+    wire [28:0] nop_waddr [0:3];
+    assign nop_waddr[0] = 29'd0; assign nop_waddr[1] = 29'd0;
+    assign nop_waddr[2] = 29'd0; assign nop_waddr[3] = 29'd0;
     tex_cache_4p_1c u_tc4 (.clk(clk),.reset(reset),.flush(flush),
-        .creq(tc_req),.cresp(tc_resp),.dreq(ddr_req[0]),.dresp(ddr_resp[0]));
+        .creq(tc_req),.cresp(tc_resp),
+        .probe_valid(1'b0),.probe_mask(4'd0),.probe_waddr(nop_waddr),
+        .dreq(ddr_req[0]),.dresp(ddr_resp[0]));
     tex_cache_4p_1c u_vq4 (.clk(clk),.reset(reset),.flush(flush),
-        .creq(vq_req),.cresp(vq_resp),.dreq(ddr_req[1]),.dresp(ddr_resp[1]));
+        .creq(vq_req),.cresp(vq_resp),
+        .probe_valid(1'b0),.probe_mask(4'd0),.probe_waddr(nop_waddr),
+        .dreq(ddr_req[1]),.dresp(ddr_resp[1]));
 
     // per-corner data-cache word address + VQ byte lane (combinational off inputs)
     wire [28:0] tc_waddr [0:3];

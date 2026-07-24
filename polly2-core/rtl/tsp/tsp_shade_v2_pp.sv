@@ -287,7 +287,11 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
     // ==============================================================
     localparam integer PLW = 32+32+32+1+1+IDW;   // base, ofs, tsp, ptx, pof, id
     wire [PLW-1:0] pl_in = { iv_base, iv_ofs, iv_tsp, iv_ptx, iv_pof, iv_id };
-    localparam integer PLD = 64, PLAW = 6;
+    // 128 deep: with the queued tex_fetch4_q the legit in-flight window is no longer
+    // the ~5 pixels of the lockstep fetch - pl_room's PLD-4 cap was the binding limit
+    // on the fetch queues (pixq pinned at 60 in the daytona traces). 128 moves the
+    // cap past the fetch's own capacity so ITS in_ready governs.
+    localparam integer PLD = 128, PLAW = 7;
     reg  [PLW-1:0] plf [0:PLD-1];
     reg  [PLAW-1:0] pl_h, pl_t; reg [PLAW:0] pl_cnt;
     wire pl_push = tu_issue;                    // push on front issue (== tex_unit accept)
@@ -302,6 +306,17 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
 `ifndef SYNTHESIS
     reg dl_dfired = 1'b0, dl_xfired = 1'b0, dl_hw_fired = 1'b0;   // one-shot flags
     integer dl_npush = 0, dl_npop = 0;        // cumulative push/pop counters
+    // PL<->TEXEL PAIRING CROSS-CHECK (always on): the k-th popped payload must carry
+    // the SAME id tex_unit echoes with the k-th result (tu_oid rode THROUGH the fetch
+    // with the pixel; the pl FIFO id took the parallel path). A single dropped or
+    // duplicated tex_unit out_valid desyncs every later pixel - wrong texel paired
+    // with wrong base/ofs/tsp/id, wrong blend target. Catch the FIRST slip loudly.
+    integer dl_iderr = 0;
+    always @(posedge clk) if (!reset && pl_pop && pl_out[IDW-1:0] != tu_oid && dl_iderr < 10) begin
+        dl_iderr <= dl_iderr + 1;
+        $display("[tsp_shade_v2_pp] PL/TEXEL ID DESYNC #%0d: pl_id=%0d tu_oid=%0d pl_cnt=%0d h=%0d t=%0d",
+                 dl_iderr, pl_out[IDW-1:0], tu_oid, pl_cnt, pl_h, pl_t);
+    end
 `endif
     always @(posedge clk) begin
         if (reset) begin pl_h<=0; pl_t<=0; pl_cnt<=0; end
@@ -324,10 +339,10 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
             // here >> pops, tu_issue is pulsing more than tex_unit accepts (double-push).
             dl_npush <= dl_npush + (pl_push?1:0);
             dl_npop  <= dl_npop  + (pl_pop?1:0);
-            if (dl_en && pl_cnt >= 7'd48 && (pl_push || pl_pop))
+            if (dl_en && pl_cnt >= (PLD-16) && (pl_push || pl_pop))
                 $display("[shade FIFO] t=%0t cnt=%0d push=%b pop=%b (Spush=%0d Spop=%0d) | tu_issue=%b tu_ready=%b tu_ov=%b iv_ov=%b stall=%b en=%b room=%b",
                          $time, pl_cnt, pl_push, pl_pop, dl_npush, dl_npop, tu_issue, tu_ready, tu_ov, iv_ov, stall, en, pl_room);
-            if (dl_en && !dl_dfired && pl_cnt >= 7'd64) begin
+            if (dl_en && !dl_dfired && pl_cnt >= PLD) begin
                 dl_dfired <= 1'b1;
                 $display("[tsp_shade_v2_pp] FIFO OVERFLOWED: cnt=%0d  totalPush=%0d totalPop=%0d (diff=%0d)",
                          pl_cnt, dl_npush, dl_npop, dl_npush - dl_npop);
@@ -340,13 +355,13 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
                 $display("[tsp_shade_v2_pp] X POISON @t=%0t: pl_push=%b pl_pop=%b pl_cnt=%b  (tu_ov=%b tu_issue=%b) <- tex_unit out_valid went X",
                          $time, pl_push, pl_pop, pl_cnt, tu_ov, tu_issue);
             end
-            // RAW HIGH-WATER (NO gate at all - not even dl_en): announce the first time pl_cnt
-            // in THIS block ever exceeds 40. If this never prints but the dump shows cnt=97,
-            // then the dump's pl_cnt is a DIFFERENT signal than this block updates (aliasing).
-            if (pl_cnt > 7'd40 && !dl_hw_fired) begin
+            // RAW HIGH-WATER (NO gate at all - not even dl_en): announce the first time
+            // pl_cnt climbs to within 8 of the pl_room cap (PLD-4) - i.e. the FIFO is
+            // effectively the binding limit on tex in-flight this run. One-shot.
+            if (pl_cnt > (PLD-8) && !dl_hw_fired) begin
                 dl_hw_fired <= 1'b1;
-                $display("[shade RAW] FIFO cnt exceeded 40: pl_cnt=%0d h=%0d t=%0d push=%b pop=%b t=%0t",
-                         pl_cnt, pl_h, pl_t, pl_push, pl_pop, $time);
+                $display("[shade RAW] FIFO cnt exceeded %0d: pl_cnt=%0d h=%0d t=%0d push=%b pop=%b t=%0t",
+                         PLD-8, pl_cnt, pl_h, pl_t, pl_push, pl_pop, $time);
             end
 `endif
         end

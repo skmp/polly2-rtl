@@ -37,7 +37,7 @@ CWD  := $(shell pwd)
 .PHONY: shade-drop raster-topleft clean test tex tex-addr tex-uv tex-decode tex-filter tex-combiner \
         oparse region regfile regen sortcache itquad itskip taginvw dense_span_buffer \
         frontendtsplp spannerv2 mulc9 mul16sppro add24sppro mulc9sppro add3sppro \
-        mul24sppro mul24c9sppro
+        mul24sppro mul24c9sppro texfetchq
 
 # TSP module files (package first). ISP shared FP units come from rtl/isp_min.
 TSP_RTL = rtl/tsp/tsp_pkg.sv $(filter-out rtl/tsp/tsp_pkg.sv,$(wildcard rtl/tsp/*.sv))
@@ -177,6 +177,17 @@ dense_span_buffer: | $(BUILD)
 # compare (isp_depth_cmp_lp) with dual depth/tag buffers + a per-pixel valid bit,
 # re-running the object list per peel pass, and blending at the end of the TSP
 # pipe -> shaded_lp_<name>.bmp.
+# ---- tex_fetch4_q (queued/coalescing texel fetch) vs tex_fetch4_ob golden ----
+# Same pixel stream through both units over a shared VRAM with adversarial
+# (randomized) DDR latency; in-order output compare + software model. Covers
+# dedup/row-packing, miss elasticity, direct-mapped aliasing, VQ, flush.
+texfetchq: | $(BUILD)
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ --public-flat-rw \
+	  --top-module tex_fetch4_q_tb_top $(RTL_INC) \
+	  $(TSP_PKG) $(RTL_EXTRA) tb/tex_fetch4_q_tb_top.sv \
+	  $(CWD)/tb/tex_fetch4_q_tb.cpp --Mdir $(BUILD)/obj_texfetchq -o tb
+	./$(BUILD)/obj_texfetchq/tb
+
 # RASLANES=4 overrides peel_core's raster lane count (default 8; spanner stays 4-wide).
 frontendtsplp: | $(BUILD)
 	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ --public-flat-rw \
