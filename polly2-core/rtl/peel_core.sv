@@ -677,8 +677,12 @@ module peel_core import tsp_pkg::*; #(
                                                         // passes queued - only this control FIFO
                                                         // (+ the spanner go-FIFO GF_AW) grows.
     localparam integer MD_AW      = $clog2(MD_N);        // 3
-    reg  [SPAN_AW-1:0] md_base [0:MD_N-1];  // per-pass ring base slot (span_pass_base)
-    reg  [SPAN_AW:0]   md_cnt  [0:MD_N-1];  // per-pass span count (0 => empty pass)
+    reg  [SPAN_AW:0]   md_base [0:MD_N-1];  // per-pass ring base ptr (incl wrap MSB - the
+                                            // streaming reader compares against the LIVE head)
+    reg  [SPAN_AW:0]   md_cnt  [0:MD_N-1];  // per-pass span count (valid when md_fin)
+    reg                md_fin  [0:MD_N-1];  // pass fully spanned: md_cnt final. Entries are
+                                            // pushed at spanner START (streaming) and
+                                            // finalized at its busy-fall.
     reg                md_last [0:MD_N-1];  // per-pass: tile's final shade -> post color
     reg                md_post [0:MD_N-1];  // per-pass: post-only (OP-only FLUSH, no shade)
     reg  [5:0]         md_tx   [0:MD_N-1], md_ty [0:MD_N-1];
@@ -699,22 +703,30 @@ module peel_core import tsp_pkg::*; #(
     // dense span buffer WRITE bus (spanner_v2 sp_* port; driven in the spanner region below)
     wire               sp_we;
     wire [SPAN_AW-1:0] sp_slot;             // ring write slot (span_head)
-    wire [9:0]         sp_start, sp_id;
+    wire [9:0]         sp_start;
+    wire [9:0]         sp_id;
     wire [2:0]         sp_rep;
     wire [31:0]        sp_invw [0:3];
     wire               sp_at;
     // TSP reader read port (one span/slot) into the shared ring
     reg  [SPAN_AW-1:0] dsr_addr;
-    wire [9:0]         dsr_start, dsr_id;
+    // streaming plumbing: live span head + per-span watermark + setup progress
+    // from the spanner; cons_seq_r feeds the consumed watermark back (declared
+    // with the reader regs below)
+    wire [SPAN_AW:0]   spv_head_live;
+    wire [12:0]        spv_sp_wm, spv_setup_seq;
+    wire [12:0]        dsr_wm;
+    wire [9:0]         dsr_start;
+    wire [9:0]         dsr_id;
     wire [2:0]         dsr_rep;
     wire [31:0]        dsr_invw  [0:3];
     wire               dsr_at;
-    dense_span_buffer #(.DEPTH(SPAN_NSLOT)) u_span (
+    dense_span_buffer #(.DEPTH(SPAN_NSLOT), .IDW(10)) u_span (
         .clk(clk),
         .we(sp_we), .waddr(sp_slot),
-        .w_start(sp_start), .w_id(sp_id), .w_rep(sp_rep), .w_invw(sp_invw), .w_at(sp_at),
+        .w_start(sp_start), .w_id(sp_id), .w_wm(spv_sp_wm), .w_rep(sp_rep), .w_invw(sp_invw), .w_at(sp_at),
         .raddr(dsr_addr),
-        .r_start(dsr_start), .r_id(dsr_id), .r_rep(dsr_rep),
+        .r_start(dsr_start), .r_id(dsr_id), .r_wm(dsr_wm), .r_rep(dsr_rep),
         .r_invw(dsr_invw), .r_at(dsr_at)
     );
 
@@ -788,7 +800,9 @@ module peel_core import tsp_pkg::*; #(
     spanner_v2 #(.NSLOT(TILE_W*TILE_H), .SLOTW(10),
                  .SPAN_NSLOT(SPAN_NSLOT), .SPAN_W(SPAN_AW)) u_spanner (
         .clk(clk), .reset(reset),
-        .start(spv_start), .busy(spv_busy), .shade_mode(spv_shade_mode),
+        .start(spv_start), .ctx_inval(go), .busy(spv_busy), .shade_mode(spv_shade_mode),
+        .span_head_live(spv_head_live), .sp_wm(spv_sp_wm),
+        .setup_seq(spv_setup_seq), .cons_seq(cons_seq_r),
         .scan_y0(spn_y0), .scan_y1(spn_y1),
         .xbase(spn_xbase), .ybase(spn_ybase), .param_base(param_base),
         .intensity_shadow(regs.fpu_shad_scale.intensity_shadow),
@@ -1157,23 +1171,27 @@ module peel_core import tsp_pkg::*; #(
     //  C) EXPAND  : cs_* is the span being expanded; cs_k walks 0..rep-1 -> Stage C -> pp.
     // The skid lets READ run ahead and refill while EXPAND is busy, so every slot is
     // consumed exactly once, in order, with no idle cycle between spans.
-    reg [SPAN_AW-1:0] span_ptr; // the IN-FLIGHT ring slot (Stage A addr), held stable, wraps
-    reg        rd_live;       // a slot read is OUTSTANDING (issued, not yet consumed)
+    reg [SPAN_AW:0] sp_rdp;   // the IN-FLIGHT ring slot ptr (Stage A addr; full width so
+                              // the STREAMING availability test vs the live head works)
+    reg [SPAN_AW:0] sp_cons;  // spans consumed this pass (termination vs final md_cnt)
+    reg        rd_live;       // walking (a slot read may be outstanding)
     reg        sb_rd_pend;    // the outstanding read has RESOLVED on dsr_* this cycle
-    reg        span_more;     // a slot remains AFTER the in-flight one (derived from span_left)
-    reg [SPAN_AW:0] span_left; // spans not yet CONSUMED (incl the in-flight one); md_cnt at prime
+    reg        span_more;     // (unused by the streaming walk; kept for reset sites)
+    reg [SPAN_AW:0] span_left; // (unused by the streaming walk; kept for reset sites)
     // Stage B skid: one prefetched span awaiting EXPAND.
     reg        ns_v;
     reg [9:0]  ns_start, ns_id;
     reg [2:0]  ns_rep;
     reg [31:0] ns_invw [0:3];
     reg        ns_at;
+    reg [12:0] ns_wm;
     // Stage C expand: current span being expanded + pixel counter k
     reg        cs_v;          // a span is being expanded (cs_* valid)
     reg [9:0]  cs_start, cs_id;
     reg [2:0]  cs_rep;
     reg [31:0] cs_invw [0:3];
     reg        cs_at;
+    reg [12:0] cs_wm;
     reg [2:0]  cs_k;          // pixel-within-span 0..rep-1
     // Stage C: the pixel emitted last cycle -> feeds pp with fresh planes (tsg_r_* for cs_id).
     reg        s2_v;          // Stage C occupied (a pixel to feed pp this cycle)
@@ -1181,7 +1199,17 @@ module peel_core import tsp_pkg::*; #(
     reg [31:0] s2_invw;
     reg        s2_at;
     reg [9:0]  s2_id;         // held to re-present the tsg read on pp_stall
+    reg [12:0] s2_wm;         // its span's alloc watermark (cons_seq feedback)
+    reg        s2_last;       // this pixel is its span's LAST -> advance cons_seq
+    reg [12:0] cons_seq_r;    // watermark of the last FULLY consumed span (to spanner)
 
+    reg  [MD_AW-1:0] mdp_idx; // md slot of the in-flight streaming pass (G_RUN patch)
+    reg stream_en;            // +nostream: reader waits for md_fin (bisect aid)
+`ifndef SYNTHESIS
+    initial stream_en = !$test$plusargs("nostream");
+`else
+    initial stream_en = 1'b1;
+`endif
     reg  [1:0] ti_ready;      // per-half: rastered, awaiting shade
     reg        ti_mode [0:1]; // per-half OP(0)/PEEL(1)
     reg        ti_last [0:1]; // per-half: this is the tile's final shade -> post color
@@ -1665,7 +1693,7 @@ module peel_core import tsp_pkg::*; #(
         // the skid (so the registered read output dsr_* stays valid across a multi-cycle expand).
         // setups ring: present the CURRENT expanding span's id (cs_id) so planes are stable
         // across the span's rep pixels. On pp_stall, hold both (re-present s2_id for planes).
-        dsr_addr  = span_ptr;
+        dsr_addr  = sp_rdp[SPAN_AW-1:0];
         tsg_raddr = pp_stall ? s2_id : cs_id;
     end
 
@@ -1757,7 +1785,8 @@ module peel_core import tsp_pkg::*; #(
             spn_tx<=6'h3f; spn_ty<=6'h3f;
             spn_xbase<=32'd0; spn_ybase<=32'd0;
             tsp_st<=R_IDLE;
-            span_ptr<='0; span_left<='0; rd_live<=1'b0; sb_rd_pend<=1'b0; span_more<=1'b0; ns_v<=1'b0;
+            sp_rdp<='0; sp_cons<='0; span_left<='0; rd_live<=1'b0; sb_rd_pend<=1'b0; span_more<=1'b0; ns_v<=1'b0;
+            cons_seq_r<='0; s2_last<=1'b0;
             cs_v<=1'b0; cs_k<=3'd0; s2_v<=1'b0; s2_id<=10'd0;
             md_wp<='0; md_rp<='0;                 // span pass-metadata FIFO ptrs
 `ifndef SYNTHESIS
@@ -2801,6 +2830,7 @@ module peel_core import tsp_pkg::*; #(
                     // (md_cnt=0, md_post=1 -> reader goes straight to R_POST, no ring free).
                     md_base[md_wp[MD_AW-1:0]] <= '0;
                     md_cnt [md_wp[MD_AW-1:0]] <= '0;
+                    md_fin [md_wp[MD_AW-1:0]] <= 1'b1;         // complete at push
                     md_post[md_wp[MD_AW-1:0]] <= 1'b1;
                     md_last[md_wp[MD_AW-1:0]] <= 1'b1;         // post-only implies last
                     md_ptres[md_wp[MD_AW-1:0]] <= 1'b0;
@@ -2837,8 +2867,24 @@ module peel_core import tsp_pkg::*; #(
                 end
             end
 
-            // wait for the start to be accepted (busy rises 1 cycle after start).
-            G_START: if (spv_busy) spn <= G_RUN;
+            // wait for the start to be accepted (busy rises 1 cycle after start), then
+            // PUSH the pass descriptor IMMEDIATELY (STREAMING): base = the live span
+            // head (post-normalize, pre-emission at this point), count UNKNOWN
+            // (md_fin=0). The reader may begin consuming this pass's spans as they
+            // are written; G_RUN finalizes the count at the spanner's busy-fall.
+            G_START: if (spv_busy) begin
+                md_base[md_wp[MD_AW-1:0]] <= spv_head_live;
+                md_cnt [md_wp[MD_AW-1:0]] <= '0;
+                md_fin [md_wp[MD_AW-1:0]] <= 1'b0;
+                md_post[md_wp[MD_AW-1:0]] <= 1'b0;
+                md_last[md_wp[MD_AW-1:0]] <= ti_last[tsp_tag];
+                md_ptres[md_wp[MD_AW-1:0]] <= ti_ptres[tsp_tag];
+                md_tx  [md_wp[MD_AW-1:0]] <= ti_tx  [tsp_tag];
+                md_ty  [md_wp[MD_AW-1:0]] <= ti_ty  [tsp_tag];
+                mdp_idx <= md_wp[MD_AW-1:0];
+                md_wp <= md_wp + 1'b1;
+                spn <= G_RUN;
+            end
 
             // spanner running: hand off when done (!spv_busy: SPANGEN drained + all setups
             // written + all spans written to the ring). PUSH a descriptor carrying this pass's
@@ -2861,14 +2907,10 @@ module peel_core import tsp_pkg::*; #(
                              spans_inflight + {{(32-(SPAN_AW+1)){1'b0}}, spv_sp_range_cnt},
                              MD_N, tsp_st);
 `endif
-                md_base[md_wp[MD_AW-1:0]] <= spv_sp_range_base[SPAN_AW-1:0]; // ring base slot
-                md_cnt [md_wp[MD_AW-1:0]] <= spv_sp_range_cnt;               // # spans (0=empty)
-                md_post[md_wp[MD_AW-1:0]] <= 1'b0;
-                md_last[md_wp[MD_AW-1:0]] <= ti_last[tsp_tag];
-                md_ptres[md_wp[MD_AW-1:0]] <= ti_ptres[tsp_tag];
-                md_tx  [md_wp[MD_AW-1:0]] <= ti_tx  [tsp_tag];
-                md_ty  [md_wp[MD_AW-1:0]] <= ti_ty  [tsp_tag];
-                md_wp <= md_wp + 1'b1;
+                // FINALIZE the streaming descriptor pushed at G_START: the count is
+                // now known; the reader's walk_done can fire once it consumes it all.
+                md_cnt[mdp_idx] <= spv_sp_range_cnt;
+                md_fin[mdp_idx] <= 1'b1;
                 ti_ready[tsp_tag]  <= 1'b0;         // free the input half for ISP
                 tsp_tag  <= ~tsp_tag;
 `ifndef SYNTHESIS
@@ -2876,7 +2918,7 @@ module peel_core import tsp_pkg::*; #(
                 // running "spans behind" counter: this pass adds its span count. Record the
                 // count per-slot so R_DRAIN subtracts the exact same value when it frees.
                 spans_inflight <= spans_inflight + {{(32-(SPAN_AW+1)){1'b0}}, spv_sp_range_cnt};
-                md_cnt_dbg[md_wp[MD_AW-1:0]] <= spv_sp_range_cnt;
+                md_cnt_dbg[mdp_idx] <= spv_sp_range_cnt;
 `endif
                 spn <= G_IDLE;
             end
@@ -2896,31 +2938,36 @@ module peel_core import tsp_pkg::*; #(
             // pixel walk, so without this it laps the VO engine and blends into a half VO is
             // still flushing (col_prod==col_vo read conflict). (An empty pass does no blend,
             // so it doesn't need the gate; post-only takes R_POST which has its own gate.)
-            R_IDLE: if (!md_empty && (md_post[md_rp[MD_AW-1:0]] || md_cnt[md_rp[MD_AW-1:0]]=='0
-                                      || !col_full[tsp_col])) begin
+            // STREAMING: a real (non-post) entry may be picked up while its pass is
+            // still being SPANNED (md_fin=0, md_cnt unknown) - the walk paces off
+            // the live span head and each span's setup watermark, and terminates
+            // once md_fin with sp_cons == md_cnt.
+            R_IDLE: if (!md_empty && (md_post[md_rp[MD_AW-1:0]]
+                                      || (md_fin[md_rp[MD_AW-1:0]] && md_cnt[md_rp[MD_AW-1:0]]=='0)
+                                      || (!col_full[tsp_col]
+                                          && (stream_en || md_fin[md_rp[MD_AW-1:0]])))) begin
                 if (md_post[md_rp[MD_AW-1:0]]) begin
                     tsp_st <= R_POST;
-                end else if (md_cnt[md_rp[MD_AW-1:0]] == '0) begin
+                end else if (md_fin[md_rp[MD_AW-1:0]] && md_cnt[md_rp[MD_AW-1:0]] == '0) begin
                     // 0 spans: no shade work. Skip to DRAIN (frees ring range; posts if last).
                     sh_out_n <= 0; sh_pending <= 0;
-                    rd_live <= 1'b0; sb_rd_pend <= 1'b0; span_more <= 1'b0; span_left <= '0;
+                    rd_live <= 1'b0; sb_rd_pend <= 1'b0;
                     ns_v <= 1'b0; cs_v <= 1'b0; s2_v <= 1'b0;
                     tsp_st <= R_DRAIN;
                 end else begin
 `ifndef SYNTHESIS
                     if ($test$plusargs("passtrace"))
-                        $display("[->RD] tile(%0d,%0d) base=%0d cnt=%0d",
+                        $display("[->RD] tile(%0d,%0d) base=%0d fin=%b cnt=%0d",
                                  md_tx[md_rp[MD_AW-1:0]], md_ty[md_rp[MD_AW-1:0]],
-                                 md_base[md_rp[MD_AW-1:0]], md_cnt[md_rp[MD_AW-1:0]]);
+                                 md_base[md_rp[MD_AW-1:0]][SPAN_AW-1:0],
+                                 md_fin[md_rp[MD_AW-1:0]], md_cnt[md_rp[MD_AW-1:0]]);
 `endif
-                    // Prime the READ stage at this pass's ring BASE. dsr_addr=span_ptr is held
-                    // stable, so the base slot's registered read resolves next cycle. span_left =
-                    // spans not yet consumed (incl the in-flight one); span_more = >1 remaining.
-                    span_ptr   <= md_base[md_rp[MD_AW-1:0]];      // in-flight slot = pass base
-                    span_left  <= md_cnt [md_rp[MD_AW-1:0]];      // spans remaining
-                    rd_live    <= 1'b1;                           // base read outstanding
-                    sb_rd_pend <= 1'b0;                           // base read resolves NEXT cyc
-                    span_more  <= (md_cnt[md_rp[MD_AW-1:0]] > 1); // slots after the base one?
+                    // Prime the READ stage at this pass's ring BASE (full ptr incl
+                    // wrap MSB: availability = live head - sp_rdp).
+                    sp_rdp     <= md_base[md_rp[MD_AW-1:0]];
+                    sp_cons    <= '0;
+                    rd_live    <= 1'b1;
+                    sb_rd_pend <= 1'b0;
                     ns_v <= 1'b0; cs_v <= 1'b0; s2_v <= 1'b0; cs_k <= 3'd0;
                     sh_out_n <= 0; sh_pending <= 0;
                     tsp_st   <= R_RUN;
@@ -2947,25 +2994,31 @@ module peel_core import tsp_pkg::*; #(
             R_RUN: if (!pp_stall) begin
                 // ---- local decisions (all declared first; SV: decls precede statements) ----
                 reg        span_done, accept, fill, dsr_rdy, src_v, consume_read;
+                reg        walk_done, drain_ok;
                 reg [9:0]  src_start, src_id;
                 reg [2:0]  src_rep;
                 reg        src_at;
                 reg [31:0] src_invw [0:3];
+                reg [12:0] src_wm;
                 integer    si;
                 // current expand span finishes this cycle (or none in flight)
                 span_done = !cs_v || (cs_k == cs_rep - 3'd1);
-                // a slot read resolved on dsr_* this cycle
-                dsr_rdy   = sb_rd_pend;
+                // a slot read resolved on dsr_* this cycle, AND its planes are
+                // WRITTEN (streaming setup gate: setup_seq has reached the span's
+                // alloc watermark; the subtraction is wrap-safe, distance < 4096)
+                dsr_rdy   = sb_rd_pend && !((spv_setup_seq - dsr_wm) >> 12);
                 // The next span to feed EXPAND comes from the SKID (ns_*) if full, else a
                 // BYPASS directly off dsr_* when a read resolved this cycle (bubble-free 1-deep
                 // skid). src_* selects between them.
                 src_v = ns_v || dsr_rdy;
                 if (ns_v) begin
                     src_start = ns_start; src_id = ns_id; src_rep = ns_rep; src_at = ns_at;
+                    src_wm = ns_wm;
                     for (si=0; si<4; si=si+1) src_invw[si] = ns_invw[si];
                 end else begin  // bypass from dsr_* (shared ring, no half index)
                     src_start = dsr_start; src_id = dsr_id;
                     src_rep = dsr_rep; src_at = dsr_at;
+                    src_wm = dsr_wm;
                     for (si=0; si<4; si=si+1) src_invw[si] = dsr_invw[si];
                 end
                 // accept a span into EXPAND when the current one finishes and a src is available.
@@ -2984,9 +3037,15 @@ module peel_core import tsp_pkg::*; #(
                     s2_invw <= cs_invw[cs_k];
                     s2_at   <= cs_at;
                     s2_id   <= cs_id;
+                    s2_wm   <= cs_wm;
+                    s2_last <= span_done;   // span's final pixel -> cons_seq authority
                     sh_pending <= sh_pending + 1;
                     if (!span_done) cs_k <= cs_k + 3'd1;   // mid-span: next pixel
                 end else s2_v <= 1'b0;
+                // cons_seq: the pixel LEAVING s2 this cycle (accepted by pp, since
+                // !pp_stall here) was its span's last -> every tsg read of that
+                // span has resolved; its planes may age out of the window.
+                if (s2_v && s2_last) cons_seq_r <= s2_wm;
 
                 // --- EXPAND accept: feed the next span (skid or bypass) into cs_* on finish. ---
                 if (span_done) begin
@@ -3006,6 +3065,7 @@ module peel_core import tsp_pkg::*; #(
                         cs_start <= src_start;
                         cs_id    <= src_id;
                         cs_rep   <= src_rep;
+                        cs_wm    <= src_wm;
                         cs_at    <= src_at;
                         for (pj2 = 0; pj2 < 4; pj2 = pj2 + 1) cs_invw[pj2] <= src_invw[pj2];
                     end else begin
@@ -3021,7 +3081,7 @@ module peel_core import tsp_pkg::*; #(
                     if ($test$plusargs("rdslot") && md_tx[md_rp[MD_AW-1:0]]==7
                         && md_ty[md_rp[MD_AW-1:0]]==4)
                         $display("[RDSLOT] tile(7,4) sp=%0d start=%0d id=%0d rep=%0d invw0=%08x bypass=%b",
-                                 span_ptr, dsr_start, dsr_id, dsr_rep,
+                                 sp_rdp[SPAN_AW-1:0], dsr_start, dsr_id, dsr_rep,
                                  dsr_invw[0], (accept && !ns_v));
 `endif
                     ns_v     <= 1'b1;                    // in-flight read -> skid
@@ -3029,6 +3089,7 @@ module peel_core import tsp_pkg::*; #(
                     ns_id    <= dsr_id;
                     ns_rep   <= dsr_rep;
                     ns_at    <= dsr_at;
+                    ns_wm    <= dsr_wm;
                     for (pj2 = 0; pj2 < 4; pj2 = pj2 + 1) ns_invw[pj2] <= dsr_invw[pj2];
                 end else if (accept && ns_v) begin
                     ns_v <= 1'b0;       // skid drained into EXPAND, nothing new -> empty
@@ -3042,29 +3103,33 @@ module peel_core import tsp_pkg::*; #(
                 // derived from span_left (spans remaining, incl the in-flight one), NEVER from a
                 // pointer-equality against a wrapped end pointer. span_ptr wraps at SPAN_NSLOT
                 // (power-of-two) by width. This is the one-read-in-flight invariant.
+                // STREAMING walk termination: the pass is fully spanned (md_fin) and
+                // every span consumed. TWO variants: walk_done (includes this
+                // cycle's consume) stops the READ side the same cycle - without it
+                // sb_rd_pend could set for the NEXT pass's spans and over-consume.
+                // drain_ok (registered count only) gates the DRAIN transition: on
+                // the last consume cycle the span is still being accepted into
+                // cs/skid (the NBA writes land at cycle end, the drain check reads
+                // the OLD empty flags), so draining that cycle DROPS it.
+                walk_done = md_fin[md_rp[MD_AW-1:0]]
+                          && ((sp_cons + (consume_read ? (SPAN_AW+1)'(1) : (SPAN_AW+1)'(0)))
+                              == md_cnt[md_rp[MD_AW-1:0]]);
+                drain_ok  = md_fin[md_rp[MD_AW-1:0]]
+                          && (sp_cons == md_cnt[md_rp[MD_AW-1:0]]);
                 if (consume_read) begin
-                    // the in-flight read (span_ptr) was taken (into skid or bypassed to EXPAND).
-                    span_left <= span_left - 1'b1;              // one span consumed
-                    if (span_more) begin                        // (span_left > 1 at prime/advance)
-                        span_ptr   <= span_ptr + 1'b1;          // advance (wraps within the ring)
-                        span_more  <= (span_left > 2);          // >1 will remain AFTER this consume
-                        sb_rd_pend <= 1'b0;                     // new slot resolves NEXT cycle
-                        // rd_live stays 1: a new read is now outstanding.
-                    end else begin
-                        // last slot consumed - no more reads outstanding. sb_rd_pend/rd_live
-                        // both clear and STAY clear so the drain detect can fire.
-                        sb_rd_pend <= 1'b0;
-                        rd_live    <= 1'b0;
-                    end
-                end else if (rd_live) begin
-                    // a read is outstanding and NOT consumed this cycle: it has resolved on dsr_*
-                    // (1 cycle after issue) -> mark valid. (Held stable until consumed.)
+                    // the in-flight read (sp_rdp) was taken (into skid or bypassed to EXPAND).
+                    sp_cons    <= sp_cons + 1'b1;
+                    sp_rdp     <= sp_rdp + 1'b1;    // next slot (past-head reads are gated)
+                    sb_rd_pend <= 1'b0;             // new slot resolves NEXT cycle
+                end else if (rd_live && (spv_head_live != sp_rdp)) begin
+                    // the in-flight slot is WRITTEN (behind the live head) and its read
+                    // has resolved on dsr_* -> mark valid. (Held stable until consumed.)
                     sb_rd_pend <= 1'b1;
                 end
-                // else (!consume_read && !rd_live): reads exhausted - hold sb_rd_pend=0.
+                if (walk_done) rd_live <= 1'b0;
 
-                // --- drain detect: no read outstanding, skid empty, expand + Stage C idle ---
-                if (!rd_live && !ns_v && span_done && !cs_v && !s2_v)
+                // --- drain detect: walk complete, skid empty, expand + Stage C idle ---
+                if (drain_ok && !ns_v && span_done && !cs_v && !s2_v)
                     tsp_st <= R_DRAIN;
             end
             // else pp_stall: hold the whole pipeline (addresses re-presented by the combi mux).

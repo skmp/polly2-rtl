@@ -33,8 +33,24 @@
 // widens that buffer to serve 4 aligned lanes). Lane l is pixel (group|l).
 //
 module spanner_v2 import tsp_pkg::*; #(
-    parameter integer NSLOT = 1024,          // triangle_setups depth (== tile pixels)
-    parameter integer SLOTW = 10,            // clog2(NSLOT)
+    parameter integer NSLOT = 1024,          // dedup-map depth (== tile pixels)
+    parameter integer SLOTW = 10,            // clog2(NSLOT) (tile pixel index width)
+    // CROSS-PASS PLANE REUSE via a SLIDING WINDOW: plane ids are the low bits of
+    // a free-running alloc SEQUENCE; the dedup generation is kept across passes
+    // of the same tile, so a later pass's hit reuses the earlier pass's setup id
+    // (no re-fetch, no re-setup) - but only ids within the last WINDOW allocs
+    // are referencable (older hits realloc). Every span carries its alloc-seq
+    // watermark; the READER feeds back the watermark of the last span it fully
+    // consumed (cons_seq), and a plane is free once cons_seq passes its seq by
+    // WINDOW (no unconsumed span can reference it: any such span's watermark
+    // would be <= seq+WINDOW <= cons_seq, i.e. already consumed). Ring capacity
+    // check is pure pointer arithmetic: alloc may run at most RING_N - WINDOW
+    // ahead of cons_seq. The reader consumes STREAMED (it does not wait for the
+    // pass to finish spanning), so an alloc stall always resolves.
+    parameter integer RING_N = 1024,         // plane ring depth (pow2)
+    parameter integer IDW    = 10,           // clog2(RING_N) (setup-id width)
+    parameter integer WINDOW = 512,          // max lookback for cross-pass reuse
+    parameter integer SEQ_W  = 13,           // alloc-sequence width (wrap-safe)
     // span RING (shared with TSP) is sized larger than the plane ring: 2048 = two
     // worst-case tiles, so a full 1024-span pass fits with room for a SECOND pass to be
     // written and in flight while the first drains. SPAN_W = clog2(SPAN_NSLOT) = 11.
@@ -46,6 +62,8 @@ module spanner_v2 import tsp_pkg::*; #(
 
     // ---- control ----
     input                       start,       // 1-cyc: begin resolving one tile pass
+    input                       ctx_inval,   // render start: params may change at the
+                                             // same pointers -> drop the retained ctx
     output reg                  busy,         // start .. SPANGEN done && setup drained
     input                       shade_mode,  // 1=OP (shade all px); 0=PEEL (gate on valid)
     // STAGED-ROW CLIP: walk only tile rows scan_y0..scan_y1 (inclusive). The ISP
@@ -64,6 +82,16 @@ module spanner_v2 import tsp_pkg::*; #(
     // (top_tag), TSP reads them, and a whole tile's ring range frees when TSP finishes it.
     output reg                  tsp_go,      // 1-cyc: this tile's setups are all done -> TSP may read
     input                       tsp_rd_done, // 1-cyc: TSP finished the oldest handed tile -> free its range
+    // ---- STREAMING handshake: the reader consumes spans while this pass is
+    // still being spanned. span_head_live exposes the write head (available =
+    // head - reader ptr); sp_wm (stored with each span) is the alloc-seq
+    // watermark the reader must (a) wait for setup_seq to reach before shading
+    // the span (its planes are then written) and (b) report back via cons_seq
+    // once the span's last pixel has taken its planes (plane-free authority).
+    output     [SPAN_W:0]       span_head_live,
+    output     [SEQ_W-1:0]      sp_wm,       // alloc watermark of the span at sp_we
+    output     [SEQ_W-1:0]      setup_seq,   // setups written so far (alloc order)
+    input      [SEQ_W-1:0]      cons_seq,    // reader: watermark fully consumed
 
     // ---- IN: 4-wide ALIGNED tag-buffer read (present addr -> data NEXT cycle) ----
     output reg                  rd_valid,    // present a group read this cycle
@@ -75,7 +103,7 @@ module spanner_v2 import tsp_pkg::*; #(
 
     // ---- OUT: triangle_setups WRITE (SETUP engine) ----
     output reg                  ts_we,
-    output reg [SLOTW-1:0]      ts_id,
+    output reg [IDW-1:0]        ts_id,
     output reg [31:0]           ts_isp, ts_tsp, ts_tcw,
     output reg [319:0]          ts_ddx, ts_ddy, ts_c,   // 10 x 32, lane j at [32*j+:32]
 
@@ -95,7 +123,7 @@ module spanner_v2 import tsp_pkg::*; #(
     output reg [SPAN_W:0]       sp_range_base,
     output reg [SPAN_W:0]       sp_range_cnt,
     output reg [SLOTW-1:0]      sp_start,    // run-start pixel index (y:x, 0..1023) [data]
-    output reg [SLOTW-1:0]      sp_id,       // setup id (== triangle_setups slot)
+    output reg [IDW-1:0]        sp_id,       // setup id (== triangle_setups slot)
     output reg [2:0]            sp_rep,      // run length 1..4 (all covered pixels shaded)
     output reg [31:0]           sp_invw [0:3], // per-covered-pixel invW (lanes 0..rep-1)
     output reg                  sp_at,       // PT alpha-test enable (run-start lane)
@@ -127,34 +155,45 @@ module spanner_v2 import tsp_pkg::*; #(
     // COHERENCY: EMIT can WRITE a bucket the same cycle COAL presents the next read (M10K
     // returns stale on same-addr r+w) -> the two most-recent allocations are FORWARDED.
     localparam integer GEN_W = 8;
-    localparam integer DD_W  = GEN_W + 32 + SLOTW;   // {gen, tag, id}
+    localparam integer DD_W  = GEN_W + 32 + SEQ_W;   // {gen, tag, alloc-seq}
     localparam [GEN_W-1:0] GEN_MAX = {GEN_W{1'b1}};
     (* ramstyle = "M10K, no_rw_check" *) reg [DD_W-1:0] dedup_ram [0:NSLOT-1];
     reg [DD_W-1:0]     dd_rd_q;                   // registered read {gen,tag,id} of coal bucket
-    reg [GEN_W-1:0]    cur_gen;                   // current pass generation (never 0)
+    reg [GEN_W-1:0]    cur_gen;                   // current ERA generation (never 0)
     reg                dd_clearing;               // clear-walk in progress (gen wrap)
     reg [SLOTW-1:0]    dd_clr_addr;
     wire [GEN_W-1:0]   dd_rd_gen  = dd_rd_q[DD_W-1 -: GEN_W];
-    wire [31:0]        slot_tag_q = dd_rd_q[SLOTW +: 32];
-    wire [SLOTW-1:0]   slot_id_q  = dd_rd_q[0 +: SLOTW];
+    wire [31:0]        slot_tag_q = dd_rd_q[SEQ_W +: 32];
+    wire [SEQ_W-1:0]   slot_seq_q = dd_rd_q[0 +: SEQ_W];
     wire               slot_valid_q = (dd_rd_gen == cur_gen);
 
-    // ---- setup-id RING (triangle_setups slots), shared with TSP ----
-    // top_tag = next id to allocate; tail = oldest id still owned by TSP. Extra MSB (like a
-    // FIFO) disambiguates full vs empty so all NSLOT ids are usable. On tsp_done the oldest
-    // handed tile's range frees (tail <- that tile's end). If the ring would overflow (a
-    // single tile with >NSLOT distinct, or two dense tiles overlapping), SPANGEN stalls
-    // until TSP frees a tile. A go-FIFO records each handed tile's end pointer.
-    reg [SLOTW:0]      top_tag, tail;            // ring head / tail (SLOTW+1 bits)
-    wire ring_empty = (top_tag == tail);
-    wire ring_full  = (top_tag[SLOTW] != tail[SLOTW]) && (top_tag[SLOTW-1:0] == tail[SLOTW-1:0]);
+    // ---- setup-id allocator: free-running SEQUENCE, sliding-window liveness ----
+    // slot = alloc_seq[IDW-1:0]; a plane's slot may be re-allocated once
+    // alloc_seq - its_seq >= RING_N, which the capacity stall below defers until
+    // cons_seq (reader progress) has passed its_seq + WINDOW - and the window
+    // check makes any FURTHER reference realloc instead. So a slot is never
+    // overwritten while a not-yet-consumed span references it.
+    reg  [SEQ_W-1:0]   alloc_seq;                 // next plane's sequence number
+    reg  [SEQ_W-1:0]   ts_seq;                    // setups written so far (in order)
+    assign setup_seq = ts_seq;
+    // alloc may run RING_N - WINDOW ahead of the reader's consumed watermark
+    wire [SEQ_W-1:0]   ring_ahead = alloc_seq - cons_seq;
+    wire ring_full  = (ring_ahead >= SEQ_W'(RING_N - WINDOW));
     localparam integer GF_AW = 3;                 // up to 8 passes handed-but-not-done (matches
-                                                  // peel_core MD_N=8). Only the end-pointer FIFOs
-                                                  // grow; the span/plane DATA rings are unchanged
-                                                  // (few spans/planes survive PEEL, so no overflow).
-    reg [SLOTW:0]      gf_mem [0:(1<<GF_AW)-1];   // tile END pointers handed to TSP
-    reg [GF_AW:0]      gf_wp, gf_rp;
+                                                  // peel_core MD_N=8).
+    reg [GF_AW:0]      gf_wp, gf_rp;              // handed-pass FIFO ptrs (span ends)
     wire gf_empty = (gf_wp == gf_rp);
+    // retention context: same tile origin since the last start, not render-invalidated
+    reg [31:0]         prev_xb, prev_yb;
+    reg                ctx_val;
+    reg                retain_en;              // +noretain: force every pass fresh
+`ifndef SYNTHESIS
+    initial retain_en = !$test$plusargs("noretain");
+`else
+    initial retain_en = 1'b1;
+`endif
+    wire               ctx_ok = ctx_val && (prev_xb == xbase) && (prev_yb == ybase);
+    wire               retain_ok = retain_en && ctx_ok;
 
     // ---- span RING (dense_span_buffer slots), shared with TSP (mirrors the plane ring) ----
     // span_head = next slot to write; span_tail = oldest slot still owned by TSP. Sized
@@ -165,6 +204,7 @@ module spanner_v2 import tsp_pkg::*; #(
     // parallel end-pointer FIFO sgf_mem records each handed pass's span end (span_head); it
     // shares gf_wp/gf_rp with the plane go-FIFO (planes+spans hand/free per-pass, lock-step).
     reg [SPAN_W:0]     span_head, span_tail;      // ring head / tail (SPAN_W+1 bits)
+    assign span_head_live = span_head;            // streaming reader's availability limit
     wire span_ring_empty = (span_head == span_tail);
     wire span_ring_full  = (span_head[SPAN_W] != span_tail[SPAN_W]) &&
                            (span_head[SPAN_W-1:0] == span_tail[SPAN_W-1:0]);
@@ -175,7 +215,7 @@ module spanner_v2 import tsp_pkg::*; #(
     // {id, tag} pushed when a span allocates a NEW slot; drained by the SETUP engine.
     localparam integer SF_AW = 3;                 // 8-deep
     localparam integer SF_N  = (1 << SF_AW);
-    localparam integer SF_W  = SLOTW + 32;        // {id, tag}
+    localparam integer SF_W  = IDW + 32;        // {id, tag}
     reg  [SF_W-1:0] sf_mem [0:SF_N-1];
     reg  [SF_AW:0]  sf_wp, sf_rp;                 // extra MSB for full/empty disambig
     wire            sf_empty = (sf_wp == sf_rp);
@@ -268,22 +308,28 @@ module spanner_v2 import tsp_pkg::*; #(
     reg             fwd0_valid, fwd1_valid;
     reg [SLOTW-1:0] fwd0_h,     fwd1_h;
     reg [31:0]      fwd0_tag,   fwd1_tag;
-    reg [SLOTW-1:0] fwd0_id,    fwd1_id;
+    reg [SEQ_W-1:0] fwd0_seq,   fwd1_seq;
     wire            fwd0_hit = fwd0_valid && (fwd0_h == t_h);
     wire            fwd1_hit = fwd1_valid && (fwd1_h == t_h);
     wire            eff_valid = fwd0_hit | fwd1_hit | slot_valid_q;
     wire [31:0]     eff_tag   = fwd0_hit ? fwd0_tag : (fwd1_hit ? fwd1_tag : slot_tag_q);
-    wire [SLOTW-1:0] eff_id   = fwd0_hit ? fwd0_id  : (fwd1_hit ? fwd1_id  : slot_id_q);
+    wire [SEQ_W-1:0] eff_seq  = fwd0_hit ? fwd0_seq : (fwd1_hit ? fwd1_seq : slot_seq_q);
     // Only SHADED runs (t_ok) emit a span AND allocate/dedup/setup. An invalid run (t_ok=0)
     // is retired at EMIT without emitting a span, allocating an id, or pushing a setup - it
     // only advanced the walk past its invalid pixels.
     wire run_shaded   = t_valid && t_ok;
-    wire is_dedup_hit = run_shaded && eff_valid && (eff_tag == t_tag);
+    // WINDOW check: a hit is only usable while the plane's seq is within the
+    // last WINDOW allocs (older planes may free under a later span; realloc).
+    // Forwarded entries are <= 2 allocs old - always in window.
+    wire            eff_inwin = (alloc_seq - eff_seq) <= SEQ_W'(WINDOW);
+    wire is_dedup_hit = run_shaded && eff_valid && (eff_tag == t_tag) && eff_inwin;
     wire needs_alloc  = run_shaded && !is_dedup_hit;
-    // ring id: reuse on a dedup hit, allocate the next bump id on a shaded miss, or a
-    // don't-care 0 for an invalid (unshaded) run (that span's id is never read).
-    wire [SLOTW-1:0] emit_id = is_dedup_hit ? eff_id
-                             : (run_shaded ? top_tag[SLOTW-1:0] : {SLOTW{1'b0}});
+    // ring id (triangle_setups slot) = low bits of the plane's alloc seq
+    wire [IDW-1:0] emit_id = is_dedup_hit ? eff_seq[IDW-1:0]
+                             : (run_shaded ? alloc_seq[IDW-1:0] : {IDW{1'b0}});
+    // the span's watermark: alloc count AFTER this span (incl. its own alloc)
+    wire [SEQ_W-1:0] emit_wm = alloc_seq + (needs_alloc ? SEQ_W'(1) : SEQ_W'(0));
+    assign sp_wm = emit_wm;            // stored with the span (valid at sp_we)
 
     // emit can commit when: an ALLOCATING emit needs setup-FIFO room AND a free ring slot.
     // A same-tag reuse needs neither. When blocked, the WHOLE pipeline freezes (COAL+EMIT).
@@ -319,7 +365,7 @@ module spanner_v2 import tsp_pkg::*; #(
     wire            dd_we    = dd_clearing || dd_emit_we;
     wire [SLOTW-1:0] dd_waddr = dd_clearing ? dd_clr_addr : t_h;
     wire [DD_W-1:0]  dd_wdata = dd_clearing ? {DD_W{1'b0}}
-                                            : {cur_gen, t_tag, top_tag[SLOTW-1:0]};
+                                            : {cur_gen, t_tag, alloc_seq};
     // Read port: present run_id's bucket exactly when COAL produces a descriptor (coal_fires),
     // so dd_rd_q resolves next cycle in EMIT. A clean read ENABLE (dd_re) + read ADDRESS
     // (dd_raddr) in a DEDICATED always block below is the textbook synchronous-read M10K
@@ -353,20 +399,20 @@ module spanner_v2 import tsp_pkg::*; #(
     //   SETUP  : latch the FIFO head into cur_*/fv_* (held stable for the whole
     //            run) + start tsp_setup_min; on tsp_done pulse ts_pend -> ts_we.
     reg              fetch_busy;    // a fetch is in flight (fx_start..fx_done)
-    reg [SLOTW-1:0]  fx_id;         // the in-flight fetch's setup id
+    reg [IDW-1:0]  fx_id;         // the in-flight fetch's setup id
     localparam integer PD_N = 4;
     reg [1:0]        pd_h, pd_t;    // head/tail
     reg [2:0]        pd_n;          // occupancy 0..4
     wire             pd_empty = (pd_n == 3'd0);
     wire             pd_full  = (pd_n == 3'(PD_N));
-    reg [SLOTW-1:0]  pd_id  [0:PD_N-1];
+    reg [IDW-1:0]  pd_id  [0:PD_N-1];
     reg [31:0]       pd_isp [0:PD_N-1], pd_tsp [0:PD_N-1], pd_tcw [0:PD_N-1];
     reg [31:0]       pd_x  [0:PD_N-1][0:2], pd_y  [0:PD_N-1][0:2], pd_z  [0:PD_N-1][0:2];
     reg [31:0]       pd_u  [0:PD_N-1][0:2], pd_v3 [0:PD_N-1][0:2];
     reg [31:0]       pd_col[0:PD_N-1][0:2], pd_ofs[0:PD_N-1][0:2];
     reg              su_run;        // tsp_setup_min busy (tsp_start..tsp_done)
     reg              ts_pend;       // write triangle_setups this cycle (cycle after tsp_done)
-    reg [SLOTW-1:0]  su_id;         // the active setup's id (write target)
+    reg [IDW-1:0]  su_id;         // the active setup's id (write target)
 `ifndef SYNTHESIS
     integer          su_dbg_cyc;   // +sutrace cycle counter
 `endif
@@ -475,6 +521,15 @@ module spanner_v2 import tsp_pkg::*; #(
     end
 
     // ============================ sequential ============================
+    // pass done: SPANGEN drained + whole setup path drained (used by the done
+    // block AND by ringacct's era_out hand-count - keep the two in lock-step)
+    wire pass_done_w = busy && !start && !dd_clearing && !sg_active && !t_valid
+                     && sf_empty && !fetch_busy && pd_empty && !su_run && !ts_pend;
+`ifndef SYNTHESIS
+    integer s_ret = 0, s_fresh = 0, s_setups = 0;
+    final $display("=== SPANNER %m: passes retained=%0d fresh=%0d, setups fetched+computed=%0d ===",
+                   s_ret, s_fresh, s_setups);
+`endif
     integer q;
     always @(posedge clk) begin
         if (reset) begin
@@ -486,7 +541,8 @@ module spanner_v2 import tsp_pkg::*; #(
             dd_clearing <= 1'b0;
             fwd0_valid <= 1'b0; fwd1_valid <= 1'b0;
             sf_wp <= '0; sf_rp <= '0;
-            top_tag <= '0; tail <= '0; gf_wp <= '0; gf_rp <= '0;
+            alloc_seq <= '0; ts_seq <= '0; gf_wp <= '0; gf_rp <= '0;
+            ctx_val <= 1'b0; prev_xb <= '0; prev_yb <= '0;
             span_head <= '0; span_tail <= '0; span_pass_base <= '0;
             fetch_busy <= 1'b0; su_run <= 1'b0; ts_pend <= 1'b0;
             pd_h <= 2'd0; pd_t <= 2'd0; pd_n <= 3'd0;
@@ -496,52 +552,61 @@ module spanner_v2 import tsp_pkg::*; #(
             tsp_start <= 1'b0;
             tsp_go    <= 1'b0;            // 1-cyc pulse
 
-            // ---------------- TSP freed a tile -> advance BOTH ring tails ----------------
-            // planes and spans hand/free per-pass in lock-step, so one free pulse (the same
-            // gf_rp entry) advances both the plane tail and the span tail.
+            // ---------------- TSP drained a pass -> free its SPAN range ----------------
+            // (plane liveness is the sliding window off cons_seq - no per-pass
+            // plane frees; see the module-header window argument)
             if (tsp_rd_done && !gf_empty) begin
-                tail      <= gf_mem [gf_rp[GF_AW-1:0]];  // free up to the oldest handed tile's plane end
-                span_tail <= sgf_mem[gf_rp[GF_AW-1:0]];  // ... and its span end
+                span_tail <= sgf_mem[gf_rp[GF_AW-1:0]];
                 gf_rp     <= gf_rp + 1'b1;
             end
 
             // ---------------- start a tile pass ----------------
-            // Bump the generation so all prior-pass dedup buckets go stale for free ("don't
-            // reuse when x/y change"). If gen would wrap, clear-walk first. When the ring is
-            // idle (all handed tiles done - the standalone/sequential case) NORMALIZE it to 0
-            // so ids restart dense at 0; when overlapped with TSP the head just continues.
+            // RETAINED pass (same tile ctx, <= LOOKBACK live planes): keep the
+            // generation - dedup entries written by the earlier passes of this
+            // era stay valid, so their planes are REUSED (a hit emits the old
+            // id: no fetch, no setup). Otherwise close the era (ringacct above)
+            // and bump the generation (clear-walk first on wrap). The plane
+            // ring needs no normalize: occ-based full detection, ids are just
+            // RAM addresses and may start anywhere.
             if (start) begin
                 busy  <= 1'b1;
                 fwd0_valid <= 1'b0; fwd1_valid <= 1'b0;
                 sf_wp <= '0; sf_rp <= '0;
-                // NORMALIZE gate: ring_empty alone does NOT mean "all handed tiles done" -
-                // an EMPTY pass (zero allocs/spans, e.g. a terminating PEEL pass) leaves the
-                // rings empty yet is still handed, with gf/sgf entries recording the
-                // PRE-normalize end pointers. Normalizing under such an outstanding entry
-                // makes its later tsp_rd_done load a STALE tail (tail<=T, span_tail<=S while
-                // head restarted at 0) -> spurious ring_full/empty -> permanent SPANGEN stall
-                // (busy=1 deadlock) or broken backpressure (live-slot overwrite). So also
-                // require gf_empty: no handed-but-unfreed pass may be outstanding. (This
-                // subsumes the old same-cycle-free guard: tsp_rd_done implies !gf_empty.)
-                if (ring_empty && gf_empty) begin top_tag <= '0; tail <= '0; end
-                // Span ring: same normalize (idle -> restart dense at 0) and latch this pass's
+                prev_xb <= xbase; prev_yb <= ybase; ctx_val <= 1'b1;
+                // Span ring: normalize when idle (restart dense at 0) and latch this pass's
                 // range base. CRUCIAL: latch the POST-normalize head (0 when normalizing, else
                 // the current head), NOT the pre-normalize span_head - the normalize's NBA
-                // wouldn't be visible to a same-cycle span_pass_base <= span_head.
+                // wouldn't be visible to a same-cycle span_pass_base <= span_head. Requires
+                // gf_empty: no handed-but-unfreed pass may be outstanding (its later
+                // tsp_rd_done would load a stale tail -> spurious full/empty).
                 if (span_ring_empty && gf_empty) begin
                     span_head <= '0; span_tail <= '0; span_pass_base <= '0;
                 end else begin
                     span_pass_base <= span_head;   // overlapped: this pass starts at the live head
                 end
-                if (cur_gen == GEN_MAX) begin
+                if (retain_ok) begin
+                    sg_x <= {scan_y0, 5'd0};                      // keep gen: cross-pass reuse
+                    sg_active <= (scan_y0 <= scan_y1);
+                    t_valid <= 1'b0; g_ready <= 1'b0;
+`ifndef SYNTHESIS
+                    s_ret <= s_ret + 1;
+`endif
+                end else if (cur_gen == GEN_MAX) begin
                     dd_clearing <= 1'b1; dd_clr_addr <= '0;   // SPANGEN idle until clear done
+`ifndef SYNTHESIS
+                    s_fresh <= s_fresh + 1;
+`endif
                 end else begin
                     cur_gen <= cur_gen + 1'b1;
                     sg_x <= {scan_y0, 5'd0};                       // start at the staged clip
                     sg_active <= (scan_y0 <= scan_y1);            // empty clip: no walk
                     t_valid <= 1'b0; g_ready <= 1'b0;
+`ifndef SYNTHESIS
+                    s_fresh <= s_fresh + 1;
+`endif
                 end
             end
+            if (ctx_inval) ctx_val <= 1'b0;   // render start: retained ctx is void
 
             // dedup_ram writes/reads are handled by the DEDICATED M10K block above
             // (dd_we/dd_waddr/dd_wdata write, dd_re/dd_raddr->dd_rd_q read).
@@ -564,16 +629,16 @@ module spanner_v2 import tsp_pkg::*; #(
                 // bucket {cur_gen, tag, id}. span write + setup push are combinational (sp_*).
                 if (t_valid && needs_alloc) begin
                     // dedup_ram[t_h] write is done by the single muxed port above (dd_emit_we).
-                    top_tag <= top_tag + 1'b1;    // advance ring head (wraps via SLOTW+1 bits)
+                    alloc_seq <= alloc_seq + 1'b1;
                 end
                 // dense pack: only an EMITTED (shaded) span advances the ring head. Guarded
                 // by !pipe_stall (this block), so a span-ring-full stall holds the head.
                 if (run_shaded) span_head <= span_head + 1'b1;
                 // forwarding shift: fwd0 = alloc this cycle (bucket t_h -> {tag,id}).
-                fwd1_valid <= fwd0_valid; fwd1_h <= fwd0_h; fwd1_id <= fwd0_id; fwd1_tag <= fwd0_tag;
+                fwd1_valid <= fwd0_valid; fwd1_h <= fwd0_h; fwd1_seq <= fwd0_seq; fwd1_tag <= fwd0_tag;
                 fwd0_valid <= t_valid && needs_alloc;
                 fwd0_h     <= t_h;
-                fwd0_id    <= top_tag[SLOTW-1:0];
+                fwd0_seq   <= alloc_seq;
                 fwd0_tag   <= t_tag;
 
                 // ---------- COAL: coalesce one span off ti_* (the current group) ----------
@@ -629,6 +694,9 @@ module spanner_v2 import tsp_pkg::*; #(
             if (sf_push && !sf_full) begin
                 sf_mem[sf_wp[SF_AW-1:0]] <= sf_pdata;
                 sf_wp <= sf_wp + 1'b1;
+`ifndef SYNTHESIS
+                s_setups <= s_setups + 1;
+`endif
             end
 
             // =================== SETUP path (streaming stages) ===================
@@ -722,19 +790,18 @@ module spanner_v2 import tsp_pkg::*; #(
                 ts_pend <= 1'b1;      // ts_we fires (combinational) next cycle
             end else if (ts_pend) begin
                 ts_pend <= 1'b0;
+                ts_seq  <= ts_seq + 1'b1;   // one setup landed (alloc order)
             end
 
             // =================== busy / done -> tsp_go ===================
             // done when SPANGEN drained (not walking, EMIT stage empty) AND the whole setup
             // path is drained (FIFO, fetch, skid, setup run, write pulse). At that moment the
-            // tile's setups are ALL in triangle_setups -> pulse tsp_go and record BOTH the
-            // plane END pointer (top_tag) and the span END pointer (span_head) so tsp_done can
-            // later free this pass's plane AND span ring ranges together (shared gf_wp/gf_rp).
-            if (busy && !start && !dd_clearing && !sg_active && !t_valid && sf_empty
-                && !fetch_busy && pd_empty && !su_run && !ts_pend) begin
+            // tile's setups are ALL in triangle_setups -> pulse tsp_go and record the span
+            // END pointer so tsp_rd_done can free this pass's span range. Plane frees are
+            // era-based (ringacct: era_out counts this hand via pass_done_w).
+            if (pass_done_w) begin
                 busy   <= 1'b0;
                 tsp_go <= 1'b1;
-                gf_mem [gf_wp[GF_AW-1:0]] <= top_tag;
                 sgf_mem[gf_wp[GF_AW-1:0]] <= span_head;
                 gf_wp <= gf_wp + 1'b1;
             end
@@ -751,6 +818,35 @@ module spanner_v2 import tsp_pkg::*; #(
         // leaking ring space forever (permanent ring_full stall) - protocol violation.
         if (tsp_rd_done && gf_empty)
             $error("spanner_v2: tsp_rd_done with empty go-FIFO (free dropped)");
+        // sliding-window sanity: alloc never runs past its capacity bound, the
+        // setup engine never runs ahead of allocation, and the reader's consumed
+        // watermark never passes allocation.
+        if ((alloc_seq - cons_seq) > SEQ_W'(RING_N - WINDOW))
+            $error("spanner_v2: alloc_seq ran past capacity (ahead=%0d)", alloc_seq - cons_seq);
+    end
+    // plane-lifetime scoreboard: ref_wm[slot] = watermark of the LAST span that
+    // references the slot; an ALLOC (overwrite) of the slot while the reader has
+    // not consumed past that watermark is a use-after-free.
+    reg [SEQ_W-1:0] sb_ref_wm [0:RING_N-1];
+    reg             sb_ref_v  [0:RING_N-1];
+    always @(posedge clk) begin
+        if (reset) begin : sbrst
+            integer sbi;
+            for (sbi = 0; sbi < RING_N; sbi = sbi + 1) sb_ref_v[sbi] = 1'b0;
+        end else begin
+            if (sp_we) begin
+                sb_ref_wm[sp_id] <= emit_wm;
+                sb_ref_v [sp_id] <= 1'b1;
+            end
+            if (dd_emit_we && sb_ref_v[alloc_seq[IDW-1:0]] && !(sp_we && sp_id == alloc_seq[IDW-1:0])
+                && ((cons_seq - sb_ref_wm[alloc_seq[IDW-1:0]]) >> (SEQ_W-1)))
+                $error("spanner_v2: plane slot %0d OVERWRITTEN while referenced (ref_wm=%0d cons=%0d alloc=%0d)",
+                       alloc_seq[IDW-1:0], sb_ref_wm[alloc_seq[IDW-1:0]], cons_seq, alloc_seq);
+        end
+    end
+    always @(posedge clk) if (!reset) begin
+        if ((alloc_seq - ts_seq) > SEQ_W'(64))
+            $error("spanner_v2: setup engine impossibly far behind (%0d)", alloc_seq - ts_seq);
     end
 `endif
 endmodule

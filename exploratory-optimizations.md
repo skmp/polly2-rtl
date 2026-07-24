@@ -29,22 +29,23 @@ by pass kind/number). Identify the biggest serialization bucket → fix → re-m
 | 12 | + OL ring entry drops (entskip feedback) | 3,249,207 | −71k | ✅ |
 | 13 | + PT fail-row / peel survivor-row sweep masks | 3,198,385 | −51k | ✅ |
 | 14 | + back-to-back triangle chaining | 2,981,810 | −217k | ✅ |
-| 15 | + coverage cache (cov$: exact per-triangle covered-row masks) | **2,909,579** | −72k | ✅ |
+| 15 | + coverage cache (cov$: exact per-triangle covered-row masks) | 2,909,579 | −72k | ✅ |
+| 16 | + cross-pass plane reuse (sliding window) + streamed spanner→reader handoff | **2,717,013** | −193k | ✅ |
 
-Total: **−49%** (5.66M → 2.91M).
+Total: **−52%** (5.66M → 2.72M).
 
-## Final numbers per scene (all bit-exact vs `+nochain` and vs golden hashes)
+## Final numbers per scene (all bit-exact vs golden hashes)
 
-| scene | cycles (final) | chaining Δ | cov$ Δ | cov$ tri-skips / rows-clipped |
+| scene | cycles (final) | chaining Δ | cov$ Δ | plane-reuse+streaming Δ |
 |---|---|---|---|---|
-| shenmue_intro2 | 2,909,579 | −216,575 | −72,231 | 451 / 61,246 |
-| sonic | 2,673,058 | −148,682 | −32,666 | 42 / 23,543 |
-| hotd2_car_fire | 1,678,069 | −14,959 | −3,121 | 699 / 21,652 |
-| shenmue_menu | 1,453,595 | −10,710 | +209 | 3 / 4,013 |
-| hotd2_gargoyle | 1,333,727 | −8,022 | −1,418 | 170 / 11,374 |
-| daytona_intro | 1,283,886 | −13,964 | −84 | 1,381 / 7,017 |
-| menu2 | 994,823 | −69,417 | −9,771 | 194 / 28,112 |
-| hotd2_selfie | 982,494 | −1,039 | −103 | 18 / 2,375 |
+| shenmue_intro2 | 2,717,013 | −216,575 | −72,231 | −192,566 |
+| sonic | 2,588,800 | −148,682 | −32,666 | −84,258 |
+| hotd2_car_fire | 1,655,021 | −14,959 | −3,121 | −23,048 |
+| shenmue_menu | 1,409,105 | −10,710 | +209 | −44,490 |
+| hotd2_gargoyle | 1,317,390 | −8,022 | −1,418 | −16,337 |
+| daytona_intro | 1,267,801 | −13,964 | −84 | −16,085 |
+| menu2 | 945,729 | −69,417 | −9,771 | −49,094 |
+| hotd2_selfie | 981,101 | −1,039 | −103 | −1,393 |
 
 ## What was tried — detail
 
@@ -66,8 +67,9 @@ Total: **−49%** (5.66M → 2.91M).
 | **OL ring entry drops** | −71k | Iterator reports entries that retired with *every* record pre-skipped (entry_oidx tag through eq, entskip pulse back); the ring drops them from all later replays. Sound: sort$ "fully rendered" is a permanent predicate within a peel sequence, regardless of later cache eviction. intro2: 16.7k entries dropped pre-eq. | 512×1 bits + 10b eq tag |
 | **Row-mask sweep clips** | −51k | Fail/survivor sets tracked as 32-bit row masks; the sweep's row-advance jumps to the next set row (ctz32). Bbox y-window folded into the same row set → clipped and unclipped walks share one exit test. Less than the 900k PT-sweep bucket suggested: shenmue's fail rows are dense. | 4×32b masks + 2 encoders |
 | **Triangle chaining** | −217k intro2, −149k sonic | RS_DRAIN between same-pass triangles (full u_line flush, 10-15 cy/tri, 336k total) replaced by direct chaining: sweep-end / probe-abort / clip-skip pop the next pq entry immediately. Safe because (a) pq only ever holds same-pass triangles, (b) the stage-A/B RAW window is ±1 exit cycle and POP+CORNER guarantee a 2-cycle gap, (c) triangle identity rides u_line as a 2-bit slot index (qi/out_qi) into a 4-slot sideband. Per-site kill switches: `+nochain`, `+nc_pop`, `+nc_abort`, `+nc_row`. | the subtlest change of the campaign — see bug patterns below |
-
 | **Coverage cache (cov$)** | −72k intro2, −33k sonic, −10k menu2 | A triangle's sampled coverage in a tile is **pass-invariant** (same planes, same fill rule). The stage-A exit stream aggregates each rastered triangle's covered-row mask (32b) into a 1024×{tag,mask} M10K; from pass ≥2 of a peel/PT sequence, RS_CORNER ANDs a tag-matching mask into the sweep's row set. Exact by construction: skips leading/trailing sub-pixel fringe rows AND gappy sliver interiors; zero-coverage triangles skip whole and demote-starve out of the sort$. Freshness mirrors the sort$ argument (anything popping in pass p≥2 was rastered — or exactly cov-skipped — in pass p-1 of the same tile; aliases mismatch the stored tag → no clip). Rows excluded by other clips in the recording pass can never stage again (monotone shrink, grounded at the unclipped pass 1), so the under-approximation is sound. | 8 M10K (1024×64) + a 32b AND/ctz at RS_CORNER |
+
+| **Cross-pass plane reuse + streamed handoff** | −193k intro2, −84k sonic, −49k menu2; SETUP_WAIT 646k→46k, TSP busy 47%→64% | Two coupled changes. (1) **Sliding-window plane reuse**: setup ids become the low bits of a free-running 13-bit alloc sequence; the dedup generation persists across passes of the same tile, so a later pass's dedup hit reuses the earlier pass's triangle_setups entry — no re-fetch, no re-setup (intro2: 2070/2370 passes retained, 7,628 setups total). Only the last WINDOW=512 allocs are referencable (older hits realloc); every span stores its alloc watermark; the reader feeds back the watermark of the last fully-consumed span, and a plane frees once consumption passes its seq+WINDOW — provably no unconsumed reference (any such span's watermark would already be consumed). Ring capacity = alloc may run RING_N−WINDOW=512 ahead of consumption. (2) **Streamed spanner→reader handoff**: md descriptors push at spanner *start* (finalized at busy-fall); the reader paces off the live span head and each span's setup watermark, consuming while the pass is still being spanned — required for the window to be deadlock-free, and it overlaps setup with shade. A sim scoreboard asserts no plane is overwritten while referenced. `+noretain` / `+nostream` kill switches. | dedup entry +3b, span buffer +13b/slot, seq counters; deletes the per-pass plane-free machinery |
 
 ### Neutral / rejected
 
@@ -97,7 +99,17 @@ Total: **−49%** (5.66M → 2.91M).
    silently disabled everything during the bisect. Debug plusarg names must not
    prefix each other.
 4. **Bisect switches pay for themselves.** The per-site `+nc_*` gates localized
-   the corruption to the sweep-end chain in two sim runs.
+   the corruption to the sweep-end chain in two sim runs; `+nostream`/`+noretain`
+   did the same for the streaming work.
+5. **Same-cycle done-vs-accept races at pipeline drains.** The streamed reader's
+   walk-done fired on the same cycle the final span was bypass-accepted into the
+   expand stage; the drain check read the OLD (empty) stage flags and dropped the
+   span's pixels silently (counters balanced because the pixel was never counted).
+   An intermediate era-based free design also hid a latent 10-bit truncation of
+   the setups write address (`ts_id`) that only mattered at ring sizes > 1024.
+   Drain/termination decisions must use state registered BEFORE the cycle's
+   consume, while read-side stop conditions must include it — they are different
+   predicates.
 
 ## Current profile at 2.98M (intro2) and parked ideas
 
@@ -111,7 +123,6 @@ re-setup of the same planes).
 
 | parked idea | attacks | est. benefit | cost / blocker |
 |---|---|---|---|
-| Cross-pass plane/setup reuse ("survivor plane ring") | SETUP_WAIT 646k + PT ping-pong | 150-400k | dedup `gen` currently bumps per pass; retaining across passes needs deferred ring-tail frees + headroom guarantees against ring-full deadlock (plane ring is exactly one tile's worst case today), or a separate memo cache (~14 M10K / 128 entries) |
 | Tex throughput for sparse pixels | PT texstall 365k | 100-250k | TEXQ rows are mostly size 1-2 during PT; needs cross-span row coalescing in tex_fetch4_q |
 | Per-pass z-cull of PT triangles (corner invW vs fail-set ceiling) | PT sweep 900k | modest | 4 FP mult/adds at RS_POP; overlaps what sort$ demotes already catch |
 | VQ cache prefetch | vq cold fills (17.8k fills, 0 prefetched) | small | mirror of the tc prefetch path |
