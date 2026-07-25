@@ -3720,10 +3720,12 @@ module peel_core import tsp_pkg::*; #(
                           : (tsp_st != R_IDLE) ? OC_B : OC_U;
     wire [1:0] oc_shade   = pp_stall ? OC_O
                           : (pp_in_valid || pp_out_valid || u_shade.iv_ov) ? OC_B : OC_U;
-    // TEX: during a miss-fill, BUSY while beats stream, UNDERFLOW while waiting for the
-    // DDR channel grant (contention). When ready, BUSY only while pixels pass through.
-    wire [1:0] oc_tex     = !u_shade.tu_ready ? ((d_oc[0] != 2'd0 || d_oc[1] != 2'd0
-                                                  || d_oc[6] != 2'd0) ? OC_B : OC_U)
+    // TEX: a miss-fill is the unit WAITING FOR DATA, whether or not beats happen
+    // to be streaming this cycle - the texel the shader asked for is not there
+    // yet, so the whole fill episode reads as UNDERFLOW (it used to show BUSY
+    // while beats moved, which hid the stall). BUSY only when the cache is ready
+    // AND pixels are actually passing through.
+    wire [1:0] oc_tex     = !u_shade.tu_ready ? OC_U
                           : (u_shade.tu_ov || u_shade.iv_ov) ? OC_B : OC_U;
     wire [1:0] oc_blend   = (cb_valid || pp_out_valid) ? OC_B : OC_U;
     wire [1:0] oc_vo      = (vst != VO_IDLE) ? ((fbw_req.we && fbw_resp.busy) ? OC_O : OC_B)
@@ -3801,6 +3803,13 @@ module peel_core import tsp_pkg::*; #(
             $fwrite(occ_fd, "V 13 reader_st\nV 14 vo_tx\nV 15 vo_ty\nV 16 ddr_q\nV 17 ddr_owner\n");
             $fwrite(occ_fd, "V 18 shade_fifo\nV 19 halves\nV 20 ti_ready\nV 21 col_full\n");
             $fwrite(occ_fd, "V 22 spanner_st\nV 23 vo_st\nV 24 spn_stall\nV 25 sf_n\nV 26 pt_pass\n");
+            // F <unit> <value-id> <depth>: this unit IS a queue - the viewer draws
+            // it as a FILL LEVEL (value/depth) instead of an under/busy/over state,
+            // so starvation (empty) and backpressure (full) are both visible.
+            $fwrite(occ_fd, "F 2 6 %0d\n",  EQ_N);      // EQ   <- eq_n
+            $fwrite(occ_fd, "F 4 7 %0d\n",  FIFO_N);    // FQ   <- fq_n
+            $fwrite(occ_fd, "F 7 8 %0d\n",  PQ_N);      // PQ   <- pq_n
+            $fwrite(occ_fd, "F 13 11 %0d\n", MD_N);     // MDQ  <- mdq_n
             $fwrite(occ_fd, "E 0 0:IDLE,1:RA,2:STATE,4:OL_RUN,9:RA_ACK,10:DONE,11:DRAIN,28:PEEL_INIT,29:PEEL_BUF,32:OP_DONE,34:CLEAR_WR,35:PEEL_BUF_RUN,36:ZK_INV,39:PT_BUF,40:PT_INIT,41:PT_SWAP,42:PT_FIX,43:PT_WAIT,44:PT_NEXT\n");
             $fwrite(occ_fd, "E 5 0:IDLE,1:POP,2:RAS,3:DRAIN,4:CORNER\n");
             $fwrite(occ_fd, "E 13 0:IDLE,1:RUN,3:DRAIN,4:POST\n");

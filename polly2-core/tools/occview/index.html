@@ -87,6 +87,9 @@
       <span><i class="swatch" style="background:var(--c-under)"></i>underflow (waiting for data)</span>
       <span><i class="swatch" style="background:var(--c-busy)"></i>busy</span>
       <span><i class="swatch" style="background:var(--c-over)"></i>overflow (blocked)</span>
+      <span style="opacity:.85">| FIFOs:
+        <i class="swatch" style="width:52px;background:linear-gradient(90deg,#995a1c,#8baf20,#24c624,#dcdc14,#f20000)"></i>
+        empty&rarr;half&rarr;full</span>
     </span>
     <span class="hint">wheel: zoom &nbsp; drag: pan &nbsp; click: seek &nbsp; &larr;/&rarr;: step change &nbsp; shift+&larr;/&rarr;: &plusmn;1% </span>
   </div>
@@ -113,6 +116,7 @@ const DB = {
   units: [], vals: [], enums: {},           // header
   sCyc: null, sLo: null, sHi: null, nS: 0,  // state-change records
   vCyc: [], vVal: [],                       // per-value-id change arrays
+  fifos: [],                                // unit -> {vid, depth} for queue tracks
   marks: [],                                // {c, t:'R'|'D'}
   total: 0,
   order: [],                                // track DISPLAY order (row -> unit idx)
@@ -132,6 +136,33 @@ function computeOrder() {
 const NSTATE = 3;
 const COLORS = ['#e2b93d', '#3fa34d', '#d64541'];   // under, busy, over
 const IDLE = '#2a2a30';
+// FIFO fill ramp: EMPTY = orange (downstream starving), HALF = green (healthy
+// flow), FULL = red (upstream backpressured). Hue walks 30 -> 120 -> 0 so both
+// failure modes are warm and the healthy middle is green.
+function fifoColor(f) {
+  if (f < 0) return IDLE;
+  if (f > 1) f = 1;
+  // Hue walks 30 (orange) -> 120 (green) -> 0 (red), but hue ALONE is ambiguous:
+  // the descent re-enters orange at ~7/8 full, so an empty and a nearly-full
+  // queue would look identical. Brightness/saturation therefore rise with fill -
+  // empty reads as DARK orange, full as vivid red.
+  const h = f <= 0.5 ? 30 + f * 180 : 120 - (f - 0.5) * 240;
+  const v = 0.60 + f * 0.35;
+  const sa = f <= 0.5 ? 0.82 : 0.82 + (f - 0.5) * 0.36;
+  return hsv2css(h, Math.min(sa, 1), Math.min(v, 1));
+}
+function hsv2css(h, s, v) {
+  const c = v * s, x = c * (1 - Math.abs(((h / 60) % 2) - 1)), m = v - c;
+  let r, g, b;
+  if      (h <  60) { r = c; g = x; b = 0; }
+  else if (h < 120) { r = x; g = c; b = 0; }
+  else if (h < 180) { r = 0; g = c; b = x; }
+  else if (h < 240) { r = 0; g = x; b = c; }
+  else if (h < 300) { r = x; g = 0; b = c; }
+  else              { r = c; g = 0; b = x; }
+  const q = (n) => Math.round((n + m) * 255).toString(16).padStart(2, '0');
+  return '#' + q(r) + q(g) + q(b);
+}
 
 function stateOf(lo, hi, u) {
   return u < 16 ? (lo >>> (2*u)) & 3 : (hi >>> (2*(u-16))) & 3;
@@ -153,6 +184,34 @@ function valAtCycle(c, vid) {
   const i = idxAt(a, a.length, c);
   return i < 0 ? null : DB.vVal[vid][i];
 }
+// Time-weighted average of a value channel per pixel column, so a zoomed-out
+// FIFO track shows its MEAN occupancy over the column rather than whatever
+// value happened to land on the sample point. Returns -1 where no data.
+function binValue(vid, t0, t1, W) {
+  const a = DB.vCyc[vid], b = DB.vVal[vid];
+  if (!a || !a.length) return null;
+  const out = new Float64Array(W), wt = new Float64Array(W);
+  const span = t1 - t0;
+  let i = idxAt(a, a.length, t0); if (i < 0) i = 0;
+  for (; i < a.length; i++) {
+    const c0 = Math.max(a[i], t0);
+    const c1 = Math.min(i+1 < a.length ? a[i+1] : DB.total, t1);
+    if (c0 >= t1) break;
+    if (c1 <= c0) continue;
+    const v = b[i];
+    let px0 = Math.floor((c0 - t0) / span * W);
+    let px1 = Math.ceil ((c1 - t0) / span * W);
+    if (px1 > W) px1 = W; if (px0 < 0) px0 = 0;
+    if (px1 - px0 === 1) { out[px0] += v * (c1 - c0); wt[px0] += (c1 - c0); }
+    else for (let px = px0; px < px1; px++) {
+      const pc0 = t0 + px / W * span, pc1 = t0 + (px+1) / W * span;
+      const ov = Math.min(c1, pc1) - Math.max(c0, pc0);
+      if (ov > 0) { out[px] += v * ov; wt[px] += ov; }
+    }
+  }
+  for (let px = 0; px < W; px++) out[px] = wt[px] > 0 ? out[px] / wt[px] : -1;
+  return out;
+}
 function enumName(vid, v) {
   const e = DB.enums[vid];
   return e && (v in e) ? e[v] : String(v);
@@ -160,7 +219,7 @@ function enumName(vid, v) {
 
 // ============================== parser ==============================
 function parseLog(text, done, progress) {
-  const units = [], vals = [], enums = {};
+  const units = [], vals = [], enums = {}, fifos = [];
   let sCyc = new Float64Array(1<<16), sLo = new Uint32Array(1<<16),
       sHi = new Uint32Array(1<<16), nS = 0;
   const vCyc = [], vVal = [];
@@ -217,6 +276,9 @@ function parseLog(text, done, progress) {
           const t = line.split(' '); units[+t[1]] = t[2];
         } else if (c0 === 86) {                     // 'V i name'
           const t = line.split(' '); vals[+t[1]] = t[2];
+        } else if (c0 === 70) {                     // 'F unit vid depth'
+          const t = line.split(' ');
+          fifos[+t[1]] = { vid: +t[2], depth: +t[3] };
         } else if (c0 === 69) {                     // 'E vid a:N,b:N'
           const t = line.split(' '); const m = {};
           for (const kv of t[2].split(',')) { const [k, n] = kv.split(':'); m[+k] = n; }
@@ -231,7 +293,7 @@ function parseLog(text, done, progress) {
     }
     progress(pos / len);
     if (pos < len) { setTimeout(step, 0); return; }
-    DB.units = units; DB.vals = vals; DB.enums = enums;
+    DB.units = units; DB.vals = vals; DB.enums = enums; DB.fifos = fifos;
     DB.sCyc = sCyc; DB.sLo = sLo; DB.sHi = sHi; DB.nS = nS;
     DB.vCyc = vCyc.map(a => a ? Float64Array.from(a) : null);
     DB.vVal = vVal.map(a => a ? Float64Array.from(a) : null);
@@ -286,6 +348,27 @@ function paintBins(ctx, t0, t1, x0, W, rowH, rowGap, topY) {
     const y = topY + r * (rowH + rowGap);
     ctx.fillStyle = IDLE;
     ctx.fillRect(x0, y, W, rowH);
+    // FIFO units are drawn as a FILL LEVEL (orange=empty .. green=half ..
+    // red=full) instead of an under/busy/over state: for a queue, "empty" and
+    // "full" are the two interesting failures and both are invisible in a
+    // 3-state view. Colours are quantised to 5% so equal columns merge into runs.
+    const fifo = DB.fifos && DB.fifos[u];
+    if (fifo) {
+      const av = binValue(fifo.vid, t0, t1, W);
+      let fRunStart = 0, fRunCol = null;
+      for (let px = 0; px <= W; px++) {
+        const c = (px < W && av)
+          ? (av[px] < 0 ? IDLE : fifoColor(Math.round(av[px] / fifo.depth * 20) / 20))
+          : null;
+        if (c !== fRunCol) {
+          if (fRunCol !== null && fRunCol !== IDLE && px > fRunStart) {
+            ctx.fillStyle = fRunCol; ctx.fillRect(x0+fRunStart, y, px-fRunStart, rowH);
+          }
+          fRunStart = px; fRunCol = c;
+        }
+      }
+      continue;
+    }
     // A pixel column can cover many cycles when zoomed out. A column whose cycles
     // are ALL one state is drawn as a solid run (runs are merged across columns,
     // so a zoomed-in view is one fillRect per state change). A MIXED column is
