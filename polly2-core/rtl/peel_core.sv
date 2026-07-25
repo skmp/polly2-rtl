@@ -741,7 +741,15 @@ module peel_core import tsp_pkg::*; #(
     reg  [5:0]  col_tx [0:1];             // per-half posted tile x
     reg  [5:0]  col_ty [0:1];             // per-half posted tile y
     reg  [5:0]  vo_tx, vo_ty;             // coords of the half VO is draining
-    reg  [9:0]  vo_i;                     // VO writeout pixel 0..1023
+    reg  [9:0]  vo_i;                     // VO pixel being WRITTEN (0..1023)
+    // PIPELINED VO (1 px/clk): the color read is registered, so the read pointer
+    // runs exactly ONE pixel ahead of the write - the datum landing on vo_rd_argb
+    // this cycle is the one being written this cycle. A write stall (fbw busy)
+    // parks the just-landed datum in a 1-deep skid (vo_hv/vo_hd) and freezes the
+    // read pointer, so no datum is lost and no re-read bubble is needed.
+    reg  [9:0]  vo_ri;                    // read pointer (address presented this cycle)
+    reg         vo_hv;                    // skid holds the current write pixel's data
+    reg  [31:0] vo_hd;
     localparam VO_IDLE=2'd0, VO_RD=2'd1, VO_WR=2'd2;
     reg  [1:0]  vst;                      // video-out FSM state
     // TSP posts a finished color buffer to VO: sets the credit, latches coords, flips
@@ -1616,13 +1624,16 @@ module peel_core import tsp_pkg::*; #(
     wire [10:0] fw_py = {5'd0, vo_ty}*11'd32 + {6'd0, vo_i[9:5]};
     // hscale renders are 1280 wide before the write master's x1/2 downscale
     wire [10:0] fw_xlim = regs.scaler_ctl.hscale ? 11'd1280 : 11'd640;
+    // the color of the pixel being written: normally the datum that landed this
+    // cycle (its read was presented last cycle), or the skid across a write stall
+    wire [31:0] vo_wdat = vo_hv ? vo_hd : vo_rd_argb;
     wire        fw_onscreen = (fw_px < fw_xlim) && (fw_py < 11'd480);
     always @(*) begin
         fbw_req.we      = (vst==VO_WR) && fw_onscreen;
         fbw_req.pix_idx = fw_py*20'd640 + {9'd0, fw_px};
         fbw_req.px      = fw_px;
         fbw_req.py      = fw_py[9:0];
-        fbw_req.argb    = vo_rd_argb;             // VO-half registered read of vo_i
+        fbw_req.argb    = vo_wdat;                // pixel vo_i's color (bus or skid)
     end
     // a pixel is consumed this cycle when: on-screen and the sink accepted it, OR
     // off-screen (nothing to write -> skip immediately).
@@ -1666,7 +1677,7 @@ module peel_core import tsp_pkg::*; #(
         if (fbd_en) begin fbd_fd=$fopen(fbd_name,"w"); $fwrite(fbd_fd,"# x y argb (tile tx,ty fw_i)\n"); end
     end
     always @(posedge clk) if (!reset && fbd_en && fbw_req.we && fw_pix_consumed) begin
-        $fwrite(fbd_fd, "%0d %0d %08x %0d %0d %0d\n", fw_px, fw_py, vo_rd_argb, vo_tx, vo_ty, vo_i);
+        $fwrite(fbd_fd, "%0d %0d %08x %0d %0d %0d\n", fw_px, fw_py, vo_wdat, vo_tx, vo_ty, vo_i);
         fbd_n = fbd_n + 1;
     end
     final if (fbd_en && fbd_fd!=0) begin $fflush(fbd_fd); $fclose(fbd_fd);
@@ -1709,8 +1720,8 @@ module peel_core import tsp_pkg::*; #(
         cb_ca_valid = pp_out_valid;                   // blend stage CA read (out_id)
         cb_ca_id    = pp_out_id[9:0];                 // [10] is the at-bit
         // FLUSH read is driven by the DECOUPLED video-out FSM (vst), on the VO half.
-        cb_fl_valid = (vst == VO_RD || vst == VO_WR); // VO read (vo_i)
-        cb_fl_id    = vo_i;
+        cb_fl_valid = (vst == VO_RD || vst == VO_WR); // VO read (runs 1 ahead)
+        cb_fl_id    = vo_ri;
 
         // ---- TSP reader read-address presentation (dense span walk + expand) ----
         // Stage A: dsr_addr = span_ptr = the IN-FLIGHT slot, held stable until consumed into
@@ -3565,7 +3576,7 @@ module peel_core import tsp_pkg::*; #(
     always @(posedge clk) begin
         if (reset) begin
             vst<=VO_IDLE; vo_i<=10'd0; col_vo<=1'b0; col_full<=2'b00;
-            vo_tx<=6'd0; vo_ty<=6'd0;
+            vo_tx<=6'd0; vo_ty<=6'd0; vo_ri<=10'd0; vo_hv<=1'b0; vo_hd<=32'd0;
         end else begin
             // SET credit from the main FSM's post intent (main FSM flips col_prod).
             if (col_post) begin
@@ -3578,18 +3589,27 @@ module peel_core import tsp_pkg::*; #(
             VO_IDLE: if (col_full[col_vo]) begin
                 // this half holds a finished tile: latch its coords, prime pixel 0.
                 vo_tx <= col_tx[col_vo]; vo_ty <= col_ty[col_vo];
-                vo_i  <= 10'd0;
-                vst   <= VO_RD;          // cb_fl_* presents the read of vo_i=0
+                vo_i  <= 10'd0; vo_ri <= 10'd0; vo_hv <= 1'b0;
+                vst   <= VO_RD;          // cb_fl_* presents the read of pixel 0
             end
-            VO_RD: vst <= VO_WR;         // registered read lands next cycle
+            // PRIME: pixel 0's read is presented this cycle (lands next); step the
+            // read pointer so the stream stays exactly one pixel ahead.
+            VO_RD: begin vo_ri <= 10'd1; vst <= VO_WR; end
+            // STREAM at 1 px/clk: write vo_i from vo_wdat while presenting vo_ri.
             VO_WR: if (fw_pix_consumed) begin
+                vo_hv <= 1'b0;            // next pixel's datum is already on the bus
                 if (vo_i == 10'd1023) begin
                     col_full[col_vo] <= 1'b0;                 // release the half
                     col_vo <= ~col_vo;                       // next half in order
                     vst    <= VO_IDLE;
                 end else begin
-                    vo_i <= vo_i + 10'd1; vst <= VO_RD;       // present next pixel read
+                    vo_i  <= vo_i  + 10'd1;
+                    vo_ri <= vo_ri + 10'd1;                   // stay one ahead
                 end
+            end else if (!vo_hv) begin
+                // write stalled: park the datum that just landed (it belongs to
+                // vo_i) and FREEZE the read pointer so nothing else lands on it.
+                vo_hv <= 1'b1; vo_hd <= vo_rd_argb;
             end
             default: vst <= VO_IDLE;
             endcase

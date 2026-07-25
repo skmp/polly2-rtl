@@ -33,22 +33,24 @@ by pass kind/number). Identify the biggest serialization bucket → fix → re-m
 | 16 | + cross-pass plane reuse (sliding window) + streamed spanner→reader handoff | 2,717,013 | −193k | ✅ |
 | 17 | + tex prefetch lookahead pointer + continuous re-arm | 2,666,928 | −50k | ✅ |
 | 18 | + TEXQ bubble-riding rows + pipe-idle bypass | 2,666,653 | −0.3k (−14k suite) | ✅ |
-| 19 | + cov$ v2: per-row CHUNK-COLUMN masks | **2,590,839** | −76k | ✅ |
+| 19 | + cov$ v2: per-row CHUNK-COLUMN masks | 2,590,839 | −76k | ✅ |
+| 20 | + pipelined video-out (1 px/clk) | **2,589,816** | −1k (−295k suite) | ✅ |
 
-Total: **−54%** (5.66M → 2.59M).
+Total: **−54%** (5.66M → 2.59M) on intro2; the VO fix is worth far more on
+light-geometry scenes (daytona −7.3%, see the per-scene table).
 
 ## Final numbers per scene (all bit-exact vs golden hashes)
 
-| scene | cycles (final) | chaining Δ | cov$ v1 Δ | plane-reuse+streaming Δ | tex-lookahead Δ | cov$ v2 Δ |
-|---|---|---|---|---|---|---|
-| shenmue_intro2 | 2,590,839 | −216,575 | −72,231 | −192,566 | −50,085 | −75,814 |
-| sonic | 2,559,941 | −148,682 | −32,666 | −84,258 | −7,762 | −23,999 |
-| hotd2_car_fire | 1,508,588 | −14,959 | −3,121 | −23,048 | −133,482 | −5,289 |
-| daytona_intro | 1,257,854 | −13,964 | −84 | −16,085 | −10,047 | −670 |
-| shenmue_menu | 1,249,029 | −10,710 | +209 | −44,490 | −152,093 | +99 |
-| hotd2_gargoyle | 1,215,615 | −8,022 | −1,418 | −16,337 | −96,332 | −1,009 |
-| menu2 | 930,582 | −69,417 | −9,771 | −49,094 | −7,082 | −8,647 |
-| hotd2_selfie | 899,172 | −1,039 | −103 | −1,393 | −79,224 | −842 |
+| scene | cycles (final) | tex-lookahead Δ | cov$ v2 Δ | VO 1px/clk Δ | bound by |
+|---|---|---|---|---|---|
+| shenmue_intro2 | 2,589,816 | −50,085 | −75,814 | −1,023 | geometry (raster) |
+| sonic | 2,558,918 | −7,762 | −23,999 | −1,023 | geometry |
+| hotd2_car_fire | 1,449,432 | −133,482 | −5,289 | −59,156 | mixed |
+| shenmue_menu | 1,248,006 | −152,093 | +99 | −1,023 | texture |
+| hotd2_gargoyle | 1,174,477 | −96,332 | −1,009 | −41,138 | mixed |
+| daytona_intro | 1,166,291 | −10,047 | −670 | **−91,563** | **video-out** |
+| menu2 | 889,493 | −7,082 | −8,647 | −41,089 | video-out |
+| hotd2_selfie | 839,129 | −79,224 | −842 | −60,043 | video-out |
 
 ## What was tried — detail
 
@@ -77,6 +79,8 @@ Total: **−54%** (5.66M → 2.59M).
 | **Tex prefetch lookahead pointer + re-arm** | −152k shenmue_menu, −133k hotd2_car_fire, −96k gargoyle, −79k selfie, −50k intro2 | The old probe examined only the row-queue HEAD, once per fill episode (28% of tc4 fills prefetched). Now: (1) tfq_fifo grows a persistent LOOKAHEAD pointer into its RAM-resident tail — the probe presents the pointer's row and `probe_adv` advances it when a row is exhausted, so successive probes RESUME ever deeper (LA_MAX=16 window, self-clamping to the read pointer). No second port: lookahead refreshes steal RAM-read cycles the FWFT refill leaves idle. (2) The cache re-arms continuously (the once-per-episode `pr_evd` latch is gone) and folds the in-flight guards per-lane, so a row with several misses yields several prefetches back-to-back on the dedicated client. Probe rows latch at issue (race-free vs pointer clamps). Coverage: intro2 42%, shenmue_menu 67% of fills prefetched; shenmue_menu TEX_STALL 6%, reader PRESENT 67%. | ~40 FF in tfq_fifo + probe latch regs; probe still runs only while frozen filling |
 
 | **cov$ v2 (per-row chunk-column masks)** | −76k intro2, −24k sonic, −8.6k menu2 | The sweep's x range came from the triangle bbox, measured at 3.4 of 4 chunk columns per row with **47% of all swept chunks covering nothing**. v2 records coverage per (row, chunk column) instead of per row — 4 bits/row, 128b/entry — and the sweep jumps column-to-column within a row, then row-to-row, using the recorded mask (all-ones when no cov$ hit ⇒ identical to the old bbox walk). Sound for the same reason as v1, plus: **chunk coverage within a row is contiguous for a convex primitive** (a gap would require the covered x-interval to skip an integer it must contain), so the mask never encodes an unreachable hole. Result: clipped sweeps are now essentially exact — 432,245 chunks swept / 431,129 covered (**0.26% waste**). Entry {tag32, mask128}; 1024 entries = 16 M10K (512 = 8 M10K costs only 6.6k cycles on intro2 — halve it if the fitter is tight). | 16 M10K (or 8 at 512 entries); a 32×4 OR-reduce + ctz32 + 4-bit ctz in the sweep-control path |
+
+| **Pipelined video-out (1 px/clk)** | −1k intro2, but **−91.6k daytona / −60k selfie / −59k car_fire / −41k menu2+gargoyle** (~295k suite) | The VO engine ran a 2-state RD→WR loop = exactly 2.00 cycles/pixel (614,400 = 2 × 640×480). Now the registered color read runs exactly ONE pixel ahead of the write, so the datum landing each cycle is the one being written — 1 px/clk (FLUSH 614,400 → 307,500). A write stall (fbw busy) parks the landed datum in a 1-deep skid and freezes the read pointer, so no datum is lost and no re-read bubble is needed. **Lesson on where it pays:** VO is fully hidden behind geometry-bound tiles (intro2 gained only 1k — it was 99.8% overlapped), but a tile whose total work is under the old 2048-cycle VO cost is VO-LIMITED, which is exactly the light-geometry scenes. Per-tile budget predicts it: menu2 ~3.1k cyc/tile, daytona ~4.2k. | ~35 FF (read ptr + 32b skid) |
 
 ### Neutral / rejected
 
@@ -135,7 +139,7 @@ re-setup of the same planes).
 | **Analytic per-row x-range (edge-based sweep bounds)** | the 533k of remaining chunk waste — ALL of it in unclipped (pass-1 / tag-miss) sweeps, which are 68% of chunk work and run 59% wasted | 200-300k | cov$ cannot help a first pass. Per row the ISP pipeline already has the edge bases eb_n = Cn + DXn·y; with rcp(DYn) computed ONCE per triangle (4 reciprocals at setup) the crossing column is eb_n × rcp(DYn) — 4 multiplies/row, then min/max by edge sign. Only needs to be CONSERVATIVE (round outward one chunk), so no bit-exactness constraint. This is the "real rasterizer" fix and the last big raster lever. NOTE: online early-exit within a row is NOT viable — the coverage verdict lands ~7 cycles after issue and a row is only 4 chunks. |
 | Per-pass z-cull of PT triangles (corner invW vs fail-set ceiling) | PT sweep 900k | modest | 4 FP mult/adds at RS_POP; overlaps what sort$ demotes already catch |
 | VQ cache prefetch | vq cold fills (17.8k fills, 0 prefetched) | small | mirror of the tc prefetch path |
-| More color halves | VO-bound scenes (daytona pattern) | scene-specific | M10K |
+| More color halves | VO-bound scenes — now much weaker after the 1 px/clk VO fix (daytona/menu2/selfie already gained 4-7%) | small | M10K |
 | PT_SWAP walk row-clip | 147k fenced swap walks | small (dense rows again) | safe by the same monotone argument; un-failed pixels' zb/zb2/valid are never consumed again before PT_FIX |
 
 ## Debt
