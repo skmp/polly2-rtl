@@ -416,6 +416,28 @@ module tex_fetch4_q import tsp_pkg::*; #(
         assign vq_req[gi].waddr = t1_vqaddr[gi];
     end endgenerate
 
+`ifndef SYNTHESIS
+    // ---- DRAIN-SIDE PROBE: why is the tex path not retiring a pixel this cycle?
+    // The shade front stalls on !pl_room (payload window full) when this path
+    // drains slower than pixels are issued, so classify every non-retiring cycle.
+    integer dr_adv, dr_row, dr_vqfrz, dr_t2, dr_empty;
+    integer dr_tcfrz, dr_vqfrz_all, dr_rowq_dry;
+    initial begin dr_adv=0; dr_row=0; dr_vqfrz=0; dr_t2=0; dr_empty=0;
+                  dr_tcfrz=0; dr_vqfrz_all=0; dr_rowq_dry=0; end
+    always @(posedge clk) if (!clear) begin
+        if (t2_adv)                       dr_adv   <= dr_adv + 1;   // a pixel retired
+        else if (!pixq_ov && !t1_v && !t2_v) dr_empty <= dr_empty + 1; // nothing in flight
+        else if (pixq_ov && !ex_row_ok)   dr_row   <= dr_row + 1;   // waiting for row data
+        else if (vq_need && !vq_ready)    dr_vqfrz <= dr_vqfrz + 1; // VQ cache frozen
+        else                              dr_t2    <= dr_t2 + 1;    // V2 waiting on vq_ack
+        if (!tc_ready) dr_tcfrz     <= dr_tcfrz + 1;
+        if (!vq_ready) dr_vqfrz_all <= dr_vqfrz_all + 1;
+        if (!rowq_ov)  dr_rowq_dry  <= dr_rowq_dry + 1;
+    end
+    final $display("=== TEXDRAIN %m: retired=%0d | stalls: row-wait=%0d vq-frozen=%0d v2-wait=%0d idle=%0d | tc$frozen=%0d vq$frozen=%0d rowq-empty=%0d ===",
+                   dr_adv, dr_row, dr_vqfrz, dr_t2, dr_empty, dr_tcfrz, dr_vqfrz_all, dr_rowq_dry);
+`endif
+
     // output: same drain-pulse contract + VQ same-cycle bypass as tex_fetch4_ob
     generate for (gi=0; gi<4; gi=gi+1) begin : outw
         assign texel[gi] = (t2_v && t2_vq && !t2_dv) ? vq_resp[gi].rdata : t2_word[gi];

@@ -82,6 +82,48 @@ light-geometry scenes (daytona −7.3%, see the per-scene table).
 
 | **Pipelined video-out (1 px/clk)** | −1k intro2, but **−91.6k daytona / −60k selfie / −59k car_fire / −41k menu2+gargoyle** (~295k suite) | The VO engine ran a 2-state RD→WR loop = exactly 2.00 cycles/pixel (614,400 = 2 × 640×480). Now the registered color read runs exactly ONE pixel ahead of the write, so the datum landing each cycle is the one being written — 1 px/clk (FLUSH 614,400 → 307,500). A write stall (fbw busy) parks the landed datum in a 1-deep skid and freezes the read pointer, so no datum is lost and no re-read bubble is needed. **Lesson on where it pays:** VO is fully hidden behind geometry-bound tiles (intro2 gained only 1k — it was 99.8% overlapped), but a tile whose total work is under the old 2048-cycle VO cost is VO-LIMITED, which is exactly the light-geometry scenes. Per-tile budget predicts it: menu2 ~3.1k cyc/tile, daytona ~4.2k. | ~35 FF (read ptr + 32b skid) |
 
+### Parked mid-flight (in the tree, decision pending)
+
+**Tex drain-side during PT.** A drain probe in `tex_fetch4_q` (sim-only counters,
+kept) settled two hypotheses:
+
+* The drain stall is **not** the expander or the V1/V2 output stages — it is cache
+  fill time, dominated by the **VQ codebook cache**, which had no prefetch at all:
+  VQ-frozen 406,906 cyc, row-wait (tc$ path) 283,150, V2-wait 44,152.
+* Misses are **94-95% conflict/capacity, not cold** (tc$ 40,523 vs 2,022; vq$
+  17,280 vs 1,020). Note the taxonomy conflates conflict with capacity — the
+  XOR-index result below shows these are mostly capacity.
+
+Two changes are in the tree, both bit-exact on all 8 scenes with all selftests
+passing:
+
+1. **XOR-folded cache index** (`cix()` in tex_cache_4p_1c) — the set index was a
+   plain address slice, so lines 32KB apart collided (a 128KB texture
+   self-conflicts 4x). Tag still identifies a line uniquely, so no extra tag
+   bits. Worth only −8.7k, and conflicts barely moved (40,523 → 40,436), which is
+   the evidence that these are capacity misses rather than stride aliasing.
+   Free, keep.
+2. **VQ fill lookahead** — the codebook address is data-dependent (an index byte
+   inside a fetched texel word) so it cannot be predicted from the request queue,
+   but it IS known one pixel early: the EX stage holds the next pixel with its row
+   data resolved, and V1 is precisely what stalls during a VQ fill. EX's four
+   codebook addresses now drive the VQ cache's probe port, with an 8th arbiter
+   client for its prefetch fills. intro2 −36.3k and PT texstall 341,716 → 276,574
+   (−19%), 22% of VQ fills prefetched. **But** the suite is mixed: daytona −25.7k,
+   sonic −2.5k, gargoyle −2.3k against **selfie +15.0k**, car_fire +3.6k,
+   menu2/shenmue_menu +0.5k/+1.1k — net ≈ −46k. Mechanism for the regressions:
+   prefetching into a cache that is already 94% conflict-evicting displaces live
+   lines and spends DDR on lines that are never used.
+
+Untested idea for the regressions: suppress a VQ prefetch whose target set holds a
+valid line of a *different* tag (prefetch only into cold or self slots), keeping
+the daytona/intro2 gains without the eviction damage. Otherwise revert item 2 and
+keep item 1. **The real fix is capacity, not latency hiding** — these caches are
+32KB against textures that are often larger.
+
+| **Cross-tile pipelining** | ALREADY PRESENT — measured, no work needed | No tile-boundary state waits for TSP: `RSTATE_CLEAR`/`RSTATE_OP`/`RSTATE_FLUSH` gate on `consumer_idle` (ISP pipe drained) + `!ti_ready[htile]` (target half free), and the `ti_*`/`md_*` metadata is per-half, so the halves are tile-agnostic. Measured: TSP shades a **different tile than ISP for 219,292 cycles = 12% of TSP-busy time**. | — |
+| **Deeper pass buffer (3rd taginvw half)** | measured ≈ 0 — DEAD | The hypothesis was that the 2-half ping-pong starves TSP (474k BARRIER + 302k OL of ISP-alone). It does not: `ISP-on-taginvw` is **17,196 cycles (0%)** on the peel path, and the PT path's `S_PT_NEXT` wait splits **half-busy 97,518 vs speculation-throttle 389,596** — i.e. the half count binds almost nowhere, and where it does, unblocking it only deepens PT speculation, which is deliberately capped. Re-verified today at the post-cov$-v2 balance: throttle depth 3 gives **2,603,324 (+13.5k)** with passes 1,426→1,678. So +7 M10K and a 3:1 mux on the spanner's 4-wide read path would buy nothing. TSP starvation is a pure ISP THROUGHPUT deficit (ISP work 1.84M vs TSP 1.69M), not a buffering problem. |
+
 ### Neutral / rejected
 
 | experiment | result | verdict / lesson |

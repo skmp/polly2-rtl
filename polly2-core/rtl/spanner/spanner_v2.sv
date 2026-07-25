@@ -192,7 +192,19 @@ module spanner_v2 import tsp_pkg::*; #(
 `else
     initial retain_en = 1'b1;
 `endif
-    wire               ctx_ok = ctx_val && (prev_xb == xbase) && (prev_yb == ybase);
+    // +xtileretain (SPECULATIVE, renders WRONG today): drop the tile-origin match
+    // so the dedup generation - and hence plane/setup reuse - persists ACROSS
+    // tiles. Only valid once setups are UNANCHORED (planes not expressed
+    // relative to the tile origin); until then the reused planes carry the
+    // previous tile's origin. Measures the upper bound of that change.
+    reg                xtile_en;
+`ifndef SYNTHESIS
+    initial xtile_en = $test$plusargs("xtileretain");
+`else
+    initial xtile_en = 1'b0;
+`endif
+    wire               ctx_ok = ctx_val
+                             && (xtile_en || ((prev_xb == xbase) && (prev_yb == ybase)));
     wire               retain_ok = retain_en && ctx_ok;
 
     // ---- span RING (dense_span_buffer slots), shared with TSP (mirrors the plane ring) ----

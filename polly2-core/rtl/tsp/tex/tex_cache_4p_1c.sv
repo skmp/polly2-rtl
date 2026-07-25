@@ -274,6 +274,7 @@ module tex_cache_4p_1c import tsp_pkg::*; (
     integer stat_hit [0:4];
     integer stat_n;
     integer st_pf_iss, st_fills;
+    integer st_cold = 0, st_conflict = 0;
 `endif
 
     always @(posedge clk) begin
@@ -343,6 +344,20 @@ module tex_cache_4p_1c import tsp_pkg::*; (
                 end
             end
 
+`ifndef SYNTHESIS
+            // miss taxonomy: was the line we are about to overwrite VALID with a
+            // DIFFERENT tag (conflict/thrash) or invalid (cold)?
+            if (fr_beat_now && fr_beat == 2'd3) begin
+                if (meta0[fr_ix][TAGW] && meta0[fr_ix][TAGW-1:0] != fr_line[LAW-1:IXW])
+                     st_conflict <= st_conflict + 1;
+                else st_cold     <= st_cold + 1;
+            end
+            if (pfr_beat_now && pfr_beat == 2'd3) begin
+                if (meta0[pfr_ix][TAGW] && meta0[pfr_ix][TAGW-1:0] != pfr_line[LAW-1:IXW])
+                     st_conflict <= st_conflict + 1;
+                else st_cold     <= st_cold + 1;
+            end
+`endif
             // -------- fill receiver: consume qualified beats in ANY state --------
             if (fr_beat_now) begin
                 fr_beat <= fr_beat + 2'd1;
@@ -487,6 +502,7 @@ module tex_cache_4p_1c import tsp_pkg::*; (
     end
 
     final begin
+        $display("=== TEX$1c %m: cold-fills=%0d conflict-fills=%0d ===", st_cold, st_conflict);
         $display("=== TEX$1c %m: %0d lookup-cycles: HIT4=%0d HIT3=%0d HIT2=%0d HIT1=%0d HIT0=%0d fills=%0d (prefetched=%0d) ===",
                  stat_n, stat_hit[4], stat_hit[3], stat_hit[2], stat_hit[1], stat_hit[0],
                  st_fills, st_pf_iss);

@@ -1549,6 +1549,13 @@ module peel_core import tsp_pkg::*; #(
     integer pc_ee_tail, pc_ee_viol, pc_ee_tri, pc_ee_rows;
     integer pc_cov_abort, pc_cov_cliprows;
     integer pc_chunk_all, pc_chunk_cov;   // swept chunks vs chunks with ANY coverage
+    // CROSS-TILE overlap probe: is TSP shading a DIFFERENT tile than the one ISP
+    // is currently working on? (the ti_*/md_* metadata is per-half, so the
+    // machinery is tile-agnostic - this measures how often it actually happens)
+    integer pc_xtile, pc_sametile, pc_tspbusy;
+    // why does S_PT_NEXT wait? half-busy (2-half ping-pong is binding) vs the
+    // speculation throttle (deliberate) - decides whether a 3rd half would help
+    integer pc_ptn_half, pc_ptn_thr, pc_ptn_both;
     integer pc_chunk_p1, pc_chunk_p1c;    // ... of which in an unclipped (pass-1 / miss) sweep
     reg     cov_hit_r;                    // this triangle's sweep is cov$-clipped
     reg [4:0] ee_row; reg [5:0] ee_tail;
@@ -1789,6 +1796,8 @@ module peel_core import tsp_pkg::*; #(
             pc_ee_tail<=0; pc_ee_viol<=0; pc_ee_tri<=0; pc_ee_rows<=0;
             pc_cov_abort<=0; pc_cov_cliprows<=0; pc_chunk_all<=0; pc_chunk_cov<=0;
             pc_chunk_p1<=0; pc_chunk_p1c<=0;
+            pc_xtile<=0; pc_sametile<=0; pc_tspbusy<=0;
+            pc_ptn_half<=0; pc_ptn_thr<=0; pc_ptn_both<=0;
             ee_row<=5'd0; ee_tail<='0;
             ee_rowcov<=1'b0; ee_seen<=1'b0; ee_gap<=1'b0; ee_viol<=1'b0;
             pt_c_px<=0; pt_c_stall<=0; pt_c_look<=0; pt_c_fillw<=0; pt_c_spn<=0;
@@ -2007,6 +2016,21 @@ module peel_core import tsp_pkg::*; #(
             ras_inflight <= ras_inflight + (ras_in_valid ? 1 : 0) - (ras_out_valid ? 1 : 0);
 
 `ifndef SYNTHESIS
+            if (st == 6'(S_PT_NEXT) && !pt_stop && pt_pass < PT_MAX_PASS[7:0]) begin : ptnwhy
+                reg hb, tb;
+                hb = ti_ready[htile];
+                tb = !((pt_sh_pend + (pt_hand_p ? 3'd1 : 3'd0)
+                                   - (pt_free_p ? 3'd1 : 3'd0)) < 3'd3);
+                if      (hb && tb) pc_ptn_both <= pc_ptn_both + 1;
+                else if (hb)       pc_ptn_half <= pc_ptn_half + 1;
+                else if (tb)       pc_ptn_thr  <= pc_ptn_thr  + 1;
+            end
+            if (tsp_st != R_IDLE && !md_empty) begin
+                pc_tspbusy <= pc_tspbusy + 1;
+                if (md_tx[md_rp[MD_AW-1:0]] != cur_tx || md_ty[md_rp[MD_AW-1:0]] != cur_ty)
+                     pc_xtile    <= pc_xtile + 1;
+                else pc_sametile <= pc_sametile + 1;
+            end
             if (ras_out_valid) begin
                 pc_chunk_all <= pc_chunk_all + 1;
                 if (|ras_inside) pc_chunk_cov <= pc_chunk_cov + 1;
@@ -2786,6 +2810,10 @@ module peel_core import tsp_pkg::*; #(
                 $display("     ROW-EXIT:    swept-rows=%0d tail-rows=%0d (%0d%%) over %0d covered-tris, naive-rule violations=%0d",
                     pc_ee_rows, pc_ee_tail, (pc_ee_tail*100)/(pc_ee_rows?pc_ee_rows:1),
                     pc_ee_tri, pc_ee_viol);
+                $display("     PT_NEXT wait: half-busy-only=%0d throttle-only=%0d both=%0d",
+                    pc_ptn_half, pc_ptn_thr, pc_ptn_both);
+                $display("     XTILE:       TSP busy=%0d: shading a DIFFERENT tile than ISP=%0d (%0d%%), same tile=%0d",
+                    pc_tspbusy, pc_xtile, (pc_xtile*100)/(pc_tspbusy?pc_tspbusy:1), pc_sametile);
                 $display("     CHUNKS:      swept=%0d covered=%0d (%0d%% wasted); UNCLIPPED sweeps: %0d swept %0d covered (%0d wasted)",
                     pc_chunk_all, pc_chunk_cov,
                     ((pc_chunk_all-pc_chunk_cov)*100)/(pc_chunk_all?pc_chunk_all:1),
