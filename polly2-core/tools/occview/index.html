@@ -589,7 +589,7 @@ const LAYOUT = {
     { id:'SPANNER', u:10, x: 10, y:236, w:110, h: 38, label:'spanner_v2' },
     { id:'SFETCH',  u:11, x: 10, y:290, w: 52, h: 26, label:'fetch' },
     { id:'SSETUP',  u:12, x: 68, y:290, w: 52, h: 26, label:'setup' },
-    { id:'MDQ',     u:13, x:140, y:236, w: 54, h: 38, label:'MDQ' },
+    { id:'MDQ',     u:13, x:140, y:236, w: 54, h: 38, label:'DELIM' },
     { id:'READER',  u:14, x:214, y:236, w: 84, h: 38, label:'TSP reader' },
     { id:'SHADE',   u:15, x:318, y:236, w: 84, h: 38, label:'shade pipe' },
     { id:'TEX',     u:16, x:318, y:290, w: 84, h: 26, label:'tex unit' },
@@ -738,7 +738,7 @@ function updateSvg() {
     : '';
   ann('SPANNER', `${fmtVal(22)}  tile(${fmtVal(9)},${fmtVal(10)})${stallTxt}`);
   ann('SFETCH',  `sf=${fmtVal(25)}/8`);
-  ann('MDQ',     `${fmtVal(11)}/8 sp=${fmtVal(12)}`);
+  ann('MDQ',     `${fmtVal(11)}/32 sp=${fmtVal(12)}`);
   ann('READER',  `${fmtVal(13)}`);
   ann('SHADE',   `fifo=${fmtVal(18)}`);
   ann('COLBUF',  `full=${fmtVal(21)}`);

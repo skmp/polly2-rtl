@@ -179,8 +179,8 @@ module spanner_v2 import tsp_pkg::*; #(
     // alloc may run RING_N - WINDOW ahead of the reader's consumed watermark
     wire [SEQ_W-1:0]   ring_ahead = alloc_seq - cons_seq;
     wire ring_full  = (ring_ahead >= SEQ_W'(RING_N - WINDOW));
-    localparam integer GF_AW = 3;                 // up to 8 passes handed-but-not-done (matches
-                                                  // peel_core MD_N=8).
+    localparam integer GF_AW = 5;                 // up to 32 passes handed-but-not-done (matches
+                                                  // peel_core DL_N=32, the reader's delimiter FIFO).
     reg [GF_AW:0]      gf_wp, gf_rp;              // handed-pass FIFO ptrs (span ends)
     wire gf_empty = (gf_wp == gf_rp);
     // retention context: same tile origin since the last start, not render-invalidated
@@ -217,7 +217,9 @@ module spanner_v2 import tsp_pkg::*; #(
     // shares gf_wp/gf_rp with the plane go-FIFO (planes+spans hand/free per-pass, lock-step).
     reg [SPAN_W:0]     span_head, span_tail;      // ring head / tail (SPAN_W+1 bits)
     assign span_head_live = span_head;            // streaming reader's availability limit
-    wire span_ring_empty = (span_head == span_tail);
+    /* verilator lint_off UNUSED */
+    wire span_ring_empty = (span_head == span_tail);   // (kept as a debug/assert handle)
+    /* verilator lint_on UNUSED */
     wire span_ring_full  = (span_head[SPAN_W] != span_tail[SPAN_W]) &&
                            (span_head[SPAN_W-1:0] == span_tail[SPAN_W-1:0]);
     reg [SPAN_W:0]     span_pass_base;            // span_head at this pass's start
@@ -585,17 +587,13 @@ module spanner_v2 import tsp_pkg::*; #(
                 fwd0_valid <= 1'b0; fwd1_valid <= 1'b0;
                 sf_wp <= '0; sf_rp <= '0;
                 prev_xb <= xbase; prev_yb <= ybase; ctx_val <= 1'b1;
-                // Span ring: normalize when idle (restart dense at 0) and latch this pass's
-                // range base. CRUCIAL: latch the POST-normalize head (0 when normalizing, else
-                // the current head), NOT the pre-normalize span_head - the normalize's NBA
-                // wouldn't be visible to a same-cycle span_pass_base <= span_head. Requires
-                // gf_empty: no handed-but-unfreed pass may be outstanding (its later
-                // tsp_rd_done would load a stale tail -> spurious full/empty).
-                if (span_ring_empty && gf_empty) begin
-                    span_head <= '0; span_tail <= '0; span_pass_base <= '0;
-                end else begin
-                    span_pass_base <= span_head;   // overlapped: this pass starts at the live head
-                end
+                // Span ring: NO normalize. head/tail free-run and wrap by width, exactly like
+                // the plane ring's alloc_seq/cons_seq. The old snap-to-0-when-idle existed to
+                // keep slot ids dense, but the reader's sp_rdp is now a FREE-RUNNING pointer
+                // (it is never re-primed from a per-pass base - it just walks to the next
+                // delimiter), so any reset here would desync it. Dropping it also removes a
+                // tile-boundary discontinuity, which is what cross-tile setup retention wants.
+                span_pass_base <= span_head;       // this pass starts at the live head
                 if (retain_ok) begin
                     sg_x <= {scan_y0, 5'd0};                      // keep gen: cross-pass reuse
                     sg_active <= (scan_y0 <= scan_y1);

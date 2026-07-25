@@ -34,10 +34,13 @@ by pass kind/number). Identify the biggest serialization bucket → fix → re-m
 | 17 | + tex prefetch lookahead pointer + continuous re-arm | 2,666,928 | −50k | ✅ |
 | 18 | + TEXQ bubble-riding rows + pipe-idle bypass | 2,666,653 | −0.3k (−14k suite) | ✅ |
 | 19 | + cov$ v2: per-row CHUNK-COLUMN masks | 2,590,839 | −76k | ✅ |
-| 20 | + pipelined video-out (1 px/clk) | **2,589,816** | −1k (−295k suite) | ✅ |
+| 20 | + pipelined video-out (1 px/clk) | 2,589,816 | −1k (−295k suite) | ✅ |
+| 21 | + setup admission relaxed to the full PQ depth (`!pq_full`) | 2,587,408 | −2.4k | ✅ |
+| 22 | + MDQ → span-delimiter FIFO (free-running reader ptr, no ring normalize) | **2,588,637** | +1.2k (−42k suite) | ✅ |
 
-Total: **−54%** (5.66M → 2.59M) on intro2; the VO fix is worth far more on
-light-geometry scenes (daytona −7.3%, see the per-scene table).
+Total: **−54%** (5.66M → 2.59M) on intro2; several late changes (VO, the delimiter
+FIFO) are worth far more on light-geometry scenes than on intro2 — always read the
+suite column, not just intro2.
 
 ## Final numbers per scene (all bit-exact vs golden hashes)
 
@@ -51,6 +54,26 @@ light-geometry scenes (daytona −7.3%, see the per-scene table).
 | daytona_intro | 1,166,291 | −10,047 | −670 | **−91,563** | **video-out** |
 | menu2 | 889,493 | −7,082 | −8,647 | −41,089 | video-out |
 | hotd2_selfie | 839,129 | −79,224 | −842 | −60,043 | video-out |
+
+### After the delimiter-FIFO refactor (change 22) — all 9 scenes bit-exact
+
+| scene | before | after | Δ |
+|---|---|---|---|
+| menu2 | 885,821 | 869,270 | **−16,551** |
+| hotd2_gargoyle | 1,172,842 | 1,160,099 | **−12,743** |
+| hotd2_car_fire | 1,449,904 | 1,439,373 | **−10,531** |
+| daytona_intro | 1,164,641 | 1,159,187 | −5,454 |
+| hotd2_selfie | 839,413 | 839,065 | −348 |
+| shenmue_intro4 | 2,830,384 | 2,830,765 | +381 |
+| sonic | 2,555,650 | 2,556,544 | +894 |
+| shenmue_menu | 1,248,004 | 1,248,904 | +900 |
+| shenmue_intro2 | 2,587,408 | 2,588,637 | +1,229 |
+| **total** | **14,734,067** | **14,691,844** | **−42,223 (−0.29%)** |
+
+The split is systematic, not noise: scenes with many small/empty passes (menu2,
+gargoyle, car_fire) win because a pass no longer needs a descriptor slot before it
+can be walked, so the reader stops idling at pass boundaries. Geometry-bound scenes
+lose ~1k to the one-cycle-later delimiter visibility at each of ~2.4k pass ends.
 
 ## What was tried — detail
 
@@ -81,6 +104,43 @@ light-geometry scenes (daytona −7.3%, see the per-scene table).
 | **cov$ v2 (per-row chunk-column masks)** | −76k intro2, −24k sonic, −8.6k menu2 | The sweep's x range came from the triangle bbox, measured at 3.4 of 4 chunk columns per row with **47% of all swept chunks covering nothing**. v2 records coverage per (row, chunk column) instead of per row — 4 bits/row, 128b/entry — and the sweep jumps column-to-column within a row, then row-to-row, using the recorded mask (all-ones when no cov$ hit ⇒ identical to the old bbox walk). Sound for the same reason as v1, plus: **chunk coverage within a row is contiguous for a convex primitive** (a gap would require the covered x-interval to skip an integer it must contain), so the mask never encodes an unreachable hole. Result: clipped sweeps are now essentially exact — 432,245 chunks swept / 431,129 covered (**0.26% waste**). Entry {tag32, mask128}; 1024 entries = 16 M10K (512 = 8 M10K costs only 6.6k cycles on intro2 — halve it if the fitter is tight). | 16 M10K (or 8 at 512 entries); a 32×4 OR-reduce + ctz32 + 4-bit ctz in the sweep-control path |
 
 | **Pipelined video-out (1 px/clk)** | −1k intro2, but **−91.6k daytona / −60k selfie / −59k car_fire / −41k menu2+gargoyle** (~295k suite) | The VO engine ran a 2-state RD→WR loop = exactly 2.00 cycles/pixel (614,400 = 2 × 640×480). Now the registered color read runs exactly ONE pixel ahead of the write, so the datum landing each cycle is the one being written — 1 px/clk (FLUSH 614,400 → 307,500). A write stall (fbw busy) parks the landed datum in a 1-deep skid and freezes the read pointer, so no datum is lost and no re-read bubble is needed. **Lesson on where it pays:** VO is fully hidden behind geometry-bound tiles (intro2 gained only 1k — it was 99.8% overlapped), but a tile whose total work is under the old 2048-cycle VO cost is VO-LIMITED, which is exactly the light-geometry scenes. Per-tile budget predicts it: menu2 ~3.1k cyc/tile, daytona ~4.2k. | ~35 FF (read ptr + 32b skid) |
+
+### Kept — MDQ → span-delimiter FIFO (change 22)
+
+The spanner→reader handoff used an 8-deep pass-descriptor FIFO holding
+`{base, cnt, fin, last, post, ptres, tx, ty}` per pass, pushed at pass START and
+patched at the spanner's busy-fall (`fin`/`cnt`). Replaced with a 32-deep FIFO of
+**pass delimiters**, pushed ONCE, at the pass's end.
+
+| aspect | before (MDQ) | after (delimiter FIFO) |
+|---|---|---|
+| depth | 8 | 32 (spanner `GF_AW` 3→5 to match) |
+| entry | base 12b + cnt 12b + fin/last/post/ptres + tx/ty | end 12b + last/post/ptres + tx/ty |
+| pushes per pass | 2 (start + finalize) | 1 |
+| reader ring ptr | re-primed from `md_base` each pass | **free-running**, never re-primed |
+| termination | `sp_cons == md_cnt` (a second counter) | `sp_rdp == dl_end` (pointer equality) |
+| span-ring normalize | snap head/tail to 0 when idle | **removed** |
+
+Design notes worth keeping:
+
+- **Exclusive end, not "index of the last span."** 867 of 2,372 passes on intro2
+  (37%) emit zero spans, and those have no last span to name. An exclusive end
+  pointer (== `span_head` at busy-fall) carries the same information with no
+  "empty" flag: a zero-span pass is simply a delimiter equal to the previous one.
+- **Streaming survives.** The reader never needed the descriptor to *start* — only
+  to *stop*. It walks spans as they appear and ends the pass at the head delimiter.
+- **Ordering is free.** The glue FSM is sequential, so pass N's delimiter is always
+  pushed before pass N+1's first span exists. No extra sync.
+- **`ptres` is the one field that could not move to the end.** `cb_ptres` is
+  consumed per-pixel *mid-pass*, before any delimiter exists, so the pass kind is
+  stamped into every span entry (`dense_span_buffer.w_ptres`, driven straight from
+  the glue's `spn_ptres` — no spanner plumbing) and latched reader-side on consume.
+  It is *also* kept in the delimiter, because a zero-span PT pass consumes no span
+  entry and would otherwise read a stale bit for the end-of-pass PT accounting.
+- **The normalize had to go.** `spanner_v2` snapped `span_head`/`span_tail` to 0
+  whenever the ring went idle; a free-running reader pointer would desync from that.
+  Removing it also deletes a tile-boundary discontinuity, which is what unanchored
+  / cross-tile setup retention wants.
 
 ### Parked mid-flight (in the tree, decision pending)
 

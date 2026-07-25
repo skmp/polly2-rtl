@@ -25,6 +25,10 @@ module dense_span_buffer #(
     input      [2:0]      w_rep,            // run length 1..4
     input      [31:0]     w_invw [0:3],     // per-covered-pixel invW
     input                 w_at,             // PT alpha-test enable
+    input                 w_ptres,          // pass kind: PT-resolve (drives cb_ptres). Per-PASS,
+                                            // but stored PER-SPAN: the streaming reader consumes
+                                            // spans BEFORE the pass's end delimiter exists, so it
+                                            // cannot learn the kind from the delimiter FIFO.
     // ---- READ (reader): present raddr, span valid next cycle ----
     input      [AW-1:0]   raddr,
     output     [9:0]      r_start,
@@ -32,15 +36,17 @@ module dense_span_buffer #(
     output     [WMW-1:0]  r_wm,
     output     [2:0]      r_rep,
     output     [31:0]     r_invw [0:3],
-    output                r_at
+    output                r_at,
+    output                r_ptres
 );
     localparam integer F_START = 0;           // 10
     localparam integer F_ID    = 10;          // IDW
     localparam integer F_REP   = 10 + IDW;    // 3
     localparam integer F_INVW  = 13 + IDW;    // 128 (4 x 32)
     localparam integer F_AT    = 141 + IDW;   // 1
-    localparam integer F_WM    = 142 + IDW;   // WMW
-    localparam integer PW      = 142 + IDW + WMW;
+    localparam integer F_PTRES = 142 + IDW;   // 1
+    localparam integer F_WM    = 143 + IDW;   // WMW
+    localparam integer PW      = 143 + IDW + WMW;
 
     (* ramstyle = "M10K, no_rw_check" *) reg [PW-1:0] mem [0:DEPTH-1];
     reg [PW-1:0] rdw;
@@ -51,6 +57,7 @@ module dense_span_buffer #(
     assign wrw[F_WM    +: WMW] = w_wm;
     assign wrw[F_REP   +: 3]  = w_rep;
     assign wrw[F_AT]          = w_at;
+    assign wrw[F_PTRES]       = w_ptres;
     genvar gi;
     generate
       for (gi = 0; gi < 4; gi = gi + 1) begin : g_wr_invw
@@ -68,6 +75,7 @@ module dense_span_buffer #(
     assign r_wm    = rdw[F_WM    +: WMW];
     assign r_rep   = rdw[F_REP   +: 3];
     assign r_at    = rdw[F_AT];
+    assign r_ptres = rdw[F_PTRES];
     genvar gr;
     generate
       for (gr = 0; gr < 4; gr = gr + 1) begin : g_rd_invw
