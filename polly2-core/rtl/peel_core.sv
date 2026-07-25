@@ -354,7 +354,13 @@ module peel_core import tsp_pkg::*; #(
     // Sort-cache filtering moved UPSTREAM into the iterator (pre-fetch check): any
     // triangle that reaches fq already survived its verdict, so heads issue
     // unconditionally - no per-head verdict wait here anymore.
-    assign su_in_valid = fq_out_valid && (pq_count <= 5'd4);
+    // Admission is gated only by the plane FIFO being FULL - not by an artificial
+    // reserve. The retire side is losslessly backpressured (out_ready = !pq_full;
+    // isp_setup_streamed's `stall` freezes the whole pipe and holds out_valid
+    // low), so pq can never be overrun however many triangles are in flight. The
+    // old `pq_count <= 4` reserve refused work while 3 of 8 slots sat empty,
+    // which is what showed up as SETUP "blocked" at 5/8 in the occupancy view.
+    assign su_in_valid = fq_out_valid && !pq_full;
 
     isp_setup_streamed u_isp (
         .clk(clk), .reset(reset),
@@ -1556,6 +1562,8 @@ module peel_core import tsp_pkg::*; #(
     // why does S_PT_NEXT wait? half-busy (2-half ping-pong is binding) vs the
     // speculation throttle (deliberate) - decides whether a 3rd half would help
     integer pc_ptn_half, pc_ptn_thr, pc_ptn_both;
+    // what does an md descriptor actually carry that the rolling span ring can't?
+    integer pc_md_push, pc_md_postonly, pc_md_zerospan, pc_md_flagged;
     integer pc_chunk_p1, pc_chunk_p1c;    // ... of which in an unclipped (pass-1 / miss) sweep
     reg     cov_hit_r;                    // this triangle's sweep is cov$-clipped
     reg [4:0] ee_row; reg [5:0] ee_tail;
@@ -1798,6 +1806,7 @@ module peel_core import tsp_pkg::*; #(
             pc_chunk_p1<=0; pc_chunk_p1c<=0;
             pc_xtile<=0; pc_sametile<=0; pc_tspbusy<=0;
             pc_ptn_half<=0; pc_ptn_thr<=0; pc_ptn_both<=0;
+            pc_md_push<=0; pc_md_postonly<=0; pc_md_zerospan<=0; pc_md_flagged<=0;
             ee_row<=5'd0; ee_tail<='0;
             ee_rowcov<=1'b0; ee_seen<=1'b0; ee_gap<=1'b0; ee_viol<=1'b0;
             pt_c_px<=0; pt_c_stall<=0; pt_c_look<=0; pt_c_fillw<=0; pt_c_spn<=0;
@@ -2810,6 +2819,8 @@ module peel_core import tsp_pkg::*; #(
                 $display("     ROW-EXIT:    swept-rows=%0d tail-rows=%0d (%0d%%) over %0d covered-tris, naive-rule violations=%0d",
                     pc_ee_rows, pc_ee_tail, (pc_ee_tail*100)/(pc_ee_rows?pc_ee_rows:1),
                     pc_ee_tri, pc_ee_viol);
+                $display("     MDQ ROLE:    pushes=%0d  post-only(no spans)=%0d  zero-span passes=%0d  flagged(last|ptres)=%0d",
+                    pc_md_push, pc_md_postonly, pc_md_zerospan, pc_md_flagged);
                 $display("     PT_NEXT wait: half-busy-only=%0d throttle-only=%0d both=%0d",
                     pc_ptn_half, pc_ptn_thr, pc_ptn_both);
                 $display("     XTILE:       TSP busy=%0d: shading a DIFFERENT tile than ISP=%0d (%0d%%), same tile=%0d",
@@ -2912,6 +2923,10 @@ module peel_core import tsp_pkg::*; #(
                     md_base[md_wp[MD_AW-1:0]] <= '0;
                     md_cnt [md_wp[MD_AW-1:0]] <= '0;
                     md_fin [md_wp[MD_AW-1:0]] <= 1'b1;         // complete at push
+`ifndef SYNTHESIS
+                    pc_md_push <= pc_md_push + 1;
+                    pc_md_postonly <= pc_md_postonly + 1;
+`endif
                     md_post[md_wp[MD_AW-1:0]] <= 1'b1;
                     md_last[md_wp[MD_AW-1:0]] <= 1'b1;         // post-only implies last
                     md_ptres[md_wp[MD_AW-1:0]] <= 1'b0;
@@ -2965,6 +2980,10 @@ module peel_core import tsp_pkg::*; #(
                 mdp_idx <= md_wp[MD_AW-1:0];
                 md_wp <= md_wp + 1'b1;
                 spn <= G_RUN;
+`ifndef SYNTHESIS
+                pc_md_push <= pc_md_push + 1;
+                if (ti_last[tsp_tag] || ti_ptres[tsp_tag]) pc_md_flagged <= pc_md_flagged + 1;
+`endif
             end
 
             // spanner running: hand off when done (!spv_busy: SPANGEN drained + all setups
@@ -2992,6 +3011,9 @@ module peel_core import tsp_pkg::*; #(
                 // now known; the reader's walk_done can fire once it consumes it all.
                 md_cnt[mdp_idx] <= spv_sp_range_cnt;
                 md_fin[mdp_idx] <= 1'b1;
+`ifndef SYNTHESIS
+                if (spv_sp_range_cnt == '0) pc_md_zerospan <= pc_md_zerospan + 1;
+`endif
                 ti_ready[tsp_tag]  <= 1'b0;         // free the input half for ISP
                 tsp_tag  <= ~tsp_tag;
 `ifndef SYNTHESIS
@@ -3679,7 +3701,7 @@ module peel_core import tsp_pkg::*; #(
     // --- ISP setup / raster ---
     wire [1:0] oc_setup  = (su_out_valid && pq_full) ? OC_O
                          : (su_busy || su_out_valid) ? OC_B
-                         : (fq_out_valid && pq_count > 5'd4) ? OC_O : OC_U;
+                         : (fq_out_valid && pq_full) ? OC_O : OC_U;
     wire [1:0] oc_pq     = pq_full ? OC_O : pq_empty ? OC_U : OC_B;
     // idle raster is BLOCKED (not starved) while a tile-buffer bulk op owns the
     // depth/tag RAM ports (CLEAR / PeelBuffers swap / z_keep invalidate) or the
