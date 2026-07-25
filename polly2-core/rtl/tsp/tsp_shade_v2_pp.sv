@@ -38,6 +38,7 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
 ) (
     input             clk,
     input             reset,
+    input             flush,   // render-start: invalidate tex_unit's tex/VQ caches
 
     // ---- input pixel (buffered by caller; consumed when in_valid && !stall) ----
     input             in_valid,
@@ -263,7 +264,7 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
     wire [IDW-1:0] tu_oid;
     wire [31:0] tu_argb;
     tex_unit #(.IDW(IDW)) u_tex (
-        .clk(clk),.reset(reset),
+        .clk(clk),.reset(reset),.flush(flush),
         .in_valid(tu_issue),.in_id(iv_id),
         .u(iv_attr[0]),.v(iv_attr[1]),
         .texu(tu_texu),.texv(tu_texv),.miplevel(iv_mip),
