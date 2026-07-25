@@ -28,8 +28,10 @@
 //     sh_valid/sh_tag/sh_depth carry that pixel's staged fields.
 //   * CLEAR: clr_valid writes {clr_depth, clr_tag} to all banks at clr_addr.
 //   * PEELBUFFERS: an RMW walk - pb_rd_valid+pb_rd_addr read chunk N; the next cycle
-//     pb_wr_valid+pb_wr_addr write the transformed chunk (depth2<-depth, tag2<-tag
-//     or 0xFFFFFFFF when pb_first, depth<-FLT_MAX, valid<-0).
+//     pb_wr_valid+pb_wr_addr write the transformed chunk (depth2<-depth UNLESS depth is
+//     the FLT_MAX sentinel -> keep old depth2; tag2<-tag or 0xFFFFFFFF when pb_first;
+//     depth<-FLT_MAX, valid<-0). The sentinel guard preserves the opaque-Z reference a
+//     later z_keep=1 empty-opaque entry inherits (see the PW_DEPTH2 write comment).
 //
 module peel_tile_buffer import tsp_pkg::*; #(
     parameter integer LANES = 8
@@ -80,7 +82,17 @@ module peel_tile_buffer import tsp_pkg::*; #(
     input      [10-$clog2(LANES)-1:0] pb_rd_addr,
     input                       pb_wr_valid,
     input      [10-$clog2(LANES)-1:0] pb_wr_addr,
-    input                       pb_first     // fold SetTagToMax: tag2 <- 0xFFFFFFFF
+    input                       pb_first,    // fold SetTagToMax: tag2 <- 0xFFFFFFFF
+    // ---- z_keep depth-restore RMW (reuses the pb_rd/pb_wr cursors) ----
+    // When pb_zkeep is asserted alongside the pb_wr write, the transform is NOT the
+    // PeelBuffers reference-swap: instead it RESTORES the kept depth for a z_keep=1 OP
+    // entry. After a peel, PW_DEPTH (zb) is left at the FLT_MAX sentinel that PeelBuffers
+    // wrote every pass, while the real last-drawn (closest) depth survives in PW_DEPTH2
+    // (zb2, the reference). Per pixel: zb <- (zb==FLT_MAX ? zb2 : zb); tag/tag2/valid are
+    // preserved (the tag invalidate for the OP pre-walk is done in the SEPARATE u_taginvw
+    // buffer). Only pixels the final peel pass left as the sentinel are restored, so an
+    // OP-only predecessor (real zb, stale zb2) is untouched.
+    input                       pb_zkeep
 );
     localparam integer NB     = LANES;
     localparam integer BANK_BITS = $clog2(LANES);       // 3 for 8, 2 for 4
@@ -183,12 +195,37 @@ module peel_tile_buffer import tsp_pkg::*; #(
                 wdata[PEEL_W*cw + PW_TAG   +: 32] = clr_tag;
                 // depth2/tag2/valid don't-care for OP; PeelBuffers sets them.
             end
+        end else if (pb_wr_valid && pb_zkeep) begin // z_keep depth-restore RMW
+            // zb <- (zb==FLT_MAX ? zb2 : zb); keep tag/tag2/valid/depth2. Undoes the
+            // FLT_MAX sentinel a prior peel left in zb so a z_keep=1 OP entry depth-tests
+            // against the real last-drawn depth (else GREATER always fails vs FLT_MAX and
+            // the entry's OP - e.g. the THPS2 special bar - is wrongly occluded).
+            we    = {NB{1'b1}};
+            waddr = {NB{pb_wr_addr}};
+            for (cw = 0; cw < NB; cw = cw + 1) begin
+                wdata[PEEL_W*cw + PW_DEPTH  +: 32] =
+                    (f_depth(rdata, cw) == FLT_MAX) ? f_depth2(rdata, cw)
+                                                    : f_depth (rdata, cw);
+                wdata[PEEL_W*cw + PW_DEPTH2 +: 32] = f_depth2(rdata, cw);
+                wdata[PEEL_W*cw + PW_TAG    +: 32] = f_tag  (rdata, cw);
+                wdata[PEEL_W*cw + PW_TAG2   +: 32] = f_tag2 (rdata, cw);
+                wdata[PEEL_W*cw + PW_VALID]        = f_valid(rdata, cw);
+            end
         end else if (pb_wr_valid) begin            // PeelBuffers RMW transform
             we    = {NB{1'b1}};
             waddr = {NB{pb_wr_addr}};
             for (cw = 0; cw < NB; cw = cw + 1) begin
                 wdata[PEEL_W*cw + PW_DEPTH  +: 32] = FLT_MAX;
-                wdata[PEEL_W*cw + PW_DEPTH2 +: 32] = f_depth(rdata, cw);
+                // reference (zb2) <- zb (old depth), EXCEPT when zb is the FLT_MAX sentinel
+                // (this pixel peeled NOTHING last pass): then KEEP the old zb2. Without this,
+                // an entry's FIRST PeelBuffers would swap the sentinel in and discard the
+                // carried reference - which for a z_keep=1 entry whose opaque list is EMPTY
+                // is the only surviving copy of the opaque Z. That refsw2 bug wrongly z-fails
+                // the entry's TR (e.g. the THPS2 OSD occluded by the frozen scene). Merging
+                // odepth into zb2 this way needs no extra buffer - just the right reload.
+                wdata[PEEL_W*cw + PW_DEPTH2 +: 32] =
+                    (f_depth(rdata, cw) == FLT_MAX) ? f_depth2(rdata, cw)
+                                                    : f_depth (rdata, cw);
                 wdata[PEEL_W*cw + PW_TAG    +: 32] = f_tag  (rdata, cw);
                 wdata[PEEL_W*cw + PW_TAG2   +: 32] =
                     pb_first ? 32'hFFFFFFFF : f_tag(rdata, cw);

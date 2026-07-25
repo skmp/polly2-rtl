@@ -213,8 +213,8 @@ regfile: | $(BUILD)
 
 # region_array_parser unit test: region walk -> per-tile ordered states.
 region: | $(BUILD)
-	+$(VERILATOR) --cc --exe --build $(VFLAGS) --public-flat-rw --top-module region_array_parser_tb_top \
-	  $(TSP)/tsp_pkg.sv tb/region_array_parser_tb_top.sv $(TSP)/region_array_parser.sv \
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) $(RTL_INC) --public-flat-rw --top-module region_array_parser_tb_top \
+	  $(TSP_PKG) tb/region_array_parser_tb_top.sv rtl/lists/region_array_parser.sv \
 	  $(CWD)/tb/region_array_parser_tb.cpp --Mdir $(BUILD)/obj_region -o tb
 	./$(BUILD)/obj_region/tb
 
