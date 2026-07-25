@@ -3720,12 +3720,19 @@ module peel_core import tsp_pkg::*; #(
                           : (tsp_st != R_IDLE) ? OC_B : OC_U;
     wire [1:0] oc_shade   = pp_stall ? OC_O
                           : (pp_in_valid || pp_out_valid || u_shade.iv_ov) ? OC_B : OC_U;
-    // TEX: a miss-fill is the unit WAITING FOR DATA, whether or not beats happen
-    // to be streaming this cycle - the texel the shader asked for is not there
-    // yet, so the whole fill episode reads as UNDERFLOW (it used to show BUSY
-    // while beats moved, which hid the stall). BUSY only when the cache is ready
-    // AND pixels are actually passing through.
-    wire [1:0] oc_tex     = !u_shade.tu_ready ? OC_U
+    // TEX, all three states (NB: in the QUEUED fetch, tu_ready is NOT "cache
+    // ready" - it is tex_fetch4_q.in_ready, which is low exactly when pixq/rowq
+    // are FULL, i.e. the unit is backpressuring the shader):
+    //   UNDERFLOW - a cache is frozen on a DDR fill: the texel asked for is not
+    //               there yet. This is the real "waiting for data" and it is the
+    //               root cause the drain probe measured (tc$/vq$ frozen).
+    //   OVERFLOW  - queues full, no fill outstanding: the unit has work it cannot
+    //               retire fast enough and is refusing input.
+    //   BUSY      - texels actually passing through.
+    wire tex_filling = !u_shade.u_tex.u_fetch.tc_ready
+                    || !u_shade.u_tex.u_fetch.vq_ready;
+    wire [1:0] oc_tex     = !u_shade.tu_ready   ? OC_O
+                          : tex_filling         ? OC_U
                           : (u_shade.tu_ov || u_shade.iv_ov) ? OC_B : OC_U;
     wire [1:0] oc_blend   = (cb_valid || pp_out_valid) ? OC_B : OC_U;
     wire [1:0] oc_vo      = (vst != VO_IDLE) ? ((fbw_req.we && fbw_resp.busy) ? OC_O : OC_B)
