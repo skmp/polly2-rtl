@@ -286,22 +286,48 @@ function paintBins(ctx, t0, t1, x0, W, rowH, rowGap, topY) {
     const y = topY + r * (rowH + rowGap);
     ctx.fillStyle = IDLE;
     ctx.fillRect(x0, y, W, rowH);
+    // A pixel column can cover many cycles when zoomed out. A column whose cycles
+    // are ALL one state is drawn as a solid run (runs are merged across columns,
+    // so a zoomed-in view is one fillRect per state change). A MIXED column is
+    // drawn as a vertical STACK proportional to the time in each state, ordered
+    // under / busy / over top-to-bottom - so 5 under, 3 busy, 2 over reads as
+    // 50% yellow over 30% green over 20% red instead of hiding the minority
+    // states behind whichever one happened to dominate.
     let runStart = 0, runColor = null;
+    const flushRun = (pxEnd) => {
+      if (runColor !== null && runColor !== IDLE && pxEnd > runStart) {
+        ctx.fillStyle = runColor; ctx.fillRect(x0+runStart, y, pxEnd-runStart, rowH);
+      }
+      runColor = null;
+    };
     for (let px = 0; px < W; px++) {
       const o = px * NU * NSTATE + u * NSTATE;
-      let best = -1, bv = 0;
-      for (let s = 0; s < NSTATE; s++) if (bins[o+s] > bv) { bv = bins[o+s]; best = s; }
-      const col = best < 0 ? IDLE : COLORS[best];
-      if (col !== runColor) {
-        if (runColor !== null && runColor !== IDLE) {
-          ctx.fillStyle = runColor; ctx.fillRect(x0+runStart, y, px-runStart, rowH);
-        }
-        runStart = px; runColor = col;
+      const b0 = bins[o], b1 = bins[o+1], b2 = bins[o+2];
+      const tot = b0 + b1 + b2;
+      let col;
+      if (tot <= 0)            col = IDLE;              // no samples in this column
+      else if (b1 === 0 && b2 === 0) col = COLORS[0];
+      else if (b0 === 0 && b2 === 0) col = COLORS[1];
+      else if (b0 === 0 && b1 === 0) col = COLORS[2];
+      else col = null;                                  // mixed -> stack
+      if (col !== null) {
+        if (col !== runColor) { flushRun(px); runStart = px; runColor = col; }
+        continue;
       }
+      flushRun(px);                                     // stacks break the run
+      let yy = y, acc = 0;
+      for (let s = 0; s < NSTATE; s++) {
+        const v = bins[o+s]; if (v <= 0) continue;
+        acc += v;
+        // accumulate before rounding so the segments always tile rowH exactly
+        const yEnd = (s === NSTATE-1 || acc === tot) ? y + rowH
+                                                     : y + Math.round(acc / tot * rowH);
+        if (yEnd > yy) { ctx.fillStyle = COLORS[s]; ctx.fillRect(x0+px, yy, 1, yEnd-yy); }
+        yy = yEnd;
+      }
+      runStart = px + 1;
     }
-    if (runColor !== null && runColor !== IDLE) {
-      ctx.fillStyle = runColor; ctx.fillRect(x0+runStart, y, W-runStart, rowH);
-    }
+    flushRun(W);
   }
 }
 
