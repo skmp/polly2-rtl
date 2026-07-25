@@ -1,0 +1,3 @@
+[submodule "polly2-data"]
+	path = polly2-data
+	url = ../polly2-rtl-data
