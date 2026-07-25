@@ -74,7 +74,7 @@ module tex_fetch4_q import tsp_pkg::*; #(
                                        // front can run ahead of the expander; also
                                        // bounds ROWQ's reachable occupancy at
                                        // ~PIXQ_D / pixels-per-row)
-    localparam integer ROW_AGE = 4;    // max cycles a non-empty row stays open
+    localparam integer ROW_AGE = 7;    // max cycles a non-empty row stays open
 
     wire clear = reset || flush;
 
@@ -221,11 +221,18 @@ module tex_fetch4_q import tsp_pkg::*; #(
 
     // row close events (one ROWQ push port; mutually exclusive by construction):
     //   * a processing tex pixel that doesn't fit closes the row (and opens fresh)
-    //   * otherwise the row closes when F1 is idle/stalled or the row aged out
+    //   * otherwise the row closes on AGE-OUT, or IMMEDIATELY when the pipe
+    //     behind the packer is EMPTY (bypass): nothing queued for lookup and no
+    //     row data pending means the expander is starving on THIS open row's
+    //     pixels, so holding it for more coalescing is pure latency. Under load
+    //     (queues occupied) bubbles ride and sparse pixels coalesce into full
+    //     rows; the age bound then only limits packing depth, not first-pixel
+    //     latency - the wait is hidden behind the queued work.
     wire f1_proc     = f0_adv;                          // F1 processes f0 this cycle
     wire close_pixel = f1_proc && f0_tex && row_open && !fits;
+    wire pipe_idle   = (rowq_count == '0) && !lk_v && (datq_count == '0);
     wire close_idle  = row_open && !f1_proc && !rowq_full
-                       && (!(f0_v && f0_tex && fits) || (row_age >= 3'(ROW_AGE)));
+                       && ((row_age >= 3'(ROW_AGE)) || pipe_idle);
     wire rowq_push   = close_pixel || close_idle;
 
     // packer state update
