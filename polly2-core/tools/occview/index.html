@@ -142,13 +142,13 @@ const IDLE = '#2a2a30';
 function fifoColor(f) {
   if (f < 0) return IDLE;
   if (f > 1) f = 1;
-  // Hue walks 30 (orange) -> 120 (green) -> 0 (red), but hue ALONE is ambiguous:
-  // the descent re-enters orange at ~7/8 full, so an empty and a nearly-full
-  // queue would look identical. Brightness/saturation therefore rise with fill -
-  // empty reads as DARK orange, full as vivid red.
-  const h = f <= 0.5 ? 30 + f * 180 : 120 - (f - 0.5) * 240;
-  const v = 0.60 + f * 0.35;
-  const sa = f <= 0.5 ? 0.82 : 0.82 + (f - 0.5) * 0.36;
+  // Hue walks 33 (orange) -> 120 (green) -> 0 (red). EMPTY must read as clearly
+  // ORANGE, so it stays bright/vivid; fill DARKENS toward a deep saturated red.
+  // (Hue alone is ambiguous - the descent re-crosses orange near 7/8 full - so
+  // the brightness ramp is what separates "empty" from "nearly full".)
+  const h  = f <= 0.5 ? 33 + f * 174 : 120 - (f - 0.5) * 240;
+  const sa = f <= 0.5 ? 0.95 - f * 0.30 : 0.80 + (f - 0.5) * 0.40;
+  const v  = f <= 0.5 ? 0.97 - f * 0.20 : 0.87 - (f - 0.5) * 0.20;
   return hsv2css(h, Math.min(sa, 1), Math.min(v, 1));
 }
 function hsv2css(h, s, v) {
@@ -184,33 +184,61 @@ function valAtCycle(c, vid) {
   const i = idxAt(a, a.length, c);
   return i < 0 ? null : DB.vVal[vid][i];
 }
-// Time-weighted average of a value channel per pixel column, so a zoomed-out
-// FIFO track shows its MEAN occupancy over the column rather than whatever
-// value happened to land on the sample point. Returns -1 where no data.
-function binValue(vid, t0, t1, W) {
+// Per-column HISTOGRAM of a queue's fill level: time spent at each level, so a
+// zoomed-out column can be drawn as a proportional STACK (same treatment the
+// state tracks get) instead of collapsing to a mean - a queue that flips between
+// empty and full must not look half-full. Returns W*NB time weights.
+function binLevels(vid, t0, t1, W, depth, NB) {
   const a = DB.vCyc[vid], b = DB.vVal[vid];
   if (!a || !a.length) return null;
-  const out = new Float64Array(W), wt = new Float64Array(W);
+  const out = new Float64Array(W * NB);
   const span = t1 - t0;
+  const bucket = (v) => {
+    let k = depth > 0 ? Math.round(v / depth * (NB - 1)) : 0;
+    return k < 0 ? 0 : (k > NB - 1 ? NB - 1 : k);
+  };
   let i = idxAt(a, a.length, t0); if (i < 0) i = 0;
   for (; i < a.length; i++) {
     const c0 = Math.max(a[i], t0);
     const c1 = Math.min(i+1 < a.length ? a[i+1] : DB.total, t1);
     if (c0 >= t1) break;
     if (c1 <= c0) continue;
-    const v = b[i];
+    const k = bucket(b[i]);
     let px0 = Math.floor((c0 - t0) / span * W);
     let px1 = Math.ceil ((c1 - t0) / span * W);
     if (px1 > W) px1 = W; if (px0 < 0) px0 = 0;
-    if (px1 - px0 === 1) { out[px0] += v * (c1 - c0); wt[px0] += (c1 - c0); }
+    if (px1 - px0 === 1) out[px0 * NB + k] += (c1 - c0);
     else for (let px = px0; px < px1; px++) {
       const pc0 = t0 + px / W * span, pc1 = t0 + (px+1) / W * span;
       const ov = Math.min(c1, pc1) - Math.max(c0, pc0);
-      if (ov > 0) { out[px] += v * ov; wt[px] += ov; }
+      if (ov > 0) out[px * NB + k] += ov;
     }
   }
-  for (let px = 0; px < W; px++) out[px] = wt[px] > 0 ? out[px] / wt[px] : -1;
   return out;
+}
+// min / time-weighted mean / max of a value channel over [t0,t1) - the numbers
+// behind a zoomed-out FIFO column, for the hover readout.
+function statsOfValue(vid, t0, t1) {
+  const a = DB.vCyc[vid], b = DB.vVal[vid];
+  if (!a || !a.length) return null;
+  if (t1 <= t0) t1 = t0 + 1;
+  let i = idxAt(a, a.length, t0); if (i < 0) i = 0;
+  let mn = Infinity, mx = -Infinity, sum = 0, wt = 0;
+  for (; i < a.length; i++) {
+    const c0 = Math.max(a[i], t0);
+    const c1 = Math.min(i+1 < a.length ? a[i+1] : DB.total, t1);
+    if (c0 >= t1) break;
+    if (c1 <= c0) continue;
+    const v = b[i];
+    if (v < mn) mn = v;
+    if (v > mx) mx = v;
+    sum += v * (c1 - c0); wt += (c1 - c0);
+  }
+  if (!wt) {                                   // no change lands inside: held value
+    const v = valAtCycle(t0, vid);
+    return v == null ? null : { min: v, avg: v, max: v };
+  }
+  return { min: mn, avg: sum / wt, max: mx };
 }
 function enumName(vid, v) {
   const e = DB.enums[vid];
@@ -354,19 +382,47 @@ function paintBins(ctx, t0, t1, x0, W, rowH, rowGap, topY) {
     // 3-state view. Colours are quantised to 5% so equal columns merge into runs.
     const fifo = DB.fifos && DB.fifos[u];
     if (fifo) {
-      const av = binValue(fifo.vid, t0, t1, W);
+      const NB = Math.min(fifo.depth + 1, 17);          // one bucket per level
+      const hist = binLevels(fifo.vid, t0, t1, W, fifo.depth, NB);
       let fRunStart = 0, fRunCol = null;
-      for (let px = 0; px <= W; px++) {
-        const c = (px < W && av)
-          ? (av[px] < 0 ? IDLE : fifoColor(Math.round(av[px] / fifo.depth * 20) / 20))
-          : null;
-        if (c !== fRunCol) {
-          if (fRunCol !== null && fRunCol !== IDLE && px > fRunStart) {
-            ctx.fillStyle = fRunCol; ctx.fillRect(x0+fRunStart, y, px-fRunStart, rowH);
-          }
-          fRunStart = px; fRunCol = c;
+      const flushF = (pxEnd) => {
+        if (fRunCol !== null && fRunCol !== IDLE && pxEnd > fRunStart) {
+          ctx.fillStyle = fRunCol; ctx.fillRect(x0+fRunStart, y, pxEnd-fRunStart, rowH);
         }
+        fRunCol = null;
+      };
+      for (let px = 0; px < W; px++) {
+        let tot = 0, nz = 0, only = -1;
+        if (hist) for (let k = 0; k < NB; k++) {
+          const v = hist[px*NB + k];
+          if (v > 0) { tot += v; nz++; only = k; }
+        }
+        if (tot <= 0) {                                  // no samples here
+          if (fRunCol !== IDLE) { flushF(px); fRunStart = px; fRunCol = IDLE; }
+          continue;
+        }
+        if (nz === 1) {                                  // one level -> solid run
+          const col = fifoColor(only / (NB - 1));
+          if (col !== fRunCol) { flushF(px); fRunStart = px; fRunCol = col; }
+          continue;
+        }
+        // mixed: proportional stack, EMPTY at the top -> FULL at the bottom
+        // (matches the state tracks' under/busy/over ordering)
+        flushF(px);
+        let yy = y, acc = 0;
+        for (let k = 0; k < NB; k++) {
+          const v = hist[px*NB + k]; if (v <= 0) continue;
+          acc += v;
+          const yEnd = (acc === tot) ? y + rowH : y + Math.round(acc / tot * rowH);
+          if (yEnd > yy) {
+            ctx.fillStyle = fifoColor(k / (NB - 1));
+            ctx.fillRect(x0+px, yy, 1, yEnd-yy);
+          }
+          yy = yEnd;
+        }
+        fRunStart = px + 1;
       }
+      flushF(W);
       continue;
     }
     // A pixel column can cover many cycles when zoomed out. A column whose cycles
@@ -729,9 +785,28 @@ window.addEventListener('mousemove', ev => {
     if (row >= 0 && row < nUnits() && ev.clientX - rect.left > GUTTER) {
       const u = DB.order[row] ?? row;
       const t = Math.round(trackTime(ev));
+      const fifo = DB.fifos && DB.fifos[u];
+      if (fifo) {
+        // FIFO track: report the fill under the cursor. When one pixel column
+        // covers many cycles, a single sample would be misleading - report the
+        // min/avg/max over exactly the cycles that column represents.
+        const W = rect.width - GUTTER;
+        const span = view.t1 - view.t0;
+        const cpp = span / Math.max(1, W);              // cycles per pixel column
+        const st = statsOfValue(fifo.vid, t - cpp/2, t + cpp/2);
+        const pct = (v) => Math.round(v / fifo.depth * 100) + '%';
+        tt.textContent = `${DB.units[u]} @ ${t.toLocaleString()}  (depth ${fifo.depth})\n` +
+          (!st ? 'no data'
+               : cpp <= 1.0001
+                 ? `fill ${st.max} / ${fifo.depth}  (${pct(st.max)})`
+                 : `fill min ${st.min}  avg ${st.avg.toFixed(1)}  max ${st.max}  of ${fifo.depth}` +
+                   `\n     ${pct(st.min)} .. ${pct(st.avg)} .. ${pct(st.max)}` +
+                   `   over ${Math.round(cpp).toLocaleString()} cyc`);
+      } else {
       const s = stateAtCycle(t, u);
       tt.textContent = `${DB.units[u]} @ ${t.toLocaleString()}\n` +
         (s < 0 ? 'no data' : ['UNDERFLOW (waiting for data)','BUSY','OVERFLOW (blocked)'][s]);
+      }
       tt.style.display = 'block';
       tt.style.left = (ev.clientX + 14) + 'px';
       tt.style.top  = (ev.clientY + 12) + 'px';
