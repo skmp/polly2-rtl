@@ -1414,6 +1414,8 @@ module peel_core import tsp_pkg::*; #(
     wire       ptc_empty   = ptc_bbmiss || (ptc_en && rp_rowwin == 32'd0);
     wire [4:0] rp_row0     = ctz32(rp_rowwin);
     reg  [31:0] rb_rows;               // active sweep row set (this triangle)
+    reg  [CMW-1:0] rb_cmask;           // per-row covered chunk columns (all-1s if no cov$ hit)
+    reg  [CHX-1:0] rb_cols;            // bbox chunk-column window
 
     // ==================== COVERAGE CACHE (cov$) ====================
     // A triangle's sampled coverage in a tile is PASS-INVARIANT (same planes,
@@ -1426,22 +1428,41 @@ module peel_core import tsp_pkg::*; #(
     // Freshness: any triangle reaching RS_POP in pass p>=2 was rastered (or
     // cov-aborted, which preserves its entry) in pass p-1 of the SAME tile, so
     // a tag-matching entry is same-tile-fresh; aliasing mismatches -> no clip.
-    (* ramstyle = "M10K, no_rw_check" *) reg [63:0] cov_mem [0:1023]; // {tag, rowmask}
-    function automatic [9:0] cov_idx(input [31:0] t);   // same spread as sort$
-        cov_idx = t[12:3] ^ {7'd0, t[2:0]};
+    // v2 records coverage per (row, CHUNK COLUMN), not just per row: the sweep's
+    // x range comes from the triangle bbox, which measured 3.4 of 4 chunk
+    // columns per row (47% of swept chunks covered nothing). Convex coverage is
+    // contiguous per row, so the recorded column mask makes the sweep near-exact.
+    localparam integer CHX     = TILE_W / RAS_LANES;      // chunk columns (4 @ 8 lanes)
+    localparam integer LANE_SH = $clog2(RAS_LANES);       // 3 @ 8 lanes
+    localparam integer CMW     = TILE_H * CHX;            // 128 @ 8 lanes
+    localparam integer COV_N   = 1024;                    // entries (1024 x 160b = 16 M10K)
+    localparam integer COV_AW  = $clog2(COV_N);
+    (* ramstyle = "M10K, no_rw_check" *)
+    reg [31+CMW:0] cov_mem [0:COV_N-1];                   // {tag, per-row column masks}
+    function automatic [COV_AW-1:0] cov_idx(input [31:0] t);   // same spread as sort$
+        cov_idx = t[COV_AW-1+3:3] ^ {{(COV_AW-3){1'b0}}, t[2:0]};
     endfunction
-    reg         cov_we;                // 1-cyc write pulse (exit-stream commit)
-    reg  [9:0]  cov_waddr;
-    reg  [31:0] cov_wtag, cov_wmask;
-    reg  [63:0] cov_rd;                // registered read (presented at RS_POP)
+    reg              cov_we;           // 1-cyc write pulse (exit-stream commit)
+    reg  [COV_AW-1:0] cov_waddr;
+    reg  [31:0]      cov_wtag;
+    reg  [CMW-1:0]   cov_wmask;
+    reg  [31+CMW:0]  cov_rd;           // registered read (presented at RS_POP)
     always @(posedge clk) begin
         if (cov_we) cov_mem[cov_waddr] <= {cov_wtag, cov_wmask};
         cov_rd <= cov_mem[cov_idx(pq_rdw[QF_TAG +: 32])];
     end
     wire cov_en = (peeling && (peel_pass >= 8'd2)) || (pt_phase && (pt_pass >= 8'd2));
     // exit-stream per-triangle aggregation (triangle boundary = ras_qi change)
-    reg  [1:0]  ee_qi;   reg ee_pend;
-    reg  [31:0] ee_mask;               // covered rows of the aggregating triangle
+    reg  [1:0]     ee_qi;   reg ee_pend;
+    reg  [CMW-1:0] ee_mask;            // per-row covered chunk columns
+    // first set bit of a chunk-column mask (row's leftmost covered chunk)
+    function automatic [$clog2(CHX)-1:0] ctzc(input [CHX-1:0] m);
+        integer ci;
+        begin
+            ctzc = '0;
+            for (ci = CHX-1; ci >= 0; ci = ci - 1) if (m[ci]) ctzc = ci[$clog2(CHX)-1:0];
+        end
+    endfunction
 
     // consumer fully idle: entry FIFO empty, iterator authoritative-idle (it_pf_busy
     // clear: no record buffered/being read/emitted/outstanding), streamed setup
@@ -1519,6 +1540,9 @@ module peel_core import tsp_pkg::*; #(
     // the REAL cov$ aggregation regs, declared with the cache)
     integer pc_ee_tail, pc_ee_viol, pc_ee_tri, pc_ee_rows;
     integer pc_cov_abort, pc_cov_cliprows;
+    integer pc_chunk_all, pc_chunk_cov;   // swept chunks vs chunks with ANY coverage
+    integer pc_chunk_p1, pc_chunk_p1c;    // ... of which in an unclipped (pass-1 / miss) sweep
+    reg     cov_hit_r;                    // this triangle's sweep is cov$-clipped
     reg [4:0] ee_row; reg [5:0] ee_tail;
     reg ee_rowcov, ee_seen, ee_gap, ee_viol;
     integer pc_ptbb_skip;       // PT triangles sweep-skipped by the fail bbox
@@ -1752,7 +1776,8 @@ module peel_core import tsp_pkg::*; #(
             pc_sort_skip<=0; pc_pt_pass<=0; pc_pt_tiles<=0; pc_ptbb_skip<=0;
             pc_plbb_skip<=0; pc_pt_maxp<=0; pc_pt_trunc<=0;
             pc_ee_tail<=0; pc_ee_viol<=0; pc_ee_tri<=0; pc_ee_rows<=0;
-            pc_cov_abort<=0; pc_cov_cliprows<=0;
+            pc_cov_abort<=0; pc_cov_cliprows<=0; pc_chunk_all<=0; pc_chunk_cov<=0;
+            pc_chunk_p1<=0; pc_chunk_p1c<=0;
             ee_row<=5'd0; ee_tail<='0;
             ee_rowcov<=1'b0; ee_seen<=1'b0; ee_gap<=1'b0; ee_viol<=1'b0;
             pt_c_px<=0; pt_c_stall<=0; pt_c_look<=0; pt_c_fillw<=0; pt_c_spn<=0;
@@ -1970,12 +1995,25 @@ module peel_core import tsp_pkg::*; #(
             end
             ras_inflight <= ras_inflight + (ras_in_valid ? 1 : 0) - (ras_out_valid ? 1 : 0);
 
+`ifndef SYNTHESIS
+            if (ras_out_valid) begin
+                pc_chunk_all <= pc_chunk_all + 1;
+                if (|ras_inside) pc_chunk_cov <= pc_chunk_cov + 1;
+                if (!cov_hit_r) begin
+                    pc_chunk_p1 <= pc_chunk_p1 + 1;
+                    if (|ras_inside) pc_chunk_p1c <= pc_chunk_p1c + 1;
+                end
+            end
+`endif
             // ---- cov$ AGGREGATION: per-triangle covered-row mask off the exit
             // stream (issue-ordered; triangle boundary = ras_qi change). Commit
             // writes the cache at the boundary, or on a quiet pipe (last
             // triangle of a pass has no successor exit). Zero-coverage
             // triangles commit an EMPTY mask - the next pass skips them whole.
-            if (ras_out_valid) begin
+            if (ras_out_valid) begin : covagg
+                reg [$clog2(CMW)-1:0] cbit;
+                // bit index of this chunk: row * CHX + chunk column
+                cbit = {ras_oy, ras_ox[4:LANE_SH]};
                 if (ee_qi != ras_qi) begin              // new triangle in the exit stream
                     if (ee_pend) begin
                         cov_we    <= 1'b1;
@@ -1985,9 +2023,9 @@ module peel_core import tsp_pkg::*; #(
                     end
                     ee_qi   <= ras_qi;
                     ee_pend <= 1'b1;
-                    ee_mask <= (|ras_inside) ? (32'd1 << ras_oy) : 32'd0;
+                    ee_mask <= (|ras_inside) ? (CMW'(1) << cbit) : '0;
                 end else if (|ras_inside)
-                    ee_mask <= ee_mask | (32'd1 << ras_oy);
+                    ee_mask <= ee_mask | (CMW'(1) << cbit);
             end else if (ee_pend && ras_inflight == 0) begin
                 cov_we    <= 1'b1;                      // quiet pipe: commit the last one
                 cov_waddr <= cov_idx(tq_tag[ee_qi]);
@@ -2737,6 +2775,10 @@ module peel_core import tsp_pkg::*; #(
                 $display("     ROW-EXIT:    swept-rows=%0d tail-rows=%0d (%0d%%) over %0d covered-tris, naive-rule violations=%0d",
                     pc_ee_rows, pc_ee_tail, (pc_ee_tail*100)/(pc_ee_rows?pc_ee_rows:1),
                     pc_ee_tri, pc_ee_viol);
+                $display("     CHUNKS:      swept=%0d covered=%0d (%0d%% wasted); UNCLIPPED sweeps: %0d swept %0d covered (%0d wasted)",
+                    pc_chunk_all, pc_chunk_cov,
+                    ((pc_chunk_all-pc_chunk_cov)*100)/(pc_chunk_all?pc_chunk_all:1),
+                    pc_chunk_p1, pc_chunk_p1c, pc_chunk_p1-pc_chunk_p1c);
                 $display("     COV$:        tri-skips=%0d rows-clipped=%0d",
                     pc_cov_abort, pc_cov_cliprows);
                 $display("     OL-REPLAY:   %0d walks replayed from the ring, %0d walked DDR, %0d entries dropped pre-eq",
@@ -3375,14 +3417,30 @@ module peel_core import tsp_pkg::*; #(
                 cr_issue <= 1'b0;      // 1-cycle probe issue pulse
                 cr_cnt   <= CR_LAT[3:0];
                 rs_st <= RS_RAS;
-                // cov$ clip: cov_rd (presented at RS_POP) holds {tag, rowmask}.
-                // On a tag hit in a clip-eligible pass, AND last pass's ACTUAL
-                // covered rows into the sweep's row set - exact, since coverage
-                // is pass-invariant. Empty -> skip the sweep entirely.
+                // cov$ clip: cov_rd (presented at RS_POP) holds {tag, per-row
+                // chunk-column masks}. On a tag hit in a clip-eligible pass the
+                // sweep walks only the (row, chunk) cells that ACTUALLY covered
+                // last pass - exact, since coverage is pass-invariant. A row
+                // survives iff it has a covered chunk inside the bbox column
+                // window; no surviving row -> skip the triangle whole.
                 begin : covclip
-                    reg [31:0] nrows;
-                    nrows = (cov_en && cov_rd[63:32] == tri_tag)
-                          ? (rb_rows & cov_rd[31:0]) : rb_rows;
+                    reg [31:0]    nrows;
+                    reg [CMW-1:0] cm;
+                    reg [CHX-1:0] win, r0cols;
+                    integer       rr;
+                    // bbox chunk-column window (rbx0/rbx1 are chunk-aligned)
+                    win = (({{(CHX-1){1'b0}},1'b1} << (rbx1[4:LANE_SH]+1)) - 1'b1)
+                        & ~(({{(CHX-1){1'b0}},1'b1} << rbx0[4:LANE_SH]) - 1'b1);
+                    cm  = (cov_en && cov_rd[31+CMW -: 32] == tri_tag)
+                        ? cov_rd[CMW-1:0] : {CMW{1'b1}};
+                    for (rr = 0; rr < 32; rr = rr + 1)
+                        nrows[rr] = rb_rows[rr] && (|(cm[rr*CHX +: CHX] & win));
+                    rb_cmask <= cm;
+                    rb_cols  <= win;
+`ifndef SYNTHESIS
+                    cov_hit_r <= (cov_en && cov_rd[31+CMW -: 32] == tri_tag);
+`endif
+                    r0cols = cm[ctz32(nrows)*CHX +: CHX] & win;
                     if (nrows == 32'd0) begin
                         if (ch_pop && !pq_empty) begin
                             pq_rdw  <= pq_ram[pq_head[2:0]];
@@ -3396,6 +3454,7 @@ module peel_core import tsp_pkg::*; #(
                     end else begin
                         rb_rows <= nrows;
                         ras_y   <= ctz32(nrows);      // first coverable row
+                        ras_x   <= {ctzc(r0cols), {LANE_SH{1'b0}}};  // its first chunk
                         // identity-sideband slot claim (moved from RS_POP): only
                         // sweeping triangles claim, so claims stay >=3 cyc apart
                         tri_qi <= tri_qi + 2'd1;
@@ -3440,11 +3499,20 @@ module peel_core import tsp_pkg::*; #(
                     end
                 end
                 if (!(cr_en && !cr_seen && cr_cnt == 4'd1 && ras_probe_reject)) begin
-                    if (ras_x == rbx1) begin
-                        ras_x <= rbx0;
+                    // walk the CURRENT row's remaining covered chunk columns;
+                    // when none remain, advance to the next covered row and jump
+                    // straight to ITS first covered column (cov$ v2). With no
+                    // cov$ hit the masks are all-ones, reproducing the plain
+                    // bbox walk exactly.
+                    if ((rb_cmask[ras_y*CHX +: CHX] & rb_cols
+                         & ~((({{(CHX-1){1'b0}},1'b1} << (ras_x[4:LANE_SH]+1))) - 1'b1))
+                        != '0) begin
+                        ras_x <= {ctzc(rb_cmask[ras_y*CHX +: CHX] & rb_cols
+                                       & ~((({{(CHX-1){1'b0}},1'b1} << (ras_x[4:LANE_SH]+1))) - 1'b1)),
+                                  {LANE_SH{1'b0}}};
+                    end else begin
                         // advance to the NEXT SET row of the sweep's row set
-                        // (rb_rows already folds the bbox y window, so the plain
-                        // walk and the row-mask walk share this one exit test)
+                        // (rb_rows already folds the bbox y window + cov$ rows)
                         begin : rowadv
                             reg [31:0] nx_rows;
                             nx_rows = rb_rows & (32'hFFFFFFFE << ras_y);
@@ -3459,10 +3527,12 @@ module peel_core import tsp_pkg::*; #(
                                     rs_st   <= RS_POP;
                                 end else rs_st <= RS_DRAIN;
                             end
-                            else ras_y <= ctz32(nx_rows);
+                            else begin
+                                ras_y <= ctz32(nx_rows);
+                                ras_x <= {ctzc(rb_cmask[ctz32(nx_rows)*CHX +: CHX] & rb_cols),
+                                          {LANE_SH{1'b0}}};
+                            end
                         end
-                    end else begin
-                        ras_x <= ras_x + 5'(RAS_LANES);
                     end
                 end
             end
