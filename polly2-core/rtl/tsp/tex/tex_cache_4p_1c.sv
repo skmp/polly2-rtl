@@ -70,6 +70,10 @@ module tex_cache_4p_1c import tsp_pkg::*; (
     input                probe_valid,
     input  [3:0]         probe_mask,
     input  [28:0]        probe_waddr [0:3],
+    // pulse: the probed row has no more prefetchable lines (all hit / in
+    // flight) - the client may advance its LOOKAHEAD POINTER to the next row,
+    // so probing RESUMES where it left off instead of re-examining the head.
+    output reg           probe_adv,
 
     output ddr_rd_req_t  dreq,
     input  ddr_rd_resp_t dresp,
@@ -146,10 +150,15 @@ module tex_cache_4p_1c import tsp_pkg::*; (
     reg  [IXW-1:0] rd_ix [0:3];
     reg  [IXW-1:0] retest_ix [0:3];
     reg            retesting;
-    reg            pr_evd;                  // probe evaluated for this fill episode
     reg            pf_have;                 // prefetch candidate latched
-    wire pr_want = (st == S_WAITFILL) && !retesting && probe_valid && !pr_evd && !pf_have;
+    // CONTINUOUS re-arm: probe whenever frozen with no candidate latched and no
+    // evaluation in flight (was once per fill episode via a pr_evd latch). The
+    // client walks its lookahead pointer on probe_adv, so successive probes
+    // examine successively DEEPER queued rows.
+    wire pr_want = (st == S_WAITFILL) && !retesting && probe_valid && !pf_have && !pr_rdp;
     reg  pr_rdp;                            // a probe read lands this cycle
+    reg  [3:0]     prq_mask;                // probe row latched at issue (race-free
+    reg  [LAW-1:0] prq_line [0:3];          // vs the client advancing the pointer)
     always @(*) begin
         for (int p=0; p<4; p=p+1)
             rd_ix[p] = retesting ? retest_ix[p] : pr_want ? pr_ix[p] : in_ix[p];
@@ -272,7 +281,7 @@ module tex_cache_4p_1c import tsp_pkg::*; (
             st <= S_RST; rd_r <= 0; rst_i <= 0; retesting <= 0;
             fr_busy <= 1'b0; g_miss <= 4'd0; g_req <= 4'd0;
             pf_rd_r <= 0; pfr_busy <= 1'b0;
-            pf_have <= 1'b0; pr_evd <= 1'b0; pr_rdp <= 1'b0;
+            pf_have <= 1'b0; pr_rdp <= 1'b0; probe_adv <= 1'b0;
             for (i=0;i<4;i=i+1) t_v[i]<=0;
 `ifndef SYNTHESIS
             if (reset) begin
@@ -287,6 +296,11 @@ module tex_cache_4p_1c import tsp_pkg::*; (
             pf_rd_r <= 1'b0;
             retesting <= 1'b0;
             pr_rdp <= pr_want;
+            probe_adv <= 1'b0;              // 1-cyc pulse
+            if (pr_want) begin
+                prq_mask <= probe_mask;
+                for (k=0;k<4;k=k+1) prq_line[k] <= pr_line[k];
+            end
 
             // -------- prefetch receiver: consume its own client's beats --------
             // (never the same cycle as a demand beat - one channel beat globally)
@@ -300,7 +314,6 @@ module tex_cache_4p_1c import tsp_pkg::*; (
                     if (pfr_wm[3]) begin data3[pfr_ix] <= { pf_dresp.dout, pfr_acc }; meta3[pfr_ix] <= {1'b1, pfr_line[LAW-1:IXW]}; end
                     pfr_busy <= 1'b0;
                     for (k=0;k<4;k=k+1) if (t_line[k] == pfr_line) g_miss[k] <= 1'b0;
-                    pr_evd <= 1'b0;          // tags changed: allow a fresh probe pass
 `ifndef SYNTHESIS
                     st_fills <= st_fills + 1;
 `endif
@@ -342,7 +355,6 @@ module tex_cache_4p_1c import tsp_pkg::*; (
                     fr_busy <= 1'b0;
                     // satisfied frozen ports (line now resident)
                     for (k=0;k<4;k=k+1) if (t_line[k] == fr_line) g_miss[k] <= 1'b0;
-                    pr_evd <= 1'b0;          // tags changed: allow a fresh probe pass
 `ifndef SYNTHESIS
                     st_fills <= st_fills + 1;
 `endif
@@ -351,24 +363,26 @@ module tex_cache_4p_1c import tsp_pkg::*; (
 
             // -------- probe evaluation (read issued last cycle lands now) --------
             if (pr_rdp && !pf_have) begin : prev
-                reg        found;
+                reg        found, skip;
                 reg [LAW-1:0] cand;
+                integer    k2;
                 found = 1'b0; cand = '0;
-                for (k=0;k<4;k=k+1)
-                    if (!found && probe_mask[k]
-                        && !(rmeta[k][TAGW] && rmeta[k][TAGW-1:0] == pr_line[k][LAW-1:IXW])) begin
-                        found = 1'b1; cand = pr_line[k];
-                    end
-                // don't prefetch a line the group will fill anyway / already in flight
-                // (on either the demand or the prefetch client)
-                if (found) begin
-                    if (fr_busy  && fr_line  == cand) found = 1'b0;
-                    if (pfr_busy && pfr_line == cand) found = 1'b0;
-                    for (k=0;k<4;k=k+1)
-                        if (g_miss[k] && t_line[k] == cand) found = 1'b0;
+                // per-lane: skip hits and lines already in flight (demand fill,
+                // prefetch fill, or a line the frozen group will fill anyway) so
+                // a later lane of the same row can still be picked.
+                for (k=0;k<4;k=k+1) begin
+                    skip = !prq_mask[k]
+                         || (rmeta[k][TAGW] && rmeta[k][TAGW-1:0] == prq_line[k][LAW-1:IXW])
+                         || (fr_busy  && fr_line  == prq_line[k])
+                         || (pfr_busy && pfr_line == prq_line[k]);
+                    for (k2=0;k2<4;k2=k2+1)
+                        if (g_miss[k2] && t_line[k2] == prq_line[k]) skip = 1'b1;
+                    if (!found && !skip) begin found = 1'b1; cand = prq_line[k]; end
                 end
                 if (found) begin pf_have <= 1'b1; pf_line <= cand; end
-                pr_evd <= 1'b1;              // one evaluation per fill episode
+                // row exhausted (every line cached or in flight): tell the client
+                // to advance the lookahead pointer - the NEXT probe resumes there.
+                else probe_adv <= 1'b1;
             end
 
             // -------- demand request scheduler: the frozen group's lines only --------
@@ -419,7 +433,6 @@ module tex_cache_4p_1c import tsp_pkg::*; (
                         g_req[k]  <= (fr_busy  && !fr_last  && (t_line[k] == fr_line))
                                   || (pfr_busy && !pfr_last && (t_line[k] == pfr_line));
                     end
-                    pr_evd <= 1'b0;
                     st <= S_WAITFILL;
                 end else begin
                     for (k=0;k<4;k=k+1) begin

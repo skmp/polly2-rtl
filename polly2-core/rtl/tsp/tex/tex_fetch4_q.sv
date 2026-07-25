@@ -88,6 +88,9 @@ module tex_fetch4_q import tsp_pkg::*; #(
     wire        tcp_valid;
     wire [3:0]  tcp_mask;
     wire [28:0] tcp_waddr [0:3];
+    wire        tcp_adv;              // cache: probed row exhausted -> advance lookahead
+    wire              la_ov;
+    wire [ROWQ_W-1:0] la_data;
     wire [28:0] vqp_waddr [0:3];
     assign vqp_waddr[0] = 29'd0; assign vqp_waddr[1] = 29'd0;
     assign vqp_waddr[2] = 29'd0; assign vqp_waddr[3] = 29'd0;
@@ -101,11 +104,13 @@ module tex_fetch4_q import tsp_pkg::*; #(
     tex_cache_4p_1c u_tc4 (.clk(clk),.reset(reset),.flush(flush),
         .creq(tc_req),.cresp(tc_resp),
         .probe_valid(tcp_valid),.probe_mask(tcp_mask),.probe_waddr(tcp_waddr),
+        .probe_adv(tcp_adv),
         .dreq(ddr_req[0]),.dresp(ddr_resp[0]),
         .pf_dreq(ddr_req[2]),.pf_dresp(ddr_resp[2]));   // lookahead fill client
     tex_cache_4p_1c u_vq4 (.clk(clk),.reset(reset),.flush(flush),
         .creq(vq_req),.cresp(vq_resp),
         .probe_valid(1'b0),.probe_mask(4'd0),.probe_waddr(vqp_waddr),
+        .probe_adv(),
         .dreq(ddr_req[1]),.dresp(ddr_resp[1]),
         .pf_dreq(vq_pf_nc),.pf_dresp(vq_pf_parked));
 
@@ -261,18 +266,25 @@ module tex_fetch4_q import tsp_pkg::*; #(
     tfq_fifo #(.W(ROWQ_W), .DEPTH(QDEPTH)) u_rowq (
         .clk(clk), .reset(clear),
         .push(rowq_push), .wdata(rowq_wdata), .full(rowq_full),
-        .ovalid(rowq_ov), .odata(rowq_rdata), .pop(rowq_pop), .count(rowq_count));
+        .ovalid(rowq_ov), .odata(rowq_rdata), .pop(rowq_pop), .count(rowq_count),
+        .la_adv(tcp_adv), .la_ov(la_ov), .la_data(la_data));
 
+    // demand-issue slices of the queue HEAD (unchanged: lk_issue consumes the
+    // head into the cache's lookup ports)
     wire [3:0]  lk_mask_in = rowq_rdata[ROWQ_W-1 -: 4];
     wire [28:0] lk_wa_in [0:3];
-    generate for (gi=0; gi<4; gi=gi+1) begin : lkw
+    generate for (gi=0; gi<4; gi=gi+1) begin : lkhd
         assign lk_wa_in[gi] = rowq_rdata[29*gi +: 29];
-        assign tcp_waddr[gi] = lk_wa_in[gi];
     end endgenerate
-    // fill-lookahead probe: present the head row whenever it exists and is not being
-    // accepted this cycle (the cache only samples it while frozen filling).
-    assign tcp_valid = rowq_ov && !rowq_pop;
-    assign tcp_mask  = lk_mask_in;
+    // fill-lookahead probe: present the LOOKAHEAD pointer's row (not the head).
+    // The cache walks the pointer via probe_adv as it exhausts each row, so
+    // successive probes resume ever deeper into the queue (up to the fifo's
+    // LA_MAX window) instead of re-examining the head once per fill.
+    generate for (gi=0; gi<4; gi=gi+1) begin : lkw
+        assign tcp_waddr[gi] = la_data[29*gi +: 29];
+    end endgenerate
+    assign tcp_valid = la_ov;
+    assign tcp_mask  = la_data[ROWQ_W-1 -: 4];
 
     // ============================ PIXQ: pixels + refs ============================
     localparam integer PIXQ_W = 3 + 8 + 12 + 21 + PLW;
@@ -287,7 +299,8 @@ module tex_fetch4_q import tsp_pkg::*; #(
     tfq_fifo #(.W(PIXQ_W), .DEPTH(PIXQ_D)) u_pixq (
         .clk(clk), .reset(clear),
         .push(f1_proc), .wdata(pixq_wdata), .full(pixq_full),
-        .ovalid(pixq_ov), .odata(pixq_rdata), .pop(pixq_pop), .count(pixq_count));
+        .ovalid(pixq_ov), .odata(pixq_rdata), .pop(pixq_pop), .count(pixq_count),
+        .la_adv(1'b0), .la_ov(), .la_data());
 
     wire         px_first, px_tex, px_vq;
     wire [1:0]   pxr  [0:3];
@@ -335,7 +348,8 @@ module tex_fetch4_q import tsp_pkg::*; #(
     tfq_fifo #(.W(256), .DEPTH(QDEPTH)) u_datq (
         .clk(clk), .reset(clear),
         .push(lk_v && tc_ack), .wdata(datq_wdata), .full(datq_full),
-        .ovalid(datq_ov), .odata(datq_rdata), .pop(datq_pop), .count(datq_count));
+        .ovalid(datq_ov), .odata(datq_rdata), .pop(datq_pop), .count(datq_count),
+        .la_adv(1'b0), .la_ov(), .la_data());
 
     // ============================ EX: pixel + row -> corner words ============================
     reg  [255:0] row_q;                    // the held (current) row data

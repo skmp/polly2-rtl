@@ -63,11 +63,13 @@ module tex_fetch4_ob import tsp_pkg::*; #(
     tex_cache_4p_1c u_tc4 (.clk(clk),.reset(reset),.flush(flush),
         .creq(tc_req),.cresp(tc_resp),
         .probe_valid(1'b0),.probe_mask(4'd0),.probe_waddr(nop_waddr),
+        .probe_adv(),
         .dreq(ddr_req[0]),.dresp(ddr_resp[0]),
         .pf_dreq(pf_nc0),.pf_dresp(pf_parked));
     tex_cache_4p_1c u_vq4 (.clk(clk),.reset(reset),.flush(flush),
         .creq(vq_req),.cresp(vq_resp),
         .probe_valid(1'b0),.probe_mask(4'd0),.probe_waddr(nop_waddr),
+        .probe_adv(),
         .dreq(ddr_req[1]),.dresp(ddr_resp[1]),
         .pf_dreq(pf_nc1),.pf_dresp(pf_parked));
 

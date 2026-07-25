@@ -20,9 +20,10 @@
 // RAM alone, so callers can treat DEPTH as the usable depth.
 //
 module tfq_fifo #(
-    parameter integer W     = 32,
-    parameter integer DEPTH = 64,
-    parameter integer AW    = $clog2(DEPTH)
+    parameter integer W      = 32,
+    parameter integer DEPTH  = 64,
+    parameter integer AW     = $clog2(DEPTH),
+    parameter integer LA_MAX = 16      // lookahead window cap (entries past rp)
 ) (
     input               clk,
     input               reset,      // also the flush-clear (drops all contents)
@@ -32,7 +33,17 @@ module tfq_fifo #(
     output              ovalid,
     output [W-1:0]      odata,
     input               pop,
-    output [AW+2:0]     count
+    output [AW+2:0]     count,
+    // ---- LOOKAHEAD side-read (optional; tie la_adv low when unused) ----
+    // A persistent pointer into the RAM-resident tail of the queue: la_data
+    // presents the entry AT the pointer; la_adv advances it (so the consumer's
+    // next probe RESUMES from where the last one stopped, up to LA_MAX entries
+    // past the FWFT read pointer). Shares the ONE RAM read port: refreshes
+    // steal cycles the FWFT refill leaves idle - no second port, no shadow RAM.
+    // The pointer self-clamps to the read pointer as the head drains.
+    input               la_adv,
+    output              la_ov,      // la_data holds the entry at the pointer
+    output [W-1:0]      la_data
 );
     (* ramstyle = "M10K, no_rw_check" *) reg [W-1:0] ram [0:DEPTH-1];
     reg [AW-1:0] wp, rp;
@@ -41,6 +52,17 @@ module tfq_fifo #(
     reg [W-1:0]  ram_q;
     reg [W-1:0]  ob0, ob1;          // output buffer: ob0 = head
     reg [1:0]    ob_cnt;
+    // lookahead state: absolute (wrap-MSB) mirrors of rp/wp so window tests are
+    // plain subtractions; la_a tracks the pointer, la_q/la_qv the settled data.
+    reg [AW:0]   rp_a, wp_a, la_a;
+    reg [W-1:0]  la_q;
+    reg          la_qv;
+    reg          la_land;           // an la refresh read lands in ram_q now
+    assign la_ov   = la_qv;
+    assign la_data = la_q;
+    wire [AW:0] la_win  = wp_a - la_a;              // entries at/after the pointer
+    wire        la_val  = (la_win != '0);           // pointer names a real entry
+    wire        la_want = la_val && !la_qv && !la_land;  // needs a refresh read
 
     assign ovalid = (ob_cnt != 2'd0);
     assign odata  = ob0;
@@ -55,15 +77,35 @@ module tfq_fifo #(
     assign count = {2'd0, ram_cnt} + {{(AW){1'b0}}, pending};
 
     always @(posedge clk) begin
-        ram_q <= ram[rp];
+        // ONE RAM read port: the FWFT refill has priority; a lookahead refresh
+        // steals the idle cycles.
+        ram_q <= ram[rd_issue ? rp : la_a[AW-1:0]];
         if (push) ram[wp] <= wdata;
         if (reset) begin
             wp <= '0; rp <= '0; ram_cnt <= '0; rif <= 1'b0; ob_cnt <= 2'd0;
-        end else begin
-            if (push)     wp <= wp + 1'b1;
-            if (rd_issue) rp <= rp + 1'b1;
+            rp_a <= '0; wp_a <= '0; la_a <= '0; la_qv <= 1'b0; la_land <= 1'b0;
+        end else begin : body
+            reg [AW:0] nla;
+            if (push)     begin wp <= wp + 1'b1; wp_a <= wp_a + 1'b1; end
+            if (rd_issue) begin rp <= rp + 1'b1; rp_a <= rp_a + 1'b1; end
             ram_cnt <= ram_cnt + {{AW{1'b0}}, push} - {{AW{1'b0}}, rd_issue};
             rif     <= rd_issue;
+
+            // ---- lookahead pointer update ----
+            nla = la_a;
+            if (la_adv && la_qv && ((la_a - rp_a) < (AW+1)'(LA_MAX)))
+                nla = la_a + 1'b1;          // consumer done with this entry
+            // self-clamp: never fall behind the FWFT read pointer (those entries
+            // are heading into the output buffer / demand path)
+            if (((nla - (rp_a + {{AW{1'b0}}, rd_issue})) >> AW) != '0)
+                nla = rp_a + {{AW{1'b0}}, rd_issue};
+            if (nla != la_a) la_qv <= 1'b0;      // pointer moved: data stale
+            else if (la_land) begin              // refresh read landed
+                la_q  <= ram_q;
+                la_qv <= 1'b1;
+            end
+            la_a    <= nla;
+            la_land <= !rd_issue && la_want;
 
             // output-buffer update: a landing read (rif) appends, a pop shifts.
             case ({rif, do_pop})
