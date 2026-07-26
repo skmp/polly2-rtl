@@ -90,9 +90,13 @@ static void regwrite(int addr, uint32_t data) {
     tick();
 }
 
-static uint16_t px565(uint32_t pix) {     // argb = {pix16, pix16} -> RGB565
-    uint32_t a = ((pix & 0xFFFF) << 16) | (pix & 0xFFFF);
-    return (uint16_t)((((a >> 19) & 0x1F) << 11) | (((a >> 10) & 0x3F) << 5) | ((a >> 3) & 0x1F));
+// stub argb = hash32({py, px}) (xorpat 0 here); master 565-packs with refsw2
+// quantization (c*31/255, no dither)
+static int div255i(int x) { return (x + (x >> 8) + 1) >> 8; }
+static uint16_t px565(uint32_t pix) {
+    uint32_t a = (((pix / 640) << 11) | (pix % 640)) * 2654435761u;
+    int r = (a >> 16) & 0xFF, g = (a >> 8) & 0xFF, b = a & 0xFF;
+    return (uint16_t)((div255i(r * 31) << 11) | (div255i(g * 63) << 5) | div255i(b * 31));
 }
 
 int main(int argc, char** argv) {
@@ -103,7 +107,7 @@ int main(int argc, char** argv) {
     dut->reset = 0;
     for (int i = 0; i < 4; i++) tick();
 
-    const uint32_t SOF = (1u << 22) | 0x100;  // lower half (BE=0F), base word 0x40
+    const uint32_t SOF = (1u << 22) | 0x100;  // bank 1 = upper half (BE=F0), base word 0x40
     const uint64_t FB_BASE = (SOF & 0x3FFFFC) >> 2;
     regwrite(12, SOF);
 
@@ -132,7 +136,7 @@ int main(int argc, char** argv) {
     for (uint32_t i = 0; i < 64; i++) {
         uint32_t pix = 4096 + i;
         uint64_t word = FB_BASE + (pix >> 1);
-        uint64_t byte0 = word * 8 + ((pix & 1) ? 2 : 0);  // lower 32-bit half
+        uint64_t byte0 = word * 8 + 4 + ((pix & 1) ? 2 : 0);  // bank 1 = upper 32-bit half
         uint16_t want = px565(pix);
         uint16_t got = (uint16_t)(mem.count(byte0) ? mem[byte0] : 0)
                      | (uint16_t)((mem.count(byte0 + 1) ? mem[byte0 + 1] : 0) << 8);

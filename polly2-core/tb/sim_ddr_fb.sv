@@ -65,8 +65,11 @@ module sim_ddr_fb import tsp_pkg::*; #(
     end
 
     // ==================== FAUX FRAMEBUFFER WRITE ====================
+    // Behavioral fb[] is linear 640-wide (the shape the BMP writers expect);
+    // rebuild the index from the screen coordinate.
     assign fbw_resp.busy = 1'b0;
+    wire [19:0] fb_idx = {10'd0, fbw_req.py} * 20'd640 + {9'd0, fbw_req.px};
     always @(posedge clk) begin
-        if (fbw_req.we) fb[fbw_req.pix_idx] <= fbw_req.argb;
+        if (fbw_req.we) fb[fb_idx] <= fbw_req.argb;
     end
 endmodule

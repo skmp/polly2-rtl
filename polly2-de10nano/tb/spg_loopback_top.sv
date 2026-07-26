@@ -27,6 +27,9 @@ module spg_loopback_top import tsp_pkg::*; (
     input  wire        fb_line_dbl,
     input  wire        fb_split,
     input  wire        fb_disp_half,
+    input  wire [1:0]  fb_depth,
+    input  wire [2:0]  fb_concat,
+    input  wire        fb_enable,
 
     // ---- spg display read channel (from the C++ DDR model) ----
     output wire         avl_read,
@@ -88,8 +91,12 @@ module spg_loopback_top import tsp_pkg::*; (
         .fb_base     (fb_base),
         .fb_stride   (fb_stride),
         .fb_line_dbl (fb_line_dbl),
+        .fb_pix_dbl  (1'b0),
         .fb_split    (fb_split),
         .fb_disp_half(fb_disp_half),
+        .fb_depth    (fb_depth),
+        .fb_concat   (fb_concat),
+        .fb_enable   (fb_enable),
 
         .avl_clk          (clk),
         .avl_read         (avl_read),

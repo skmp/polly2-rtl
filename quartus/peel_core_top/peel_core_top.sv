@@ -162,9 +162,11 @@ module peel_core_top import tsp_pkg::*; #(
     //
     // NOTE: this assumes fbw_req delivers pixels for a word-pair back-to-back
     // (even index then odd index). peel_core streams col_buf in linear order, so
-    // consecutive on-screen pixels differ by 1 in pix_idx - holding for the low
-    // half then writing on the high half is correct for even row widths.
+    // consecutive on-screen pixels differ by 1 in the y*640+x linear index -
+    // holding for the low half then writing on the high half is correct for
+    // even row widths. (The index is rebuilt from px/py below.)
     // ==================================================================
+    wire [19:0] fw_idx = {10'd0, fbw_req.py} * 20'd640 + {9'd0, fbw_req.px};
     reg        have_lo;       // a low (even-index) pixel is latched, awaiting pair
     reg [31:0] lo_px;
     reg [19:0] lo_idx;
@@ -196,7 +198,7 @@ module peel_core_top import tsp_pkg::*; #(
                     // low half (even linear index): latch, wait for its pair
                     have_lo <= 1'b1;
                     lo_px   <= fbw_req.argb;
-                    lo_idx  <= fbw_req.pix_idx;
+                    lo_idx  <= fw_idx;
                 end else begin
                     // high half: form the 64-bit word {odd_px, even_px} and queue
                     have_lo    <= 1'b0;

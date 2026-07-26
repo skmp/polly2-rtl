@@ -80,15 +80,15 @@ static void regwrite(int addr, uint32_t data) {
     tick();
 }
 
-// expected pixel: stub argb = {pix16^xor, pix16^xor}, write master 565-packs,
-// spg MSB-replicates to 888
+// expected pixel: stub argb = hash32((y<<11)|x) ^ {xor,xor}, write master
+// 565-packs with refsw2 quantization (c*31/255, no dither), spg expands with
+// fb_concat appended (refsw2 Present; concat = 0 here)
+static int div255i(int x) { return (x + (x >> 8) + 1) >> 8; }
 static void expect_rgb(uint32_t pix, uint16_t xorpat, uint8_t* r, uint8_t* g, uint8_t* b) {
-    uint32_t v = (pix ^ xorpat) & 0xFFFF;
-    uint32_t a = (v << 16) | v;
-    uint32_t p = (((a >> 19) & 0x1F) << 11) | (((a >> 10) & 0x3F) << 5) | ((a >> 3) & 0x1F);
-    *r = (uint8_t)(((p >> 11) & 0x1F) << 3 | ((p >> 11) & 0x1F) >> 2);
-    *g = (uint8_t)(((p >> 5) & 0x3F) << 2 | ((p >> 5) & 0x3F) >> 4);
-    *b = (uint8_t)((p & 0x1F) << 3 | (p & 0x1F) >> 2);
+    uint32_t a = (pix * 2654435761u) ^ (((uint32_t)xorpat << 16) | xorpat);
+    *r = (uint8_t)(div255i(((a >> 16) & 0xFF) * 31) << 3);
+    *g = (uint8_t)(div255i(((a >> 8) & 0xFF) * 63) << 2);
+    *b = (uint8_t)(div255i((a & 0xFF) * 31) << 3);
 }
 
 static void run_config(uint32_t sof, uint16_t xorpat, const char* name) {
@@ -111,6 +111,9 @@ static void run_config(uint32_t sof, uint16_t xorpat, const char* name) {
     dut->fb_line_dbl  = 0;
     dut->fb_split     = 1;
     dut->fb_disp_half = (sof >> 22) & 1;
+    dut->fb_depth     = 1;    // 565
+    dut->fb_concat    = 0;
+    dut->fb_enable    = 1;
     dut->spg_reset = 0;
 
     // let the raster free-run one frame to settle prefetch, then align to the
@@ -131,7 +134,7 @@ static void run_config(uint32_t sof, uint16_t xorpat, const char* name) {
         if (dut->de) {
             if (y >= 60 && y < 1020 && x >= 320 && x < 1600) {
                 uint32_t sx = (uint32_t)(x - 320) / 2, sy = (uint32_t)(y - 60) / 2;
-                uint32_t pix = sy * 640 + sx;
+                uint32_t pix = (sy << 11) | sx;   // the stub's {py, px} hash key
                 uint8_t er, eg, eb;
                 expect_rgb(pix, xorpat, &er, &eg, &eb);
                 if (dut->red != er || dut->green != eg || dut->blue != eb) {
@@ -159,10 +162,10 @@ int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     dut = new Vspg_loopback_top;
 
-    // config A: half 0 (pixels in high 32 bits), even 64-bit base word
+    // config A: half/bank 0 (pixels in LOW 32 bits, pvr_map32), even base word
     run_config(0x000000u | (0u << 22), 0x0000, "half0/even");
-    // config B: half 1 (low 32 bits), ODD 64-bit base word (sof byte 4 ->
-    // DDR byte 8 -> fb_base[3]=1, the odd0 fetch path) + inverted pattern
+    // config B: half/bank 1 (HIGH 32 bits), ODD 64-bit base word (sof byte 4
+    // -> DDR byte 8 -> fb_base[3]=1, the mid-beat fetch path) + inverted pattern
     run_config(0x000004u | (1u << 22), 0x5A5A, "half1/odd");
 
     printf(errors ? "FAIL (%d errors)\n" : "PASS\n", errors);
