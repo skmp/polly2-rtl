@@ -1,0 +1,15 @@
+# --------------------------------------------------------------------------
+# timming_vo - isolated fileset for the whole-unit `vo` (video out / framebuffer
+# write master) perf harness. Paths are relative to this project dir
+# (quartus/timming_tests/timming_vo/), pointing up into ../../../polly2-core/rtl.
+#
+# vo has NO submodule dependencies: it is one unit plus tsp_pkg (which pulls in
+# gen/pvr_regs_gen.svh through the SEARCH_PATH set in the .qsf).
+# --------------------------------------------------------------------------
+
+# ---- package (structs + the generated PVR register typedefs) MUST come first ----
+set_global_assignment -name SYSTEMVERILOG_FILE ../../../polly2-core/rtl/gen/tsp_pkg.sv
+
+# ---- DUT + harness ----
+set_global_assignment -name SYSTEMVERILOG_FILE ../../../polly2-core/rtl/vo.sv
+set_global_assignment -name SYSTEMVERILOG_FILE timming_vo.sv

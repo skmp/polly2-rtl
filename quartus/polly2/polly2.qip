@@ -87,8 +87,9 @@ set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/tsp/tex/tex
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/tsp/tex/tex_fetch4_ob.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/tsp/tex/tex_unit.sv
 
-# ---- the render core ----
+# ---- the render core + video out (framebuffer write-out) ----
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/peel_core.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/vo.sv
 
 # ---- DE10-Nano / MiSTer board wrapper (instantiated by sys_top) ----
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/sys_top.v

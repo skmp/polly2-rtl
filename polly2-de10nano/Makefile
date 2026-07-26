@@ -18,6 +18,8 @@ VFLAGS = -Wno-WIDTH -Wno-UNUSEDSIGNAL -j $(NJOBS) --build-jobs $(NJOBS) \
          -CFLAGS "-O3"
 
 TSP_PKG = ../polly2-core/rtl/gen/tsp_pkg.sv
+# polly2-core video-out (framebuffer write master) instantiated by simplex_pvr_top
+VO_RTL  = ../polly2-core/rtl/vo.sv
 
 all: spg-sync pvr-burst spg-loopback audio-i2s spg-bands spg-depth fb-write render-irq
 
@@ -29,12 +31,12 @@ all: spg-sync pvr-burst spg-loopback audio-i2s spg-bands spg-depth fb-write rend
 fb-write: obj_dir/fb_write_tb
 	./obj_dir/fb_write_tb
 
-obj_dir/fb_write_tb: rtl/simplex_pvr_top.sv tb/peel_core_stub.sv tb/fb_write_tb.cpp $(TSP_PKG)
+obj_dir/fb_write_tb: rtl/simplex_pvr_top.sv $(VO_RTL) tb/peel_core_stub.sv tb/fb_write_tb.cpp $(TSP_PKG)
 	$(VERILATOR) --cc --exe --build $(VFLAGS) \
 	    -Wno-UNUSEDPARAM -Wno-DECLFILENAME -Wno-PINMISSING \
 	    -I../polly2-core/rtl/gen \
 	    --top-module simplex_pvr_top \
-	    $(TSP_PKG) tb/peel_core_stub.sv rtl/simplex_pvr_top.sv tb/fb_write_tb.cpp \
+	    $(TSP_PKG) tb/peel_core_stub.sv rtl/simplex_pvr_top.sv $(VO_RTL) tb/fb_write_tb.cpp \
 	    -o fb_write_tb
 
 #   make spg-depth - FB_R_CTRL read formats + per-line FB_R_SOF: all four
@@ -95,21 +97,21 @@ pvr-burst: obj_dir/pvr_burst_tb
 spg-loopback: obj_dir/spg_loopback_tb
 	./obj_dir/spg_loopback_tb
 
-obj_dir/spg_loopback_tb: rtl/simplex_pvr_top.sv rtl/spg.sv tb/spg_loopback_top.sv tb/peel_core_stub.sv tb/spg_loopback_tb.cpp $(TSP_PKG)
+obj_dir/spg_loopback_tb: rtl/simplex_pvr_top.sv $(VO_RTL) rtl/spg.sv tb/spg_loopback_top.sv tb/peel_core_stub.sv tb/spg_loopback_tb.cpp $(TSP_PKG)
 	$(VERILATOR) --cc --exe --build $(VFLAGS) \
 	    -Wno-UNUSEDPARAM -Wno-DECLFILENAME -Wno-PINMISSING \
 	    -I../polly2-core/rtl/gen \
 	    --top-module spg_loopback_top \
-	    $(TSP_PKG) tb/peel_core_stub.sv rtl/simplex_pvr_top.sv rtl/spg.sv \
+	    $(TSP_PKG) tb/peel_core_stub.sv rtl/simplex_pvr_top.sv $(VO_RTL) rtl/spg.sv \
 	    tb/spg_loopback_top.sv tb/spg_loopback_tb.cpp \
 	    -o spg_loopback_tb
 
-obj_dir/pvr_burst_tb: rtl/simplex_pvr_top.sv tb/peel_core_stub.sv tb/pvr_burst_tb.cpp $(TSP_PKG)
+obj_dir/pvr_burst_tb: rtl/simplex_pvr_top.sv $(VO_RTL) tb/peel_core_stub.sv tb/pvr_burst_tb.cpp $(TSP_PKG)
 	$(VERILATOR) --cc --exe --build $(VFLAGS) \
 	    -Wno-UNUSEDPARAM -Wno-DECLFILENAME -Wno-PINMISSING \
 	    -I../polly2-core/rtl/gen \
 	    --top-module simplex_pvr_top \
-	    $(TSP_PKG) tb/peel_core_stub.sv rtl/simplex_pvr_top.sv tb/pvr_burst_tb.cpp \
+	    $(TSP_PKG) tb/peel_core_stub.sv rtl/simplex_pvr_top.sv $(VO_RTL) tb/pvr_burst_tb.cpp \
 	    -o pvr_burst_tb
 
 clean:
