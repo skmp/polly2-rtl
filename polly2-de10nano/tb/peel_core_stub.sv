@@ -1,7 +1,7 @@
 // Stub peel_core for the simplex_pvr_top burst/reset testbench (pvr_burst_tb).
 // Replaces the real core so the adapter's DDR masters can be driven directly.
 // Commanded through the wr_en register port:
-//   wr_addr 0  : set stream base pix_idx = wr_data[19:0]
+//   wr_addr 0  : set stream base linear pixel index = wr_data[19:0]
 //   wr_addr 4  : start streaming wr_data[19:0] pixels linearly from the base
 //                (argb = {pix16,pix16} ^ {xorpat,xorpat})
 //   wr_addr 8  : issue one DDR read burst, addr = wr_data[24:0], 8 beats
@@ -9,7 +9,7 @@
 //   wr_addr 16 : set argb xor pattern = wr_data[15:0]
 //   wr_addr 20 : stream a full 640x480 frame in TILE order (20x15 tiles of
 //                32x32, row-major inside each tile - the real peel_core
-//                writeback pattern, with a pix_idx jump every 32 pixels)
+//                writeback pattern, with an x/y jump every 32 pixels)
 //   wr_addr 24 : set fb_w_ctrl   = wr_data (default 1: 565, no dither)
 //   wr_addr 28 : set fb_w_linestride = wr_data (default 160 = 1280 bytes)
 //   wr_addr 32 : set scaler_ctl  = wr_data (bit 16 = hscale)
@@ -61,17 +61,13 @@ module peel_core import tsp_pkg::*; (
     reg [3:0]  t_ty  = 4'd0;
     wire [9:0]  t_y   = {t_ty, 5'd0} + {5'd0, t_row};   // ty*32 + row
     wire [10:0] t_px  = {t_tx, 5'd0} + {6'd0, t_col};   // tx*32 + col
-    wire [19:0] tile_pix = {t_y, 9'd0} + {3'd0, t_y, 7'd0}   // y*640 = y*512+y*128
-                         + {9'd0, t_px};
 
-    wire [19:0] cur_pix = tile_mode ? tile_pix : pix;
     wire [10:0] cur_px  = tile_mode ? t_px : 11'(pix % 640);  // TB-only: ok to divide
     wire [9:0]  cur_py  = tile_mode ? t_y  : 10'(pix / 640);
     wire [19:0] hpix    = {cur_py[8:0], cur_px};              // py*2048 + px
     wire [31:0] pix_hash = {12'd0, hpix} * 32'h9E3779B1;
 
     assign fbw_req.we      = tile_mode || (remain != 21'd0);
-    assign fbw_req.pix_idx = cur_pix;
     assign fbw_req.px      = cur_px;
     assign fbw_req.py      = cur_py;
     assign fbw_req.argb    = pix_hash ^ {xorpat, xorpat};

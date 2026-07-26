@@ -44,7 +44,6 @@ module timming_vo import tsp_pkg::*; (
     //   3 : SCALER_CTL       (hscale)
     //   4 : fbw_req.argb
     //   5 : { ..., ddr_busy@31, we@30, py@29:20, px@19:9, ... }  (control bits)
-    //   6 : fbw_req.pix_idx  (legacy field; driven so it is never a constant)
     localparam integer NREG = 8;
     reg [31:0] in_reg [0:NREG-1];
     integer ir;
@@ -78,7 +77,6 @@ module timming_vo import tsp_pkg::*; (
     fb_wr_resp_t q_resp;
     always @* begin
         q_req.we      = w_we;
-        q_req.pix_idx = in_reg[6][19:0];
         q_req.px      = w_px;
         q_req.py      = w_py;
         q_req.argb    = in_reg[4];

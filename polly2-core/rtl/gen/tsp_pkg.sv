@@ -82,12 +82,11 @@ package tsp_pkg;
 
     // ---- framebuffer pixel WRITE port (injected DDR-controller dependency) ----
     // The peel_core streams each shaded tile's colour buffer out through this port,
-    // one 32-bit ARGB pixel per accepted cycle at a linear pixel index (y*640+x).
-    // Injected: the sim wrapper writes a behavioral fb[] array; mister_top packs
-    // pixels into 64-bit words and bursts them to the real DDR framebuffer region.
+    // one 32-bit ARGB pixel per accepted cycle at its screen coordinate (px, py).
+    // Injected: the sim wrapper writes a behavioral fb[] array; the synth
+    // integrations hand it to `vo` (rtl/vo.sv), which packs/bursts it to DDR.
     typedef struct packed {
         logic        we;        // 1 = present a pixel this cycle (consumed when !busy)
-        logic [19:0] pix_idx;   // linear pixel index (y*640 + x), 0..307199
         logic [10:0] px;        // screen x (0..1279: SCALER_CTL.hscale renders
                                 // are 1280 wide before the x1/2 write-out)
         logic [9:0]  py;        // screen y (0..479) - addressing + dither phase

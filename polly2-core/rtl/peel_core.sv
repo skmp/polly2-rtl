@@ -1216,7 +1216,6 @@ module peel_core import tsp_pkg::*; (
     wire        fw_onscreen = (fw_px < fw_xlim) && (fw_py < 11'd480);
     always @(*) begin
         fbw_req.we      = (vst==VO_WR) && fw_onscreen;
-        fbw_req.pix_idx = fw_py*20'd640 + {9'd0, fw_px};
         fbw_req.px      = fw_px;
         fbw_req.py      = fw_py[9:0];
         fbw_req.argb    = vo_rd_argb;             // VO-half registered read of vo_i
