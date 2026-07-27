@@ -4,6 +4,7 @@
 #   make tex           - TSP texture-pipeline block tests (randomized vs refsw):
 #                        tex-addr / tex-uv / tex-decode / tex-filter / tex-combiner
 #   make frontendtsplp - front-end + ISP + TSP + layer peeling -> shaded_lp_<name>.bmp
+#   make golden-check   - render ALL polly2-data dump scenes, md5 vs dumps/golden.txt
 #   make spannerv2     - spanner_v2 standalone replay vs C++ golden
 #   make regen         - regenerate PVR register typedefs from minicast's pvr_regs.h
 #   make clean
@@ -36,8 +37,8 @@ CWD  := $(shell pwd)
 
 .PHONY: shade-drop raster-topleft clean test tex tex-addr tex-uv tex-decode tex-filter tex-combiner \
         oparse region regfile regen sortcache itquad taginvw dense_span_buffer \
-        frontendtsplp spannerv2 mulc9 mul16sppro add24sppro mulc9sppro add3sppro \
-        mul24sppro mul24c9sppro
+        frontendtsplp frontendtsplp-build golden-check spannerv2 mulc9 mul16sppro \
+        add24sppro mulc9sppro add3sppro mul24sppro mul24c9sppro
 
 # TSP module files (package first). ISP shared FP units come from rtl/isp_min.
 TSP_RTL = rtl/tsp/tsp_pkg.sv $(filter-out rtl/tsp/tsp_pkg.sv,$(wildcard rtl/tsp/*.sv))
@@ -167,12 +168,37 @@ dense_span_buffer: | $(BUILD)
 # compare (isp_depth_cmp_lp) with dual depth/tag buffers + a per-pixel valid bit,
 # re-running the object list per peel pass, and blending at the end of the TSP
 # pipe -> shaded_lp_<name>.bmp.
-frontendtsplp: | $(BUILD)
+frontendtsplp-build: | $(BUILD)
 	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ --public-flat-rw \
 	  --top-module frontend_tsp_lp_tb_top $(RTL_INC) \
 	  $(TSP_PKG) $(RTL_EXTRA) tb/frontend_tsp_lp_tb_top.sv tb/sim_ddr_fb.sv \
 	  $(CWD)/tb/frontend_tsp_lp_tb.cpp --Mdir $(BUILD)/obj_frontendtsplp -o tb
+
+frontendtsplp: frontendtsplp-build
 	./$(BUILD)/obj_frontendtsplp/tb $(DUMP)
+
+# ---- golden-check: render EVERY scene listed in ../polly2-data/dumps/golden.txt
+# (parallel, one frontendtsplp sim per scene) and compare each shaded_lp_<scene>.bmp
+# md5 against the recorded golden. Renders land in build/golden/ (a polly2-data
+# symlink beside build/golden makes the tb's relative "../polly2-data/dumps" path
+# resolve), so the local reference BMPs in this directory are never touched.
+# Regenerate the list after an INTENDED output change: re-render + refresh golden.txt.
+GOLDEN_TXT = ../polly2-data/dumps/golden.txt
+
+golden-check: frontendtsplp-build
+	@mkdir -p $(BUILD)/golden
+	@ln -sfn ../../polly2-data $(BUILD)/polly2-data
+	@cd $(BUILD)/golden && grep -v '^\#' $(CWD)/$(GOLDEN_TXT) | awk '{print $$2}' | \
+	  xargs -P $(NJOBS) -I{} sh -c \
+	    '$(CWD)/$(BUILD)/obj_frontendtsplp/tb {} > log_{}.txt 2>&1 || echo "RENDER FAIL: {}"'
+	@cd $(BUILD)/golden && grep -v '^\#' $(CWD)/$(GOLDEN_TXT) | { fail=0; \
+	  while read m s; do \
+	    a=$$(md5sum shaded_lp_$$s.bmp 2>/dev/null | cut -d' ' -f1); \
+	    if [ "$$a" != "$$m" ]; then echo "FAIL $$s (got $${a:-missing}, want $$m)"; fail=1; \
+	    else echo "ok   $$s"; fi; \
+	  done; \
+	  if [ $$fail -eq 0 ]; then echo "=== golden-check: all scenes match golden.txt ==="; \
+	  else echo "=== golden-check: MISMATCHES (see above) ==="; exit 1; fi; }
 
 # spanner_v2 standalone check: replays captured TSP-input vectors
 # (spanner_test_vectors/spanner_input_<N>.txt + vram.bin) through spanner_v2 and

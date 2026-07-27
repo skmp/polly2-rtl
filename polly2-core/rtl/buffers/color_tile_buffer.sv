@@ -6,18 +6,25 @@
 // (1 px/cyc) ever touch it, never LANES-wide. So it is a single-bank 1024x32 M10K
 // (1R1W, registered read), addressed by the full pixel index (0..1023).
 //
-// The blend is a 2-stage RMW because the read is registered:
+// The blend is a 3-stage RMW, and the blend unit itself lives OUTSIDE this
+// module: only the producer half blends at a time, so peel_core keeps ONE shared
+// tsp_blend (itself pipelined: SELECT then MUL/CLAMP) instead of one per
+// ping-pong half. The M10K array exit + coefficient select and the
+// multiply+clamp each get a full clock (the one-cycle version was the design's
+// worst STA path; the blend chain alone only made ~78 MHz standalone).
 //   stage CA (bl_ca_valid): present the col-RAM read of bl_ca_id (the dst).
-//   stage CB (bl_cb_valid): rdata = OLD col_buf[cb_id] = dst; tsp_blend runs
-//     combinationally; the result is written back to col_ram[cb_id].
+//   stage CB (in peel_core):  rd_argb = OLD col_buf[id] = dst; tsp_blend S1
+//     (alpha clamp + coefficient select) samples it into its own registers.
+//   stage CC (bl_cb_valid): tsp_blend S2 (mul+clamp, comb off its S1 regs)
+//     arrives on cb_data and is written to col_ram[cb_id].
 // The shade pipeline is in-order and pixel ids ascend within a sub-phase, so a CA
-// read and a CB write never hit the same address in the same cycle (no RMW hazard).
+// read and a CC write never hit the same address in the same cycle (no RMW hazard).
 //
 // Read clients  (at most one/cycle): blend stage CA | FLUSH read.
-// Write clients (at most one/cycle): blend stage CB.
+// Write clients (at most one/cycle): blend stage CC (port names keep cb_*).
 // The module owns the ports and asserts the exclusion (sim).
 //
-module color_tile_buffer import tsp_pkg::*; #(
+module color_tile_buffer #(
     parameter integer DEPTH = 1024
 ) (
     input                       clk,
@@ -27,13 +34,10 @@ module color_tile_buffer import tsp_pkg::*; #(
     input                       bl_ca_valid,
     input      [9:0]            bl_ca_id,
 
-    // ---- BLEND stage CB: blend (src over rdata) and write col_ram[cb_id] ----
+    // ---- BLEND stage CB: write the externally blended result to col_ram[cb_id] ----
     input                       bl_cb_valid,
     input      [9:0]            cb_id,
-    input      [31:0]           cb_argb,     // shaded source color
-    input      [31:0]           cb_tsp,      // TSP word (SrcInstr/DstInstr)
-    input                       cb_at_en,    // PT alpha-test enable
-    input      [7:0]            alpha_ref,   // PT_ALPHA_REF
+    input      [31:0]           cb_data,     // blended color (shared tsp_blend output)
 
     // ---- FLUSH: hold the read of pixel fl_id; fl_argb is the registered read ----
     input                       fl_rd_valid,
@@ -51,21 +55,6 @@ module color_tile_buffer import tsp_pkg::*; #(
     end
     assign rd_argb = rdata_r;
 
-    // -------------------- blend (stage CB, combinational off rdata_r) --------------------
-    wire [2:0]  cb_src_instr = cb_tsp[31:29];
-    wire [2:0]  cb_dst_instr = cb_tsp[28:26];
-    wire [31:0] blend_out;
-    wire        blend_at;
-    tsp_blend u_blend (
-        .src       (cb_argb),
-        .dst       (rdata_r),               // registered read: OLD col_buf[cb_id]
-        .src_instr (cb_src_instr),
-        .dst_instr (cb_dst_instr),
-        .alpha_test(cb_at_en),
-        .alpha_ref (alpha_ref),
-        .out       (blend_out),
-        .at_pass   (blend_at));
-
     // -------------------- READ port mux --------------------
     always @(*) begin
         raddr = 10'd0;
@@ -77,7 +66,7 @@ module color_tile_buffer import tsp_pkg::*; #(
     always @(*) begin
         we    = bl_cb_valid;
         waddr = cb_id;
-        wdata = blend_out;
+        wdata = cb_data;
     end
 
 `ifndef SYNTHESIS
