@@ -1,7 +1,7 @@
 //
 // sort_cache - peel "fully rendered" triangle filter (the sorting cache).
 //
-// One entry per (tag mod 128) in FOUR ways, one way per ISP raster lane. The
+// One entry per (tag mod 128) in WAYS ways, one way per ISP raster lane. The
 // entry tracks the predicate "this triangle can never be selected by a future
 // peel pass":
 //
@@ -12,18 +12,18 @@
 //          candidate rejected while still BEHIND the peel boundary): write
 //          {tag, 0} into THAT LANE's way only.
 //
-// A triangle whose 4 ways all still hold {tag, 1} at the end of a pass kept
+// A triangle whose ways all still hold {tag, 1} at the end of a pass kept
 // every pixel it touched (or was already peeled there) - it has been fully
 // rendered, and the NEXT pass can skip it before parameter fetch/setup.
 //
-//   CHECK  : registered read of all 4 ways; done = every way matches the tag
+//   CHECK  : registered read of all ways; done = every way matches the tag
 //            with its bit set. Any mismatch (alias replaced it, a lost enter,
 //            a demote) reads as "not done" -> render. All failure modes are
 //            conservative.
 //
 // SINGLE write port per way: way w's demote and the enter broadcast share it,
 // DEMOTE WINS on a same-cycle conflict. A swallowed enter leaves a stale or
-// partial entry -> the 4-way agreement test fails -> the triangle renders
+// partial entry -> the all-way agreement test fails -> the triangle renders
 // (safe). A swallowed demote could false-skip live geometry, so it must never
 // lose. Causality guarantees a triangle's own enter precedes its own demotes
 // (its tag can only be displaced after it was rasterized, 30+ cycles after
@@ -49,7 +49,7 @@
 // while different records still spread by address. The index is a hash, not a
 // slice, so each way stores the FULL tag for the agreement compare.
 //
-// 4x M10K (128 x 33 each): {done, tag[31:0]}.
+// WAYS x M10K (128 x 33 each): {done, tag[31:0]}.
 //
 module sort_cache #(
     parameter integer TAGW = 32,
@@ -141,8 +141,7 @@ module sort_cache #(
             if (en_valid && ready)         st_enter  <= st_enter + 1;
             if (chk_valid_q)               st_check  <= st_check + 1;
             if (chk_valid_q && chk_done)   st_skip   <= st_skip + 1;
-            st_demote <= st_demote + (wr_valid[0]?1:0) + (wr_valid[1]?1:0)
-                                   + (wr_valid[2]?1:0) + (wr_valid[3]?1:0);
+            st_demote <= st_demote + $countones(wr_valid);
             if (en_valid && ready && (|wr_valid)) st_enter_lost <= st_enter_lost + 1;
         end
     end
