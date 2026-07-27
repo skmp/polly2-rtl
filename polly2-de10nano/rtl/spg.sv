@@ -291,6 +291,33 @@ wire  [8:0] bb_lin     = pd_lat
 wire  [8:0] bb_geo     = split_lat ? {bb_lin[7:0], 1'b0} : bb_lin;
 wire  [8:0] look_beats = bb_geo + {8'd0, look_roff != 4'd0};
 
+// look_* are LINE-CONSTANT (vcnt only changes when hcnt wraps): register the
+// whole lookahead cone per clock (copies are settled from hcnt==1 on) and
+// fire the request at hcnt==2 instead of hcnt==0, so the vcnt+2 wrap adder /
+// region subtracts / 12-bit dedup compare never gate the req_* enables
+// combinationally (they were an STA-failing family into req_base). The two
+// pixel clocks of extra latency are nothing against the ~2-output-line
+// fetch-ahead margin, and the per-line config latches at hcnt==0 have
+// settled a full cycle before the registered copies are consumed.
+reg        look_in_r    = 1'b0;
+reg [11:0] look_key_r   = 12'hFFF;
+reg  [1:0] look_rgn_r   = 2'd0;
+reg        look_sof_r   = 1'b0;
+reg        look_buf_r   = 1'b0;
+reg        look_game_r  = 1'b0;
+reg  [3:0] look_roff_r  = 4'd0;
+reg  [8:0] look_beats_r = 9'd0;
+always @(posedge clk) begin
+	look_in_r    <= look_in;
+	look_key_r   <= look_key;
+	look_rgn_r   <= look_rgn;
+	look_sof_r   <= (look_src == 10'd0);
+	look_buf_r   <= look_src[0];
+	look_game_r  <= look_game;
+	look_roff_r  <= look_roff;
+	look_beats_r <= look_beats;
+end
+
 always @(posedge clk or posedge reset) begin
 	if (reset) begin
 		req_toggle <= 1'b0;
@@ -317,15 +344,15 @@ always @(posedge clk or posedge reset) begin
 			last_req     <= 12'hFFF;
 		end
 
-		if (hcnt == 12'd0 && look_in && look_key != last_req) begin
-			req_sof    <= (look_src == 10'd0);
-			req_buf    <= look_src[0];
-			req_region <= look_rgn;
+		if (hcnt == 12'd2 && look_in_r && look_key_r != last_req) begin
+			req_sof    <= look_sof_r;
+			req_buf    <= look_buf_r;
+			req_region <= look_rgn_r;
 			req_base   <= fbs_stable[31:4];
 			req_half   <= fbs_stable[32];
-			req_beats  <= look_beats;
-			line_roff[look_src[0]] <= look_game ? look_roff : 4'd0;
-			last_req   <= look_key;
+			req_beats  <= look_beats_r;
+			line_roff[look_buf_r] <= look_game_r ? look_roff_r : 4'd0;
+			last_req   <= look_key_r;
 			cnt_req    <= cnt_req + 2'd1;
 			req_toggle <= ~req_toggle;   // payload above is stable when this lands
 		end
@@ -489,10 +516,29 @@ wire [10:0] d_rel   = top_v ? vcnt : bot_v ? vcnt - Y1 : y_rel;
 wire  [1:0] d_vsh   = band_v ? 2'd1 : vshift;
 /* verilator lint_off UNUSEDSIGNAL */
 wire [10:0] y_shf   = d_rel >> d_vsh;
-wire [11:0] x_pre   = hcnt + 12'd1 - X0;     // lookahead: pixel needed next clk
+wire [11:0] x_pre   = hcnt + 12'd2 - X0;     // lookahead: pixel needed in 2 clks
 /* verilator lint_on UNUSEDSIGNAL */
 wire  [9:0] src_cur = y_shf[9:0];
-assign      rbuf    = src_cur[0];
+
+// Line-constant display selects, REGISTERED: vcnt only changes when hcnt
+// wraps, so per-clock copies are settled from hcnt==1 on - hundreds of
+// clocks before the window starts at X0. This keeps the vcnt band compares,
+// the region subtract chain and the line_roff lookup out of the per-pixel
+// address cone (they headed spg's worst STA family, landing in the bank
+// RAMs' read-address registers).
+reg        band_v_r   = 1'b0;
+reg  [1:0] disp_dep_r = 2'd0;
+reg  [3:0] roff_r     = 4'd0;
+reg        rbuf_r     = 1'b0;
+reg        pd_sel_r   = 1'b0;
+always @(posedge clk) begin
+	band_v_r   <= band_v;
+	disp_dep_r <= band_v ? 2'd1 : dep_lat;   // bands read as 16bpp
+	roff_r     <= band_v ? 4'd0 : line_roff[src_cur[0]];
+	rbuf_r     <= src_cur[0];
+	pd_sel_r   <= pd_lat && !band_v;
+end
+assign rbuf = rbuf_r;
 
 // FB-view byte address of the lookahead pixel within the stored stream:
 // roff (the line base's sub-beat offset) + n * bytes-per-pixel. Packed 888
@@ -504,15 +550,22 @@ assign      rbuf    = src_cur[0];
 // a 1-px comb from the odd/even split - while the core render was right).
 // /2: source pixel 0..639; pixel_double game lines: /4, source 0..319
 // (bands are always 640 wide at 2x)
-wire  [9:0] n_pre    = (pd_lat && !band_v) ? x_pre[11:2] : x_pre[10:1];
-wire  [1:0] disp_dep = band_v ? 2'd1 : dep_lat;   // bands read as 16bpp
-wire  [3:0] roff_d   = band_v ? 4'd0 : line_roff[rbuf];
-wire [11:0] b_pre =
-	((disp_dep == 2'd2) ? ({1'b0, n_pre, 1'b0} + {2'b00, n_pre})   // 3n
-	:(disp_dep == 2'd3) ? {n_pre, 2'b00}                           // 4n
-	                    : {1'b0, n_pre, 1'b0})                     // 2n
-	+ {8'd0, roff_d};
-assign w0_pre = b_pre[11:2];
+//
+// The byte address is REGISTERED (b_pre_r) with the lookahead deepened to
+// hcnt+2, so the bank RAMs' address registers see only the short bump/
+// increment cone off a register slice. Overall RGB alignment vs the
+// counters is unchanged: the extra register stage is exactly absorbed by
+// the extra pixel of lookahead.
+wire  [9:0] n_pre    = pd_sel_r ? x_pre[11:2] : x_pre[10:1];
+reg  [11:0] b_pre_r  = 12'd0;
+always @(posedge clk) begin
+	b_pre_r <=
+		((disp_dep_r == 2'd2) ? ({1'b0, n_pre, 1'b0} + {2'b00, n_pre})   // 3n
+		:(disp_dep_r == 2'd3) ? {n_pre, 2'b00}                           // 4n
+		                      : {1'b0, n_pre, 1'b0})                     // 2n
+		+ {8'd0, roff_r};
+end
+assign w0_pre = b_pre_r[11:2];
 
 wire        img_h   = (hcnt >= X0) && (hcnt < X1);
 
@@ -535,14 +588,14 @@ reg [4:0] pipe1   = 5'd0;   // {img, de, hs, vs, vbl}
 always @(posedge clk) begin
 	// stage 0/1 companions of the RAM pipeline in the generate above
 	s1_w0lo <= w0_pre[1:0];
-	s1_blo  <= b_pre[1:0];
+	s1_blo  <= b_pre_r[1:0];
 	s2_w0lo <= s1_w0lo;
 	s2_blo  <= s1_blo;
 	pipe1   <= {img_c, de_c, hs_c, vs_c, vbl_c};
 
 	// stage 2: rotate the window, funnel the pixel's bytes down, convert.
-	// disp_dep/cat_lat/en_lat/band_v are line-constant, so using them 2
-	// clocks "late" is safe (the affected edge pixels are border-black).
+	// dep_lat/cat_lat/en_lat/band_v_r are line-constant, so using them
+	// "late" is safe (the affected edge pixels are border-black).
 	begin : lane_mux
 		reg [31:0] wlo, whi;
 		reg [63:0] s64;
@@ -554,7 +607,7 @@ always @(posedge clk) begin
 		s64 = {whi, wlo} >> {s2_blo, 3'b000};
 		p32 = s64[31:0];
 		p16 = p32[15:0];
-		if (band_v) begin                    // bands: 565, MSB-replicated
+		if (band_v_r) begin                  // bands: 565, MSB-replicated
 			r8 = {p16[15:11], p16[15:13]};
 			g8 = {p16[10:5],  p16[10:9]};
 			b8 = {p16[4:0],   p16[4:2]};
@@ -576,7 +629,7 @@ always @(posedge clk) begin
 				b8 = p32[7:0];
 			end
 		endcase
-		if (pipe1[4] && (band_v || en_lat)) begin
+		if (pipe1[4] && (band_v_r || en_lat)) begin
 			red   <= r8;
 			green <= g8;
 			blue  <= b8;
