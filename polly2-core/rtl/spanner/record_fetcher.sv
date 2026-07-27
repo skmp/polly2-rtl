@@ -59,11 +59,29 @@ module record_fetcher import tsp_pkg::*; (
     // record byte base = param_base + {4'd0, tag[23:3], 2'b00}
     reg  [26:0] rec_b;                        // record byte base
     wire [24:0] rec_w = rec_b[26:2];          // view word index
-    // vertex region base (view words): rec + (two_vol?5:3) + toff*stride
-    wire [24:0] vb_w  = rec_w + (r_two_vol ? 25'd5 : 25'd3)
-                              + {20'd0, r_toff} * {20'd0, r_stride_w};
-    // burst-2 length: 2*stride + fpv words (last field of vertex 2)
-    wire [7:0]  v_len = {2'd0, r_stride_w, 1'b0} + {4'd0, fpv};
+
+    // ---- staged vertex-region address + length ----
+    // vertex region base (view words): vb = rec + (two_vol?5:3) + toff*stride,
+    // burst length v_len = 2*stride + fpv (last field of vertex 2). Computed
+    // FREE-RUNNING in two register stages instead of combinationally at
+    // B_V_REQ: the full r_tag[27] -> two_vol -> stride -> toff*stride ->
+    // 25-bit-add cone into ts_addr_r was the design's worst timing path
+    // (~ -5 ns at 112.5 MHz), yet its inputs are quasi-static - r_tag/rec_b
+    // are latched in B_IDLE and B_V_REQ samples the result >= 4 cycles later
+    // (header issue + 3 header beats). Staging cuts what STA sees to three
+    // short single-cycle hops; every stage settles >= 2 cycles before use
+    // (stride_w_r/vbase_r after B_H_REQ's first cycle, vb_w_r a cycle later,
+    // v_len_r the cycle after o_isp lands on header beat 0).
+    reg  [4:0]  stride_w_r;                   // == r_stride_w
+    reg  [24:0] vbase_r;                      // rec_w + (two_vol?5:3)
+    reg  [24:0] vb_w_r;                       // vbase_r + toff*stride
+    reg  [7:0]  v_len_r;                      // 2*stride + fpv
+    always @(posedge clk) begin
+        stride_w_r <= r_stride_w;
+        vbase_r    <= rec_w + (r_two_vol ? 25'd5 : 25'd3);
+        vb_w_r     <= vbase_r + {20'd0, r_toff} * {20'd0, stride_w_r};
+        v_len_r    <= {2'd0, stride_w_r, 1'b0} + {4'd0, fpv};
+    end
 
     // view word -> physical: bank = word[20] (half select), wofs = word[19:0]
     function automatic [28:0] vw_addr(input [24:0] vw);
@@ -143,9 +161,9 @@ module record_fetcher import tsp_pkg::*; (
             // ---- burst 2: the whole vertex region @ vb (flags now valid) ----
             B_V_REQ: if (!dresp.busy) begin
                 ts_rd_r    <= 1'b1;
-                ts_addr_r  <= vw_addr(vb_w);
-                ts_burst_r <= v_len;
-                v_bank     <= vb_w[20];
+                ts_addr_r  <= vw_addr(vb_w_r);
+                ts_burst_r <= v_len_r;
+                v_bank     <= vb_w_r[20];
                 beat       <= 8'd0;
                 bst        <= B_V_DATA;
             end
@@ -153,8 +171,8 @@ module record_fetcher import tsp_pkg::*; (
                 // this word is offset `beat` in the region; fill every vertex whose
                 // field window contains it (vertices overlap when stride < fpv).
                 for (v = 0; v < 3; v = v + 1) begin
-                    rr = beat - v[1:0] * {3'd0, r_stride_w};
-                    if (beat >= v[1:0] * {3'd0, r_stride_w} && rr < {4'd0, fpv}) begin
+                    rr = beat - v[1:0] * {3'd0, stride_w_r};
+                    if (beat >= v[1:0] * {3'd0, stride_w_r} && rr < {4'd0, fpv}) begin
                         if      (rr == 8'd0) o_x[v] <= v_word;
                         else if (rr == 8'd1) o_y[v] <= v_word;
                         else if (rr == 8'd2) o_z[v] <= v_word;
@@ -169,7 +187,7 @@ module record_fetcher import tsp_pkg::*; (
                     end
                 end
                 beat <= beat + 8'd1;
-                if (beat == v_len - 8'd1) bst <= B_DONE;
+                if (beat == v_len_r - 8'd1) bst <= B_DONE;
             end
 
             B_DONE: begin
