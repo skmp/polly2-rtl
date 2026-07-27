@@ -285,6 +285,7 @@ module peel_core import tsp_pkg::*; (
     wire [4:0]  w_bx0, w_bx1, w_by0, w_by1;   // tile-local bbox from setup
     wire [31:0] w_dx12,w_dx23,w_dx31,w_dx41, w_dy12,w_dy23,w_dy31,w_dy41;
     wire [31:0] w_c1,w_c2,w_c3,w_c4, w_ddx,w_ddy,w_cinvw;
+    wire [3:0]  w_tl;   // per-edge IsTopLeft (raster's exact-on-edge rule)
 
     // Streaming setup interface: accept a triangle from the tri FIFO (fq) whenever
     // in_ready, retire one (out_valid) into the plane FIFO (pq) when out_ready.
@@ -319,6 +320,7 @@ module peel_core import tsp_pkg::*; (
         .dx12(w_dx12), .dx23(w_dx23), .dx31(w_dx31), .dx41(w_dx41),
         .dy12(w_dy12), .dy23(w_dy23), .dy31(w_dy31), .dy41(w_dy41),
         .c1(w_c1), .c2(w_c2), .c3(w_c3), .c4(w_c4),
+        .out_tl(w_tl),
         .ddx_invw(w_ddx), .ddy_invw(w_ddy), .c_invw(w_cinvw),
         .bx0(w_bx0), .bx1(w_bx1), .by0(w_by0), .by1(w_by1)
     );
@@ -328,6 +330,7 @@ module peel_core import tsp_pkg::*; (
     reg [31:0] isp_dy12,isp_dy23,isp_dy31,isp_dy41;
     reg [31:0] isp_c1,isp_c2,isp_c3,isp_c4;
     reg [31:0] isp_ddx_invw, isp_ddy_invw, isp_c_invw;
+    reg [3:0]  isp_tl;
 
     // -------------------- ISP rasterize (as tile_engine_top) --------------------
     // 8 depth lanes/clock, matching the real FPGA (32 lanes is DSP-heavy). Sim
@@ -374,6 +377,7 @@ module peel_core import tsp_pkg::*; (
         .dx12(isp_dx12),.dx23(isp_dx23),.dx31(isp_dx31),.dx41(isp_dx41),
         .dy12(isp_dy12),.dy23(isp_dy23),.dy31(isp_dy31),.dy41(isp_dy41),
         .ddx(isp_ddx_invw),.ddy(isp_ddy_invw),.c_invw(isp_c_invw),
+        .tl(isp_tl),
         .probe(ras_probe), .probe_reject(ras_probe_reject), .probe_valid(ras_probe_valid),
         .out_valid(ras_out_valid),
         .inside_mask(ras_inside),
@@ -1057,7 +1061,7 @@ module peel_core import tsp_pkg::*; (
     // push and pop never target the same address in the same cycle (pop only fires when
     // !pq_empty -> head!=tail; push is blocked by out_ready=!pq_full when head==tail),
     // so no_rw_check is safe. Only the small head/tail/count control stays in logic.
-    localparam integer PQ_W = 565;   // 17*32 + 4*5 + 1 (is_pt)
+    localparam integer PQ_W = 569;   // 17*32 + 4*5 + 1 (is_pt) + 4 (tl)
     localparam integer QF_DX12=0,  QF_DX23=32,  QF_DX31=64,  QF_DX41=96;
     localparam integer QF_DY12=128,QF_DY23=160, QF_DY31=192, QF_DY41=224;
     localparam integer QF_C1=256,  QF_C2=288,   QF_C3=320,   QF_C4=352;
@@ -1065,6 +1069,7 @@ module peel_core import tsp_pkg::*; (
     localparam integer QF_ISP=480, QF_TAG=512;
     localparam integer QF_BX0=544, QF_BX1=549,  QF_BY0=554,  QF_BY1=559;   // 5b each
     localparam integer QF_PT=564;    // list-kind (PT) bit
+    localparam integer QF_TL=565;    // 4b: per-edge IsTopLeft
     (* ramstyle = "M10K, no_rw_check" *) reg [PQ_W-1:0] pq_ram [0:PQ_N-1];
     reg [PQ_W-1:0] pq_rdw;            // registered read word (valid the cycle after pop)
     reg [3:0]  pq_head, pq_tail;
@@ -1087,6 +1092,7 @@ module peel_core import tsp_pkg::*; (
     assign pq_wrw[QF_PT]         = su_out_pt;
     assign pq_wrw[QF_BX0  +:  5] = w_bx0;  assign pq_wrw[QF_BX1  +:  5] = w_bx1;
     assign pq_wrw[QF_BY0  +:  5] = w_by0;  assign pq_wrw[QF_BY1  +:  5] = w_by1;
+    assign pq_wrw[QF_TL   +:  4] = w_tl;
 
     // consumer fully idle: entry FIFO empty, iterator authoritative-idle (it_pf_busy
     // clear: no record buffered/being read/emitted/outstanding), streamed setup
@@ -2515,6 +2521,7 @@ module peel_core import tsp_pkg::*; (
                 isp_c3<=pq_rdw[QF_C3 +:32]; isp_c4<=pq_rdw[QF_C4 +:32];
                 isp_ddx_invw<=pq_rdw[QF_DDX +:32]; isp_ddy_invw<=pq_rdw[QF_DDY +:32];
                 isp_c_invw<=pq_rdw[QF_CINVW +:32];
+                isp_tl<=pq_rdw[QF_TL +:4];
                 isp_word<=pq_rdw[QF_ISP +:32]; tri_tag<=pq_rdw[QF_TAG +:32];
                 tri_is_pt<=pq_rdw[QF_PT];
                 tri_count<=tri_count+1;

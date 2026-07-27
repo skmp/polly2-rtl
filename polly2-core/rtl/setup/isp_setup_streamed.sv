@@ -114,6 +114,7 @@ module isp_setup_streamed (
     output reg [31:0] dx12, output reg [31:0] dx23, output reg [31:0] dx31, output reg [31:0] dx41,
     output reg [31:0] dy12, output reg [31:0] dy23, output reg [31:0] dy31, output reg [31:0] dy41,
     output reg [31:0] c1,   output reg [31:0] c2,   output reg [31:0] c3,   output reg [31:0] c4,
+    output reg [3:0]  out_tl,   // {tl4,tl3,tl2,tl1}: IsTopLeft per edge (raster compare)
     output reg [31:0] ddx_invw, output reg [31:0] ddy_invw, output reg [31:0] c_invw,
     output reg [4:0]  bx0, output reg [4:0] bx1, output reg [4:0] by0, output reg [4:0] by1
 );
@@ -126,6 +127,15 @@ module isp_setup_streamed (
     function istl(input [31:0] fdx, input [31:0] fdy);   // IsTopLeft on sgn-normalized edges
         istl=(fzero(fdy)&&fpos(fdx))||fneg(fdy); endfunction
     function [31:0] fnegf(input [31:0] f); fnegf={~f[31],f[30:0]}; endfunction
+    // NOTE on the top-left rule: C is NOT biased. The old "-1 raw ulp on C
+    // when not top-left" wrapped C=+0 to 0xFFFFFFFF (-NaN, exponent FF),
+    // which dominated every Xhs sum - any tile whose origin lies exactly on
+    // a non-top-left edge lost the WHOLE triangle (alternating black 32x32
+    // holes along shared fullscreen-quad diagonals, RE:CV intro). And any
+    // finite bias washes out of (C + DX*y) vs DY*x depending on per-pixel
+    // exponent alignment. So the rule lives in the RASTER compare instead
+    // (refsw2 refsw_tile.cpp: inside = Xhs > 0 || (T && Xhs == 0)); setup
+    // exports the four T flags on out_tl.
     // NOTE on -0: a flipped zero delta yields -0 (the old mac16 path's add stage
     // normalized these to +0). Harmless: every consumer path (raster Xhs / invW
     // sums) re-derives the sign through an fp adder, and those pack +0 on exact
@@ -199,6 +209,7 @@ module isp_setup_streamed (
     reg [31:0] e1XL,e1YT, e2XL,e2YT, e3XL,e3YT, e4XL,e4YT;   // @13, read <= @16
     reg [31:0] aZ,aXL,aYT;                 // @13, read <= @25
     reg        tl1,tl2,tl3,tl4;            // @15, read <= @26
+    reg [3:0]  sc_tl;                      // {tl4,tl3,tl2,tl1} captured @23 for retire
     reg [31:0] Aa,Ba;                      // @17/@18, read @19
     reg [31:0] C2a,C2b, C4a,C4b;           // @18/@19, read @20/@21
     reg [31:0] ddx,ddy;                    // @22, read @31
@@ -474,11 +485,12 @@ module isp_setup_streamed (
                 // ---- A3 result captures ----
                 if (d[2])  Aa<=a3_y;
                 if (d[3])  Ba<=a3_y;
-                // edge constants: top-left bias = integer -1 ulp when NOT top-left
-                if (d[8])  sc_c1 <= tl1 ? a3_y : (a3_y - 32'd1);
-                if (d[9])  sc_c3 <= tl3 ? a3_y : (a3_y - 32'd1);
-                if (d[10]) sc_c2 <= tl2 ? a3_y : (a3_y - 32'd1);
-                if (d[11]) sc_c4 <= bQ[dpar[11]] ? (tl4 ? a3_y : (a3_y - 32'd1)) : ONE;
+                // edge constants: EXACT (top-left rule is in the raster
+                // compare via out_tl - see the note at fnegf)
+                if (d[8])  begin sc_c1 <= a3_y; sc_tl <= {tl4, tl3, tl2, tl1}; end
+                if (d[9])  sc_c3 <= a3_y;
+                if (d[10]) sc_c2 <= a3_y;
+                if (d[11]) sc_c4 <= bQ[dpar[11]] ? a3_y : ONE;
                 if (d[15]) sc_cinvw <= a3_y;
 
                 // ================= retire (d16, rel 31) =================
@@ -492,6 +504,7 @@ module isp_setup_streamed (
                     dy12<=bDY12[dpar[16]]; dy23<=bDY23[dpar[16]];
                     dy31<=bDY31[dpar[16]]; dy41<=bDY41[dpar[16]];
                     c1<=sc_c1; c2<=sc_c2; c3<=sc_c3; c4<=sc_c4;
+                    out_tl<=sc_tl;
                     ddx_invw<=ddx; ddy_invw<=ddy; c_invw<=sc_cinvw;
                     bx0<=bBX0[dpar[16]]; bx1<=bBX1[dpar[16]];
                     by0<=bBY0[dpar[16]]; by1<=bBY1[dpar[16]];
