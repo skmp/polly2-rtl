@@ -12,7 +12,7 @@ set_global_assignment -name OPTIMIZATION_TECHNIQUE SPEED
 set_global_assignment -name VERILOG_MACRO "SYNTHESIS=1"
 set_global_assignment -name SEARCH_PATH .
 
-set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/tsp/tex_decode.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../../polly2-core/rtl/tsp/tex/tex_decode.sv
 set_global_assignment -name SYSTEMVERILOG_FILE stage_tex_decode.sv
 set_global_assignment -name SDC_FILE stage.sdc
 
