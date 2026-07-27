@@ -1,10 +1,19 @@
 //
 // tsp_blend - refsw2 BlendingUnit (alpha blend at the very end of the TSP pipe).
 //
-// Mirrors BlendingUnit<> + BlendCoefs<> in refsw2/refsw_tile.cpp. Combinational:
-// takes the shaded source color `src` (combiner output), the current destination
-// `dst` (accumulation buffer pixel), and the tag's TSP blend controls, and
-// produces the blended color to store back.
+// Mirrors BlendingUnit<> + BlendCoefs<> in refsw2/refsw_tile.cpp. PIPELINED,
+// latency 1: measured standalone, the full comb chain (alpha-test clamp ->
+// coefficient select -> 8x8 mult pair -> sum -> clamp) only makes ~78 MHz on
+// Cyclone V - nowhere near the 112.5 MHz clk_sys slot. Split per stage:
+//   S1 (comb off inputs -> REGISTERED): alpha-test clamp + per-channel
+//      coefficient SELECT (the cheap mux tree). Registers the clamped src, the
+//      dst and both coefficient vectors.
+//   S2 (comb off the S1 registers -> `out`): the 8 8x8 MULTIPLIES, the
+//      two-product sums, >>8 and the CLAMP to 255. The caller registers `out`
+//      (peel_core: the per-half cb3_* result registers of the blend RMW).
+// So inputs are sampled on one clk edge and out/at_pass describe those inputs
+// during the NEXT cycle. No enable/valid: the caller tracks validity (it
+// already pipelines ids alongside) and inputs may change every cycle.
 //
 // Colors are packed ARGB (matches the rest of the TSP path / color_combiner):
 //   bits [31:24]=A, [23:16]=R, [15:8]=G, [7:0]=B.
@@ -25,28 +34,35 @@
 // for PUNCH-THROUGH fragments - refsw2 passes pp_AlphaTest=1 solely for RM_PUNCHTHROUGH.
 // Enabling it on a translucent fragment zeroes low-alpha layers -> faint translucent.
 //
+// multstyle="logic": keep the 8 8x8 coefficient multiplies in ALMs instead of
+// DSP blocks - the DSP pool sits ~87% full and the DSP-column detour costs more
+// routing than the soft mults cost ALMs.
+(* multstyle = "logic" *)
 module tsp_blend (
+    input             clk,
     input      [31:0] src,        // shaded source color (ARGB)
     input      [31:0] dst,        // destination / accumulation color (ARGB)
     input      [2:0]  src_instr,  // TSP.SrcInstr
     input      [2:0]  dst_instr,  // TSP.DstInstr
     input             alpha_test, // punch-through alpha test enable
     input      [7:0]  alpha_ref,  // PT_ALPHA_REF
-    output reg [31:0] out,        // blended color to store
-    output reg        at_pass     // alpha-test pass (always 1 when !alpha_test)
+    output     [31:0] out,        // blended color to store (1 cycle after inputs)
+    output            at_pass     // alpha-test pass (always 1 when !alpha_test)
 );
+    // ======================= S1 (comb): clamp + coefficient select =======================
     // --- unpack ARGB ---
     wire [7:0] s_a = src[31:24], s_r = src[23:16], s_g = src[15:8], s_b = src[7:0];
     wire [7:0] d_a = dst[31:24], d_r = dst[23:16], d_g = dst[15:8], d_b = dst[7:0];
 
     // punch-through alpha test: clamp src alpha to 0/255 and report pass/fail
     reg [7:0] c_a;   // src alpha after alpha-test clamp
+    reg       c_pass;
     always @* begin
-        at_pass = 1'b1;
-        c_a     = s_a;
+        c_pass = 1'b1;
+        c_a    = s_a;
         if (alpha_test) begin
-            if (s_a < alpha_ref) begin c_a = 8'd0;   at_pass = 1'b0; end
-            else                 begin c_a = 8'd255;                 end
+            if (s_a < alpha_ref) begin c_a = 8'd0;   c_pass = 1'b0; end
+            else                 begin c_a = 8'd255;                end
         end
     end
 
@@ -84,6 +100,18 @@ module tsp_blend (
     wire [31:0] dc = blend_coefs(dst_instr, 1'b1,
                                  cs_a,cs_r,cs_g,cs_b, d_a,d_r,d_g,d_b);
 
+    // ---- S1 registers: clamped src, dst, both coefficient vectors, at flag ----
+    reg [31:0] s1_cs, s1_d, s1_sc, s1_dc;
+    reg        s1_at_pass;
+    always @(posedge clk) begin
+        s1_cs      <= {cs_a, cs_r, cs_g, cs_b};
+        s1_d       <= {d_a,  d_r,  d_g,  d_b};
+        s1_sc      <= sc;
+        s1_dc      <= dc;
+        s1_at_pass <= c_pass;
+    end
+
+    // ======================= S2 (comb off S1 regs): multiply + clamp =====================
     // per-channel: min( (src*scoef + dst*dcoef) >> 8, 255 ), raw 8-bit coefs
     // (no 8->9 to256 scaling; >>8 divides by 256). The two coefficients are
     // independent per blend mode, so this stays a genuine two-product sum.
@@ -96,10 +124,9 @@ module tsp_blend (
         end
     endfunction
 
-    always @* begin
-        out = { mix(cs_a, sc[31:24], d_a, dc[31:24]),
-                mix(cs_r, sc[23:16], d_r, dc[23:16]),
-                mix(cs_g, sc[15:8],  d_g, dc[15:8]),
-                mix(cs_b, sc[7:0],   d_b, dc[7:0]) };
-    end
+    assign out = { mix(s1_cs[31:24], s1_sc[31:24], s1_d[31:24], s1_dc[31:24]),
+                   mix(s1_cs[23:16], s1_sc[23:16], s1_d[23:16], s1_dc[23:16]),
+                   mix(s1_cs[15:8],  s1_sc[15:8],  s1_d[15:8],  s1_dc[15:8]),
+                   mix(s1_cs[7:0],   s1_sc[7:0],   s1_d[7:0],   s1_dc[7:0]) };
+    assign at_pass = s1_at_pass;
 endmodule

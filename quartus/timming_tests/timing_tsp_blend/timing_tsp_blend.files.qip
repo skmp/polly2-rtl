@@ -1,0 +1,10 @@
+# --------------------------------------------------------------------------
+# timing_tsp_blend - isolated fileset for the tsp_blend perf harness. Paths are
+# relative to this project dir (quartus/timming_tests/timing_tsp_blend/).
+#
+# tsp_blend is standalone combinational logic (no package, no submodules).
+# --------------------------------------------------------------------------
+
+# ---- DUT + harness ----
+set_global_assignment -name SYSTEMVERILOG_FILE ../../../polly2-core/rtl/tsp/tsp_blend.sv
+set_global_assignment -name SYSTEMVERILOG_FILE timing_tsp_blend.sv

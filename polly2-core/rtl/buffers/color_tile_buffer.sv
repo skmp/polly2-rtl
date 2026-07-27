@@ -6,17 +6,22 @@
 // (1 px/cyc) ever touch it, never LANES-wide. So it is a single-bank 1024x32 M10K
 // (1R1W, registered read), addressed by the full pixel index (0..1023).
 //
-// The blend is a 2-stage RMW because the read is registered, but the blend unit
-// itself lives OUTSIDE this module: only the producer half blends at a time, so
-// peel_core keeps ONE shared tsp_blend instead of one per ping-pong half.
+// The blend is a 3-stage RMW, and the blend unit itself lives OUTSIDE this
+// module: only the producer half blends at a time, so peel_core keeps ONE shared
+// tsp_blend (itself pipelined: SELECT then MUL/CLAMP) instead of one per
+// ping-pong half. The M10K array exit + coefficient select and the
+// multiply+clamp each get a full clock (the one-cycle version was the design's
+// worst STA path; the blend chain alone only made ~78 MHz standalone).
 //   stage CA (bl_ca_valid): present the col-RAM read of bl_ca_id (the dst).
-//   stage CB (bl_cb_valid): rd_argb = OLD col_buf[cb_id] = dst feeds the external
-//     tsp_blend; its result returns on cb_data and is written to col_ram[cb_id].
+//   stage CB (in peel_core):  rd_argb = OLD col_buf[id] = dst; tsp_blend S1
+//     (alpha clamp + coefficient select) samples it into its own registers.
+//   stage CC (bl_cb_valid): tsp_blend S2 (mul+clamp, comb off its S1 regs)
+//     arrives on cb_data and is written to col_ram[cb_id].
 // The shade pipeline is in-order and pixel ids ascend within a sub-phase, so a CA
-// read and a CB write never hit the same address in the same cycle (no RMW hazard).
+// read and a CC write never hit the same address in the same cycle (no RMW hazard).
 //
 // Read clients  (at most one/cycle): blend stage CA | FLUSH read.
-// Write clients (at most one/cycle): blend stage CB.
+// Write clients (at most one/cycle): blend stage CC (port names keep cb_*).
 // The module owns the ports and asserts the exclusion (sim).
 //
 module color_tile_buffer #(
