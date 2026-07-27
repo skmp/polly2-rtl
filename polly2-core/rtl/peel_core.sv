@@ -90,61 +90,76 @@ module peel_core import tsp_pkg::*; #(
     wire       any_pend = |pend;
     wire [2:0] d_win = pend[0] ? 3'd0 : pend[1] ? 3'd1 : pend[2] ? 3'd2 :
                        pend[3] ? 3'd3 : pend[4] ? 3'd4 : 3'd5;
-    // A read is in flight (d_busy) from when we grant until the last beat arrives.
-    // d_beats counts remaining beats; the injected controller streams ddr_resp.
-    reg        d_busy; reg [2:0] d_owner;
-    reg [7:0]  d_beats;
-    reg        d_issued;   // ddr_req.rd already pulsed for the current grant
+
+    // ---- MULTI-OUTSTANDING (pipelined) channel: up to DDR_OUT bursts in flight ----
+    // The backend (sim_ddr_fb / the Avalon DDRAM bridge) accepts a new command
+    // whenever !ddr_resp.busy (= its command queue has room) and returns the beats
+    // of ALL accepted bursts strictly IN ISSUE ORDER. An order FIFO here remembers
+    // {owner, beats} per accepted burst so returned beats are routed to the right
+    // client; per-client busy still spans request -> last beat, so every client
+    // keeps its old single-outstanding view while DIFFERENT clients' bursts overlap
+    // (a tex fill no longer serializes behind an OL/param walk - it pends at the
+    // channel and issues the cycle the previous command is accepted).
+    localparam integer DDR_OUT = 4;
+    reg [2:0]  of_owner [0:DDR_OUT-1];
+    reg [7:0]  of_beats [0:DDR_OUT-1];
+    reg [2:0]  of_wp, of_rp;
+    wire       of_empty = (of_wp == of_rp);
+    wire       of_full  = (of_wp[2] != of_rp[2]) && (of_wp[1:0] == of_rp[1:0]);
+    wire [1:0] of_head  = of_rp[1:0];
     integer di;
 
-    // drive the injected DDR controller: issue the granted read once, then wait
-    // for `d_beats` dready beats. ddr_req.rd is a 1-cycle pulse (accepted when
-    // !ddr_resp.busy). We assert it on grant and hold-until-accepted.
-    assign ddr_req.rd    = d_busy && !d_issued;
-    assign ddr_req.addr  = pa[d_owner];
-    assign ddr_req.burst = d_beats;
+    // present the highest-priority pending request whenever the order FIFO has room;
+    // hold until the backend accepts (!busy).
+    assign ddr_req.rd    = any_pend && !of_full;
+    assign ddr_req.addr  = pa[d_win];
+    assign ddr_req.burst = pb[d_win];
+    wire d_accept = ddr_req.rd && !ddr_resp.busy;
 
-    // a response beat belongs to the CURRENT grant only while that read is in
-    // flight: granted (d_busy) AND actually issued (d_issued). A straggler beat
-    // landing in the grant->accept window (d_busy && !d_issued), or after release
-    // (d_owner is stale then), must neither be counted against d_beats nor be
-    // delivered to a client - one uncounted/misdelivered beat permanently desyncs
-    // the exact-beat-count clients (record_fetcher hangs mid-burst -> spanner_v2
-    // busy=1 deadlock). d_issued is registered on the accept cycle and every DDR
-    // backend (faux sim model and the Avalon bridge) returns the first beat at
-    // least one cycle after acceptance, so no legitimate beat is ever gated off.
-    wire d_beat = ddr_resp.dready && d_busy && d_issued;
+    // a response beat belongs to the OLDEST outstanding burst. A beat with nothing
+    // outstanding is a stray and must never reach a client (an uncounted beat
+    // permanently desyncs the exact-beat-count clients).
+    wire       d_beat  = ddr_resp.dready && !of_empty;
+    wire [2:0] d_owner = of_owner[of_head];
+    wire       d_last  = d_beat && (of_beats[of_head] <= 8'd1);
+
+    // per-client outstanding-burst counters (request accepted, beats not yet done)
+    reg [1:0] d_oc [0:5];
 
     always @(posedge clk) begin
-        if (reset) begin d_busy <= 1'b0; pend <= 6'd0; d_issued <= 1'b0; end
-        else begin
+        if (reset) begin
+            pend <= 6'd0; of_wp <= 3'd0; of_rp <= 3'd0;
+            for (di=0; di<6; di=di+1) d_oc[di] <= 2'd0;
+        end else begin
             for (di=0; di<6; di=di+1)
                 if (rd_pulse[di]) begin pend[di] <= 1'b1; pa[di] <= ca[di]; pb[di] <= cbv[di]; end
-            if (!d_busy) begin
-                if (any_pend) begin
-                    d_busy   <= 1'b1; d_owner <= d_win;
-                    d_beats  <= pb[d_win];
-                    d_issued <= 1'b0;
-                    pend[d_win] <= (rd_pulse[d_win]);  // clear grant (unless re-pulsed same cyc)
-                end
-            end else begin
-                // hold ddr_req.rd until the controller accepts it
-                if (ddr_req.rd && !ddr_resp.busy) d_issued <= 1'b1;
-                // count returned QUALIFIED beats; release the channel after the last
-                if (d_beat) begin
-                    if (d_beats <= 8'd1) begin d_busy <= 1'b0; d_issued <= 1'b0; end
-                    d_beats <= d_beats - 8'd1;
-                end
+            if (d_accept) begin
+                of_owner[of_wp[1:0]] <= d_win;
+                of_beats[of_wp[1:0]] <= pb[d_win];
+                of_wp <= of_wp + 3'd1;
+                pend[d_win] <= (rd_pulse[d_win]);  // clear grant (unless re-pulsed same cyc)
             end
+            if (d_beat) begin
+                of_beats[of_head] <= of_beats[of_head] - 8'd1;
+                if (d_last) of_rp <= of_rp + 3'd1;
+            end
+            for (di=0; di<6; di=di+1)
+                d_oc[di] <= d_oc[di] + {1'd0, (d_accept && d_win == 3'(di))}
+                                     - {1'd0, (d_last   && d_owner == 3'(di))};
+`ifndef SYNTHESIS
+            if (ddr_resp.dready && of_empty)
+                $error("peel_core DDR arbiter: stray beat with no burst outstanding");
+`endif
         end
     end
-    // a client cannot issue while the channel is busy or it has a pending request
-    assign tex_dresp[0].busy = d_busy || pend[0];
-    assign tex_dresp[1].busy = d_busy || pend[1];
-    assign ts_dresp.busy     = d_busy || pend[2];
-    assign pr_dresp.busy     = d_busy || pend[3];
-    assign ol_dresp.busy     = d_busy || pend[4];
-    assign ra_dresp.busy     = d_busy || pend[5];
+    // a client is busy from its request pulse until its LAST beat has returned -
+    // the old single-channel view per client, while different clients overlap.
+    assign tex_dresp[0].busy = pend[0] || (d_oc[0] != 2'd0);
+    assign tex_dresp[1].busy = pend[1] || (d_oc[1] != 2'd0);
+    assign ts_dresp.busy     = pend[2] || (d_oc[2] != 2'd0);
+    assign pr_dresp.busy     = pend[3] || (d_oc[3] != 2'd0);
+    assign ol_dresp.busy     = pend[4] || (d_oc[4] != 2'd0);
+    assign ra_dresp.busy     = pend[5] || (d_oc[5] != 2'd0);
     assign tex_dresp[0].dout=ddr_resp.dout; assign tex_dresp[1].dout=ddr_resp.dout;
     assign ts_dresp.dout=ddr_resp.dout; assign pr_dresp.dout=ddr_resp.dout;
     assign ol_dresp.dout=ddr_resp.dout; assign ra_dresp.dout=ddr_resp.dout;
