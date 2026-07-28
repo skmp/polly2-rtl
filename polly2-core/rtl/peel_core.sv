@@ -312,6 +312,17 @@ module peel_core import tsp_pkg::*; #(
     reg  [31:0] spn_xbase, spn_ybase;
     reg  [31:0] tri_tag;                   // active (raster) triangle's CoreTag
     reg         tri_is_pt;                 // active (raster) triangle's list-kind (PT)
+    // per-triangle IDENTITY SIDEBAND for back-to-back chaining: with no RS_DRAIN
+    // between same-pass triangles, up to 3 triangles' chunks are in u_line at
+    // once, so stage A must look the owner up by the 2-bit index that rode the
+    // pipe (u_line qi/out_qi) instead of the POP-latched regs. 4 slots > the
+    // max 3 concurrent (a triangle occupies >= 3 cycles: POP+CORNER+>=1 sweep).
+    reg  [1:0]  tri_qi;                    // current triangle's sideband slot
+    reg  [31:0] tq_tag  [0:3];
+    reg  [2:0]  tq_mode [0:3];
+    reg         tq_zwdis[0:3];
+    reg         tq_ispt [0:3];
+    wire [1:0]  ras_qi;                    // exit-aligned slot from u_line
     wire        isp_sgn_neg, isp_cull;
     wire [4:0]  w_bx0, w_bx1, w_by0, w_by1;   // tile-local bbox from setup
     wire [31:0] w_dx12,w_dx23,w_dx31,w_dx41, w_dy12,w_dy23,w_dy31,w_dy41;
@@ -409,6 +420,7 @@ module peel_core import tsp_pkg::*; #(
         .ddx(isp_ddx_invw),.ddy(isp_ddy_invw),.c_invw(isp_c_invw),
         .tl(isp_tl),
         .probe(ras_probe), .probe_reject(ras_probe_reject), .probe_valid(ras_probe_valid),
+        .qi(tri_qi), .out_qi(ras_qi),
         .out_valid(ras_out_valid),
         .inside_mask(ras_inside),
         .invw_flat(ras_invw_flat),
@@ -423,6 +435,22 @@ module peel_core import tsp_pkg::*; #(
     initial cr_en = !$test$plusargs("nocornercull");
 `else
     initial cr_en = 1'b1;
+`endif
+    // back-to-back triangle chaining (no RS_DRAIN between same-pass triangles);
+    // +nochain restores the drain-per-triangle behavior (debug/bisect aid).
+    // NOTE: these plusarg names must not PREFIX one another - $test$plusargs
+    // prefix-matches, so a "+nc_row"-style name that starts with "nochain"
+    // would silently disable everything.
+    reg chain_en, ch_pop, ch_abort, ch_row;
+`ifndef SYNTHESIS
+    initial begin
+        chain_en = !$test$plusargs("nochain");
+        ch_pop   = chain_en && !$test$plusargs("nc_pop");
+        ch_abort = chain_en && !$test$plusargs("nc_abort");
+        ch_row   = chain_en && !$test$plusargs("nc_row");
+    end
+`else
+    initial begin chain_en = 1'b1; ch_pop = 1'b1; ch_abort = 1'b1; ch_row = 1'b1; end
 `endif
 
     wire [2:0] depth_mode = isp_word[31:29];
@@ -1634,7 +1662,7 @@ module peel_core import tsp_pkg::*; #(
             pc_m_promote<=0; pc_m_waithit<=0; pc_m_waitmiss<=0; pc_m_cold<=0;
             pc_sort_skip<=0; pc_pt_pass<=0; pc_pt_tiles<=0; pc_ptbb_skip<=0;
 `endif
-            rs_st<=RS_IDLE;
+            rs_st<=RS_IDLE; tri_qi<=2'd0;
             pq_head<=0; pq_tail<=0; pq_count<=0;
             fq_head<=0; fq_tail<=0; fq_count<=0; fq_out_valid<=1'b0;
             eq_head<=0; eq_tail<=0; eq_count<=0;
@@ -1789,13 +1817,17 @@ module peel_core import tsp_pkg::*; #(
                 b_invw   <= ras_invw_flat;
                 b_ox     <= ras_ox;
                 b_oy     <= ras_oy;
-                b_tag    <= tri_tag;
-                b_mode   <= depth_mode;
-                b_zwdis  <= zwrite_dis;
+                // identity via the exit-aligned sideband slot (NOT the POP-latched
+                // regs): with triangle chaining the next triangle may already own
+                // tri_tag/isp_word while this chunk exits.
+                b_tag    <= tq_tag  [ras_qi];
+                b_mode   <= tq_mode [ras_qi];
+                b_zwdis  <= tq_zwdis[ras_qi];
                 b_peeling<= peeling;
                 b_fwd    <= pt_phase;   // forward PT-resolve compare select
-                b_which  <= tri_is_pt;   // per-triangle list-kind (threaded via fq/pq), NOT the
-                                         // live peel_which reg -> safe when PT+TL coexist in-flight
+                b_which  <= tq_ispt [ras_qi]; // per-triangle list-kind (threaded via
+                                         // fq/pq), NOT the live peel_which reg -> safe
+                                         // when PT+TL coexist in-flight
             end
             // Stage B side effects on peel_core state, from u_peel's echoed results
             // (b_pass_lp / b_more are already masked by inside & peeling in u_peel):
@@ -2972,6 +3004,19 @@ module peel_core import tsp_pkg::*; #(
                 isp_tl<=pq_rdw[QF_TL +:4];
                 isp_word<=pq_rdw[QF_ISP +:32]; tri_tag<=pq_rdw[QF_TAG +:32];
                 tri_is_pt<=pq_rdw[QF_PT];
+                // identity sideband: claim the next slot for this triangle (its
+                // chunks carry the slot index through u_line to stage A). A
+                // clip-skipped triangle issues NO chunks and must NOT claim -
+                // 1-cycle skip chains would otherwise wrap the 4 slots onto a
+                // still-in-flight triangle. Real claims are >= 3 cycles apart
+                // (POP+CORNER+sweep), so 4 slots cover the 7-deep pipe.
+                if (!ptc_empty) begin
+                    tri_qi <= tri_qi + 2'd1;
+                    tq_tag  [tri_qi + 2'd1] <= pq_rdw[QF_TAG +:32];
+                    tq_mode [tri_qi + 2'd1] <= pq_rdw[QF_ISP+29 +: 3];
+                    tq_zwdis[tri_qi + 2'd1] <= pq_rdw[QF_ISP+26];
+                    tq_ispt [tri_qi + 2'd1] <= pq_rdw[QF_PT];
+                end
                 tri_count<=tri_count+1;
                 // chunk-aligned x range + row range from the bbox, CLIPPED to the
                 // PT alpha-fail bbox when active (ptc_* = pass-through otherwise)
@@ -2991,12 +3036,28 @@ module peel_core import tsp_pkg::*; #(
                 cr_issue <= cr_en;     // fire the probe next cycle (RS_CORNER)
                 cr_seen  <= 1'b0;      // verdict not yet sampled for this triangle
                 cr_cnt   <= 4'd0;
-                rs_st <= cr_en ? RS_CORNER : RS_RAS;
+                // ALWAYS route through RS_CORNER: with back-to-back triangle
+                // chaining (no RS_DRAIN between same-pass triangles) the POP +
+                // CORNER pair guarantees a 2-cycle issue gap, which is exactly
+                // the stage-A-read vs stage-B-write RAW window on the peel RAM.
+                rs_st <= RS_CORNER;
                 // PT fail-bbox clip: no overlap with any still-failing pixel ->
-                // skip the sweep (and the probe) entirely.
+                // skip the sweep (and the probe) entirely; chain straight to the
+                // next triangle.
                 if (ptc_empty) begin
                     cr_issue <= 1'b0;
-                    rs_st    <= RS_IDLE;
+                    if (ch_pop && !pq_empty) begin
+                        pq_rdw  <= pq_ram[pq_head[2:0]];
+                        pq_head <= (pq_head==PQ_N-1) ? 4'd0 : pq_head+4'd1;
+                        pq_pop   = 1'b1;
+                        rs_st   <= RS_POP;
+                    end else
+                        // DRAIN, not IDLE: with chaining this POP may have been
+                        // entered with earlier triangles' chunks still in u_line;
+                        // going idle would open the pass barrier (consumer_idle
+                        // checks rs_st/b_valid but not the pipe) and let a buffer
+                        // walk collide with a late stage-A read.
+                        rs_st <= RS_DRAIN;
 `ifndef SYNTHESIS
                     pc_ptbb_skip <= pc_ptbb_skip + 1;
 `endif
@@ -3028,13 +3089,31 @@ module peel_core import tsp_pkg::*; #(
 `ifndef SYNTHESIS
                         pc_corner_cull <= pc_corner_cull + 1;  // sim-only stat (decl guarded)
 `endif
-                        rs_st <= RS_DRAIN;             // abort the rest of the sweep
+                        // abort the rest of the sweep; the in-flight chunks are
+                        // no-ops (no coverage -> no writes). CHAIN to the next
+                        // same-pass triangle if one is queued (see RS_POP note).
+                        if (ch_abort && !pq_empty) begin
+                            pq_rdw  <= pq_ram[pq_head[2:0]];
+                            pq_head <= (pq_head==PQ_N-1) ? 4'd0 : pq_head+4'd1;
+                            pq_pop   = 1'b1;
+                            rs_st   <= RS_POP;
+                        end else rs_st <= RS_DRAIN;
                     end
                 end
                 if (!(cr_en && !cr_seen && cr_cnt == 4'd1 && ras_probe_reject)) begin
                     if (ras_x == rbx1) begin
                         ras_x <= rbx0;
-                        if (ras_y == rby1) rs_st <= RS_DRAIN;
+                        if (ras_y == rby1) begin
+                            // sweep done. Same-pass triangles CHAIN with no pipe
+                            // drain: only the pass-end (empty pq) needs RS_DRAIN,
+                            // for the barrier + last write-back.
+                            if (ch_row && !pq_empty) begin
+                                pq_rdw  <= pq_ram[pq_head[2:0]];
+                                pq_head <= (pq_head==PQ_N-1) ? 4'd0 : pq_head+4'd1;
+                                pq_pop   = 1'b1;
+                                rs_st   <= RS_POP;
+                            end else rs_st <= RS_DRAIN;
+                        end
                         else ras_y <= ras_y + 5'd1;
                     end else begin
                         ras_x <= ras_x + 5'(RAS_LANES);
