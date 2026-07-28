@@ -11,17 +11,24 @@ set_global_assignment -name OPTIMIZATION_TECHNIQUE SPEED
 
 set_global_assignment -name VERILOG_MACRO "SYNTHESIS=1"
 set_global_assignment -name SEARCH_PATH .
-set_global_assignment -name SEARCH_PATH ../../rtl/tsp/gen
+# so tsp_pkg's `include "pvr_regs_gen.svh" resolves
+set_global_assignment -name SEARCH_PATH "../../../polly2-core/rtl/gen"
 
 # package first
-set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/tsp/tsp_pkg.sv
-# HPS DDR3 bridge
-set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/mister/f2sdram_safe_terminator.sv
-set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/mister/sysmem.sv
-set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/mister/ddram.sv
+set_global_assignment -name SYSTEMVERILOG_FILE "../../../polly2-core/rtl/gen/tsp_pkg.sv"
+# HPS DDR3 bridge (vendored MiSTer files, as polly2.qip sources them)
+set_global_assignment -name SYSTEMVERILOG_FILE ../../../mister/f2sdram_safe_terminator.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../../mister/sysmem.sv
+# block-RAM primitives the cache is built from. This project is the cheap way to
+# CHECK THE M10K MAPPING: after a fit, Resource Utilization by Entity should show the
+# two bram_tdp data arrays at ~26 M10K each and NO registers standing in for RAM. If
+# bram_tdp does not land in true-dual-port mode the block count doubles (or the array
+# falls back to FFs, as the 4-copy PAL RAM once did - see reg_file.sv).
+set_global_assignment -name SYSTEMVERILOG_FILE "../../../polly2-core/rtl/buffers/bram_tdp.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../../polly2-core/rtl/buffers/bram_sdp.sv"
 # cache + fetch (rewrite: tex_fetch4 owns only the caches; no core/decode)
-set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/tsp/tex_cache_4p_1c.sv
-set_global_assignment -name SYSTEMVERILOG_FILE ../../rtl/tsp/tex_fetch4_ob.sv
+set_global_assignment -name SYSTEMVERILOG_FILE "../../../polly2-core/rtl/tsp/tex/tex_cache_4p_1c.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../../polly2-core/rtl/tsp/tex/tex_fetch4_ob.sv"
 # harness top
 set_global_assignment -name SYSTEMVERILOG_FILE stage_tex_fetch4.sv
 set_global_assignment -name SDC_FILE stage.sdc

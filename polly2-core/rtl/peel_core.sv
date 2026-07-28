@@ -7,7 +7,7 @@
 //
 //   per pixel: tag -> plane-cache lookup (64-entry, keyed by the FULL 32-bit
 //   CoreTag) miss: fetch param record (GetFpuEntry) + tsp_setup_min; hit: planes
-//   from cache. tsp_shade_v2_pp shades (textures via two tex_cache_4p over the shared
+//   from cache. tsp_shade_v2_pp shades (textures via two tex_cache_4p_1c over the shared
 //   DDR channel), blend composites the layer, PT/TL peel back-to-front.
 //
 // Wrappers provide the DDR/fb backend:
