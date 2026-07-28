@@ -222,10 +222,10 @@ module stage_all import tsp_pkg::*; #(
     cache_req_t   pp_tc_req [0:3], pp_vq_req [0:3];
     cache_resp_t  pp_tc_resp[0:3], pp_vq_resp[0:3];
     tex_cache_4p_1c u_tc4 (.clk(clk_100m),.reset(reset_100m),
-        .creq(pp_tc_req),.cresp(pp_tc_resp),.pf_req(1'b0),.pf_waddr(29'd0),
+        .creq(pp_tc_req),.cresp(pp_tc_resp),.pf_req(1'b0),.pf_waddr({(4*29){1'b0}}),
         .dreq(tex_dreq[0]),.dresp(tex_dresp[0]));
     tex_cache_4p_1c u_vq4 (.clk(clk_100m),.reset(reset_100m),
-        .creq(pp_vq_req),.cresp(pp_vq_resp),.pf_req(1'b0),.pf_waddr(29'd0),
+        .creq(pp_vq_req),.cresp(pp_vq_resp),.pf_req(1'b0),.pf_waddr({(4*29){1'b0}}),
         .dreq(tex_dreq[1]),.dresp(tex_dresp[1]));
 
     // ==================================================================

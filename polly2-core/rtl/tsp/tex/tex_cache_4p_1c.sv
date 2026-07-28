@@ -85,11 +85,11 @@ module tex_cache_4p_1c import tsp_pkg::*; (
     output cache_resp_t  cresp [0:3],
 
     // ---- prefill probe: 5th read port, tag-only, never backpressured ----
-    input                pf_req,    // probe this cycle
-    input        [28:0]  pf_waddr,  // 64-bit-word address (same form as creq[].waddr)
-    output               pf_ack,    // 1 cycle later: pf_hit is valid
-    output               pf_hit,    // line is resident (conservative: 0 while sweeping)
-    output               pf_busy,   // informational: fill machinery occupied
+    input                pf_req,        // probe these 4 lines this cycle
+    input      [4*29-1:0] pf_waddr,     // 4 x 64-bit-word address (creq[].waddr form)
+    output               pf_ack,        // 1 cycle later: pf_hit[] is valid
+    output       [3:0]   pf_hit,        // per-probe: line resident
+    output               pf_busy,       // 1 = frozen filling (probing is possible)
 
     output ddr_rd_req_t  dreq,
     input  ddr_rd_resp_t dresp
@@ -173,16 +173,34 @@ module tex_cache_4p_1c import tsp_pkg::*; (
         .a_en(rd_en), .a_we(fill_we), .a_addr(fill_we ? wa : rd_ix[2]),
         .a_din(wdata), .a_q(rdat2),
         .b_en(rd_en), .b_addr(rd_ix[3]), .b_q(rdat3));
+    // ---- PROBE: 4 tags/cycle off the IDLE demand meta ports ----
+    // While the cache is frozen filling, all four demand read ports are unused, so
+    // the prefetch walker borrows them: meta_a port A/B and meta_b port A/B carry
+    // probes 0..3. Skipped on the fill-commit cycle, where port A of each array is
+    // writing (meta_we) - the walker simply re-probes next cycle.
+    wire [IXW-1:0] pf_ix [0:3];
+    wire [TAGW-1:0] pf_tg [0:3];
+    generate
+      for (gi=0; gi<4; gi=gi+1) begin : pfd
+        assign pf_ix[gi] = pf_waddr[29*gi+2 +: IXW];
+        assign pf_tg[gi] = pf_waddr[29*gi+2+IXW +: TAGW];
+      end
+    endgenerate
+    wire probe_go = pf_req && (st != S_RUN) && !meta_we;
+    wire [IXW-1:0] ma_a = meta_we ? wa : (probe_go ? pf_ix[0] : rd_ix[0]);
+    wire [IXW-1:0] ma_b =                 probe_go ? pf_ix[1] : rd_ix[1];
+    wire [IXW-1:0] mb_a = meta_we ? wa : (probe_go ? pf_ix[2] : rd_ix[2]);
+    wire [IXW-1:0] mb_b =                 probe_go ? pf_ix[3] : rd_ix[3];
     bram_tdp #(.W(MW), .D(NLINE)) u_meta_a (
         .clk(clk),
-        .a_en(rd_en), .a_we(meta_we), .a_addr(meta_we ? wa : rd_ix[0]),
+        .a_en(rd_en || probe_go), .a_we(meta_we), .a_addr(ma_a),
         .a_din(wmeta), .a_q(rmeta0),
-        .b_en(rd_en), .b_addr(rd_ix[1]), .b_q(rmeta1));
+        .b_en(rd_en || probe_go), .b_addr(ma_b), .b_q(rmeta1));
     bram_tdp #(.W(MW), .D(NLINE)) u_meta_b (
         .clk(clk),
-        .a_en(rd_en), .a_we(meta_we), .a_addr(meta_we ? wa : rd_ix[2]),
+        .a_en(rd_en || probe_go), .a_we(meta_we), .a_addr(mb_a),
         .a_din(wmeta), .a_q(rmeta2),
-        .b_en(rd_en), .b_addr(rd_ix[3]), .b_q(rmeta3));
+        .b_en(rd_en || probe_go), .b_addr(mb_b), .b_q(rmeta3));
 
     wire [255:0]  rdat [0:3];
     wire [MW-1:0] rmeta[0:3];
@@ -356,8 +374,30 @@ module tex_cache_4p_1c import tsp_pkg::*; (
     // filling (the only time we want to prefetch) all four read ports are free -
     // 4 tags/cycle instead of 1, at zero extra M10K. Wired up by the prefetch
     // walker; tied off until then.
-    assign pf_ack  = 1'b0;
-    assign pf_hit  = 1'b0;
+    // The probed meta lands on rmeta0..3 one cycle later - the demand ports are
+    // frozen while probing, so nothing else is using those outputs. Answers are
+    // CONSERVATIVE: a probe issued during the invalidate sweep reports "not
+    // resident", which is what will be true once the sweep lands.
+    reg        pf_v_r, pf_sweep_r;
+    reg [TAGW-1:0] pf_tg_r [0:3];
+    always @(posedge clk) begin
+        if (reset) begin pf_v_r <= 1'b0; pf_sweep_r <= 1'b0; end
+        else begin
+            pf_v_r     <= probe_go;
+            pf_sweep_r <= sweep_we;
+            for (i=0;i<4;i=i+1) pf_tg_r[i] <= pf_tg[i];
+        end
+    end
+    wire [MW-1:0] pf_meta [0:3];
+    assign pf_meta[0]=rmeta0; assign pf_meta[1]=rmeta1;
+    assign pf_meta[2]=rmeta2; assign pf_meta[3]=rmeta3;
+    generate
+      for (gi=0; gi<4; gi=gi+1) begin : pfh
+        assign pf_hit[gi] = pf_v_r && !pf_sweep_r && pf_meta[gi][TAGW]
+                         && (pf_meta[gi][TAGW-1:0] == pf_tg_r[gi]);
+      end
+    endgenerate
+    assign pf_ack  = pf_v_r;
     assign pf_busy = (st != S_RUN);
 
 `ifndef SYNTHESIS
