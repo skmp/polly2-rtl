@@ -2890,9 +2890,15 @@ module peel_core import tsp_pkg::*; #(
                     sp_cons    <= sp_cons + 1'b1;
                     sp_rdp     <= sp_rdp + 1'b1;    // next slot (past-head reads are gated)
                     sb_rd_pend <= 1'b0;             // new slot resolves NEXT cycle
-                end else if (rd_live && (spv_head_live != sp_rdp)) begin
+                end else if (rd_live && !walk_done && (spv_head_live != sp_rdp)) begin
                     // the in-flight slot is WRITTEN (behind the live head) and its read
                     // has resolved on dsr_* -> mark valid. (Held stable until consumed.)
+                    // !walk_done: on the cycle the walk terminates, rd_live is still the
+                    // OLD 1 here - if a pp_stall covered the pass boundary (md_fin landed
+                    // AND the next pass's first spans advanced the live head while this
+                    // block was frozen), this branch would otherwise arm sb_rd_pend for
+                    // the NEXT pass's slot; the later consume pushes sp_cons past md_cnt,
+                    // drain_ok never fires, and the reader wedges in R_RUN (hard lockup).
                     sb_rd_pend <= 1'b1;
                 end
                 // else: nothing available at the live head yet - hold sb_rd_pend.
@@ -3268,6 +3274,16 @@ module peel_core import tsp_pkg::*; #(
         end
     end
 
+`ifndef SYNTHESIS
+    // reader over-consume tripwire: the streaming walk must never take more spans
+    // than the pass's final count (would leave drain_ok unreachable -> R_RUN wedge).
+    always @(posedge clk) if (!reset) begin
+        if (tsp_st == R_RUN && md_fin[md_rp[MD_AW-1:0]]
+            && sp_cons > md_cnt[md_rp[MD_AW-1:0]])
+            $error("peel_core: reader OVER-CONSUMED pass at md_rp=%0d (sp_cons=%0d > md_cnt=%0d) - R_RUN wedge",
+                   md_rp[MD_AW-1:0], sp_cons, md_cnt[md_rp[MD_AW-1:0]]);
+    end
+`endif
 `ifndef SYNTHESIS
     // ==================== +occlog : per-clock unit-occupancy trace ====================
     // One line per clock IN WHICH ANYTHING CHANGED (RLE - repeat cycles are implicit),
