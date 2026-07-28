@@ -45,8 +45,8 @@ module tex_fetch4_ob import tsp_pkg::*; #(
     output     [PLW-1:0] out_pl,          // in_pl carried to align with out_valid/texel
 
     // two DDR read ports to the parent arbiter ([0]=tc data, [1]=vq codebook)
-    output ddr_rd_req_t  ddr_req  [0:1],
-    input  ddr_rd_resp_t ddr_resp [0:1]
+    output ddr_rd_req_t  ddr_req  [0:2],   // [0]=tc, [1]=vq, [2]=tc PREFETCH
+    input  ddr_rd_resp_t ddr_resp [0:2]
 );
     // shared 4-read-port caches (data + VQ)
     cache_req_t   tc_req [0:3], vq_req [0:3];
@@ -55,17 +55,26 @@ module tex_fetch4_ob import tsp_pkg::*; #(
     // TODO(prefill): drive these from the prefill walker; tied off until it exists. While
     // tied off the fitter will strip meta_pf, so the probe's ~2 M10K/cache does not show
     // up in the resource report yet.
-    wire tc_pf_ack, tc_pf_busy, vq_pf_ack, vq_pf_busy;
+    wire tc_pf_ack, tc_pf_busy, vq_pf_ack, vq_pf_busy, tc_pf_fbusy;
     wire [3:0] tc_pf_hit, vq_pf_hit;
+    // ---- PREFETCH WALKER (declared here, driven after the FIFO below) ----
+    wire            la_probe;
+    wire [4*29-1:0] la_waddr;
+    wire            la_fill;
+    wire [28:0]     la_faddr;
     tex_cache_4p_1c u_tc4 (.clk(clk),.reset(reset),.flush(flush),
         .creq(tc_req),.cresp(tc_resp),
-        .pf_req(1'b0),.pf_waddr({(4*29){1'b0}}),
+        .pf_req(la_probe),.pf_waddr(la_waddr),
         .pf_ack(tc_pf_ack),.pf_hit(tc_pf_hit),.pf_busy(tc_pf_busy),
+        .pf_fill(la_fill),.pf_faddr(la_faddr),.pf_fbusy(tc_pf_fbusy),
+        .pfreq(ddr_req[2]),.pfresp(ddr_resp[2]),
         .dreq(ddr_req[0]),.dresp(ddr_resp[0]));
     tex_cache_4p_1c u_vq4 (.clk(clk),.reset(reset),.flush(flush),
         .creq(vq_req),.cresp(vq_resp),
         .pf_req(1'b0),.pf_waddr({(4*29){1'b0}}),
         .pf_ack(vq_pf_ack),.pf_hit(vq_pf_hit),.pf_busy(vq_pf_busy),
+        .pf_fill(1'b0),.pf_faddr(29'd0),.pf_fbusy(),
+        .pfreq(),.pfresp('0),
         .dreq(ddr_req[1]),.dresp(ddr_resp[1]));
 
     // per-corner data-cache word address + VQ byte lane (combinational off inputs)
@@ -114,12 +123,11 @@ module tex_fetch4_ob import tsp_pkg::*; #(
         .clk(clk), .we(fq_push), .waddr(fq_wp[FQ_AW-1:0]), .din(fq_in),
         .re(1'b1), .raddr(fq_rp_nxt[FQ_AW-1:0]), .q(fq_qa));
     // walker lookahead copy: same write, independent read (driven in item 3)
-    wire [FQ_AW-1:0] fq_la_addr;
+    wire [FQ_AW-1:0] fq_la_addr;   // driven by the prefetch walker below
     wire [FQ_W-1:0]  fq_la_q;
     bram_sdp #(.W(FQ_W), .D(FQ_D)) u_fq_b (
         .clk(clk), .we(fq_push), .waddr(fq_wp[FQ_AW-1:0]), .din(fq_in),
         .re(1'b1), .raddr(fq_la_addr), .q(fq_la_q));
-    assign fq_la_addr = fq_rp[FQ_AW-1:0];   // TODO(prefetch): walker lookahead pointer
     // FWFT head field unpack (these replace the raw module inputs downstream)
     assign fq_hd_w  = fq_hd;
     wire        f_tex    = fq_hd_w[FQ_W-1];
@@ -147,6 +155,46 @@ module tex_fetch4_ob import tsp_pkg::*; #(
             fq_cnt <= fq_cnt + (fq_push?1:0) - (fq_pop?1:0);
         end
     end
+
+    // ============================================================================
+    // PREFETCH WALKER (#6 + #17)
+    // ============================================================================
+    // While the texel cache is FROZEN filling (tc_pf_busy) its four demand read
+    // ports are idle, so we walk the queued requests ahead of the head and probe
+    // them 4 tags/cycle. The first line that misses is issued on the cache's own
+    // prefetch DDR client, so it fills BEHIND the demand line instead of waiting
+    // for it. The pointer PERSISTS across fill episodes (#17's continuous re-arm):
+    // successive probes resume ever deeper rather than re-examining the head.
+    reg  [FQ_AW:0] la_p;                       // lookahead pointer (>= fq_rp)
+    reg            la_v;                       // fq_la_q holds the entry at la_p
+    wire           la_behind = (la_p - fq_rp) > (fq_wp - fq_rp);   // consumed past us
+    wire [FQ_AW:0] la_eff    = la_behind ? fq_rp : la_p;           // clamp to the head
+    wire           la_ahead  = (la_eff != fq_wp);                  // an entry to look at
+    // the looked-at entry's four addresses + its textured flag
+    wire           la_tex   = fq_la_q[FQ_W-1];
+    generate for (gf=0; gf<4; gf=gf+1) begin : law
+        assign la_waddr[29*gf +: 29] = fq_la_q[PLW + (3-gf)*29 +: 29];
+    end endgenerate
+    assign la_probe = la_v && la_tex && tc_pf_busy && !tc_pf_fbusy;
+    // first missing corner of the probed entry -> one prefetch
+    wire [3:0] la_miss = ~tc_pf_hit;
+    wire [1:0] la_sel  = la_miss[0] ? 2'd0 : la_miss[1] ? 2'd1
+                       : la_miss[2] ? 2'd2 : 2'd3;
+    assign la_fill  = tc_pf_ack && (la_miss != 4'd0) && !tc_pf_fbusy;
+    assign la_faddr = la_waddr[29*la_sel +: 29];
+    always @(posedge clk) begin
+        if (reset) begin la_p <= '0; la_v <= 1'b0; end
+        else begin
+            la_p <= la_eff;
+            // present the entry at la_eff; it lands next cycle
+            la_v <= la_ahead;
+            // retire this entry once probed (hit or prefetch issued) and step on;
+            // a non-textured entry needs no probe at all.
+            if (la_v && (!la_tex || tc_pf_ack || !tc_pf_busy))
+                la_p <= la_eff + 1'b1;
+        end
+    end
+    assign fq_la_addr = la_eff[FQ_AW-1:0];
 
     // ============================================================================
     // Streaming pipeline, 4 corners lockstep. All corners share the accept/advance

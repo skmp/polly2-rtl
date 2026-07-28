@@ -92,7 +92,13 @@ module tex_cache_4p_1c import tsp_pkg::*; (
     output               pf_busy,       // 1 = frozen filling (probing is possible)
 
     output ddr_rd_req_t  dreq,
-    input  ddr_rd_resp_t dresp
+    input  ddr_rd_resp_t dresp,
+    // ---- PREFETCH fill port: its own DDR client, single outstanding ----
+    input                pf_fill,       // 1-cyc: prefetch this line
+    input        [28:0]  pf_faddr,      // 64-bit-word address of the line
+    output               pf_fbusy,      // prefetch receiver occupied
+    output ddr_rd_req_t  pfreq,
+    input  ddr_rd_resp_t pfresp
 );
     localparam integer NLINE = 1024;
     localparam integer IXW   = 10;
@@ -152,10 +158,13 @@ module tex_cache_4p_1c import tsp_pkg::*; (
 
     wire            sweep_we = (st == S_RST);
     wire            fill_we  = (st == S_FILL) && dresp.dready && (m_beat == 2'd3);
-    wire            meta_we  = sweep_we || fill_we;
-    wire [IXW-1:0]  wa       = sweep_we ? rst_i[IXW-1:0] : m_ix;
-    wire [MW-1:0]   wmeta    = sweep_we ? {1'b0, {TAGW{1'b0}}} : {1'b1, m_tag};
-    wire [255:0]    wdata    = { dresp.dout, m_acc[191:0] };
+    wire            p_we;                       // prefetch commit (declared below)
+    wire            meta_we  = sweep_we || fill_we || p_we;
+    wire            data_we  = fill_we || p_we;
+    wire [IXW-1:0]  wa       = sweep_we ? rst_i[IXW-1:0] : (fill_we ? m_ix : p_ix);
+    wire [MW-1:0]   wmeta    = sweep_we ? {1'b0, {TAGW{1'b0}}}
+                             : fill_we  ? {1'b1, m_tag} : {1'b1, p_tag};
+    wire [255:0]    wdata    = fill_we ? { dresp.dout, m_acc[191:0] } : p_acc;
 
     // ============ storage: 2 true-dual-port arrays serve the 4 demand ports ============
     // data_a/meta_a -> ports 0 (side A, also the write side) and 1 (side B)
@@ -165,12 +174,12 @@ module tex_cache_4p_1c import tsp_pkg::*; (
 
     bram_tdp #(.W(256), .D(NLINE)) u_data_a (
         .clk(clk),
-        .a_en(rd_en), .a_we(fill_we), .a_addr(fill_we ? wa : rd_ix[0]),
+        .a_en(rd_en), .a_we(data_we), .a_addr(data_we ? wa : rd_ix[0]),
         .a_din(wdata), .a_q(rdat0),
         .b_en(rd_en), .b_addr(rd_ix[1]), .b_q(rdat1));
     bram_tdp #(.W(256), .D(NLINE)) u_data_b (
         .clk(clk),
-        .a_en(rd_en), .a_we(fill_we), .a_addr(fill_we ? wa : rd_ix[2]),
+        .a_en(rd_en), .a_we(data_we), .a_addr(data_we ? wa : rd_ix[2]),
         .a_din(wdata), .a_q(rdat2),
         .b_en(rd_en), .b_addr(rd_ix[3]), .b_q(rdat3));
     // ---- PROBE: 4 tags/cycle off the IDLE demand meta ports ----
@@ -186,7 +195,12 @@ module tex_cache_4p_1c import tsp_pkg::*; (
         assign pf_tg[gi] = pf_waddr[29*gi+2+IXW +: TAGW];
       end
     endgenerate
-    wire probe_go = pf_req && (st != S_RUN) && !meta_we;
+    // Gate on !rd_en, NOT (st != S_RUN): S_RETEST is not S_RUN but IS the cycle the
+    // frozen ports re-present their reads (retesting=1 -> rd_en=1). Probing there
+    // hijacks the meta addresses, the retested port reads the wrong line's tag and
+    // misses again, and the group refills the same line forever - the exact
+    // livelock the detector caught. rd_en covers S_RUN and the retest alike.
+    wire probe_go = pf_req && !rd_en && !meta_we;
     wire [IXW-1:0] ma_a = meta_we ? wa : (probe_go ? pf_ix[0] : rd_ix[0]);
     wire [IXW-1:0] ma_b =                 probe_go ? pf_ix[1] : rd_ix[1];
     wire [IXW-1:0] mb_a = meta_we ? wa : (probe_go ? pf_ix[2] : rd_ix[2]);
@@ -399,6 +413,61 @@ module tex_cache_4p_1c import tsp_pkg::*; (
     endgenerate
     assign pf_ack  = pf_v_r;
     assign pf_busy = (st != S_RUN);
+
+    // ==================== PREFETCH RECEIVER ====================
+    // An independent single-outstanding fill on its own DDR client, so a
+    // speculative line pipelines BEHIND demand fills instead of serialising on the
+    // demand port. It shares the arrays' write path, which the demand fill owns:
+    //   * the commit waits for a cycle with the demand write idle (!fill_we,
+    //     !sweep_we) AND the demand read ports idle (!rd_en). Port A of each array
+    //     is the write port, and bram_tdp gives writes priority - committing during
+    //     S_RUN would silently swallow ports 0 and 2's demand reads that cycle.
+    //     !rd_en is true throughout S_MISS/S_FILL, so there is no shortage of slots.
+    //   * it never prefetches the line the demand path is ALREADY filling (m_line),
+    //     nor a line already in flight here - that would waste the DDR burst and
+    //     could race the demand commit for the same index.
+    localparam P_IDLE=0, P_REQ=1, P_FILL=2, P_WAIT=3;
+    reg [1:0]      pst;
+    reg [LAW-1:0]  p_line;
+    reg [1:0]      p_beat;
+    reg [255:0]    p_acc;
+    wire [IXW-1:0] p_ix  = p_line[IXW-1:0];
+    wire [TAGW-1:0] p_tag = p_line[LAW-1:IXW];
+    wire [LAW-1:0] pf_fline = pf_faddr[28:2];
+    // suppress a prefetch of the line being demand-filled right now, or of the one
+    // already in flight in this receiver
+    wire pf_dup   = (miss_now || st==S_MISS || st==S_FILL || st==S_RETEST)
+                    ? (pf_fline == m_line) : 1'b0;
+    wire pf_take  = pf_fill && (pst == P_IDLE) && !pf_dup;
+    assign pf_fbusy = (pst != P_IDLE);
+    reg        p_rd; reg [28:0] p_addr;
+    assign pfreq.rd    = p_rd;
+    assign pfreq.addr  = p_addr;
+    assign pfreq.burst = 8'd4;
+    // commit slot: demand write idle AND demand reads idle
+    assign p_we = (pst == P_WAIT) && !fill_we && !sweep_we && !rd_en;
+    always @(posedge clk) begin
+        if (reset || flush) begin
+            pst <= P_IDLE; p_rd <= 1'b0; p_beat <= 2'd0;
+        end else begin
+            p_rd <= 1'b0;
+            case (pst)
+            P_IDLE: if (pf_take) begin p_line <= pf_fline; p_beat <= 2'd0; pst <= P_REQ; end
+            P_REQ:  if (!pfresp.busy) begin
+                        p_rd <= 1'b1;
+                        p_addr <= {4'b0011, {p_line, 2'b00} & 29'h1FFFFFF};
+                        pst <= P_FILL;
+                    end
+            P_FILL: if (pfresp.dready) begin
+                        p_acc[64*p_beat +: 64] <= pfresp.dout;
+                        if (p_beat == 2'd3) pst <= P_WAIT;
+                        else p_beat <= p_beat + 2'd1;
+                    end
+            P_WAIT: if (p_we) pst <= P_IDLE;
+            default: pst <= P_IDLE;
+            endcase
+        end
+    end
 
 `ifndef SYNTHESIS
     // ---- LIVELOCK detector (kept as a regression net, should never fire) ----

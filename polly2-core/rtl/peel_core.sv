@@ -68,28 +68,31 @@ module peel_core import tsp_pkg::*; #(
     // is busy elsewhere. The controller (faux or real Avalon) owns latency+burst.
     ddr_rd_req_t  ra_dreq, ol_dreq, pr_dreq, ts_dreq;
     ddr_rd_resp_t ra_dresp, ol_dresp, pr_dresp, ts_dresp;
-    ddr_rd_req_t  tex_dreq [0:1];      // [0]=tc data, [1]=vq codebook
-    ddr_rd_resp_t tex_dresp [0:1];
+    ddr_rd_req_t  tex_dreq [0:2];      // [0]=tc data, [1]=vq codebook, [2]=tc PREFETCH
+    ddr_rd_resp_t tex_dresp [0:2];
 
     // 0=tc 1=vq 2=ts(record fetch: demand OR prefetch, muxed) 3=pr 4=ol 5=ra
     // (priority high->low). The demand fetcher and prefetcher SHARE the ts client:
     // the prefetch only runs when the demand fetcher is idle (mutually exclusive), so
     // one DDR port suffices (see the record_fetcher mux below).
-    reg  [5:0]  pend;
-    reg  [28:0] pa [0:5]; reg [7:0] pb [0:5];
-    wire [5:0]  rd_pulse = { ra_dreq.rd, ol_dreq.rd, pr_dreq.rd, ts_dreq.rd,
-                             tex_dreq[1].rd, tex_dreq[0].rd };
-    wire [28:0] ca [0:5]; wire [7:0] cbv [0:5];
+    // client 6 = the texel cache's PREFETCH fill port: LOWEST priority, so a
+    // speculative line never delays a demand fill or any geometry client.
+    reg  [6:0]  pend;
+    reg  [28:0] pa [0:6]; reg [7:0] pb [0:6];
+    wire [6:0]  rd_pulse = { tex_dreq[2].rd, ra_dreq.rd, ol_dreq.rd, pr_dreq.rd,
+                             ts_dreq.rd, tex_dreq[1].rd, tex_dreq[0].rd };
+    wire [28:0] ca [0:6]; wire [7:0] cbv [0:6];
     assign ca[0]=tex_dreq[0].addr; assign cbv[0]=tex_dreq[0].burst;
     assign ca[1]=tex_dreq[1].addr; assign cbv[1]=tex_dreq[1].burst;
     assign ca[2]=ts_dreq.addr;     assign cbv[2]=ts_dreq.burst;
     assign ca[3]=pr_dreq.addr;     assign cbv[3]=pr_dreq.burst;
     assign ca[4]=ol_dreq.addr;     assign cbv[4]=ol_dreq.burst;
     assign ca[5]=ra_dreq.addr;     assign cbv[5]=ra_dreq.burst;
+    assign ca[6]=tex_dreq[2].addr; assign cbv[6]=tex_dreq[2].burst;
 
     wire       any_pend = |pend;
     wire [2:0] d_win = pend[0] ? 3'd0 : pend[1] ? 3'd1 : pend[2] ? 3'd2 :
-                       pend[3] ? 3'd3 : pend[4] ? 3'd4 : 3'd5;
+                       pend[3] ? 3'd3 : pend[4] ? 3'd4 : pend[5] ? 3'd5 : 3'd6;
 
     // ---- MULTI-OUTSTANDING (pipelined) channel: up to DDR_OUT bursts in flight ----
     // The backend (sim_ddr_fb / the Avalon DDRAM bridge) accepts a new command
@@ -124,14 +127,14 @@ module peel_core import tsp_pkg::*; #(
     wire       d_last  = d_beat && (of_beats[of_head] <= 8'd1);
 
     // per-client outstanding-burst counters (request accepted, beats not yet done)
-    reg [1:0] d_oc [0:5];
+    reg [1:0] d_oc [0:6];
 
     always @(posedge clk) begin
         if (reset) begin
-            pend <= 6'd0; of_wp <= 3'd0; of_rp <= 3'd0;
-            for (di=0; di<6; di=di+1) d_oc[di] <= 2'd0;
+            pend <= 7'd0; of_wp <= 3'd0; of_rp <= 3'd0;
+            for (di=0; di<7; di=di+1) d_oc[di] <= 2'd0;
         end else begin
-            for (di=0; di<6; di=di+1)
+            for (di=0; di<7; di=di+1)
                 if (rd_pulse[di]) begin pend[di] <= 1'b1; pa[di] <= ca[di]; pb[di] <= cbv[di]; end
             if (d_accept) begin
                 of_owner[of_wp[1:0]] <= d_win;
@@ -143,7 +146,7 @@ module peel_core import tsp_pkg::*; #(
                 of_beats[of_head] <= of_beats[of_head] - 8'd1;
                 if (d_last) of_rp <= of_rp + 3'd1;
             end
-            for (di=0; di<6; di=di+1)
+            for (di=0; di<7; di=di+1)
                 d_oc[di] <= d_oc[di] + {1'd0, (d_accept && d_win == 3'(di))}
                                      - {1'd0, (d_last   && d_owner == 3'(di))};
 `ifndef SYNTHESIS
@@ -160,7 +163,9 @@ module peel_core import tsp_pkg::*; #(
     assign pr_dresp.busy     = pend[3] || (d_oc[3] != 2'd0);
     assign ol_dresp.busy     = pend[4] || (d_oc[4] != 2'd0);
     assign ra_dresp.busy     = pend[5] || (d_oc[5] != 2'd0);
+    assign tex_dresp[2].busy = pend[6] || (d_oc[6] != 2'd0);
     assign tex_dresp[0].dout=ddr_resp.dout; assign tex_dresp[1].dout=ddr_resp.dout;
+    assign tex_dresp[2].dout=ddr_resp.dout;
     assign ts_dresp.dout=ddr_resp.dout; assign pr_dresp.dout=ddr_resp.dout;
     assign ol_dresp.dout=ddr_resp.dout; assign ra_dresp.dout=ddr_resp.dout;
     // fanout uses the QUALIFIED beat (d_beat, not raw dready): keeps every client's
@@ -172,6 +177,7 @@ module peel_core import tsp_pkg::*; #(
     assign pr_dresp.dready     = d_beat && (d_owner==3'd3);
     assign ol_dresp.dready     = d_beat && (d_owner==3'd4);
     assign ra_dresp.dready     = d_beat && (d_owner==3'd5);
+    assign tex_dresp[2].dready = d_beat && (d_owner==3'd6);
 
     // -------------------- caches --------------------
     // Region parser, OL parser, ISP iterator AND TSP param fetch all read DDR
