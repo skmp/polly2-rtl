@@ -8,7 +8,7 @@ module dense_span_buffer_selftest;
     wire [9:0]   r_start, r_id; wire [2:0] r_rep; wire [31:0] r_invw [0:3]; wire r_at;
 
     dense_span_buffer #(.DEPTH(1024)) dut (
-        .clk(clk), .we(we), .waddr(waddr), .w_start(w_start), .w_id(w_id), .w_rep(w_rep),
+        .clk(clk), .we(we), .waddr(waddr), .w_start(w_start), .w_id(w_id), .w_wm(13'd0), .r_wm(), .w_rep(w_rep),
         .w_invw(w_invw), .w_at(w_at),
         .raddr(raddr), .r_start(r_start), .r_id(r_id), .r_rep(r_rep), .r_invw(r_invw), .r_at(r_at));
 

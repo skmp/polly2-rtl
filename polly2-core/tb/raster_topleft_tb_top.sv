@@ -83,6 +83,7 @@ module raster_topleft_tb_top (
         .tl(rtl),
         .probe(r_probe), .probe_reject(probe_reject), .probe_valid(probe_valid),
         .out_valid(out_valid), .inside_mask(inside_mask), .invw_flat(),
+        .qi(2'd0), .out_qi(),
         .out_x(out_x), .out_y(out_y)
     );
 endmodule
