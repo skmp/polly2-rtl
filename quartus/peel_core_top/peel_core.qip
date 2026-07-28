@@ -1,3 +1,9 @@
+# STATUS: LEGACY / PRE-REORG. Every path below is in the old flat layout
+# (rtl/tsp/, rtl/isp_min/, rtl/fp_add.sv, mister_top.sv) that the rtl/<subsystem>
+# reorg replaced, and several listed modules no longer exist at all. The LIVE
+# synthesis fileset is quartus/polly2/polly2.qip. This file is only kept current
+# w.r.t. module NAMES (e.g. the cache entries below); it will not compile as-is.
+#
 # Sequenced (area-optimized) setup design: one mul+add per unit, one reciprocal.
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/fp_add.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/fp_mul.sv
@@ -61,10 +67,12 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/isp_primitive_iterator.sv
 # for peel_core + the isprim unit test.
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/isp_primitive_iterator_pf.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/f2u8.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/tex_cache_4p.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/tex_cache_4p_1c.sv
-# 4-read-port single-copy registered-M10K texture/VQ cache. Now owned INSIDE tex_unit
-# (tex_fetch4_ob's u_tc4/u_vq4), not by peel_core. Must precede tex_fetch4_ob.
+# 4-read-port texture/VQ cache (2 true-dual-port M10K arrays + the prefill probe's tag
+# copy). Owned INSIDE tex_unit (tex_fetch4_ob's u_tc4/u_vq4), not by peel_core. Its
+# bram_tdp/bram_sdp primitives must precede it, and it must precede tex_fetch4_ob.
+# (The 2-cycle tex_cache_4p variant was deleted; only the _1c version exists.)
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/buffers/bram_tdp.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/buffers/bram_sdp.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/tex_cache_4p_1c.sv
 # peel sort-cache: "fully rendered" triangle filter for peel passes. Before peel_core.
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tsp/sort_cache.sv

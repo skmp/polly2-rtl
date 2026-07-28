@@ -54,6 +54,12 @@ set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/isp/isp_dep
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/isp/isp_depth_cmp_lp.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/isp/tile_ram.sv
 
+# ---- generic block-RAM primitives (must precede their users) ----
+#      bram_tdp = 2 reads + 1 write out of ONE M10K copy (true dual port); bram_sdp =
+#      1 read + 1 write with the read port live during writes.
+set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/buffers/bram_tdp.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/buffers/bram_sdp.sv
+
 # ---- M10K-backed tile buffers (ping-ponged: taginvw ISP->TSP handoff,
 #      peel depth/tag buffers, colour) ----
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/buffers/peel_tile_buffer.sv

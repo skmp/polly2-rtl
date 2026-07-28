@@ -51,10 +51,21 @@ module tex_fetch4_ob import tsp_pkg::*; #(
     // shared 4-read-port caches (data + VQ)
     cache_req_t   tc_req [0:3], vq_req [0:3];
     cache_resp_t  tc_resp[0:3], vq_resp[0:3];
+    // pf_* is each cache's always-available prefill probe port (tag-only residency test).
+    // TODO(prefill): drive these from the prefill walker; tied off until it exists. While
+    // tied off the fitter will strip meta_pf, so the probe's ~2 M10K/cache does not show
+    // up in the resource report yet.
+    wire tc_pf_ack, tc_pf_hit, tc_pf_busy, vq_pf_ack, vq_pf_hit, vq_pf_busy;
     tex_cache_4p_1c u_tc4 (.clk(clk),.reset(reset),.flush(flush),
-        .creq(tc_req),.cresp(tc_resp),.dreq(ddr_req[0]),.dresp(ddr_resp[0]));
+        .creq(tc_req),.cresp(tc_resp),
+        .pf_req(1'b0),.pf_waddr(29'd0),
+        .pf_ack(tc_pf_ack),.pf_hit(tc_pf_hit),.pf_busy(tc_pf_busy),
+        .dreq(ddr_req[0]),.dresp(ddr_resp[0]));
     tex_cache_4p_1c u_vq4 (.clk(clk),.reset(reset),.flush(flush),
-        .creq(vq_req),.cresp(vq_resp),.dreq(ddr_req[1]),.dresp(ddr_resp[1]));
+        .creq(vq_req),.cresp(vq_resp),
+        .pf_req(1'b0),.pf_waddr(29'd0),
+        .pf_ack(vq_pf_ack),.pf_hit(vq_pf_hit),.pf_busy(vq_pf_busy),
+        .dreq(ddr_req[1]),.dresp(ddr_resp[1]));
 
     // per-corner data-cache word address + VQ byte lane (combinational off inputs)
     wire [28:0] tc_waddr [0:3];
