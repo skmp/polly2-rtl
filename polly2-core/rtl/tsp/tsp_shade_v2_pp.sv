@@ -301,6 +301,8 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
     assign pl_room = (pl_cnt < PLD-4);
 `ifndef SYNTHESIS
     reg dl_dfired = 1'b0, dl_xfired = 1'b0, dl_hw_fired = 1'b0;   // one-shot flags
+    reg [PLAW:0] pl_hwm = '0;                                     // TEMP measurement
+    final $display("=== PLFIFO %m: high-water = %0d of %0d (room gate at %0d) ===", pl_hwm, PLD, PLD-4);
     integer dl_npush = 0, dl_npop = 0;        // cumulative push/pop counters
 `endif
     always @(posedge clk) begin
@@ -343,6 +345,7 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
             // RAW HIGH-WATER (NO gate at all - not even dl_en): announce the first time pl_cnt
             // in THIS block ever exceeds 40. If this never prints but the dump shows cnt=97,
             // then the dump's pl_cnt is a DIFFERENT signal than this block updates (aliasing).
+            if (pl_cnt > pl_hwm) pl_hwm <= pl_cnt;      // TEMP measurement
             if (pl_cnt > 7'd40 && !dl_hw_fired) begin
                 dl_hw_fired <= 1'b1;
                 $display("[shade RAW] FIFO cnt exceeded 40: pl_cnt=%0d h=%0d t=%0d push=%b pop=%b t=%0t",

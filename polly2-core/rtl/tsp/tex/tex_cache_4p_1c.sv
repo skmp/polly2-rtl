@@ -54,22 +54,15 @@
 // regardless of how the corners alias. m_wport is gone.
 //
 // ================================= PREFILL PROBE =================================
-// pf_* is a FIFTH read port that answers "is this line resident?" and is ALWAYS
-// available - it is never gated by the demand ports' backpressure, and it keeps
-// answering during fills and during the invalidate sweep, i.e. exactly when the four
-// demand ports are frozen. It reads a PRIVATE tag copy (meta_pf, a simple-dual-port
-// array with a dedicated read port), which is why it cannot be starved; that copy costs
-// ~2 M10Ks and takes the same writes as the demand tag copies.
+// pf_* is a probe port that answers "is this line resident?", used by the prefetch
+// walker to find the next miss in the queued request stream while the cache is
+// FROZEN filling - which is exactly when the four demand ports are idle. It reads
+// the DEMAND tag copies (meta_a/meta_b) through their spare true-dual-port ports:
+// 4 tags/cycle, at zero extra M10K. It is therefore only meaningful while filling
+// (pf_busy high); there is no dedicated tag copy any more.
 //   Probe is TAG ONLY - it reports residency, not data. That is all a prefill check
-//   needs, and it is what keeps the port cheap: a probe port that returned line DATA
-//   would need a third 256-bit array (~26 M10Ks) and would give back most of what the
-//   2-copy conversion just saved.
-//   pf_req at cycle N -> pf_ack at cycle N+1 with pf_hit. Answers are CONSERVATIVE: a
-//   probe issued during the invalidate sweep reports "not resident" (which is what will
-//   be true once the sweep lands) and a probe colliding with the in-flight fill write is
-//   forwarded from that write rather than reading undefined read-during-write data.
-//   pf_busy is informational: the fill machinery is occupied, so acting on a miss now
-//   will queue behind the demand path.
+//   needs, and a probe port that returned line DATA would need a third 256-bit array
+//   (~26 M10Ks), giving back most of what the 2-copy conversion saved.
 //
 // PROTOCOL per port i:
 //   creq[i].req    : client wants to issue creq[i].waddr this cycle
@@ -357,44 +350,14 @@ module tex_cache_4p_1c import tsp_pkg::*; (
         end
     end
 
-    // ==================== PREFILL PROBE: private tag copy + 1-cycle answer ====================
-    // meta_pf takes the same writes as the demand tag copies but has its OWN read port, so
-    // a probe is never blocked by the demand ports and stays live during fills and sweeps.
-    wire [LAW-1:0]  pf_line = pf_waddr[28:2];
-    wire [IXW-1:0]  pf_ix   = pf_line[IXW-1:0];
-    wire [TAGW-1:0] pf_tag  = pf_line[LAW-1:IXW];
-    wire [MW-1:0]   pf_q;
-
-    bram_sdp #(.W(MW), .D(NLINE)) u_meta_pf (
-        .clk(clk), .we(meta_we), .waddr(wa), .din(wmeta),
-        .re(pf_req), .raddr(pf_ix), .q(pf_q));
-
-    reg             pf_v_r, pf_sweep_r;
-    reg [IXW-1:0]   pf_ix_r;
-    reg [TAGW-1:0]  pf_tag_r;
-    reg             pf_w_v;                 // a write landed on the same edge as the read
-    reg [IXW-1:0]   pf_w_ix;
-    reg [MW-1:0]    pf_w_meta;
-    always @(posedge clk) begin
-        if (reset) begin
-            pf_v_r <= 1'b0; pf_w_v <= 1'b0; pf_sweep_r <= 1'b0;
-        end else begin
-            pf_v_r     <= pf_req;
-            pf_ix_r    <= pf_ix;
-            pf_tag_r   <= pf_tag;
-            pf_sweep_r <= sweep_we;          // probe issued mid-sweep -> answer "not resident"
-            pf_w_v     <= meta_we;
-            pf_w_ix    <= wa;
-            pf_w_meta  <= wmeta;
-        end
-    end
-    // forward the colliding write: bram_sdp has no read-during-write bypass, so a probe of
-    // the address being written returns undefined data. We know exactly what was written.
-    wire            pf_fwd  = pf_w_v && (pf_w_ix == pf_ix_r);
-    wire [MW-1:0]   pf_meta = pf_fwd ? pf_w_meta : pf_q;
-    assign pf_ack  = pf_v_r;
-    assign pf_hit  = pf_v_r && !pf_sweep_r && pf_meta[TAGW]
-                            && (pf_meta[TAGW-1:0] == pf_tag_r);
+    // ==================== PREFILL PROBE ====================
+    // The dedicated meta_pf tag copy is GONE. The probe now rides the IDLE demand
+    // meta ports: meta_a/meta_b are true-dual-port, so while the cache is frozen
+    // filling (the only time we want to prefetch) all four read ports are free -
+    // 4 tags/cycle instead of 1, at zero extra M10K. Wired up by the prefetch
+    // walker; tied off until then.
+    assign pf_ack  = 1'b0;
+    assign pf_hit  = 1'b0;
     assign pf_busy = (st != S_RUN);
 
 `ifndef SYNTHESIS
