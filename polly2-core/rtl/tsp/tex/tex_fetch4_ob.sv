@@ -77,6 +77,77 @@ module tex_fetch4_ob import tsp_pkg::*; #(
     end endgenerate
 
     // ============================================================================
+    // PRE-CACHE REQUEST FIFO (32 deep, M10K, FWFT)
+    // ============================================================================
+    // Without this the front is welded to the cache: in_ready gated directly on
+    // tc_ready, so a miss-fill froze the whole shade pipe. The FIFO decouples them -
+    // the front keeps retiring pixels into it while the cache fills, and it is also
+    // the QUEUE THE PREFETCH WALKER SCANS for the next miss (the lookahead pointer).
+    //
+    // It carries the WHOLE request bundle, not just the 4 addresses: tex/vq, the VQ
+    // base, the per-corner VQ byte lanes and the decode payload all have to stay
+    // aligned with their addresses once issue is decoupled from completion. At
+    // 151+PLW bits x 32 that is still one M10K.
+    //
+    // TWO copies of the body share one write: copy A refills the FWFT head, copy B
+    // is the walker's independent lookahead read port (a single simple-dual-port
+    // RAM cannot serve both, and stealing refill cycles would throttle the head).
+    localparam integer FQ_D  = 32, FQ_AW = 5;
+    localparam integer FQ_W  = 1 + 1 + 21 + 4*3 + 4*29 + PLW;
+    wire [FQ_W-1:0] fq_in = { tex, vq, vq_addr,
+                              vqlane[0],  vqlane[1],  vqlane[2],  vqlane[3],
+                              tc_waddr[0],tc_waddr[1],tc_waddr[2],tc_waddr[3],
+                              in_pl };
+    wire [FQ_W-1:0] fq_qa, fq_hd_w;
+    reg  [FQ_W-1:0] fq_hd;   reg fq_hd_v;
+    reg  [FQ_AW:0]  fq_wp, fq_rp;   reg [FQ_AW:0] fq_cnt;
+    wire fq_full  = (fq_cnt == FQ_D[FQ_AW:0]);
+    wire fq_push  = in_valid && !fq_full;
+    wire fq_pop;                       // = the T0 accept, declared below
+    wire fq_head_free = !fq_hd_v || fq_pop;
+    wire fq_ram_has   = (fq_wp != fq_rp);
+    wire [FQ_AW:0] fq_rp_nxt = (fq_head_free && fq_ram_has) ? fq_rp + 1'b1 : fq_rp;
+    reg  [FQ_W-1:0] fq_pw_d; reg [FQ_AW:0] fq_pw_a; reg fq_pw_v;
+    wire [FQ_W-1:0] fq_src = (fq_pw_v && (fq_pw_a == fq_rp)) ? fq_pw_d : fq_qa;
+    bram_sdp #(.W(FQ_W), .D(FQ_D)) u_fq_a (            // head-refill copy
+        .clk(clk), .we(fq_push), .waddr(fq_wp[FQ_AW-1:0]), .din(fq_in),
+        .re(1'b1), .raddr(fq_rp_nxt[FQ_AW-1:0]), .q(fq_qa));
+    // walker lookahead copy: same write, independent read (driven in item 3)
+    wire [FQ_AW-1:0] fq_la_addr;
+    wire [FQ_W-1:0]  fq_la_q;
+    bram_sdp #(.W(FQ_W), .D(FQ_D)) u_fq_b (
+        .clk(clk), .we(fq_push), .waddr(fq_wp[FQ_AW-1:0]), .din(fq_in),
+        .re(1'b1), .raddr(fq_la_addr), .q(fq_la_q));
+    assign fq_la_addr = fq_rp[FQ_AW-1:0];   // TODO(prefetch): walker lookahead pointer
+    // FWFT head field unpack (these replace the raw module inputs downstream)
+    assign fq_hd_w  = fq_hd;
+    wire        f_tex    = fq_hd_w[FQ_W-1];
+    wire        f_vq     = fq_hd_w[FQ_W-2];
+    wire [20:0] f_vqbase = fq_hd_w[FQ_W-3 -: 21];
+    wire [2:0]  f_lane  [0:3];
+    wire [28:0] f_waddr [0:3];
+    wire [PLW-1:0] f_pl = fq_hd_w[PLW-1:0];
+    genvar gf;
+    generate for (gf=0; gf<4; gf=gf+1) begin : fqu
+        assign f_lane [gf] = fq_hd_w[PLW + 4*29 + (3-gf)*3 +: 3];
+        assign f_waddr[gf] = fq_hd_w[PLW + (3-gf)*29 +: 29];
+    end endgenerate
+    always @(posedge clk) begin
+        if (reset) begin
+            fq_wp<=0; fq_rp<=0; fq_cnt<=0; fq_hd_v<=1'b0; fq_pw_v<=1'b0;
+        end else begin
+            fq_pw_v <= fq_push; fq_pw_a <= fq_wp; fq_pw_d <= fq_in;
+            if (fq_push) fq_wp <= fq_wp + 1'b1;
+            if (fq_head_free) begin
+                if (fq_ram_has)   begin fq_hd <= fq_src; fq_hd_v <= 1'b1; fq_rp <= fq_rp + 1'b1; end
+                else if (fq_push) begin fq_hd <= fq_in;  fq_hd_v <= 1'b1; fq_rp <= fq_rp + 1'b1; end
+                else              fq_hd_v <= 1'b0;
+            end
+            fq_cnt <= fq_cnt + (fq_push?1:0) - (fq_pop?1:0);
+        end
+    end
+
+    // ============================================================================
     // Streaming pipeline, 4 corners lockstep. All corners share the accept/advance
     // decisions (they freeze together), so control is computed ONCE (corner 0's cache
     // readiness == all, since the 4-read-port cache gates all ports together).
@@ -144,13 +215,15 @@ module tex_fetch4_ob import tsp_pkg::*; #(
     wire t0_free   = !t0_v || t0_adv;
 
     // ---- accept a new pixel: T0 free and (textured -> data cache ready) ----
-    assign in_ready = t0_free && (!tex || tc_ready);
-    wire   accept   = in_valid && in_ready;
+    // the FRONT now only needs FIFO room; the cache gates the FIFO's HEAD instead.
+    assign in_ready = !fq_full;
+    wire   accept   = fq_hd_v && t0_free && (!f_tex || tc_ready);
+    assign fq_pop   = accept;
 
     // ---- issue data-cache read (only textured pixels) ----
     generate for (gi=0; gi<4; gi=gi+1) begin : tcreq
-        assign tc_req[gi].req   = accept && tex;
-        assign tc_req[gi].waddr = tc_waddr[gi];
+        assign tc_req[gi].req   = accept && f_tex;
+        assign tc_req[gi].waddr = f_waddr[gi];
     end endgenerate
 
     // ---- issue VQ read (T1 VQ pixel, when it can advance into a free T2) ----
@@ -197,9 +270,9 @@ module tex_fetch4_ob import tsp_pkg::*; #(
             // ---- in -> T0 ----
             if (accept) begin
                 t0_v <= 1'b1; t0_dv <= 1'b0;
-                t0_tex <= tex; t0_vq <= vq; t0_vqbase <= vq_addr;
-                for (i=0;i<4;i=i+1) t0_lane[i] <= vqlane[i];
-                t0_pl <= in_pl;                          // payload latched with the pixel
+                t0_tex <= f_tex; t0_vq <= f_vq; t0_vqbase <= f_vqbase;
+                for (i=0;i<4;i=i+1) t0_lane[i] <= f_lane[i];
+                t0_pl <= f_pl;                           // payload rides the FIFO entry
             end else if (t0_adv) t0_v <= 1'b0;
 
             // ---- T0 data-word capture (lands cycle after accept; hold it) ----
