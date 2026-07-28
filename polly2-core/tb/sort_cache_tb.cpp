@@ -10,7 +10,7 @@
 static Vsort_cache* dut;
 static void tick(){ dut->clk=0; dut->eval(); dut->clk=1; dut->eval(); }
 
-static const int IXW = 7, NENT = 1<<IXW, WAYS = 4;
+static const int IXW = 10, NENT = 1<<IXW, WAYS = 4;   // match sort_cache.sv IXW
 static uint32_t idx_of(uint32_t t){ return ((t>>3) ^ (t&7)) & (NENT-1); }
 
 // C mirror: per way {tag, done, valid-after-sweep}

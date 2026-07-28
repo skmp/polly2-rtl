@@ -36,7 +36,7 @@ BUILD = build
 CWD  := $(shell pwd)
 
 .PHONY: shade-drop raster-topleft clean test tex tex-addr tex-uv tex-decode tex-filter tex-combiner \
-        oparse region regfile regen sortcache itquad taginvw dense_span_buffer \
+        oparse region regfile regen sortcache itquad itskip taginvw dense_span_buffer \
         frontendtsplp frontendtsplp-build golden-check spannerv2 mulc9 mul16sppro \
         add24sppro mulc9sppro add3sppro mul24sppro mul24c9sppro
 
@@ -56,7 +56,7 @@ RTL_EXTRA = rtl/fp/fp_add24.sv rtl/tsp/stage_interp.sv
 RTL_INC   = $(addprefix -y ,$(RTL_DIRS)) -Irtl/gen
 
 # ---- run the fast unit tests (TSP texture blocks + front-end block tests) ----
-test: tex oparse region regfile sortcache itquad raster-topleft
+test: tex oparse region regfile sortcache itquad itskip raster-topleft
 
 # ---- top-left bias / exact-edge raster regression ----
 # isp_setup_streamed + isp_raster_line on a coplanar fullscreen quad whose
@@ -119,8 +119,8 @@ tex-combiner: | $(BUILD)
 
 # object_list_parser unit test: list walker (direct-DDR reader) + behav burst DDR.
 oparse: | $(BUILD)
-	+$(VERILATOR) --cc --exe --build $(VFLAGS) --public-flat-rw --top-module object_list_parser_tb_top \
-	  $(TSP)/tsp_pkg.sv tb/object_list_parser_tb_top.sv $(TSP)/object_list_parser.sv \
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Irtl/gen --public-flat-rw --top-module object_list_parser_tb_top \
+	  $(TSP_PKG) tb/object_list_parser_tb_top.sv rtl/lists/object_list_parser.sv \
 	  $(CWD)/tb/object_list_parser_tb.cpp --Mdir $(BUILD)/obj_oparse -o tb
 	./$(BUILD)/obj_oparse/tb
 
@@ -128,7 +128,7 @@ oparse: | $(BUILD)
 # priority, alias mismatch conservatism, reset sweep, random soak vs a C model.
 sortcache: | $(BUILD)
 	+$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module sort_cache \
-	  rtl/tsp/sort_cache.sv \
+	  rtl/buffers/sort_cache.sv \
 	  $(CWD)/tb/sort_cache_tb.cpp --Mdir $(BUILD)/obj_sortcache -o tb
 	./$(BUILD)/obj_sortcache/tb
 
@@ -136,8 +136,8 @@ sortcache: | $(BUILD)
 # through a behavioral DDR; checks vertices, quad flag + v3x/v3y, and the tag
 # param_offs advance (hdr + nverts*stride per array record).
 itquad: | $(BUILD)
-	+$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module isp_primitive_iterator_pf \
-	  $(TSP)/tsp_pkg.sv $(TSP)/isp_primitive_iterator_pf.sv \
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Irtl/gen --top-module isp_primitive_iterator_pf \
+	  $(TSP_PKG) rtl/isp/isp_primitive_iterator_pf.sv \
 	  $(CWD)/tb/isp_primitive_iterator_quad_tb.cpp --Mdir $(BUILD)/obj_itquad -o tb
 	./$(BUILD)/obj_itquad/tb
 
@@ -155,6 +155,16 @@ taginvw: | $(BUILD)
 	  rtl/tsp/tsp_pkg.sv rtl/isp_min/tile_ram.sv rtl/buffers/taginvw_tile_buffer.sv \
 	  tb/taginvw_selftest.sv --Mdir $(BUILD)/obj_taginvw -o taginvw
 	./$(BUILD)/obj_taginvw/taginvw
+
+# iterator PRE-FETCH sort$ skip unit test: real isp_primitive_iterator_pf + real
+# sort_cache (check port cross-wired as in peel_core) + behavioral burst DDR.
+# Verifies fully-rendered records skip their DDR burst, partially-done strips
+# emit only survivors, demote revives, and vertex alignment is untouched.
+itskip: | $(BUILD)
+	+$(VERILATOR) --binary $(VFLAGS) -Wno-BLKSEQ -Irtl/gen --top-module itskip_selftest \
+	  $(TSP_PKG) rtl/isp/isp_primitive_iterator_pf.sv rtl/buffers/sort_cache.sv \
+	  tb/itskip_selftest.sv --Mdir $(BUILD)/obj_itskip -o itskip
+	./$(BUILD)/obj_itskip/itskip
 
 # dense_span_buffer unit test: the DENSE spanner_v2->TSP handoff (one span/slot:
 # {start,rep,id,invw[0:3],at}). Writes spans at dense slots, reads back + streaming read.

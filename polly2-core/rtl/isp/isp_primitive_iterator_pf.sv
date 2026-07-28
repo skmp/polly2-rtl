@@ -43,6 +43,23 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
     output triangle_out_t  trio,
     input  triangle_ack_t  ack,
 
+    // ---- PRE-FETCH sort-cache check (peel pass >= 2) ----
+    // Before committing a record's DDR burst, every triangle tag of that record
+    // (constructible from the OL entry fields alone) is run through the sort
+    // cache. A record whose every triangle is already "fully rendered" is
+    // SKIPPED WITHOUT FETCHING (the old fq-head check paid the fetch first and
+    // only saved setup+raster); a partially-done strip fetches once but emits
+    // only the not-done triangles. The check tag is built with cache_bypass=0
+    // (that bit lives in the not-yet-fetched ISP word): a cb=1 triangle simply
+    // mismatches -> "not done" -> fetched and rendered normally (conservative).
+    input                  skip_en,          // LEVEL: peeling && pass>=2 && sc_ready
+    output reg             chk_valid,        // 1-cyc: check chk_tag
+    output core_tag_t      chk_tag,
+    input                  chk_valid_q,      // verdict strobe (1 cyc after chk_valid)
+    input                  chk_done,         // 1 = fully rendered -> skippable
+    output reg             skp_pulse,        // 1-cyc: skipped skp_cnt triangles pre-fetch
+    output reg [2:0]       skp_cnt,
+
     // direct DDR3 read port (64-bit beats, via shared arbiter)
     output ddr_rd_req_t    dreq,
     input  ddr_rd_resp_t   dresp
@@ -130,6 +147,41 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
     // that emit has not yet finished. flush + none-outstanding + reader idle -> done.
     reg [3:0]  outstanding;            // records fetched-but-not-emitted
 
+    // ================= pre-fetch sort$ check state =================
+    // Runs CONCURRENTLY with the exg_* geometry pipeline off the live ex_* cursor
+    // (ex_po is always the NEXT record to fetch), one verdict per triangle:
+    //   array record : one tag {ex_po, toff=0}            -> pc_skip
+    //   strip record : one tag per enabled mask bit       -> pc_fmask (survivors)
+    // pc_v gates the record start; re-armed (cleared) per record.
+    reg        pe_en;                  // skip_en latched at entry pull (stable per entry)
+    reg        pc_v;                   // verdicts complete for the next record
+    reg        pc_skip;                // array: record fully rendered -> skip fetch
+    reg [5:0]  pc_fmask;               // strip: enabled AND not-done (same bit order
+                                       //        as ex_mask: triangle i at bit [5-i])
+    reg [2:0]  pc_i;                   // strip triangle index (toff) being checked
+    localparam PC_IDLE=2'd0, PC_ISSUE=2'd1, PC_WAIT=2'd2;
+    reg [1:0]  pcs;
+    // NOTE: pass the per-slot fields IN (read the arrays at the call site) rather
+    // than indexing them inside the function - Quartus 17.0's Verific frontend
+    // crashes ("read to RAM wasn't mapped") on an array read via a function-arg
+    // index inside an assignment-pattern.
+    function automatic core_tag_t mk_tag(input isp_cbp, input shdw,
+                                         input [2:0] skp, input [20:0] po,
+                                         input [2:0] toff);
+        mk_tag = '{ invalid:1'b0, pad:2'b00,
+                    cache_bypass:isp_cbp, shadow:shdw, skip:skp,
+                    param_offs_in_words:po, tag_offset:toff };
+    endfunction
+    // check tag: cache_bypass unknown pre-fetch -> 0 (see port comment)
+    assign chk_tag = mk_tag(1'b0, ex_shadow, ex_skip, ex_po,
+                            ex_array ? 3'd0 : pc_i);
+    // the record about to start is entirely skippable
+    wire pc_rec_skip = ex_array ? pc_skip : (pc_fmask == 6'd0);
+    function automatic [2:0] cnt6(input [5:0] m);
+        cnt6 = {2'd0,m[0]} + {2'd0,m[1]} + {2'd0,m[2]}
+             + {2'd0,m[3]} + {2'd0,m[4]} + {2'd0,m[5]};
+    endfunction
+
     // LEVEL busy: any record buffered, being read, being expanded, being emitted,
     // or any outstanding. This is the AUTHORITATIVE producer-idle signal for the
     // isp_core barrier (a pulse-cleared reg was racy).
@@ -206,17 +258,7 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
     function automatic [3:0] va(input [2:0] i); va = {1'b0,i} + (i[0] ? 4'd1 : 4'd0); endfunction
     function automatic [3:0] vb(input [2:0] i); vb = {1'b0,i} + (i[0] ? 4'd0 : 4'd1); endfunction
 
-    // NOTE: pass the per-slot fields IN (read the arrays at the call site) rather
-    // than indexing them inside the function - Quartus 17.0's Verific frontend
-    // crashes ("read to RAM wasn't mapped") on an array read via a function-arg
-    // index inside an assignment-pattern.
-    function automatic core_tag_t mk_tag(input isp_cbp, input shdw,
-                                         input [2:0] skp, input [20:0] po,
-                                         input [2:0] toff);
-        mk_tag = '{ invalid:1'b0, pad:2'b00,
-                    cache_bypass:isp_cbp, shadow:shdw, skip:skp,
-                    param_offs_in_words:po, tag_offset:toff };
-    endfunction
+    // (mk_tag moved up beside the pre-fetch check state, which also uses it.)
 
     localparam E_IDLE=2'd0, E_SEEK=2'd1, E_PRESENT=2'd2, E_REL=2'd3;
     reg [1:0]  est;
@@ -233,9 +275,48 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
             exg_s1_v<=0; exg_v<=0;
             b_ready[0]<=0; b_ready[1]<=0; b_done[0]<=0; b_done[1]<=0;
             tri_ready_r<=0;
+            pe_en<=0; pc_v<=0; pcs<=PC_IDLE; chk_valid<=0; skp_pulse<=0;
         end else begin
             entry_ack <= 1'b0;
             dreq_rd_r <= 1'b0;
+            chk_valid <= 1'b0;
+            skp_pulse <= 1'b0;
+
+            // ============ PRE-FETCH SORT$ CHECK (concurrent with exg_*) ============
+            // Collect a verdict for the NEXT record (ex_po cursor). The sort-cache
+            // check port is 1-in-flight here (issue, wait strobe, next) - a strip's
+            // <=6 checks cost ~2 cycles each vs the ~30+-cycle fetch they can save.
+            case (pcs)
+            PC_IDLE: if (ex_active && pe_en && !pc_v) begin
+                if (ex_array) begin
+                    chk_valid <= 1'b1;                    // single tag, toff=0
+                    pcs <= PC_WAIT;
+                end else begin
+                    pc_fmask <= 6'd0;
+                    pc_i     <= 3'd0;
+                    pcs <= PC_ISSUE;
+                end
+            end
+            PC_ISSUE: begin   // strip: check triangle pc_i if enabled, else advance
+                if (ex_mask[3'd5 - pc_i]) begin
+                    chk_valid <= 1'b1;
+                    pcs <= PC_WAIT;
+                end else if (pc_i == 3'd5) begin
+                    pc_v <= 1'b1; pcs <= PC_IDLE;
+                end else pc_i <= pc_i + 3'd1;
+            end
+            PC_WAIT: if (chk_valid_q) begin
+                if (ex_array) begin
+                    pc_skip <= chk_done;
+                    pc_v <= 1'b1; pcs <= PC_IDLE;
+                end else begin
+                    if (!chk_done) pc_fmask[3'd5 - pc_i] <= 1'b1;   // survivor
+                    if (pc_i == 3'd5) begin pc_v <= 1'b1; pcs <= PC_IDLE; end
+                    else begin pc_i <= pc_i + 3'd1; pcs <= PC_ISSUE; end
+                end
+            end
+            default: pcs <= PC_IDLE;
+            endcase
 
             // ==================== READER ====================
             // Continuously: if not expanding an entry, pull the next entry; else
@@ -257,6 +338,9 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
                         ex_count  <= (entry_type != ENT_STRIP) ? entry.count : 5'd1;
                         exg_s1_v  <= 1'b0;     // geometry pipeline restarts for this entry
                         exg_v     <= 1'b0;
+                        pe_en     <= skip_en;  // pre-fetch filtering, stable per entry
+                        pc_v      <= 1'b0;     // re-arm the pre-check for record 0
+                        pcs       <= PC_IDLE;
                         entry_ack <= 1'b1;     // consume it; producer advances
                     end
                 end else if (!exg_s1_v) begin
@@ -271,12 +355,31 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
                     exg_recb_r <= exg_recb_c;
                     exg_recw_r <= exg_recw_c;
                     exg_v      <= 1'b1;
+                end else if (pe_en && !pc_v) begin
+                    // wait for the pre-fetch sort$ verdicts of this record
+                end else if (pe_en && pc_rec_skip) begin
+                    // every triangle of this record is already fully rendered:
+                    // SKIP ITS FETCH - advance the expansion cursor directly.
+                    skp_pulse <= 1'b1;
+                    skp_cnt   <= ex_array ? 3'd1 : cnt6(ex_mask);
+                    pc_v      <= 1'b0;                 // re-check the next record
+                    if (ex_array && ex_count != 5'd1) begin
+                        ex_count <= ex_count - 5'd1;
+                        ex_base  <= ex_base + exg_recb_r;
+                        ex_po    <= ex_po   + exg_recw_r;
+                    end else ex_active <= 1'b0;        // entry done expanding
                 end else if (!b_ready[rd_buf]) begin
-                    // start the next record of the current entry into rd_buf
+                    // start the next record of the current entry into rd_buf.
+                    // Strips carry the FILTERED mask (pre-checked done triangles
+                    // dropped) so emit never presents an already-rendered one.
+                    if (pe_en && !ex_array && cnt6(pc_fmask) != cnt6(ex_mask)) begin
+                        skp_pulse <= 1'b1;             // partial-strip skip stat
+                        skp_cnt   <= cnt6(ex_mask) - cnt6(pc_fmask);
+                    end
                     rd_base   <= ex_base;
                     rd_skip   <= ex_skip;
                     rd_shadow <= ex_shadow;
-                    rd_mask   <= ex_mask;
+                    rd_mask   <= (pe_en && !ex_array) ? pc_fmask : ex_mask;
                     rd_po     <= ex_po;
                     rd_array  <= ex_array;
                     rd_quad   <= ex_quad;
@@ -346,6 +449,7 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
                         ex_count <= ex_count - 5'd1;
                         ex_base  <= ex_base + rd_rec_bytes_r;
                         ex_po    <= ex_po   + rd_rec_words_r;
+                        pc_v     <= 1'b0;      // re-arm the pre-check for the next record
                     end else begin
                         ex_active <= 1'b0;     // entry done expanding
                     end

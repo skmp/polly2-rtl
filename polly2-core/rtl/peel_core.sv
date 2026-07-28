@@ -217,7 +217,12 @@ module peel_core import tsp_pkg::*; #(
         .entry_valid(it_entry_valid),.entry_type(it_etype),.entry(it_entry),
         .entry_pt(it_entry_pt),
         .entry_ack(it_entry_ack),.busy(it_pf_busy),
-        .trio(it_trio),.ack(it_ack),.dreq(pr_dreq),.dresp(pr_dresp));
+        .trio(it_trio),.ack(it_ack),
+        .skip_en(sc_skip_en),
+        .chk_valid(it_chk_valid),.chk_tag(it_chk_tag),
+        .chk_valid_q(sc_chk_vq),.chk_done(sc_chk_done),
+        .skp_pulse(it_skp_pulse),.skp_cnt(it_skp_cnt),
+        .dreq(pr_dreq),.dresp(pr_dresp));
 
     // -------------------- depth/tag tile + color buffer + framebuffer --------------------
     // IMPROVEMENT #3 (APPLIED) - M10K banking of the tile buffers, ABSTRACTED into
@@ -323,11 +328,10 @@ module peel_core import tsp_pkg::*; #(
     wire        su_out_pt;    // list-kind (PT) of the retiring triangle
     // gate on fq_out_valid (the head entry is loaded in the output register), not
     // just !fq_empty: the M10K read that fills fq_out lags a pushed entry by a cycle.
-    // From the second peel pass on (sc_skip_en) a head needs its sort-cache verdict
-    // first: not-done heads issue to setup, done heads are popped/skipped instead
-    // (sc_skip_pop). The 2-cycle verdict hides under setup's II.
-    assign su_in_valid = fq_out_valid && (pq_count <= 5'd4)
-                      && (!sc_skip_en || (sc_hd_v && !sc_hd_skip));
+    // Sort-cache filtering moved UPSTREAM into the iterator (pre-fetch check): any
+    // triangle that reaches fq already survived its verdict, so heads issue
+    // unconditionally - no per-head verdict wait here anymore.
+    assign su_in_valid = fq_out_valid && (pq_count <= 5'd4);
 
     isp_setup_streamed u_isp (
         .clk(clk), .reset(reset),
@@ -486,12 +490,16 @@ module peel_core import tsp_pkg::*; #(
     // issued to setup - the pass skips its fetch-to-raster cost entirely. Setup-
     // culled and corner-culled triangles enter and never demote, so they are also
     // skipped from pass 2 on (cull is geometric, pass-invariant - a free bonus).
+    // CHECK moved into the ITERATOR (pre-fetch): the iterator runs each record's
+    // triangle tags through the check port BEFORE committing the record's DDR
+    // burst, so a fully-rendered record skips its FETCH too (the old fq-head
+    // check only saved setup+raster). skip_en level + check port wired at u_it.
     wire        sc_ready, sc_chk_vq, sc_chk_done;
-    reg         sc_chk_p;                  // check in flight for the current head
-    reg         sc_hd_v, sc_hd_skip;       // verdict (valid, skip) for current head
     wire        sc_skip_en   = peeling && (peel_pass >= 8'd2) && sc_ready;
-    wire        sc_chk_issue = sc_skip_en && fq_out_valid && !sc_hd_v && !sc_chk_p;
-    wire        sc_skip_pop  = sc_skip_en && fq_out_valid && sc_hd_v && sc_hd_skip;
+    wire        it_chk_valid;
+    wire [31:0] it_chk_tag;
+    wire        it_skp_pulse;
+    wire [2:0]  it_skp_cnt;
     wire        sc_enter     = su_in_valid && su_in_ready && peeling;
     wire [RAS_LANES-1:0] sc_wr_valid = b_valid ? b_more : {RAS_LANES{1'b0}};
     wire [32*RAS_LANES-1:0] sc_wr_tag;
@@ -505,7 +513,7 @@ module peel_core import tsp_pkg::*; #(
         .clk(clk), .reset(reset), .ready(sc_ready),
         .en_valid(sc_enter),      .en_tag(fq_out[FF_TAG +: 32]),
         .wr_valid(sc_wr_valid),   .wr_tag(sc_wr_tag),
-        .chk_valid(sc_chk_issue), .chk_tag(fq_out[FF_TAG +: 32]),
+        .chk_valid(it_chk_valid), .chk_tag(it_chk_tag),
         .chk_valid_q(sc_chk_vq),  .chk_done(sc_chk_done)
     );
 
@@ -1423,7 +1431,6 @@ module peel_core import tsp_pkg::*; #(
             rs_st<=RS_IDLE;
             pq_head<=0; pq_tail<=0; pq_count<=0;
             fq_head<=0; fq_tail<=0; fq_count<=0; fq_out_valid<=1'b0;
-            sc_chk_p<=1'b0; sc_hd_v<=1'b0; sc_hd_skip<=1'b0;
             eq_head<=0; eq_tail<=0; eq_count<=0;
             peeling<=1'b0; more_to_draw<=1'b0; peel_pass<=8'd0; op_shaded<=1'b0;
             has_pt<=1'b0; has_tr<=1'b0; peel_which<=1'b0; wo_l<=1'b0;
@@ -2486,36 +2493,21 @@ module peel_core import tsp_pkg::*; #(
             // present a triangle to the streaming setup; pop fq when accepted.
             // su_in_valid is assigned combinationally outside the always block.
             // accept IS the pop: it consumes the head entry sitting in fq_out.
-            // sc_skip_pop is the sort-cache SKIP: the head was fully rendered in an
-            // earlier peel pass - consume it WITHOUT issuing to setup (mutually
-            // exclusive with a setup accept: su_in_valid is 0 when sc_hd_skip).
-            if ((su_in_valid && su_in_ready) || sc_skip_pop) begin
+            // (Sort-cache skips now happen UPSTREAM in the iterator, pre-fetch -
+            // skipped triangles never enter fq, so accept is the only pop.)
+            if (su_in_valid && su_in_ready) begin
                 fq_head <= (fq_head==FIFO_N-1) ? 4'd0 : fq_head+4'd1;
                 fifo_pop = 1'b1;
+            end
 `ifndef SYNTHESIS
-                if (sc_skip_pop) begin
-                    pc_sort_skip <= pc_sort_skip + 1;
-                    if ($test$plusargs("sorttrace"))
-                        $display("[SORT$ SKIP] tile(%0d,%0d) pass=%0d tag=%08x",
-                                 cur_tx, cur_ty, peel_pass, fq_out[FF_TAG +: 32]);
-                end
+            // pre-fetch skip stats (pulsed by the iterator, 1..6 triangles/record)
+            if (it_skp_pulse) begin
+                pc_sort_skip <= pc_sort_skip + int'(it_skp_cnt);
+                if ($test$plusargs("sorttrace"))
+                    $display("[SORT$ PRESKIP] tile(%0d,%0d) pass=%0d tris=%0d",
+                             cur_tx, cur_ty, peel_pass, it_skp_cnt);
+            end
 `endif
-            end
-
-            // ---- sort-cache head verdict tracking: one check per fq head. A pop
-            //      (either kind) invalidates the verdict; the next head re-checks.
-            //      A check result can never collide with a pop: pops (when sc_skip_en)
-            //      require a verdict, and a verdict-in-flight implies none yet. ----
-            if (sc_chk_issue) sc_chk_p <= 1'b1;
-            if (sc_chk_vq) begin
-                sc_chk_p   <= 1'b0;
-                sc_hd_v    <= 1'b1;
-                sc_hd_skip <= sc_chk_done;
-            end
-            if (fifo_pop) begin
-                sc_hd_v    <= 1'b0;
-                sc_hd_skip <= 1'b0;
-            end
 
             // ---- FWFT read-ahead: keep fq_out loaded with the head entry ----
             // Reload fq_out when it was just consumed (fifo_pop) or is empty
@@ -2727,7 +2719,7 @@ module peel_core import tsp_pkg::*; #(
     wire [1:0] oc_iter   = (it_trio.triangle_ready && fq_full) ? OC_O
                          : it_pf_busy ? ((pend[3] || d_oc[3] != 2'd0) ? OC_U : OC_B) : OC_U;
     wire [1:0] oc_fq     = fq_full ? OC_O : (fq_empty && !fq_out_valid) ? OC_U : OC_B;
-    wire [1:0] oc_sortc  = sc_chk_p ? OC_B : OC_U;
+    wire [1:0] oc_sortc  = (it_chk_valid || sc_chk_vq) ? OC_B : OC_U;
     // --- ISP setup / raster ---
     wire [1:0] oc_setup  = (su_out_valid && pq_full) ? OC_O
                          : (su_busy || su_out_valid) ? OC_B

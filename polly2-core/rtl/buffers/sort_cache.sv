@@ -53,7 +53,7 @@
 //
 module sort_cache #(
     parameter integer TAGW = 32,
-    parameter integer IXW  = 7,               // 128 entries
+    parameter integer IXW  = 10,               // 1024 entries
     parameter integer WAYS = 4                // one demote port per raster lane
 )(
     input                   clk,
