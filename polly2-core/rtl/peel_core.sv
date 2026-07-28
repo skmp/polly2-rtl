@@ -452,14 +452,59 @@ module peel_core import tsp_pkg::*; #(
     // ---- peel + color tile buffers (own the RAM ports + access-pattern enforcement) ----
     // per-lane resolved-bit slices for the forward PT compare (stage B chunk) and
     // the PT_FIX walk chunk: pixel id = {y, x_hi} * LANES + lane.
-    wire [RAS_LANES-1:0] b_res_w, pb_res_w;
-    genvar gpr;
-    generate
-      for (gpr = 0; gpr < RAS_LANES; gpr = gpr + 1) begin : gres
-        assign b_res_w[gpr]  = pt_res[{b_oy, b_ox[4:$clog2(RAS_LANES)]} * RAS_LANES + gpr];
-        assign pb_res_w[gpr] = pt_res[{pb_i} * RAS_LANES + gpr];
-      end
-    endgenerate
+    // ---- pt_res as a 128x8 RAM (was a flat 1024-bit register) ----
+    // The old form needed, every cycle: a 1024:1 random read (blend), TWO 128:1
+    // 8-bit group reads (raster stage B, PT_FIX walk), a 1-bit write at an
+    // arbitrary index (1024-way decoder) and a whole-array clear - so it could
+    // not be memory and cost ~1k ALMs in muxing alone. Note the two group reads
+    // are 8-BIT ALIGNED, so the natural shape is 128 groups of 8.
+    // Three REPLICAS, each 1 dedicated read + 1 dedicated write, so no port ever
+    // conflicts; all take the same write. Each is 1024 bits.
+    // Read cursors follow the existing precedents exactly:
+    //   raster : presented at stage A ({ras_oy,ras_ox}) -> lands at stage B with
+    //            b_oy/b_ox, like the tile buffer's own chunk read
+    //   walk   : pb_rd, the read-AHEAD cursor - identical to u_zres's zr_raddr
+    //            (the old combinational form could use the pb_i write cursor)
+    //   blend  : presented with cb_valid/cb_id -> lands at CC with cb2_id
+    localparam integer PR_AW = 10 - ZR_BB;      // 7: group-of-8 address
+    wire [RAS_LANES-1:0] b_res_w, pb_res_w, pr_q_bl;
+    wire [7:0]  pr_grp;                          // blend group, write-forwarded
+    wire        pt_res_bit = pr_grp[cb2_id[ZR_BB-1:0]];
+    wire        pr_set, pr_clr, pr_we;
+    wire [PR_AW-1:0] pr_waddr;
+    wire [7:0]  pr_wdata;
+    bram_sdp #(.W(RAS_LANES), .D(1<<PR_AW)) u_ptres_ras (
+        .clk(clk), .we(pr_we), .waddr(pr_waddr), .din(pr_wdata),
+        .re(1'b1), .raddr({ras_oy, ras_ox[4:ZR_BB]}), .q(b_res_w));
+    bram_sdp #(.W(RAS_LANES), .D(1<<PR_AW)) u_ptres_walk (
+        .clk(clk), .we(pr_we), .waddr(pr_waddr), .din(pr_wdata),
+        .re(1'b1), .raddr(pb_rd), .q(pb_res_w));
+    bram_sdp #(.W(RAS_LANES), .D(1<<PR_AW)) u_ptres_bl (
+        .clk(clk), .we(pr_we), .waddr(pr_waddr), .din(pr_wdata),
+        .re(cb_valid), .raddr(cb_id[9:ZR_BB]), .q(pr_q_bl));
+    // WRITE: the S_PT_INIT seed walk clears one group per cycle (folded into that
+    // existing 128-cycle walk, so the old single-cycle `pt_res <= 0` costs nothing
+    // extra and needs no new state); the blend SETS one bit when a pixel locks.
+    // They never coincide - S_PT_BUF waits for the shade half to drain before
+    // S_PT_INIT runs.
+    assign pr_clr   = (st == S_PT_INIT) && pb_bufwr_valid;
+    assign pr_set   = cb2_valid && cb2_ptres && !pt_res_bit && bl_at_pass;
+    assign pr_we    = pr_clr || pr_set;
+    assign pr_waddr = pr_clr ? pb_bufwr_addr : cb2_id[9:ZR_BB];
+    assign pr_wdata = pr_clr ? {RAS_LANES{1'b0}}
+                             : (pr_grp | (8'd1 << cb2_id[ZR_BB-1:0]));
+    // 1-deep write forwarding: consecutive blends land in the SAME group (a span
+    // is a run of adjacent pixels), so read-during-write on this RAM is the common
+    // case, not a corner. The bypass covers exactly it - a read presented in the
+    // same cycle as a write to that group returns the value just written.
+    reg              pr_fw_v;
+    reg [PR_AW-1:0]  pr_fw_a;
+    reg [7:0]        pr_fw_d;
+    always @(posedge clk) begin
+        if (reset) pr_fw_v <= 1'b0;
+        else begin pr_fw_v <= pr_we; pr_fw_a <= pr_waddr; pr_fw_d <= pr_wdata; end
+    end
+    assign pr_grp = (pr_fw_v && (pr_fw_a == cb2_id[9:ZR_BB])) ? pr_fw_d : pr_q_bl;
 
     peel_tile_buffer #(.LANES(RAS_LANES)) u_peel (
         .clk(clk), .reset(reset),
@@ -793,9 +838,12 @@ module peel_core import tsp_pkg::*; #(
     // The pp_* inputs are driven COMBINATIONALLY (see the pp-input mux) so a pixel can
     // be presented the same cycle its planes resolve (no extra latch stage).
     reg          pp_in_valid;
-    reg  [42:0]  pp_in_id;    // [9:0]=pixel id, [10]=PT alpha-test enable,
-                              // [42:11]=invW (rides through for the PT-resolve
-                              // depth feedback at blend - the pipe is IDW-generic)
+    reg  [10:0]  pp_in_id;    // [9:0]=pixel id, [10]=PT alpha-test enable.
+                              // invW does NOT ride the pipe: it is written to the
+                              // invW side RAM at issue and read back at blend with
+                              // the returning id (see u_iwr). Carrying it through
+                              // ~100 id-slots (incl. the 64-deep, ASYNC-READ payload
+                              // window) cost ~3.2k FFs; the RAM costs 4 M10K.
     reg  [4:0]   pp_px, pp_py;
     reg  [31:0]  pp_invw;
     reg  [31:0]  pp_tsp, pp_tcw; reg pp_ptex, pp_pofs;
@@ -804,7 +852,7 @@ module peel_core import tsp_pkg::*; #(
     reg  [31:0]  pp_c   [0:9];
     wire         pp_stall;
     wire         pp_out_valid;
-    wire [42:0]  pp_out_id;   // [9:0]=pixel id, [10]=at enable, [42:11]=invW
+    wire [10:0]  pp_out_id;   // [9:0]=pixel id, [10]=at enable
     wire [31:0]  pp_out_argb;
     wire [31:0]  pp_out_tsp;
 
@@ -822,7 +870,7 @@ module peel_core import tsp_pkg::*; #(
     // e.g. black transparent foliage). The DC re-reads textures from VRAM every render. `go`
     // pulses once per render and the ~NLINE-cycle valid-clear sweep completes long before the
     // first tile is shaded (raster/region-walk runs first), so this is free in practice.
-    tsp_shade_v2_pp #(.IDW(43)) u_shade (
+    tsp_shade_v2_pp #(.IDW(11)) u_shade (
         .clk(clk),.reset(reset),.flush(go),
         .in_valid(pp_in_valid),.in_id(pp_in_id),.px(pp_px),.py(pp_py),.invw_in(pp_invw),
         .in_ddx(pp_ddx),.in_ddy(pp_ddy),.in_c(pp_c),
@@ -920,7 +968,27 @@ module peel_core import tsp_pkg::*; #(
     reg  [9:0]   cb_id;
     reg  [31:0]  cb_argb, cb_tsp;
     reg          cb_at_en;    // alpha-test enable snapshot (peeling && dt_pt[id])
-    reg  [31:0]  cb_invw;    // CB stage: pixel's invW (from the pipe)
+    wire [31:0]  cb_invw;    // CB stage: pixel's invW (from the invW side RAM;
+                             // its read was presented with pp_out_valid last cycle,
+                             // so it lands exactly aligned with cb_valid/cb_id)
+    // ---- invW SIDE RAM: the PT-resolve depth feedback, keyed by pixel id ----
+    // The alpha verdict lands at BLEND but the depth it must record (invW) is known
+    // at ISSUE, so the two have to be joined across the whole shade pipe. Riding it
+    // as passenger bits in the pixel id (the old IDW=43) widened ~100 id-carrying
+    // slots by 32 bits - worst of all the 64-deep payload window, which is read
+    // COMBINATIONALLY (plf[pl_h]) and so cannot be block RAM at all.
+    // Instead: write invW at issue keyed by the pixel id, read it back at output
+    // with the returning id. Safe because a pixel id is issued at most ONCE per
+    // pass (the spanner walks each staged pixel once) and R_DRAIN fully drains the
+    // blend (!cb_valid && !cb2_valid) before the next pass issues - so a slot is
+    // never rewritten while an earlier instance is still in flight.
+    // The read is presented on pp_out_valid and lands 1 cycle later, exactly when
+    // cb_valid/cb_id are live: no extra stage, no realignment.
+    bram_sdp #(.W(32), .D(1024)) u_iwr (
+        .clk(clk),
+        .we(pp_in_valid && !pp_stall), .waddr(s2_p), .din(s2_invw),
+        .re(pp_out_valid), .raddr(pp_out_id[9:0]), .q(cb_invw));
+
     // stage CC id/valid + the PT-resolve context that has to travel with them (the
     // blend operands themselves ride in u_blend's S1 registers).
     reg          cb2_valid;
@@ -941,7 +1009,7 @@ module peel_core import tsp_pkg::*; #(
     wire [RAS_LANES-1:0]     zr_we;
     wire [ZR_AW*RAS_LANES-1:0] zr_waddr, zr_raddr;
     wire [32*RAS_LANES-1:0]  zr_wdata, zr_rdata;
-    wire                     zr_wr = cb2_valid && cb2_ptres && !pt_res[cb2_id] && bl_at_pass;
+    wire                     zr_wr = pr_set;
     genvar gzr;
     generate
       for (gzr = 0; gzr < RAS_LANES; gzr = gzr + 1) begin : gzres
@@ -971,7 +1039,7 @@ module peel_core import tsp_pkg::*; #(
     // speculative deeper layer must never overwrite the locked color) and the
     // alpha test passed (a failing fragment writes NOTHING; the pixel keeps
     // resolving deeper, possibly all the way down to the untouched OP color).
-    wire cb_wr_en = cb2_valid && !(cb2_ptres && (pt_res[cb2_id] || !bl_at_pass));
+    wire cb_wr_en = cb2_valid && !(cb2_ptres && (pt_res_bit || !bl_at_pass));
 
     // -------------------- orchestration FSM --------------------
     // Decoupled producer / consumer (as frontend_isp_tb_top): the region->objlist
@@ -1061,7 +1129,6 @@ module peel_core import tsp_pkg::*; #(
     reg [4:0]    pt_fbb_x0, pt_fbb_x1, pt_fbb_y0, pt_fbb_y1;  // building (this pass)
     reg [4:0]    pt_bb_x0,  pt_bb_x1,  pt_bb_y0,  pt_bb_y1;   // active clip
     reg          pt_bb_v;         // active clip valid (a pass has completed)
-    reg [1023:0] pt_res;          // per-pixel resolved (alpha passed); blend-owned
     reg          cb_ptres;        // CB stage: blend belongs to a PT-resolve pass
     reg          ti_ptres [0:1];  // per-half: handed pass is a PT-resolve pass
     reg          md_ptres [0:MD_N-1];  // per-queued-pass PT-resolve flag
@@ -1526,7 +1593,7 @@ module peel_core import tsp_pkg::*; #(
     integer pj2;   // reader span-expand invw copy loop
     always @(*) begin
         pp_in_valid = (tsp_st == R_RUN) && s2_v;   // every emitted span pixel is shaded
-        pp_in_id    = {s2_invw, s2_at, s2_p};    // fed pixel = s2_p; [10]=at; [42:11]=invW
+        pp_in_id    = {s2_at, s2_p};             // fed pixel = s2_p; [10]=at
         pp_invw     = s2_invw;
         pp_tsp      = tsg_r_tsp;
         pp_tcw      = tsg_r_tcw;
@@ -1575,7 +1642,7 @@ module peel_core import tsp_pkg::*; #(
             ol_walk_done<=1'b0;
             pt_phase<=1'b0; pt_pass<=8'd0; pt_sh_pend<=3'd0; pt_more<=11'd0;
             pt_hand_p<=1'b0; pt_free_p<=1'b0; pt_stop<=1'b0;
-            pt_res<='0; cb_ptres<=1'b0; cb2_ptres<=1'b0;
+            cb_ptres<=1'b0; cb2_ptres<=1'b0;
             ti_ptres[0]<=1'b0; ti_ptres[1]<=1'b0;
             b_fwd<=1'b0;
             has_pt<=1'b0; has_tr<=1'b0; peel_which<=1'b0; wo_l<=1'b0;
@@ -1787,9 +1854,9 @@ module peel_core import tsp_pkg::*; #(
             // CC, not CB: bl_at_pass is registered inside u_blend, so the verdict
             // for the pixel latched at CB only lands with its CC beat. Reads the
             // CURRENT cb2_* (non-blocking assigns above take effect next cycle).
-            if (cb2_valid && cb2_ptres && !pt_res[cb2_id]) begin
-                if (bl_at_pass) pt_res[cb2_id] <= 1'b1;     // pixel locks here
-                else begin
+            if (cb2_valid && cb2_ptres && !pt_res_bit) begin
+                // the lock itself is the pr_set RAM write above
+                if (!bl_at_pass) begin
                     pt_more <= pt_more + 11'd1;             // resolve continues deeper
                     // grow this pass's alpha-fail bbox
                     if (cb2_id[4:0] < pt_fbb_x0) pt_fbb_x0 <= cb2_id[4:0];
@@ -1806,7 +1873,6 @@ module peel_core import tsp_pkg::*; #(
                 cb_argb  <= pp_out_argb;
                 cb_tsp   <= pp_out_tsp;
                 cb_at_en <= pp_out_id[10];   // PT alpha-test enable (rode through shader)
-                cb_invw  <= pp_out_id[42:11];             // pixel depth (PT feedback)
                 cb_ptres <= md_ptres[md_rp[MD_AW-1:0]];   // reader's current pass kind
                 sh_out_n <= sh_out_n + 1;
 `ifndef SYNTHESIS
@@ -2107,7 +2173,7 @@ module peel_core import tsp_pkg::*; #(
             // resolved mask, prime the seed walk. The PT list's OL walk (kicked
             // at FLUSH) fills eq/fq/pq underneath all the PT walks.
             S_PT_BUF: if (!ti_ready[htile]) begin
-                pt_res  <= '0;
+                // (pt_res is cleared by the S_PT_INIT seed walk, one group/cycle)
                 pb_rd   <= '0; pb_i <= '0; pb_pipe <= 1'b0;
                 st <= S_PT_INIT;
             end

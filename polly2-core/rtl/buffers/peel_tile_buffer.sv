@@ -136,6 +136,8 @@ module peel_tile_buffer import tsp_pkg::*; #(
     localparam integer PW_VALID  = 128;  // [0]     tagStatus.valid
     localparam integer PEEL_W = 129;
     localparam [31:0]  FLT_MAX = 32'h7F7FFFFF;
+    // the three PT walks share one write-mux case (see the pb_ptwalk block)
+    wire pb_ptwalk = pb_ptinit | pb_ptswap | pb_ptfix;
 
     // -------------------- the block RAM --------------------
     reg  [NB-1:0]         we;
@@ -248,41 +250,35 @@ module peel_tile_buffer import tsp_pkg::*; #(
                 wdata[PEEL_W*cw + PW_TAG   +: 32] = clr_tag;
                 // depth2/tag2/valid don't-care for OP; PeelBuffers sets them.
             end
-        end else if (pb_wr_valid && pb_ptinit) begin // PT phase seed
-            we    = {NB{1'b1}};
-            waddr = {NB{pb_wr_addr}};
-            for (cw = 0; cw < NB; cw = cw + 1) begin
-                wdata[PEEL_W*cw + PW_TAG2   +: 32] = f_depth(rdata, cw); // Zceil <- Zop
-                wdata[PEEL_W*cw + PW_DEPTH2 +: 32] = FLT_MAX;            // boundary
-                wdata[PEEL_W*cw + PW_DEPTH  +: 32] = 32'h0;              // working seed
-                wdata[PEEL_W*cw + PW_TAG    +: 32] = f_tag(rdata, cw);
-                wdata[PEEL_W*cw + PW_VALID]        = 1'b0;
-            end
-        end else if (pb_wr_valid && pb_ptswap) begin // PT boundary advance
-            we    = {NB{1'b1}};
-            waddr = {NB{pb_wr_addr}};
-            for (cw = 0; cw < NB; cw = cw + 1) begin
-                // advance only where the pass staged (zb!=0 seed): keeps a
-                // resolved lane's depth parked in zb2, and an unstaged lane's
-                // boundary where it was.
-                wdata[PEEL_W*cw + PW_DEPTH2 +: 32] =
-                    (f_depth(rdata, cw) == 32'h0) ? f_depth2(rdata, cw)
-                                                  : f_depth (rdata, cw);
-                wdata[PEEL_W*cw + PW_DEPTH  +: 32] = 32'h0;
-                wdata[PEEL_W*cw + PW_TAG    +: 32] = f_tag (rdata, cw);
-                wdata[PEEL_W*cw + PW_TAG2   +: 32] = f_tag2(rdata, cw);  // Zceil kept
-                wdata[PEEL_W*cw + PW_VALID]        = 1'b0;
-            end
-        end else if (pb_wr_valid && pb_ptfix) begin // PT phase close: zb <- Zfinal
+        end else if (pb_wr_valid && pb_ptwalk) begin
+            // ---- PT phase walks, ONE transform ----
+            // init / swap / fix are all "read chunk, permute the depth planes, write
+            // back with valid=0 and tag kept". Folding them into a single case keeps
+            // the 1032-bit (PEEL_W x NB) write mux at ONE input instead of three -
+            // the per-field selects below are 8 x 32-bit muxes, not three parallel
+            // full-width datapaths.
+            //   zb    : init/swap -> 0 (working seed); fix -> Zfinal (the blend's
+            //           resolved depth where the pixel locked, else the opaque Z
+            //           parked in tag2)
+            //   zb2   : init -> FLT_MAX (boundary = nearest); swap -> advance to zb
+            //           but ONLY where the pass staged (zb!=0), which also parks a
+            //           resolved lane's depth here forever; fix -> kept
+            //   tag2  : init -> Zceil (<- zb, the opaque depth); swap/fix -> kept
             we    = {NB{1'b1}};
             waddr = {NB{pb_wr_addr}};
             for (cw = 0; cw < NB; cw = cw + 1) begin
                 wdata[PEEL_W*cw + PW_DEPTH  +: 32] =
-                    pb_res[cw] ? pb_zres[32*cw +: 32]  // blend-resolved depth
-                               : f_tag2  (rdata, cw);  // untouched: opaque depth
-                wdata[PEEL_W*cw + PW_DEPTH2 +: 32] = f_depth2(rdata, cw);
-                wdata[PEEL_W*cw + PW_TAG    +: 32] = f_tag (rdata, cw);
-                wdata[PEEL_W*cw + PW_TAG2   +: 32] = f_tag2(rdata, cw);
+                    pb_ptfix ? (pb_res[cw] ? pb_zres[32*cw +: 32]
+                                           : f_tag2(rdata, cw))
+                             : 32'h0;
+                wdata[PEEL_W*cw + PW_DEPTH2 +: 32] =
+                    pb_ptinit ? FLT_MAX
+                  : pb_ptswap ? ((f_depth(rdata, cw) == 32'h0) ? f_depth2(rdata, cw)
+                                                               : f_depth (rdata, cw))
+                              : f_depth2(rdata, cw);
+                wdata[PEEL_W*cw + PW_TAG2   +: 32] =
+                    pb_ptinit ? f_depth(rdata, cw) : f_tag2(rdata, cw);
+                wdata[PEEL_W*cw + PW_TAG    +: 32] = f_tag(rdata, cw);
                 wdata[PEEL_W*cw + PW_VALID]        = 1'b0;
             end
         end else if (pb_wr_valid && pb_zkeep) begin // z_keep depth-restore RMW
