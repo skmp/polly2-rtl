@@ -288,8 +288,25 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
     localparam integer PLW = 32+32+32+1+1+IDW;   // base, ofs, tsp, ptx, pof, id
     wire [PLW-1:0] pl_in = { iv_base, iv_ofs, iv_tsp, iv_ptx, iv_pof, iv_id };
     localparam integer PLD = 64, PLAW = 6;
-    reg  [PLW-1:0] plf [0:PLD-1];
-    reg  [PLAW-1:0] pl_h, pl_t; reg [PLAW:0] pl_cnt;
+    // ---- M10K FWFT payload FIFO ----
+    // The body lives in block RAM; only the HEAD is a register. A head register is
+    // unavoidable rather than a style choice: pl_out is consumed COMBINATIONALLY in
+    // the same cycle tu_ov fires, and tu_ov is tex_unit's result-valid - it cannot be
+    // back-pressured and is not known a cycle ahead. A plain registered-read FIFO
+    // would therefore deliver the payload one cycle late on EVERY pop (depth does not
+    // help; read latency is not a function of occupancy). Keeping the head in a
+    // register and refilling it from the RAM behind is exactly what makes the pop
+    // zero-latency - i.e. FWFT.
+    //   Read-ahead: raddr is the pointer we will load NEXT (pl_rp_nxt), not the
+    //   current one, so back-to-back pops stream at 1/cycle instead of alternating.
+    //   Write bypass: an entry pushed at cycle T cannot be read out of the RAM at
+    //   T+1 (same-address read-during-write returns the pre-write value), so the
+    //   just-written datum is forwarded from a 1-deep register. This is the path the
+    //   empty->push->pop sequence takes, which is every tex-pipe restart.
+    wire [PLW-1:0]  pl_q;
+    reg  [PLW-1:0]  pl_hd;      reg pl_hd_v;      // FWFT head
+    reg  [PLAW:0]   pl_wp, pl_rp;                 // extra MSB disambiguates full/empty
+    reg  [PLAW:0]   pl_cnt;
     wire pl_push = tu_issue;                    // push on front issue (== tex_unit accept)
     // Pop on a tex_unit result, but NEVER when the FIFO is empty. In steady state a tu_ov
     // always has a matching prior push (tex_unit is in-order & lossless), so this gate is a
@@ -297,19 +314,35 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
     // (the whole pipe momentarily shows out_valid=1 before it settles) that would otherwise
     // underflow pl_cnt (0 - N wraps to ~127), latch pl_room=0, and deadlock the front.
     wire pl_pop  = tu_ov && (pl_cnt != 0);
-    wire [PLW-1:0] pl_out = plf[pl_h];
+    wire pl_head_free = !pl_hd_v || pl_pop;       // head slot can take a new entry
+    wire pl_ram_has   = (pl_wp != pl_rp);         // an entry sits in the RAM body
+    wire [PLAW:0] pl_rp_nxt = (pl_head_free && pl_ram_has) ? pl_rp + 1'b1 : pl_rp;
+    // 1-deep write forwarding (see the read-during-write note above)
+    reg  [PLW-1:0] pl_pw_d; reg [PLAW:0] pl_pw_a; reg pl_pw_v;
+    wire [PLW-1:0] pl_src = (pl_pw_v && (pl_pw_a == pl_rp)) ? pl_pw_d : pl_q;
+    bram_sdp #(.W(PLW), .D(PLD)) u_plf (
+        .clk(clk), .we(pl_push), .waddr(pl_wp[PLAW-1:0]), .din(pl_in),
+        .re(1'b1),  .raddr(pl_rp_nxt[PLAW-1:0]), .q(pl_q));
+    wire [PLW-1:0] pl_out = pl_hd;
     assign pl_room = (pl_cnt < PLD-4);
 `ifndef SYNTHESIS
     reg dl_dfired = 1'b0, dl_xfired = 1'b0, dl_hw_fired = 1'b0;   // one-shot flags
-    reg [PLAW:0] pl_hwm = '0;                                     // TEMP measurement
-    final $display("=== PLFIFO %m: high-water = %0d of %0d (room gate at %0d) ===", pl_hwm, PLD, PLD-4);
     integer dl_npush = 0, dl_npop = 0;        // cumulative push/pop counters
 `endif
     always @(posedge clk) begin
-        if (reset) begin pl_h<=0; pl_t<=0; pl_cnt<=0; end
-        else begin
-            if (pl_push) begin plf[pl_t] <= pl_in; pl_t <= pl_t + 1'b1; end
-            if (pl_pop)  pl_h <= pl_h + 1'b1;
+        if (reset) begin
+            pl_wp<=0; pl_rp<=0; pl_cnt<=0; pl_hd_v<=1'b0; pl_pw_v<=1'b0;
+        end else begin
+            pl_pw_v <= pl_push; pl_pw_a <= pl_wp; pl_pw_d <= pl_in;
+            if (pl_push) pl_wp <= pl_wp + 1'b1;
+            // FWFT head maintenance: refill from the RAM body when one is queued,
+            // else take a same-cycle push directly (the RAM copy is skipped by
+            // advancing pl_rp past it), else go empty.
+            if (pl_head_free) begin
+                if (pl_ram_has)      begin pl_hd <= pl_src; pl_hd_v <= 1'b1; pl_rp <= pl_rp + 1'b1; end
+                else if (pl_push)    begin pl_hd <= pl_in;  pl_hd_v <= 1'b1; pl_rp <= pl_rp + 1'b1; end
+                else                 pl_hd_v <= 1'b0;
+            end
             pl_cnt <= pl_cnt + (pl_push?1:0) - (pl_pop?1:0);
 `ifndef SYNTHESIS
             // UNDERFLOW/OVERFLOW CATCH: a pop with the FIFO empty (tu_ov without a prior
@@ -345,11 +378,10 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
             // RAW HIGH-WATER (NO gate at all - not even dl_en): announce the first time pl_cnt
             // in THIS block ever exceeds 40. If this never prints but the dump shows cnt=97,
             // then the dump's pl_cnt is a DIFFERENT signal than this block updates (aliasing).
-            if (pl_cnt > pl_hwm) pl_hwm <= pl_cnt;      // TEMP measurement
             if (pl_cnt > 7'd40 && !dl_hw_fired) begin
                 dl_hw_fired <= 1'b1;
                 $display("[shade RAW] FIFO cnt exceeded 40: pl_cnt=%0d h=%0d t=%0d push=%b pop=%b t=%0t",
-                         pl_cnt, pl_h, pl_t, pl_push, pl_pop, $time);
+                         pl_cnt, pl_rp, pl_wp, pl_push, pl_pop, $time);
             end
 `endif
         end
@@ -443,8 +475,8 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
                 $display("  --- tex_unit handshake ---");
                 $display("  tu_issue=%b  tu_ready=%b  tu_ov=%b  (tu_ready=0 => tex_unit/cache wedged)", tu_issue, tu_ready, tu_ov);
                 $display("  --- COMB payload FIFO ---");
-                $display("  pl_cnt=%0d  pl_room=%b  pl_push=%b  pl_pop=%b  pl_h=%0d pl_t=%0d",
-                         pl_cnt, pl_room, pl_push, pl_pop, pl_h, pl_t);
+                $display("  pl_cnt=%0d  pl_room=%b  pl_push=%b  pl_pop=%b  pl_rp=%0d pl_wp=%0d",
+                         pl_cnt, pl_room, pl_push, pl_pop, pl_rp, pl_wp);
                 $display("    (pl_room=0 & pl_pop stuck 0 => tu_ov never fires => result swallowed)");
                 $display("  --- back ---");
                 $display("  cc_ov=%b  out_valid=%b", cc_ov, out_valid);
