@@ -180,11 +180,14 @@ module peel_tile_buffer import tsp_pkg::*; #(
     genvar gd;
     generate
         for (gd = 0; gd < NB; gd = gd + 1) begin : dcmp
-            // forward mode: the opaque comparator doubles as the Zceil test
-            // (candidate must beat the OPAQUE depth per the frag's DepthMode);
-            // its ob input muxes to tag2, which holds Zceil during the PT phase.
+            // forward mode: the opaque comparator doubles as the Zceil test; its
+            // ob input muxes to tag2, which holds Zceil during the PT phase. The
+            // DepthMode is FORCED to 6 (greater-or-equal): PT has no configurable
+            // depth mode - refsw2 forces mode=6 for PUNCHTHROUGH_PASS0/PASSN and
+            // ignores the ISP field, so honoring a game's junk DepthMode here
+            // would mis-compare against the opaque ceiling.
             isp_depth_cmp u_cmp (
-                .mode(b_mode),
+                .mode(b_fwd ? 3'd6 : b_mode),
                 .nw  (b_invw[32*gd +: 32]),
                 .ob  (b_fwd ? f_tag2(rdata, gd) : f_depth(rdata, gd)),
                 .pass(ras_pass_op[gd]));
