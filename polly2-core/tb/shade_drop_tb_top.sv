@@ -25,11 +25,13 @@ module shade_drop_tb_top import tsp_pkg::*; (
     output wire [10:0]  out_id,
     output wire [31:0]  out_argb,
 
-    // ---- DDR read ports, flattened (0 = tc data, 1 = vq codebook) ----
+    // ---- DDR read ports, flattened (0 = tc data, 1 = vq codebook, 2 = tc PREFETCH) ----
     output wire         rd0,    output wire [28:0] addr0, output wire [7:0] burst0,
     input  wire         busy0,  input  wire [63:0] dout0, input  wire dready0,
     output wire         rd1,    output wire [28:0] addr1, output wire [7:0] burst1,
-    input  wire         busy1,  input  wire [63:0] dout1, input  wire dready1
+    input  wire         busy1,  input  wire [63:0] dout1, input  wire dready1,
+    output wire         rd2,    output wire [28:0] addr2, output wire [7:0] burst2,
+    input  wire         busy2,  input  wire [63:0] dout2, input  wire dready2
 );
     wire [31:0] a_ddx [0:9];
     wire [31:0] a_ddy [0:9];
@@ -53,13 +55,15 @@ module shade_drop_tb_top import tsp_pkg::*; (
             pal_data[gi] <= {pal_addr[gi], pal_addr[gi], pal_addr[gi], 2'b11};
     end endgenerate
 
-    ddr_rd_req_t  ddr_req  [0:1];
-    ddr_rd_resp_t ddr_resp [0:1];
+    ddr_rd_req_t  ddr_req  [0:2];
+    ddr_rd_resp_t ddr_resp [0:2];
     assign rd0 = ddr_req[0].rd; assign addr0 = ddr_req[0].addr; assign burst0 = ddr_req[0].burst;
     assign rd1 = ddr_req[1].rd; assign addr1 = ddr_req[1].addr; assign burst1 = ddr_req[1].burst;
+    assign rd2 = ddr_req[2].rd; assign addr2 = ddr_req[2].addr; assign burst2 = ddr_req[2].burst;
     always_comb begin
         ddr_resp[0].busy = busy0; ddr_resp[0].dout = dout0; ddr_resp[0].dready = dready0;
         ddr_resp[1].busy = busy1; ddr_resp[1].dout = dout1; ddr_resp[1].dready = dready1;
+        ddr_resp[2].busy = busy2; ddr_resp[2].dout = dout2; ddr_resp[2].dready = dready2;
     end
 
     tsp_shade_v2_pp #(.IDW(11)) u_sh (

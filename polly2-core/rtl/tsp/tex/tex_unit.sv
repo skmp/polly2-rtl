@@ -8,7 +8,7 @@
 //                           fbpp_shr/tex_addr/vq_addr + decode config)
 //   tex_addroffsgen_ib(1) : 4 corner relative texel offsets
 //   tex_add_mip (comb)    : + mip, *fbpp -> 4 byte offsets
-//   tex_fetch4_ob (~3,stall): 4 raw 64-bit words (owns the 2 caches)
+//   tex_fetch4_ob (~5,stall): 4 raw 64-bit words (owns the 2 pipelined caches)
 //   tex_decode x4 (3)     : 4 raw words -> 4 ARGB texels (injected palette, x4 ports)
 //   tex_filter (6)        : bilinear/nearest blend -> 1 ARGB texel
 //
@@ -58,8 +58,8 @@ module tex_unit import tsp_pkg::*; #(
     input      [31:0] pal_data [0:3],
 
     // ---- two DDR read ports to the parent arbiter ([0]=tc, [1]=vq) ----
-    output ddr_rd_req_t  ddr_req  [0:1],
-    input  ddr_rd_resp_t ddr_resp [0:1]
+    output ddr_rd_req_t  ddr_req  [0:2],
+    input  ddr_rd_resp_t ddr_resp [0:2]
 );
     genvar gi;
     integer d;
