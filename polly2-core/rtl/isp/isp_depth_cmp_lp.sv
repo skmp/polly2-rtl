@@ -42,7 +42,13 @@ module isp_depth_cmp_lp (
     input      [31:0] pb2,      // tagBufferB   (last-rendered tag)
     input             valid,    // tagStatus.valid (staged this pass)
     output reg        pass,     // write fragment (zb<-nw, pb<-tag, valid<-1)
-    output reg        more      // MoreToDraw feedback
+    output reg        more,     // MoreToDraw feedback
+    // raw comparator taps for the FORWARD (punch-through resolve) compare in
+    // peel_tile_buffer: with the PT plane mapping zb=working-best, zb2=forward
+    // boundary, these are exactly `nearer than best` and `behind boundary` - the
+    // forward accept reuses them instead of instantiating new comparators.
+    output            o_nw_gt_zb,   // nw >  zb
+    output            o_nw_lt_zb2   // nw <  zb2
 );
     // signed-float greater-than a > b (no NaN/inf; DaZ handled by ==0 test),
     // identical to isp_depth_cmp.
@@ -76,6 +82,8 @@ module isp_depth_cmp_lp (
     wire nw_lt_zb2 = fgt(zb2, nw);          // invW <  zb2
     wire nw_eq_zb2 = feq(nw, zb2);          // invW == zb2
     wire pb2_valid = (pb2 != 32'hFFFFFFFF); // last-rendered tag is real
+    assign o_nw_gt_zb  = nw_gt_zb;
+    assign o_nw_lt_zb2 = nw_lt_zb2;
 
     always @* begin
         pass = 1'b0;

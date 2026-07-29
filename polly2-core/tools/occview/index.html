@@ -538,7 +538,8 @@ function updateSvg() {
   ann('PQ',      `${fmtVal(8)}/8`);
   ann('RASTER',  `${fmtVal(5)}  tile(${fmtVal(1)},${fmtVal(2)})`);
   const depthOp = { CLEAR_WR:'CLEAR', PEEL_BUF_RUN:'PB-SWAP', ZK_INV:'ZK-INV',
-                    PEEL_BUF:'SWAP-WAIT' }[fmtVal(0)] || '';
+                    PEEL_BUF:'SWAP-WAIT', PT_BUF:'PT-WAIT', PT_INIT:'PT-SEED',
+                    PT_SWAP:'PT-SWAP', PT_FIX:'PT-FIX' }[fmtVal(0)] || '';
   ann('DEPTH',   `${depthOp} ti_ready=${fmtVal(20)}`);
   const spnStall = valAtCycle(cursor, 24);
   const stallTxt = spnStall > 0
