@@ -87,6 +87,9 @@
       <span><i class="swatch" style="background:var(--c-under)"></i>underflow (waiting for data)</span>
       <span><i class="swatch" style="background:var(--c-busy)"></i>busy</span>
       <span><i class="swatch" style="background:var(--c-over)"></i>overflow (blocked)</span>
+      <span style="opacity:.85">| FIFOs:
+        <i class="swatch" style="width:52px;background:linear-gradient(90deg,#995a1c,#8baf20,#24c624,#dcdc14,#f20000)"></i>
+        empty&rarr;half&rarr;full</span>
     </span>
     <span class="hint">wheel: zoom &nbsp; drag: pan &nbsp; click: seek &nbsp; &larr;/&rarr;: step change &nbsp; shift+&larr;/&rarr;: &plusmn;1% </span>
   </div>
@@ -113,6 +116,7 @@ const DB = {
   units: [], vals: [], enums: {},           // header
   sCyc: null, sLo: null, sHi: null, nS: 0,  // state-change records
   vCyc: [], vVal: [],                       // per-value-id change arrays
+  fifos: [],                                // unit -> {vid, depth} for queue tracks
   marks: [],                                // {c, t:'R'|'D'}
   total: 0,
   order: [],                                // track DISPLAY order (row -> unit idx)
@@ -132,6 +136,33 @@ function computeOrder() {
 const NSTATE = 3;
 const COLORS = ['#e2b93d', '#3fa34d', '#d64541'];   // under, busy, over
 const IDLE = '#2a2a30';
+// FIFO fill ramp: EMPTY = orange (downstream starving), HALF = green (healthy
+// flow), FULL = red (upstream backpressured). Hue walks 30 -> 120 -> 0 so both
+// failure modes are warm and the healthy middle is green.
+function fifoColor(f) {
+  if (f < 0) return IDLE;
+  if (f > 1) f = 1;
+  // Hue walks 33 (orange) -> 120 (green) -> 0 (red). EMPTY must read as clearly
+  // ORANGE, so it stays bright/vivid; fill DARKENS toward a deep saturated red.
+  // (Hue alone is ambiguous - the descent re-crosses orange near 7/8 full - so
+  // the brightness ramp is what separates "empty" from "nearly full".)
+  const h  = f <= 0.5 ? 33 + f * 174 : 120 - (f - 0.5) * 240;
+  const sa = f <= 0.5 ? 0.95 - f * 0.30 : 0.80 + (f - 0.5) * 0.40;
+  const v  = f <= 0.5 ? 0.97 - f * 0.20 : 0.87 - (f - 0.5) * 0.20;
+  return hsv2css(h, Math.min(sa, 1), Math.min(v, 1));
+}
+function hsv2css(h, s, v) {
+  const c = v * s, x = c * (1 - Math.abs(((h / 60) % 2) - 1)), m = v - c;
+  let r, g, b;
+  if      (h <  60) { r = c; g = x; b = 0; }
+  else if (h < 120) { r = x; g = c; b = 0; }
+  else if (h < 180) { r = 0; g = c; b = x; }
+  else if (h < 240) { r = 0; g = x; b = c; }
+  else if (h < 300) { r = x; g = 0; b = c; }
+  else              { r = c; g = 0; b = x; }
+  const q = (n) => Math.round((n + m) * 255).toString(16).padStart(2, '0');
+  return '#' + q(r) + q(g) + q(b);
+}
 
 function stateOf(lo, hi, u) {
   return u < 16 ? (lo >>> (2*u)) & 3 : (hi >>> (2*(u-16))) & 3;
@@ -153,6 +184,87 @@ function valAtCycle(c, vid) {
   const i = idxAt(a, a.length, c);
   return i < 0 ? null : DB.vVal[vid][i];
 }
+// Per-column HISTOGRAM of a queue's fill level: time spent at each level, so a
+// zoomed-out column can be drawn as a proportional STACK (same treatment the
+// state tracks get) instead of collapsing to a mean - a queue that flips between
+// empty and full must not look half-full. Returns W*NB time weights.
+function binLevels(vid, t0, t1, W, depth, NB) {
+  const a = DB.vCyc[vid], b = DB.vVal[vid];
+  if (!a || !a.length) return null;
+  const out = new Float64Array(W * NB);
+  const span = t1 - t0;
+  const bucket = (v) => {
+    let k = depth > 0 ? Math.round(v / depth * (NB - 1)) : 0;
+    return k < 0 ? 0 : (k > NB - 1 ? NB - 1 : k);
+  };
+  let i = idxAt(a, a.length, t0); if (i < 0) i = 0;
+  for (; i < a.length; i++) {
+    const c0 = Math.max(a[i], t0);
+    const c1 = Math.min(i+1 < a.length ? a[i+1] : DB.total, t1);
+    if (c0 >= t1) break;
+    if (c1 <= c0) continue;
+    const k = bucket(b[i]);
+    let px0 = Math.floor((c0 - t0) / span * W);
+    let px1 = Math.ceil ((c1 - t0) / span * W);
+    if (px1 > W) px1 = W; if (px0 < 0) px0 = 0;
+    if (px1 - px0 === 1) out[px0 * NB + k] += (c1 - c0);
+    else for (let px = px0; px < px1; px++) {
+      const pc0 = t0 + px / W * span, pc1 = t0 + (px+1) / W * span;
+      const ov = Math.min(c1, pc1) - Math.max(c0, pc0);
+      if (ov > 0) out[px * NB + k] += ov;
+    }
+  }
+  return out;
+}
+// Time spent in each occupancy state over [t0,t1) - the numbers behind a
+// zoomed-out column's stack, for the hover readout.
+function stateStats(u, t0, t1) {
+  if (t1 <= t0) t1 = t0 + 1;
+  const acc = [0, 0, 0];
+  let wt = 0;
+  let i = idxAt(DB.sCyc, DB.nS, t0); if (i < 0) i = 0;
+  for (; i < DB.nS; i++) {
+    const c0 = Math.max(DB.sCyc[i], t0);
+    const c1 = Math.min(i+1 < DB.nS ? DB.sCyc[i+1] : DB.total, t1);
+    if (c0 >= t1) break;
+    if (c1 <= c0) continue;
+    acc[stateOf(DB.sLo[i], DB.sHi[i], u)] += (c1 - c0);
+    wt += (c1 - c0);
+  }
+  return wt ? { acc, wt } : null;
+}
+// percentages that always total 100 (largest share absorbs the rounding drift)
+function pctSplit(parts, total) {
+  const raw = parts.map(v => v / total * 100);
+  const r = raw.map(v => Math.round(v));
+  const d = 100 - r.reduce((a, b) => a + b, 0);
+  if (d !== 0) r[raw.indexOf(Math.max(...raw))] += d;
+  return r;
+}
+// min / time-weighted mean / max of a value channel over [t0,t1) - the numbers
+// behind a zoomed-out FIFO column, for the hover readout.
+function statsOfValue(vid, t0, t1) {
+  const a = DB.vCyc[vid], b = DB.vVal[vid];
+  if (!a || !a.length) return null;
+  if (t1 <= t0) t1 = t0 + 1;
+  let i = idxAt(a, a.length, t0); if (i < 0) i = 0;
+  let mn = Infinity, mx = -Infinity, sum = 0, wt = 0;
+  for (; i < a.length; i++) {
+    const c0 = Math.max(a[i], t0);
+    const c1 = Math.min(i+1 < a.length ? a[i+1] : DB.total, t1);
+    if (c0 >= t1) break;
+    if (c1 <= c0) continue;
+    const v = b[i];
+    if (v < mn) mn = v;
+    if (v > mx) mx = v;
+    sum += v * (c1 - c0); wt += (c1 - c0);
+  }
+  if (!wt) {                                   // no change lands inside: held value
+    const v = valAtCycle(t0, vid);
+    return v == null ? null : { min: v, avg: v, max: v };
+  }
+  return { min: mn, avg: sum / wt, max: mx };
+}
 function enumName(vid, v) {
   const e = DB.enums[vid];
   return e && (v in e) ? e[v] : String(v);
@@ -160,7 +272,7 @@ function enumName(vid, v) {
 
 // ============================== parser ==============================
 function parseLog(text, done, progress) {
-  const units = [], vals = [], enums = {};
+  const units = [], vals = [], enums = {}, fifos = [];
   let sCyc = new Float64Array(1<<16), sLo = new Uint32Array(1<<16),
       sHi = new Uint32Array(1<<16), nS = 0;
   const vCyc = [], vVal = [];
@@ -217,6 +329,9 @@ function parseLog(text, done, progress) {
           const t = line.split(' '); units[+t[1]] = t[2];
         } else if (c0 === 86) {                     // 'V i name'
           const t = line.split(' '); vals[+t[1]] = t[2];
+        } else if (c0 === 70) {                     // 'F unit vid depth'
+          const t = line.split(' ');
+          fifos[+t[1]] = { vid: +t[2], depth: +t[3] };
         } else if (c0 === 69) {                     // 'E vid a:N,b:N'
           const t = line.split(' '); const m = {};
           for (const kv of t[2].split(',')) { const [k, n] = kv.split(':'); m[+k] = n; }
@@ -231,7 +346,7 @@ function parseLog(text, done, progress) {
     }
     progress(pos / len);
     if (pos < len) { setTimeout(step, 0); return; }
-    DB.units = units; DB.vals = vals; DB.enums = enums;
+    DB.units = units; DB.vals = vals; DB.enums = enums; DB.fifos = fifos;
     DB.sCyc = sCyc; DB.sLo = sLo; DB.sHi = sHi; DB.nS = nS;
     DB.vCyc = vCyc.map(a => a ? Float64Array.from(a) : null);
     DB.vVal = vVal.map(a => a ? Float64Array.from(a) : null);
@@ -286,22 +401,97 @@ function paintBins(ctx, t0, t1, x0, W, rowH, rowGap, topY) {
     const y = topY + r * (rowH + rowGap);
     ctx.fillStyle = IDLE;
     ctx.fillRect(x0, y, W, rowH);
+    // FIFO units are drawn as a FILL LEVEL (orange=empty .. green=half ..
+    // red=full) instead of an under/busy/over state: for a queue, "empty" and
+    // "full" are the two interesting failures and both are invisible in a
+    // 3-state view. Colours are quantised to 5% so equal columns merge into runs.
+    const fifo = DB.fifos && DB.fifos[u];
+    if (fifo) {
+      const NB = Math.min(fifo.depth + 1, 17);          // one bucket per level
+      const hist = binLevels(fifo.vid, t0, t1, W, fifo.depth, NB);
+      let fRunStart = 0, fRunCol = null;
+      const flushF = (pxEnd) => {
+        if (fRunCol !== null && fRunCol !== IDLE && pxEnd > fRunStart) {
+          ctx.fillStyle = fRunCol; ctx.fillRect(x0+fRunStart, y, pxEnd-fRunStart, rowH);
+        }
+        fRunCol = null;
+      };
+      for (let px = 0; px < W; px++) {
+        let tot = 0, nz = 0, only = -1;
+        if (hist) for (let k = 0; k < NB; k++) {
+          const v = hist[px*NB + k];
+          if (v > 0) { tot += v; nz++; only = k; }
+        }
+        if (tot <= 0) {                                  // no samples here
+          if (fRunCol !== IDLE) { flushF(px); fRunStart = px; fRunCol = IDLE; }
+          continue;
+        }
+        if (nz === 1) {                                  // one level -> solid run
+          const col = fifoColor(only / (NB - 1));
+          if (col !== fRunCol) { flushF(px); fRunStart = px; fRunCol = col; }
+          continue;
+        }
+        // mixed: proportional stack, EMPTY at the top -> FULL at the bottom
+        // (matches the state tracks' under/busy/over ordering)
+        flushF(px);
+        let yy = y, acc = 0;
+        for (let k = 0; k < NB; k++) {
+          const v = hist[px*NB + k]; if (v <= 0) continue;
+          acc += v;
+          const yEnd = (acc === tot) ? y + rowH : y + Math.round(acc / tot * rowH);
+          if (yEnd > yy) {
+            ctx.fillStyle = fifoColor(k / (NB - 1));
+            ctx.fillRect(x0+px, yy, 1, yEnd-yy);
+          }
+          yy = yEnd;
+        }
+        fRunStart = px + 1;
+      }
+      flushF(W);
+      continue;
+    }
+    // A pixel column can cover many cycles when zoomed out. A column whose cycles
+    // are ALL one state is drawn as a solid run (runs are merged across columns,
+    // so a zoomed-in view is one fillRect per state change). A MIXED column is
+    // drawn as a vertical STACK proportional to the time in each state, ordered
+    // under / busy / over top-to-bottom - so 5 under, 3 busy, 2 over reads as
+    // 50% yellow over 30% green over 20% red instead of hiding the minority
+    // states behind whichever one happened to dominate.
     let runStart = 0, runColor = null;
+    const flushRun = (pxEnd) => {
+      if (runColor !== null && runColor !== IDLE && pxEnd > runStart) {
+        ctx.fillStyle = runColor; ctx.fillRect(x0+runStart, y, pxEnd-runStart, rowH);
+      }
+      runColor = null;
+    };
     for (let px = 0; px < W; px++) {
       const o = px * NU * NSTATE + u * NSTATE;
-      let best = -1, bv = 0;
-      for (let s = 0; s < NSTATE; s++) if (bins[o+s] > bv) { bv = bins[o+s]; best = s; }
-      const col = best < 0 ? IDLE : COLORS[best];
-      if (col !== runColor) {
-        if (runColor !== null && runColor !== IDLE) {
-          ctx.fillStyle = runColor; ctx.fillRect(x0+runStart, y, px-runStart, rowH);
-        }
-        runStart = px; runColor = col;
+      const b0 = bins[o], b1 = bins[o+1], b2 = bins[o+2];
+      const tot = b0 + b1 + b2;
+      let col;
+      if (tot <= 0)            col = IDLE;              // no samples in this column
+      else if (b1 === 0 && b2 === 0) col = COLORS[0];
+      else if (b0 === 0 && b2 === 0) col = COLORS[1];
+      else if (b0 === 0 && b1 === 0) col = COLORS[2];
+      else col = null;                                  // mixed -> stack
+      if (col !== null) {
+        if (col !== runColor) { flushRun(px); runStart = px; runColor = col; }
+        continue;
       }
+      flushRun(px);                                     // stacks break the run
+      let yy = y, acc = 0;
+      for (let s = 0; s < NSTATE; s++) {
+        const v = bins[o+s]; if (v <= 0) continue;
+        acc += v;
+        // accumulate before rounding so the segments always tile rowH exactly
+        const yEnd = (s === NSTATE-1 || acc === tot) ? y + rowH
+                                                     : y + Math.round(acc / tot * rowH);
+        if (yEnd > yy) { ctx.fillStyle = COLORS[s]; ctx.fillRect(x0+px, yy, 1, yEnd-yy); }
+        yy = yEnd;
+      }
+      runStart = px + 1;
     }
-    if (runColor !== null && runColor !== IDLE) {
-      ctx.fillStyle = runColor; ctx.fillRect(x0+runStart, y, W-runStart, rowH);
-    }
+    flushRun(W);
   }
 }
 
@@ -402,7 +592,8 @@ const LAYOUT = {
     { id:'MDQ',     u:13, x:140, y:236, w: 54, h: 38, label:'MDQ' },
     { id:'READER',  u:14, x:214, y:236, w: 84, h: 38, label:'TSP reader' },
     { id:'SHADE',   u:15, x:318, y:236, w: 84, h: 38, label:'shade pipe' },
-    { id:'TEX',     u:16, x:318, y:290, w: 84, h: 26, label:'tex unit' },
+    { id:'TEX',     u:16, x:318, y:290, w: 60, h: 26, label:'tex unit' },
+    { id:'TEXQ',    u:20, x:388, y:290, w: 44, h: 26, label:'TEXQ' },
     { id:'BLEND',   u:17, x:422, y:236, w: 70, h: 38, label:'blend' },
     { id:'COLBUF',  u:null,x:512, y:236, w: 54, h: 38, label:'col buf' },
     { id:'VO',      u:18, x:512, y:310, w: 54, h: 38, label:'VO' },
@@ -417,7 +608,7 @@ const LAYOUT = {
     ['DEPTH','SPANNER','wrap'],
     ['SPANNER','SFETCH','vdown'], ['SFETCH','SSETUP'], ['SSETUP','SPANNER','vup'],
     ['SPANNER','MDQ'], ['MDQ','READER'], ['READER','SHADE'], ['SHADE','BLEND'],
-    ['SHADE','TEX','v'], ['BLEND','COLBUF'], ['COLBUF','VO','v'], ['VO','FB','v'],
+    ['SHADE','TEXQ','v'], ['TEXQ','TEX'], ['BLEND','COLBUF'], ['COLBUF','VO','v'], ['VO','FB','v'],
     ['DDR','REGION','mem'], ['DDR','OLWALK','mem'], ['DDR','ITER','mem'],
     ['DDR','SFETCH','mem'], ['DDR','TEX','mem'],
   ],
@@ -551,6 +742,7 @@ function updateSvg() {
   ann('MDQ',     `${fmtVal(11)}/8 sp=${fmtVal(12)}`);
   ann('READER',  `${fmtVal(13)}`);
   ann('SHADE',   `fifo=${fmtVal(18)}`);
+  ann('TEXQ',    `${fmtVal(27)}/32`);
   ann('COLBUF',  `full=${fmtVal(21)}`);
   ann('VO',      `tile(${fmtVal(14)},${fmtVal(15)})`);
   ann('DDR',     `q=${fmtVal(16)} owner=${fmtVal(17)}`);
@@ -620,9 +812,35 @@ window.addEventListener('mousemove', ev => {
     if (row >= 0 && row < nUnits() && ev.clientX - rect.left > GUTTER) {
       const u = DB.order[row] ?? row;
       const t = Math.round(trackTime(ev));
-      const s = stateAtCycle(t, u);
-      tt.textContent = `${DB.units[u]} @ ${t.toLocaleString()}\n` +
-        (s < 0 ? 'no data' : ['UNDERFLOW (waiting for data)','BUSY','OVERFLOW (blocked)'][s]);
+      // one pixel column covers `cpp` cycles; when that is more than one, a
+      // single sample misrepresents the column - report the same breakdown the
+      // stack is drawn from, over exactly the cycles the column represents.
+      const W = rect.width - GUTTER;
+      const cpp = (view.t1 - view.t0) / Math.max(1, W);
+      const zoomed = cpp <= 1.0001;
+      const lo = t - cpp/2, hi = t + cpp/2;
+      const span = zoomed ? '' : `   (${Math.round(cpp).toLocaleString()} cyc/px)`;
+      const fifo = DB.fifos && DB.fifos[u];
+      if (fifo) {
+        const st = statsOfValue(fifo.vid, lo, hi);
+        const pct = (v) => Math.round(v / fifo.depth * 100) + '%';
+        tt.textContent = `${DB.units[u]} @ ${t.toLocaleString()}  depth ${fifo.depth}${span}\n` +
+          (!st ? 'no data'
+               : zoomed
+                 ? `fill ${st.max} / ${fifo.depth}  (${pct(st.max)})`
+                 : `fill min ${st.min}  avg ${st.avg.toFixed(1)}  max ${st.max}\n` +
+                   `     ${pct(st.min)} .. ${pct(st.avg)} .. ${pct(st.max)}`);
+      } else {
+        const s = stateAtCycle(t, u);
+        const ss = zoomed ? null : stateStats(u, lo, hi);
+        tt.textContent = `${DB.units[u]} @ ${t.toLocaleString()}${span}\n` +
+          (ss ? (() => {
+                  const p = pctSplit(ss.acc, ss.wt);
+                  return `underflow ${p[0]}%   busy ${p[1]}%   overflow ${p[2]}%`;
+                })()
+              : s < 0 ? 'no data'
+                      : ['UNDERFLOW (waiting for data)','BUSY','OVERFLOW (blocked)'][s]);
+      }
       tt.style.display = 'block';
       tt.style.left = (ev.clientX + 14) + 'px';
       tt.style.top  = (ev.clientY + 12) + 'px';
