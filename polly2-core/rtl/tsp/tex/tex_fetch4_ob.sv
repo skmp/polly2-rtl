@@ -200,16 +200,22 @@ module tex_fetch4_ob import tsp_pkg::*; #(
     assign la_faddr = flq[0];
     wire   flq_pop  = la_fill && !tc_pf_fbusy;   // receiver takes or dup-drops it now
 
-    // ---- probe reply -> fill CANDIDATE register ----
-    // pf_hit_r feeds ONLY this stage (priority select + 29b mux -> cand_*). Keeping
-    // the hit bits out of the grant/pointer cone matters: routed straight into
-    // wk_stall they re-created a register->every-RAM-address-port cone (~-5.8ns).
+    // ---- probe reply -> fill CANDIDATE, in TWO register stages ----
+    // pf_hit_r feeds ONLY the first stage, and only 3 bits of it: cm_v (any miss)
+    // and cm_sel (which corner). Keeping the hit bits out of the grant/pointer cone
+    // matters (routed into wk_stall they re-created a register->every-RAM-address-
+    // port cone, ~-5.8ns), and keeping them out of the WIDE mux matters too: the
+    // 29-bit corner select done combinationally off pf_hit_r was the last failing
+    // family (~-1.3ns of routing from the cache's hit registers into 29 mux
+    // selects). Now the wide mux runs a cycle later with a REGISTERED 2-bit select.
     wire [3:0] la_miss  = ~tc_pf_hit;
     wire [1:0] la_sel   = la_miss[0] ? 2'd0 : la_miss[1] ? 2'd1
                         : la_miss[2] ? 2'd2 : 2'd3;
-    reg  [4*29-1:0] wp1_addr, wp2_addr;        // granted-probe address pipe
+    reg  [4*29-1:0] wp1_addr, wp2_addr, wp3_addr;  // granted-probe address pipe
     reg             wp1_v, wp2_v;
-    reg             cand_v;
+    reg             cm_v;                      // stage 1: a corner missed...
+    reg  [1:0]      cm_sel;                    // ...and which one (registered select)
+    reg             cand_v;                    // stage 2: candidate address resolved
     reg  [28:0]     cand_a;
     // dedup + push a cycle later, all off registers: drop a candidate whose LINE is
     // already queued (two nearby entries missing the same line would otherwise burn
@@ -219,11 +225,12 @@ module tex_fetch4_ob import tsp_pkg::*; #(
                    || (flq_n >= 3'd3 && flq[2][28:2] == cand_a[28:2])
                    || (flq_n >= 3'd4 && flq[3][28:2] == cand_a[28:2]);
     wire   flq_take = cand_v && !flq_dup && (flq_n != 3'd4 || flq_pop);
-    // stall = REGISTERED operands only (skid occupancy, candidate in flight,
-    // receiver busy). It reacts one cycle later than the comb version, so up to 3
-    // pushes can still arrive after it asserts (2 in-flight probes + 1 candidate) -
-    // that is exactly why the skid is 4 deep.
-    wire   wk_stall = (flq_n != 3'd0) || cand_v || tc_pf_fbusy;
+    // stall = REGISTERED operands only (skid occupancy, candidate in flight at
+    // either stage, receiver busy). It reacts one cycle later than a comb version
+    // would, so up to 3 pushes can still arrive after it asserts (2 in-flight
+    // probes + 1 candidate) - that is exactly why the skid is 4 deep. cm_v asserts
+    // it at the same edge cand_v alone used to, so the lag analysis is unchanged.
+    wire   wk_stall = (flq_n != 3'd0) || cm_v || cand_v || tc_pf_fbusy;
 
     assign la_probe = la_q_ok && la_tex && tc_pf_busy && !wk_stall;
     wire   la_gnt   = tc_pf_gnt;               // only ever high when la_probe is
@@ -243,9 +250,14 @@ module tex_fetch4_ob import tsp_pkg::*; #(
             // granted-probe address pipe (matches the cache's 2-cycle probe reply)
             wp1_v <= la_gnt;  wp1_addr <= la_waddr;
             wp2_v <= wp1_v;   wp2_addr <= wp1_addr;
-            // fill candidate (probe reply that found a miss)
-            cand_v <= tc_pf_ack && (la_miss != 4'd0);
-            cand_a <= wp2_addr[29*la_sel +: 29];
+            wp3_addr <= wp2_addr;
+            // fill candidate stage 1: WHETHER a corner missed + WHICH (3 bits off
+            // pf_hit_r, nothing wider)
+            cm_v   <= tc_pf_ack && (la_miss != 4'd0);
+            cm_sel <= la_sel;
+            // fill candidate stage 2: the wide corner mux, registered select
+            cand_v <= cm_v;
+            cand_a <= wp3_addr[29*cm_sel +: 29];
             // fill skid: shift down on pop, append the taken candidate (the append
             // is written after the shift so it wins on the overlapping index)
             if (flq_pop)
