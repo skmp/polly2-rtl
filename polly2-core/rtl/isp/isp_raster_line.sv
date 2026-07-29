@@ -57,6 +57,11 @@ module isp_raster_line #(
     // echo of this chunk's tile coords (aligned with out_valid) so a streaming
     // consumer can address the depth/tag buffer for the results as they emerge,
     // back-to-back, without stalling the issue side.
+    // per-issue sideband index: rides the pipe with x/y so a chaining consumer
+    // can look up the owning triangle's identity (tag/mode) at exit time even
+    // when several triangles' chunks are in flight back-to-back.
+    input      [1:0]          qi,
+    output reg [1:0]          out_qi,
     output reg [4:0]          out_x,
     output reg [4:0]          out_y
 );
@@ -73,6 +78,7 @@ module isp_raster_line #(
     // x_base / y travel the full LAT-deep pipe so they arrive with out_valid.
     reg [4:0] xpipe [0:LAT-1];
     reg [4:0] ypipe [0:LAT-1];
+    reg [1:0] qpipe [0:LAT-1];
     integer pp;
     always @(posedge clk) begin
         if (reset) begin vpipe <= '0; ppipe <= '0; end
@@ -80,9 +86,10 @@ module isp_raster_line #(
             vpipe <= {vpipe[LAT-2:0], in_valid};
             ppipe <= {ppipe[LAT-2:0], (in_valid && probe)};
         end
-        xpipe[0] <= x_base; ypipe[0] <= y;
+        xpipe[0] <= x_base; ypipe[0] <= y; qpipe[0] <= qi;
         for (pp = 1; pp < LAT; pp = pp + 1) begin
             xpipe[pp] <= xpipe[pp-1]; ypipe[pp] <= ypipe[pp-1];
+            qpipe[pp] <= qpipe[pp-1];
         end
     end
     // PROBE flag must travel WITH the data so the witness selects fire at the right stage
@@ -173,10 +180,16 @@ module isp_raster_line #(
         fdown = (f[30:0] == 31'd0) ? 32'h80000001
               : f[31] ? (f + 32'd1) : (f - 32'd1);
     endfunction
+    // tl is consumed HERE, 2 cycles after issue - it must ride the pipe like
+    // the coefficients' staged copies, else a back-to-back triangle chain (the
+    // consumer re-latches its inputs 1 cycle after the last issue) corrupts the
+    // in-flight chunk's top-left rule (exact-on-edge pixels flip).
+    reg [3:0]  tl_1, tl_2;
     reg [31:0] eb1_3,eb2_3,eb3_3,eb4_3,wbase_3;
     always @(posedge clk) begin
-        eb1_3<=tl[0]?eb1:fdown(eb1); eb2_3<=tl[1]?eb2:fdown(eb2);
-        eb3_3<=tl[2]?eb3:fdown(eb3); eb4_3<=tl[3]?eb4:fdown(eb4);
+        tl_1 <= tl; tl_2 <= tl_1;
+        eb1_3<=tl_2[0]?eb1:fdown(eb1); eb2_3<=tl_2[1]?eb2:fdown(eb2);
+        eb3_3<=tl_2[2]?eb3:fdown(eb3); eb4_3<=tl_2[3]?eb4:fdown(eb4);
         wbase_3<=wbase;
     end
 
@@ -251,6 +264,7 @@ module isp_raster_line #(
         out_valid    <= vpipe[LAT-1] & ~ppipe[LAT-1];
         out_x        <= xpipe[LAT-1];
         out_y        <= ypipe[LAT-1];
+        out_qi       <= qpipe[LAT-1];
         inside_mask  <= im0;
         invw_flat    <= iw0;
         // probe_reject/probe_valid align with the (suppressed) out_valid slot; probe_valid
