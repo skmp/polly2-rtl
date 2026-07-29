@@ -3309,7 +3309,7 @@ module peel_core import tsp_pkg::*; #(
     //   R <cycle>                 render start (go)
     //   @<cycle> <hex> [v<i>=<n> ...]   state vector + CHANGED values only
     //   D <cycle>                 render done
-    localparam integer OCC_NU = 20;
+    localparam integer OCC_NU = 21;
     localparam [1:0] OC_U = 2'd0, OC_B = 2'd1, OC_O = 2'd2;
 
     // --- geometry front end ---
@@ -3325,7 +3325,7 @@ module peel_core import tsp_pkg::*; #(
     // --- ISP setup / raster ---
     wire [1:0] oc_setup  = (su_out_valid && pq_full) ? OC_O
                          : (su_busy || su_out_valid) ? OC_B
-                         : (fq_out_valid && pq_count > 5'd4) ? OC_O : OC_U;
+                         : (fq_out_valid && pq_full) ? OC_O : OC_U;
     wire [1:0] oc_pq     = pq_full ? OC_O : pq_empty ? OC_U : OC_B;
     // idle raster is BLOCKED (not starved) while a tile-buffer bulk op owns the
     // depth/tag RAM ports (CLEAR / PeelBuffers swap / z_keep invalidate) or the
@@ -3366,10 +3366,23 @@ module peel_core import tsp_pkg::*; #(
                           : (tsp_st != R_IDLE) ? OC_B : OC_U;
     wire [1:0] oc_shade   = pp_stall ? OC_O
                           : (pp_in_valid || pp_out_valid || u_shade.iv_ov) ? OC_B : OC_U;
-    // TEX: during a miss-fill, BUSY while beats stream, UNDERFLOW while waiting for the
-    // DDR channel grant (contention). When ready, BUSY only while pixels pass through.
-    wire [1:0] oc_tex     = !u_shade.tu_ready ? ((d_oc[0] != 2'd0 || d_oc[1] != 2'd0) ? OC_B : OC_U)
+    // TEX, all three states (NB: tu_ready is NOT "cache ready" - it is the fetch's
+    // in_ready, which is low exactly when the pre-cache request FIFO is FULL, i.e.
+    // the unit is backpressuring the shader):
+    //   UNDERFLOW - a cache is frozen on a DDR fill: the texel asked for is not
+    //               there yet. This is the real "waiting for data".
+    //   OVERFLOW  - request FIFO full: the unit has work it cannot retire fast
+    //               enough and is refusing input.
+    //   BUSY      - texels actually passing through.
+    wire tex_filling = !u_shade.u_tex.u_fetch.tc_ready
+                    || !u_shade.u_tex.u_fetch.vq_ready;
+    wire [1:0] oc_tex     = !u_shade.tu_ready   ? OC_O
+                          : tex_filling         ? OC_U
                           : (u_shade.tu_ov || u_shade.iv_ov) ? OC_B : OC_U;
+    // TEXFQ: the fetch's 32-deep pre-cache request FIFO, drawn by the viewer as a
+    // fill level (F record below); the state lane is the trivial queue mapping.
+    wire [5:0] texfq_n    = u_shade.u_tex.u_fetch.fq_cnt;
+    wire [1:0] oc_texfq   = (texfq_n == 6'd32) ? OC_O : (texfq_n == 6'd0) ? OC_U : OC_B;
     wire [1:0] oc_blend   = (cb_valid || cb2_valid || pp_out_valid) ? OC_B : OC_U;
     wire [1:0] oc_vo      = (vst != VO_IDLE) ? ((fbw_req.we && fbw_resp.busy) ? OC_O : OC_B)
                                              : OC_U;
@@ -3378,11 +3391,12 @@ module peel_core import tsp_pkg::*; #(
 
     // unit 0 in bits [1:0] .. unit 19 in bits [39:38] (matches the U directory below)
     wire [2*OCC_NU-1:0] occ_vec = {
+        oc_texfq,
         oc_ddr, oc_vo, oc_blend, oc_tex, oc_shade, oc_reader, oc_mdq, oc_ssetup,
         oc_sfetch, oc_spanner, oc_depth, oc_ras, oc_pq, oc_setup, oc_sortc, oc_fq,
         oc_iter, oc_eq, oc_ol, oc_region };
 
-    localparam integer OCC_NV = 27;
+    localparam integer OCC_NV = 28;
     function automatic integer occ_val(input integer idx);
         case (idx)
             0:  occ_val = int'(st);
@@ -3418,6 +3432,7 @@ module peel_core import tsp_pkg::*; #(
                                 u_spanner.emit_stall_fifo});
             25: occ_val = int'(u_spanner.sf_wp - u_spanner.sf_rp) & 15;  // setup-req FIFO depth
             26: occ_val = int'(pt_pass);   // forward PT-resolve pass counter
+            27: occ_val = int'(texfq_n);   // tex pre-cache request FIFO depth
             default: occ_val = 0;
         endcase
     endfunction
@@ -3440,16 +3455,26 @@ module peel_core import tsp_pkg::*; #(
             $fwrite(occ_fd, "U 5 SORTC\nU 6 SETUP\nU 7 PQ\nU 8 RASTER\nU 9 DEPTH\n");
             $fwrite(occ_fd, "U 10 SPANNER\nU 11 SFETCH\nU 12 SSETUP\nU 13 MDQ\nU 14 READER\n");
             $fwrite(occ_fd, "U 15 SHADE\nU 16 TEX\nU 17 BLEND\nU 18 VO\nU 19 DDR\n");
+            $fwrite(occ_fd, "U 20 TEXFQ\n");
             $fwrite(occ_fd, "V 0 phase\nV 1 tile_x\nV 2 tile_y\nV 3 peel_pass\nV 4 peeling\n");
             $fwrite(occ_fd, "V 5 raster_st\nV 6 eq_n\nV 7 fq_n\nV 8 pq_n\n");
             $fwrite(occ_fd, "V 9 spn_tx\nV 10 spn_ty\nV 11 mdq_n\nV 12 spans_inflight\n");
             $fwrite(occ_fd, "V 13 reader_st\nV 14 vo_tx\nV 15 vo_ty\nV 16 ddr_q\nV 17 ddr_owner\n");
             $fwrite(occ_fd, "V 18 shade_fifo\nV 19 halves\nV 20 ti_ready\nV 21 col_full\n");
             $fwrite(occ_fd, "V 22 spanner_st\nV 23 vo_st\nV 24 spn_stall\nV 25 sf_n\nV 26 pt_pass\n");
+            $fwrite(occ_fd, "V 27 tex_fq_n\n");
+            // F <unit> <value-id> <depth>: this unit IS a queue - the viewer draws
+            // it as a FILL LEVEL (value/depth) instead of an under/busy/over state,
+            // so starvation (empty) and backpressure (full) are both visible.
+            $fwrite(occ_fd, "F 2 6 %0d\n",  EQ_N);      // EQ    <- eq_n
+            $fwrite(occ_fd, "F 4 7 %0d\n",  FIFO_N);    // FQ    <- fq_n
+            $fwrite(occ_fd, "F 7 8 %0d\n",  PQ_N);      // PQ    <- pq_n
+            $fwrite(occ_fd, "F 13 11 %0d\n", MD_N);     // MDQ   <- mdq_n
+            $fwrite(occ_fd, "F 20 27 32\n");            // TEXFQ <- tex_fq_n (tex_fetch4_ob FQ_D)
             $fwrite(occ_fd, "E 0 0:IDLE,1:RA,2:STATE,4:OL_RUN,9:RA_ACK,10:DONE,11:DRAIN,28:PEEL_INIT,29:PEEL_BUF,32:OP_DONE,34:CLEAR_WR,35:PEEL_BUF_RUN,36:ZK_INV,39:PT_BUF,40:PT_INIT,41:PT_SWAP,42:PT_FIX,43:PT_WAIT,44:PT_NEXT\n");
             $fwrite(occ_fd, "E 5 0:IDLE,1:POP,2:RAS,3:DRAIN,4:CORNER\n");
             $fwrite(occ_fd, "E 13 0:IDLE,1:RUN,3:DRAIN,4:POST\n");
-            $fwrite(occ_fd, "E 17 0:TEX,1:VQ,2:SPN_FETCH,3:PARAM,4:OLWALK,5:REGION\n");
+            $fwrite(occ_fd, "E 17 0:TEX,1:VQ,2:SPN_FETCH,3:PARAM,4:OLWALK,5:REGION,6:TEX_PF\n");
             $fwrite(occ_fd, "E 22 0:IDLE,1:START,2:RUN\n");
             $fwrite(occ_fd, "E 23 0:IDLE,1:ACTIVE\n");
         end
@@ -3488,5 +3513,18 @@ module peel_core import tsp_pkg::*; #(
         $fflush(occ_fd); $fclose(occ_fd);
         $display("[peel_core] occupancy trace: %0d clocks -> %0s", occ_cyc, occ_fname);
     end
+`endif
+`ifndef SYNTHESIS
+    // +pxwatch=<tile-linear-id>: trace every blend event for one tile-local pixel
+    // id at whatever tile is shading (debug aid for pixel-level diffs). Printed at
+    // stage CC, where the PT-resolve verdict (bl_at_pass / pt_res_bit / cb_wr_en)
+    // and the blend result are all live for this id.
+    reg [31:0] pxw_id = 32'hFFFFFFFF;
+    initial void'($value$plusargs("pxwatch=%d", pxw_id));
+    always @(posedge clk)
+        if (cb2_valid && {22'd0, cb2_id} == pxw_id)
+            $display("[PXW] tile(%0d,%0d) id=%0d out=%08x ptres=%b atp=%b res=%b wr=%b invw=%08x",
+                     md_tx[md_rp[MD_AW-1:0]], md_ty[md_rp[MD_AW-1:0]], cb2_id, cb_blend_out,
+                     cb2_ptres, bl_at_pass, pt_res_bit, cb_wr_en, cb2_invw);
 `endif
 endmodule
