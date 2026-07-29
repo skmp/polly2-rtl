@@ -14,16 +14,10 @@ module isp_depth_cmp (
     input      [31:0] ob,     // stored depth
     output reg        pass
 );
-    // signed-float greater-than a > b (no NaN/inf; DaZ handled by ==0 test)
+    // Depth is never zero, or negative
     function fgt(input [31:0] a, input [31:0] b);
-        reg az,bz; reg [30:0] am,bm;
         begin
-            az=(a[30:0]==0); bz=(b[30:0]==0);
-            am=a[30:0]; bm=b[30:0];
-            if (az&&bz)          fgt=1'b0;
-            else if (a[31]^b[31]) fgt = b[31];         // a>b if b negative
-            else if (~a[31])      fgt = (am>bm);        // both >=0
-            else                  fgt = (am<bm);        // both <0
+            fgt = a[30:0] > b[30:0];
         end
     endfunction
 

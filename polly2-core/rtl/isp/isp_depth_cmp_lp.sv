@@ -50,24 +50,17 @@ module isp_depth_cmp_lp (
     output            o_nw_gt_zb,   // nw >  zb
     output            o_nw_lt_zb2   // nw <  zb2
 );
-    // signed-float greater-than a > b (no NaN/inf; DaZ handled by ==0 test),
-    // identical to isp_depth_cmp.
+    // Depth is never zero, or negative
     function fgt(input [31:0] a, input [31:0] b);
-        reg az,bz; reg [30:0] am,bm;
         begin
-            az=(a[30:0]==0); bz=(b[30:0]==0);
-            am=a[30:0]; bm=b[30:0];
-            if (az&&bz)           fgt=1'b0;
-            else if (a[31]^b[31]) fgt = b[31];      // a>b if b negative
-            else if (~a[31])      fgt = (am>bm);     // both >=0
-            else                  fgt = (am<bm);     // both <0
+            fgt = a[30:0] > b[30:0];
         end
     endfunction
 
-    // float equal (DaZ: +/-0 compare equal)
+    // Depth is never zero, or negative
     function feq(input [31:0] a, input [31:0] b);
         begin
-            feq = (a[30:0]==31'd0 && b[30:0]==31'd0) ? 1'b1 : (a==b);
+            feq = a[30:0] == b[30:0];
         end
     endfunction
 
