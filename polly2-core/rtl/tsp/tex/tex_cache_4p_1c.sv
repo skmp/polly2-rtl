@@ -211,6 +211,8 @@ module tex_cache_4p_1c import tsp_pkg::*; (
     wire [IXW-1:0]  p_ix;
     wire [TAGW-1:0] p_tag;
     wire [255:0]    p_acc_w;
+    wire            m_pf_ride;                  // demand's missing line is in flight on the
+                                                // prefetch client (declared below): ride it
     wire            meta_we  = sweep_we || fill_we || p_we;
     wire            data_we  = fill_we || p_we;
     wire [IXW-1:0]  wa       = sweep_we ? rst_i[IXW-1:0] : (fill_we ? m_ix : p_ix);
@@ -249,15 +251,22 @@ module tex_cache_4p_1c import tsp_pkg::*; (
         assign pf_tg[gi] = pf_waddr[29*gi+2+IXW +: TAGW];
       end
     endgenerate
-    wire probe_go = pf_req && !rd_en && !meta_we;
+    // pchk_go: the prefetch receiver's TAKE-TIME tag re-check borrows meta_a port A
+    // for one read (declared here, driven in the receiver below). It outranks the
+    // walker's probe (the walker is stalled on pf_fbusy whenever the receiver is
+    // busy, so this never actually contends - the gate is belt).
+    wire pchk_go;
+    wire probe_go = pf_req && !rd_en && !meta_we && !pchk_go;
     assign pf_gnt = probe_go;
-    wire [IXW-1:0] ma_a = meta_we ? wa : (probe_go ? pf_ix[0] : rd_ix[0]);
+    wire [IXW-1:0] p_chk_ix;            // receiver's line index (driven below)
+    wire [IXW-1:0] ma_a = meta_we ? wa : pchk_go ? p_chk_ix
+                                       : probe_go ? pf_ix[0] : rd_ix[0];
     wire [IXW-1:0] ma_b =                 probe_go ? pf_ix[1] : rd_ix[1];
     wire [IXW-1:0] mb_a = meta_we ? wa : (probe_go ? pf_ix[2] : rd_ix[2]);
     wire [IXW-1:0] mb_b =                 probe_go ? pf_ix[3] : rd_ix[3];
     bram_tdp #(.W(MW), .D(NLINE)) u_meta_a (
         .clk(clk),
-        .a_en(rd_en || probe_go), .a_we(meta_we), .a_addr(ma_a),
+        .a_en(rd_en || probe_go || pchk_go), .a_we(meta_we), .a_addr(ma_a),
         .a_din(wmeta), .a_q(rmeta0),
         .b_en(rd_en || probe_go), .b_addr(ma_b), .b_q(rmeta1));
     bram_tdp #(.W(MW), .D(NLINE)) u_meta_b (
@@ -301,6 +310,9 @@ module tex_cache_4p_1c import tsp_pkg::*; (
 `ifndef SYNTHESIS
     integer stat_hit [0:4];
     integer stat_n;
+    integer st_pfck_drop = 0;    // prefetches dropped by the take-time re-check
+    integer st_dwait     = 0;    // demand misses served by an in-flight prefetch
+    reg     dwait_r      = 1'b0;
 `endif
 
     always @(posedge clk) begin
@@ -371,12 +383,33 @@ module tex_cache_4p_1c import tsp_pkg::*; (
                 end
             end
 
-            // burst-read the 4 words of the missing line.
-            S_MISS: if (!dresp.busy) begin
-                rd_r    <= 1'b1;
-                addr_r  <= {4'b0011, m_base[24:0]};
-                burst_r <= 8'd4;
-                st      <= S_FILL;
+            // burst-read the 4 words of the missing line - UNLESS the prefetch
+            // receiver already has this exact line in flight: then issuing our own
+            // burst would just fetch it twice. Wait for its commit (p_we fires
+            // freely here: rd_en and fill_we are both low in S_MISS) and go
+            // straight to the retest. If the receiver instead DROPS its line
+            // (take-time re-check hit), pst returns to P_IDLE and we fall through
+            // to a normal issue - no deadlock either way.
+            S_MISS: begin
+                if (m_pf_ride) begin
+`ifndef SYNTHESIS
+                    if (!dwait_r) begin st_dwait <= st_dwait + 1; dwait_r <= 1'b1; end
+`endif
+                    if (p_we) begin
+                        st <= S_RT0;
+`ifndef SYNTHESIS
+                        dwait_r <= 1'b0;
+`endif
+                    end
+                end else if (!dresp.busy) begin
+                    rd_r    <= 1'b1;
+                    addr_r  <= {4'b0011, m_base[24:0]};
+                    burst_r <= 8'd4;
+                    st      <= S_FILL;
+`ifndef SYNTHESIS
+                    dwait_r <= 1'b0;
+`endif
+                end
             end
             S_FILL: if (dresp.dready) begin
                 m_acc[64*m_beat +: 64] <= dresp.dout;
@@ -487,18 +520,33 @@ module tex_cache_4p_1c import tsp_pkg::*; (
     //   * pf_fill is a LEVEL: the walker holds it (and pf_faddr) until it sees
     //     !pf_fbusy - on that cycle the receiver either takes the line or drops a
     //     duplicate; either way the walker moves on.
-    localparam P_IDLE=0, P_REQ=1, P_FILL=2, P_WAIT=3;
-    reg [1:0]      pst;
+    //   * TAKE-TIME RE-CHECK (P_CK0/P_CK1): the walker's probe answer is STALE by
+    //     the time its fill request gets here (probe pipe + candidate stage + skid),
+    //     and pf_dup only remembers the LAST demand fill - so before spending a DDR
+    //     burst the receiver re-reads the line's tag through meta_a port A (free
+    //     whenever the demand pipe isn't presenting reads; the walker is stalled on
+    //     pf_fbusy so it never contends) and DROPS a line that became resident.
+    //     Between a passed check and the commit nobody else can fill this line (the
+    //     demand path WAITS on it instead - see S_MISS), so a duplicate prefetch
+    //     commit is now impossible, not just bounded (sim-asserted at p_we).
+    localparam P_IDLE=0, P_CK0=1, P_CK1=2, P_REQ=3, P_FILL=4, P_WAIT=5;
+    reg [2:0]      pst;
     reg [LAW-1:0]  p_line;
     reg [1:0]      p_beat;
     reg [255:0]    p_acc;
-    assign p_ix    = p_line[IXW-1:0];
-    assign p_tag   = p_line[LAW-1:IXW];
-    assign p_acc_w = p_acc;
+    assign p_ix     = p_line[IXW-1:0];
+    assign p_tag    = p_line[LAW-1:IXW];
+    assign p_chk_ix = p_ix;
+    assign p_acc_w  = p_acc;
     wire [LAW-1:0] pf_fline = pf_faddr[28:2];
     wire pf_dup   = m_v && (pf_fline == m_line);
     wire pf_take  = pf_fill && (pst == P_IDLE) && !pf_dup;
-    assign pf_fbusy = (pst != P_IDLE);
+    wire p_active = (pst != P_IDLE);
+    assign pf_fbusy = p_active;
+    assign m_pf_ride = p_active && (p_line == m_line);
+    assign pchk_go  = (pst == P_CK0) && !rd_en && !meta_we;
+    // the re-read landed this cycle: resident?
+    wire pchk_hit   = rmeta0[TAGW] && (rmeta0[TAGW-1:0] == p_tag);
     reg        p_rd; reg [28:0] p_addr;
     assign pfreq.rd    = p_rd;
     assign pfreq.addr  = p_addr;
@@ -511,7 +559,14 @@ module tex_cache_4p_1c import tsp_pkg::*; (
         end else begin
             p_rd <= 1'b0;
             case (pst)
-            P_IDLE: if (pf_take) begin p_line <= pf_fline; p_beat <= 2'd0; pst <= P_REQ; end
+            P_IDLE: if (pf_take) begin p_line <= pf_fline; p_beat <= 2'd0; pst <= P_CK0; end
+            P_CK0:  if (pchk_go) pst <= P_CK1;      // tag re-read presented
+            P_CK1:  begin
+`ifndef SYNTHESIS
+                        if (pchk_hit) st_pfck_drop <= st_pfck_drop + 1;
+`endif
+                        pst <= pchk_hit ? P_IDLE : P_REQ;   // resident -> drop
+                    end
             P_REQ:  if (!pfresp.busy) begin
                         p_rd <= 1'b1;
                         p_addr <= {4'b0011, {p_line, 2'b00} & 29'h1FFFFFF};
@@ -522,7 +577,17 @@ module tex_cache_4p_1c import tsp_pkg::*; (
                         if (p_beat == 2'd3) pst <= P_WAIT;
                         else p_beat <= p_beat + 2'd1;
                     end
-            P_WAIT: if (p_we) pst <= P_IDLE;
+            P_WAIT: if (p_we) begin
+                        pst <= P_IDLE;
+`ifndef SYNTHESIS
+                        // between the passed re-check and this commit nobody else can
+                        // have filled this line (the demand path waits on it instead),
+                        // so a duplicate commit means the dedup protocol broke.
+                        if (u_meta_a.mem[p_ix] == {1'b1, p_tag})
+                            $error("tex_cache_4p_1c %m: DUPLICATE prefetch commit of resident line %07x",
+                                   p_line);
+`endif
+                    end
             default: pst <= P_IDLE;
             endcase
         end
@@ -538,8 +603,13 @@ module tex_cache_4p_1c import tsp_pkg::*; (
     always @(posedge clk) begin
         if (reset) begin tc_fills <= 0; tc_reported <= 1'b0; end
         else begin
+            // count only GENUINE burst issues (the exact S_MISS issue condition).
+            // Counting bare `S_MISS && !dresp.busy` false-fired once the hitchhike
+            // path existed: demand SITS in S_MISS with its own client idle while it
+            // waits for the in-flight prefetch of its line to commit, and a prefetch
+            // burst under arbiter contention takes >64 cycles - 65 phantom "fills".
             if (group_ack && (t_v[0]||t_v[1]||t_v[2]||t_v[3])) tc_fills <= 0;
-            else if (st==S_MISS && !dresp.busy) tc_fills <= tc_fills + 1;
+            else if (st==S_MISS && !m_pf_ride && !dresp.busy) tc_fills <= tc_fills + 1;
             if (tc_fills > 64 && !tc_reported) begin
                 tc_reported <= 1'b1;
                 $display("\n$$$$$$ TEX$ LIVELOCK %m (%0d fills, no group ack) $$$$$$", tc_fills);
@@ -554,8 +624,9 @@ module tex_cache_4p_1c import tsp_pkg::*; (
     end
 
     final begin
-        $display("=== TEX$1c %m: %0d lookup-cycles: HIT4=%0d HIT3=%0d HIT2=%0d HIT1=%0d HIT0=%0d ===",
-                 stat_n, stat_hit[4], stat_hit[3], stat_hit[2], stat_hit[1], stat_hit[0]);
+        $display("=== TEX$1c %m: %0d lookup-cycles: HIT4=%0d HIT3=%0d HIT2=%0d HIT1=%0d HIT0=%0d pfck_drop=%0d dwait=%0d ===",
+                 stat_n, stat_hit[4], stat_hit[3], stat_hit[2], stat_hit[1], stat_hit[0],
+                 st_pfck_drop, st_dwait);
     end
 `endif
 endmodule
