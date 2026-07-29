@@ -25,7 +25,7 @@ static int rnd() { lfsr = (lfsr >> 1) ^ (-(int)(lfsr & 1) & 0xB400u); return lfs
 
 // ---- DDR service model: per port, queued (addr,burst), configurable pacing ----
 struct Port { std::deque<std::pair<uint64_t, uint32_t>> q; uint64_t cur; uint32_t left = 0; int wait = 0; };
-static Port ports[2];
+static Port ports[3];
 static int cfg_lat = 4;        // beats: initial latency after accept
 static int cfg_gap = 0;        // extra stall cycles between beats (-1 = random)
 static int cfg_busy = 0;       // % of cycles the port refuses commands
@@ -68,12 +68,14 @@ static void port_tick(Port& p, uint8_t& rd, uint32_t addr, uint8_t burst,
 static void tick() {
     dut->clk = 0; dut->eval();
     {
-        uint8_t b0, dr0, b1, dr1; uint64_t d0, d1;
-        uint8_t r0 = dut->rd0, r1 = dut->rd1;
+        uint8_t b0, dr0, b1, dr1, b2, dr2; uint64_t d0, d1, d2;
+        uint8_t r0 = dut->rd0, r1 = dut->rd1, r2 = dut->rd2;
         port_tick(ports[0], r0, dut->addr0, dut->burst0, b0, d0, dr0);
         port_tick(ports[1], r1, dut->addr1, dut->burst1, b1, d1, dr1);
+        port_tick(ports[2], r2, dut->addr2, dut->burst2, b2, d2, dr2);
         dut->busy0 = b0; dut->dout0 = d0; dut->dready0 = dr0;
         dut->busy1 = b1; dut->dout1 = d1; dut->dready1 = dr1;
+        dut->busy2 = b2; dut->dout2 = d2; dut->dready2 = dr2;
     }
     dut->clk = 1; dut->eval();
 }

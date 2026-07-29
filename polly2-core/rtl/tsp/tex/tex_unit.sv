@@ -8,7 +8,7 @@
 //                           fbpp_shr/tex_addr/vq_addr + decode config)
 //   tex_addroffsgen_ib(1) : 4 corner relative texel offsets
 //   tex_add_mip (comb)    : + mip, *fbpp -> 4 byte offsets
-//   tex_fetch4_ob (~3,stall): 4 raw 64-bit words (owns the 2 caches)
+//   tex_fetch4_ob (~5,stall): 4 raw 64-bit words (owns the 2 pipelined caches)
 //   tex_decode x4 (3)     : 4 raw words -> 4 ARGB texels (injected palette, x4 ports)
 //   tex_filter (6)        : bilinear/nearest blend -> 1 ARGB texel
 //

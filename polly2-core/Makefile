@@ -35,7 +35,7 @@ VFLAGS    = -Wno-WIDTH -Wno-UNOPTFLAT -Wno-UNSIGNED -Wno-DECLFILENAME -Irtl/tsp/
 BUILD = build
 CWD  := $(shell pwd)
 
-.PHONY: shade-drop raster-topleft clean test tex tex-addr tex-uv tex-decode tex-filter tex-combiner \
+.PHONY: shade-drop raster-topleft texfetchpl clean test tex tex-addr tex-uv tex-decode tex-filter tex-combiner \
         oparse region regfile regen sortcache itquad itskip taginvw dense_span_buffer \
         frontendtsplp frontendtsplp-build golden-check spannerv2 mulc9 mul16sppro \
         add24sppro mulc9sppro add3sppro mul24sppro mul24c9sppro
@@ -63,6 +63,19 @@ test: tex oparse region regfile sortcache itquad itskip raster-topleft
 # shared diagonal passes exactly through tile origins (C = +0): per-pixel
 # coverage vs a refsw2-rule model + corner-probe sanity. Guards the raw
 # C-1 bias wrap (+0 -> -NaN) that dropped whole tiles.
+# ---- pipelined texel fetch + cache regression ----
+# tex_fetch4_ob over the PIPELINED tex_cache_4p_1c (2-cycle lookup, b-group
+# replay, streaming prefetch walker) vs a software model: in-order payload +
+# corner words, sustained 1-px/cycle on a warmed stream, real prefetch bursts,
+# direct-mapped alias stress, VQ-heavy, mid-run flush.
+texfetchpl: | $(BUILD)
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ -Wno-PINCONNECTEMPTY \
+	  --top-module tex_fetch4_pl_tb_top $(RTL_INC) \
+	  $(TSP_PKG) $(RTL_EXTRA) tb/tex_fetch4_pl_tb_top.sv \
+	  $(CWD)/tb/tex_fetch4_pl_tb.cpp \
+	  --Mdir $(BUILD)/obj_texfetchpl -o tb
+	./$(BUILD)/obj_texfetchpl/tb
+
 # ---- shade-pipe pixel-drop regression ----
 # tsp_shade_v2_pp standalone under adversarial DDR latency: strict 1-in-1-out
 # in-order ids, 565 + YUV422 (the recv_logos tile-column-line drop hunt).

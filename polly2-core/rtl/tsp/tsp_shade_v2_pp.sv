@@ -376,11 +376,14 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
                          $time, pl_push, pl_pop, pl_cnt, tu_ov, tu_issue);
             end
             // RAW HIGH-WATER (NO gate at all - not even dl_en): announce the first time pl_cnt
-            // in THIS block ever exceeds 40. If this never prints but the dump shows cnt=97,
-            // then the dump's pl_cnt is a DIFFERENT signal than this block updates (aliasing).
-            if (pl_cnt > 7'd40 && !dl_hw_fired) begin
+            // in THIS block ever exceeds 56 (just under the pl_room gate at 60). The pipelined
+            // fetch legitimately holds ~50 pixels in flight (32-deep pre-cache FIFO + the
+            // T0a..T2b stages), so the old threshold of 40 fired on every healthy run. If this
+            // never prints but the dump shows cnt=97, then the dump's pl_cnt is a DIFFERENT
+            // signal than this block updates (aliasing).
+            if (pl_cnt > 7'd56 && !dl_hw_fired) begin
                 dl_hw_fired <= 1'b1;
-                $display("[shade RAW] FIFO cnt exceeded 40: pl_cnt=%0d h=%0d t=%0d push=%b pop=%b t=%0t",
+                $display("[shade RAW] FIFO cnt exceeded 56: pl_cnt=%0d h=%0d t=%0d push=%b pop=%b t=%0t",
                          pl_cnt, pl_rp, pl_wp, pl_push, pl_pop, $time);
             end
 `endif
