@@ -170,7 +170,7 @@ itskip: | $(BUILD)
 # {start,rep,id,invw[0:3],at}). Writes spans at dense slots, reads back + streaming read.
 dense_span_buffer: | $(BUILD)
 	+$(VERILATOR) --binary $(VFLAGS) -Wno-BLKSEQ --top-module dense_span_buffer_selftest \
-	  rtl/tsp/dense_span_buffer.sv tb/dense_span_buffer_selftest.sv \
+	  rtl/buffers/dense_span_buffer.sv tb/dense_span_buffer_selftest.sv \
 	  --Mdir $(BUILD)/obj_densespan -o densespan
 	./$(BUILD)/obj_densespan/densespan
 
