@@ -11,8 +11,9 @@
 // this module is told directly which lanes to write and what to write - it is a
 // pure banked store, not a compare.
 //
-// Storage: ONE simple-dual-port tile_ram, WIDTH = 65 bits/lane {valid, tag[31:0],
-// invW[31:0]}, NBANKS = LANES. Same banking as peel_tile_buffer: bank = x[BW-1:0],
+// Storage: ONE simple-dual-port tile_ram, WIDTH = 65 bits/lane {pt, valid, tag[31:0],
+// invW[30:0]}, NBANKS = LANES. invW is a 31-bit SIGN-STRIPPED float (depths are
+// always positive non-zero). Same banking as peel_tile_buffer: bank = x[BW-1:0],
 // addr = {y[4:0], x[4:BW]}. One read port (shade single-pixel) + one write port
 // (raster stage-B duplicate | CLEAR).
 //
@@ -36,7 +37,7 @@ module taginvw_tile_buffer import tsp_pkg::*; #(
     input      [4:0]            wr_y,
     input      [4:0]            wr_x,           // chunk base (LANES-aligned)
     input      [31:0]           wr_tag,         // fragment CoreTag (same for all lanes)
-    input      [32*LANES-1:0]   wr_invw,        // per-lane invW (flat)
+    input      [31*LANES-1:0]   wr_invw,        // per-lane invW (flat, sign-stripped)
     input                       wr_pt,          // PT-list won (b_which==0): the blend's
                                                 // PT alpha-test enable, captured HERE at
                                                 // raster stage-B (dt_pt is stale by the
@@ -47,7 +48,7 @@ module taginvw_tile_buffer import tsp_pkg::*; #(
     //  with the background color.)
     input                       clr_valid,
     input      [10-$clog2(LANES)-1:0] clr_addr,
-    input      [31:0]           clr_depth,      // background invW/depth
+    input      [30:0]           clr_depth,      // background invW/depth
     input      [31:0]           clr_tag,        // background CoreTag
 
     // ---- PEELBUFFERS valid-clear walk: mirror u_peel's per-pass reset of the staged
@@ -63,7 +64,7 @@ module taginvw_tile_buffer import tsp_pkg::*; #(
     input      [9:0]            sh_rd_id,
     output reg                  sh_valid,       // staged-this-pass bit  (1-cyc latency)
     output reg [31:0]           sh_tag,         // pending tag           (1-cyc latency)
-    output reg [31:0]           sh_depth,       // depthBufferA (invW)   (1-cyc latency)
+    output reg [30:0]           sh_depth,       // depthBufferA (invW)   (1-cyc latency)
     output reg                  sh_pt,          // PT-list-won bit       (1-cyc latency)
 
     // ---- SPANNER: 4-wide ALIGNED read (group = x & ~3). FIXED 4-wide regardless of
@@ -76,17 +77,17 @@ module taginvw_tile_buffer import tsp_pkg::*; #(
     input      [9:0]            rd4_group,
     output     [3:0]            g4_valid,
     output     [31:0]           g4_tag  [0:3],
-    output     [31:0]           g4_invw [0:3],
+    output     [30:0]           g4_invw [0:3],
     output     [3:0]            g4_pt
 );
     localparam integer NB        = LANES;
     localparam integer BANK_BITS = $clog2(LANES);   // 3 for 8, 2 for 4
     localparam integer AW        = 10 - BANK_BITS;   // per-bank addr width (7 / 8)
-    localparam integer TW_INVW   = 0;    // [31:0] depthBufferA (invW)
-    localparam integer TW_TAG    = 32;   // [31:0] tagBufferA
-    localparam integer TW_VALID  = 64;   // [0]    tagStatus.valid
-    localparam integer TW_PT     = 65;   // [0]    PT-list-won (blend alpha-test enable)
-    localparam integer TI_W      = 66;
+    localparam integer TW_INVW   = 0;    // [30:0] depthBufferA (invW, sign-stripped)
+    localparam integer TW_TAG    = 31;   // [31:0] tagBufferA
+    localparam integer TW_VALID  = 63;   // [0]    tagStatus.valid
+    localparam integer TW_PT     = 64;   // [0]    PT-list-won (blend alpha-test enable)
+    localparam integer TI_W      = 65;
 
     reg  [NB-1:0]        we;
     reg  [AW*NB-1:0]     waddr;
@@ -134,7 +135,7 @@ module taginvw_tile_buffer import tsp_pkg::*; #(
         assign g4_valid[gl] = lw[TW_VALID];
         assign g4_pt   [gl] = lw[TW_PT];
         assign g4_tag  [gl] = lw[TW_TAG  +: 32];
-        assign g4_invw [gl] = lw[TW_INVW +: 32];
+        assign g4_invw [gl] = lw[TW_INVW +: 31];
       end
     endgenerate
 
@@ -149,7 +150,7 @@ module taginvw_tile_buffer import tsp_pkg::*; #(
             we    = {NB{1'b1}};
             waddr = {NB{clr_addr}};
             for (cw = 0; cw < NB; cw = cw + 1) begin
-                wdata[TI_W*cw + TW_INVW +: 32] = clr_depth;
+                wdata[TI_W*cw + TW_INVW +: 31] = clr_depth;
                 wdata[TI_W*cw + TW_TAG  +: 32] = clr_tag;
                 // valid<-0, MATCHING the old u_peel CLEAR (it left PW_VALID at the
                 // wdata='0 default). OP shade ignores valid (shades every pixel); the
@@ -168,7 +169,7 @@ module taginvw_tile_buffer import tsp_pkg::*; #(
             waddr = pack_addr(wr_y, wr_x);
             for (cw = 0; cw < NB; cw = cw + 1) begin
                 we[cw] = wr_we[cw];
-                wdata[TI_W*cw + TW_INVW +: 32] = wr_invw[32*cw +: 32];
+                wdata[TI_W*cw + TW_INVW +: 31] = wr_invw[31*cw +: 31];
                 wdata[TI_W*cw + TW_TAG  +: 32] = wr_tag;
                 wdata[TI_W*cw + TW_VALID]      = 1'b1;
                 wdata[TI_W*cw + TW_PT]         = wr_pt;   // PT-list-won (same for all lanes)
@@ -186,7 +187,7 @@ module taginvw_tile_buffer import tsp_pkg::*; #(
     always @(*) begin
         sh_valid = rdata[TI_W*sh_lane_r + TW_VALID];
         sh_tag   = rdata[TI_W*sh_lane_r + TW_TAG  +: 32];
-        sh_depth = rdata[TI_W*sh_lane_r + TW_INVW +: 32];
+        sh_depth = rdata[TI_W*sh_lane_r + TW_INVW +: 31];
         sh_pt    = rdata[TI_W*sh_lane_r + TW_PT];
     end
 

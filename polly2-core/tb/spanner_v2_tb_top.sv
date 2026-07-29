@@ -37,7 +37,7 @@ module spanner_v2_tb_top import tsp_pkg::*; (
     wire [9:0]  rd_group;
     reg  [3:0]  ti_valid;
     reg  [31:0] ti_tag  [0:3];
-    reg  [31:0] ti_invw [0:3];
+    reg  [30:0] ti_invw [0:3];   // sign-stripped (DUT depth transport is 31-bit)
     reg  [3:0]  ti_pt;
 
     // 1-cycle registered read of the 4 aligned lanes [rd_group .. rd_group+3].
@@ -46,7 +46,7 @@ module spanner_v2_tb_top import tsp_pkg::*; (
         for (li = 0; li < 4; li = li + 1) begin
             ti_valid[li] <= tim_valid[rd_group + li[9:0]];
             ti_tag  [li] <= tim_tag  [rd_group + li[9:0]];
-            ti_invw [li] <= tim_invw [rd_group + li[9:0]];
+            ti_invw [li] <= tim_invw [rd_group + li[9:0]][30:0];
             ti_pt   [li] <= tim_pt   [rd_group + li[9:0]];
         end
     end
@@ -88,7 +88,7 @@ module spanner_v2_tb_top import tsp_pkg::*; (
     wire [9:0]   sp_start;
     wire [9:0]   sp_id;
     wire [2:0]   sp_rep;
-    wire [31:0]  sp_invw [0:3];
+    wire [30:0]  sp_invw [0:3];
     wire         sp_at;
 
     // span_out store (public), one entry per run-start pixel index.
@@ -136,10 +136,10 @@ module spanner_v2_tb_top import tsp_pkg::*; (
             spo_x     [sp_slot] <= sp_start;
             spo_id    [sp_slot] <= sp_id;
             spo_rep   [sp_slot] <= sp_rep;
-            spo_invw0 [sp_slot] <= sp_invw[0];
-            spo_invw1 [sp_slot] <= sp_invw[1];
-            spo_invw2 [sp_slot] <= sp_invw[2];
-            spo_invw3 [sp_slot] <= sp_invw[3];
+            spo_invw0 [sp_slot] <= {1'b0, sp_invw[0]};
+            spo_invw1 [sp_slot] <= {1'b0, sp_invw[1]};
+            spo_invw2 [sp_slot] <= {1'b0, sp_invw[2]};
+            spo_invw3 [sp_slot] <= {1'b0, sp_invw[3]};
             spo_at    [sp_slot] <= sp_at;
         end
     end

@@ -91,7 +91,7 @@ module spanner_v2 import tsp_pkg::*; #(
     output reg [SLOTW-1:0]      rd_group,    // group base pixel index (x & ~3)
     input      [3:0]            ti_valid,    // per-lane staged-this-pass bit
     input      [31:0]           ti_tag  [0:3],
-    input      [31:0]           ti_invw [0:3],
+    input      [30:0]           ti_invw [0:3],
     input      [3:0]            ti_pt,       // per-lane PT alpha-test bit
 
     // ---- OUT: triangle_setups WRITE (SETUP engine) ----
@@ -118,7 +118,7 @@ module spanner_v2 import tsp_pkg::*; #(
     output reg [SLOTW-1:0]      sp_start,    // run-start pixel index (y:x, 0..1023) [data]
     output reg [IDW-1:0]        sp_id,       // setup id (== triangle_setups slot)
     output reg [2:0]            sp_rep,      // run length 1..4 (all covered pixels shaded)
-    output reg [31:0]           sp_invw [0:3], // per-covered-pixel invW (lanes 0..rep-1)
+    output reg [30:0]           sp_invw [0:3], // per-covered-pixel invW (lanes 0..rep-1)
     output reg                  sp_at,       // PT alpha-test enable (run-start lane)
     input                       sp_ready,    // span consumer (expander) can accept this cycle
 
@@ -258,7 +258,7 @@ module spanner_v2 import tsp_pkg::*; #(
     reg [31:0]       t_tag;
     reg [2:0]        t_rep;
     reg              t_ok;          // this run is SHADED (emit a span); else invalid (skip)
-    reg [31:0]       t_invw [0:3];
+    reg [30:0]       t_invw [0:3];
     reg              t_at;
 
     wire [1:0] sg_lane = sg_x[1:0];              // intra-group position of sg_x
@@ -634,7 +634,7 @@ module spanner_v2 import tsp_pkg::*; #(
                     // lane whose ti_invw==0 — the exact bad case (peel shading a pixel with
                     // valid=1 but zeroed invW). Shows the lane's valid/tag/invw.
                     if ($test$plusargs("peelzero") && !shade_mode && run_ok0
-                        && ti_invw[sg_lane] == 32'd0)
+                        && ti_invw[sg_lane] == 31'd0)
                         $display("[PEELZERO] sg_x=%0d lane=%0d val=%b tag=%08x invw=%08x rep=%0d",
                                  sg_x, sg_lane, ti_valid, ti_tag[sg_lane], ti_invw[sg_lane], run_rep);
                     // catch a COAL emit where the START lane is shaded (span will be written)
@@ -651,7 +651,7 @@ module spanner_v2 import tsp_pkg::*; #(
                     t_ok     <= run_ok0;           // shaded run -> emit a span; else skip
                     t_at     <= ti_pt[sg_lane];
                     for (q = 0; q < 4; q = q + 1)
-                        t_invw[q] <= (q < run_rep) ? ti_invw[sg_lane + q[1:0]] : 32'd0;
+                        t_invw[q] <= (q < run_rep) ? ti_invw[sg_lane + q[1:0]] : 31'd0;
                     // the dedup read for THIS descriptor is presented by the dedicated M10K
                     // block above (dd_re == coal_fires, dd_raddr == run_id); dd_rd_q resolves
                     // next cycle in EMIT. run_id/coal_fires are stable this cycle.

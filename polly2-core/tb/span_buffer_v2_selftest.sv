@@ -1,7 +1,7 @@
 module span_buffer_v2_selftest;
     reg clk=0; always #5 clk=~clk;
-    reg we; reg [9:0] waddr,raddr; reg w_shade,w_at; reg [9:0] w_id; reg [31:0] w_invw;
-    wire r_shade,r_at; wire [9:0] r_id; wire [31:0] r_invw;
+    reg we; reg [9:0] waddr,raddr; reg w_shade,w_at; reg [9:0] w_id; reg [30:0] w_invw;
+    wire r_shade,r_at; wire [9:0] r_id; wire [30:0] r_invw;
     span_buffer_v2 dut(.clk(clk),.we(we),.waddr(waddr),.w_shade(w_shade),.w_id(w_id),
         .w_invw(w_invw),.w_at(w_at),.raddr(raddr),.r_shade(r_shade),.r_id(r_id),
         .r_invw(r_invw),.r_at(r_at));

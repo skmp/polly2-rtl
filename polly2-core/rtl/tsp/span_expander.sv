@@ -17,7 +17,7 @@ module span_expander (
     input             sp_we,
     input      [9:0]  sp_idx,
     input      [2:0]  sp_rep,
-    input      [31:0] sp_invw [0:3],
+    input      [30:0] sp_invw [0:3],
     input      [3:0]  sp_shmask,
     input      [9:0]  sp_id,
     input             sp_at,
@@ -27,7 +27,7 @@ module span_expander (
     output reg [9:0]  xe_addr,
     output reg        xe_shade,
     output reg [9:0]  xe_id,
-    output reg [31:0] xe_invw,
+    output reg [30:0] xe_invw,
     output reg        xe_at
 );
     // mid-expansion state (for rep>1)
@@ -35,7 +35,7 @@ module span_expander (
     reg [9:0]  base_r, id_r;
     reg [2:0]  rep_r;
     reg [1:0]  k_r;                        // next covered-pixel index (1..rep-1) while active
-    reg [31:0] invw_r [0:3];
+    reg [30:0] invw_r [0:3];
     reg [3:0]  shmask_r;
     reg        at_r;
 
@@ -44,7 +44,7 @@ module span_expander (
     integer q;
     always @(*) begin
         // combinational write: pixel k=0 on accept, else the active run's pixel k_r
-        xe_we=1'b0; xe_addr=10'd0; xe_shade=1'b0; xe_id=10'd0; xe_invw=32'd0; xe_at=1'b0;
+        xe_we=1'b0; xe_addr=10'd0; xe_shade=1'b0; xe_id=10'd0; xe_invw=31'd0; xe_at=1'b0;
         if (active) begin
             xe_we    = 1'b1;
             xe_addr  = base_r + {8'd0, k_r};

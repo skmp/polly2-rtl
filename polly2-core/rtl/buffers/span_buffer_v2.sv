@@ -23,20 +23,20 @@ module span_buffer_v2 #(
     input      [9:0]      waddr,            // pixel index 0..1023
     input                 w_shade,          // this pixel is shaded this pass
     input      [9:0]      w_id,             // setup id (-> triangle_setups)
-    input      [31:0]     w_invw,           // per-pixel invW
+    input      [30:0]     w_invw,           // per-pixel invW (sign-stripped)
     input                 w_at,             // PT alpha-test enable
     // ---- READ (reader) : present raddr, data valid next cycle ----
     input      [9:0]      raddr,
     output                r_shade,
     output     [9:0]      r_id,
-    output     [31:0]     r_invw,
+    output     [30:0]     r_invw,
     output                r_at
 );
     localparam integer F_SHADE = 0;         // 1
     localparam integer F_ID    = 1;         // 10
-    localparam integer F_INVW  = 11;        // 32
-    localparam integer F_AT    = 43;        // 1
-    localparam integer PW      = 44;
+    localparam integer F_INVW  = 11;        // 31 (sign-stripped)
+    localparam integer F_AT    = 42;        // 1
+    localparam integer PW      = 43;
 
     (* ramstyle = "M10K, no_rw_check" *) reg [PW-1:0] mem [0:DEPTH-1];
     reg [PW-1:0] rdw;
@@ -44,7 +44,7 @@ module span_buffer_v2 #(
     wire [PW-1:0] wrw;
     assign wrw[F_SHADE]      = w_shade;
     assign wrw[F_ID   +: 10] = w_id;
-    assign wrw[F_INVW +: 32] = w_invw;
+    assign wrw[F_INVW +: 31] = w_invw;
     assign wrw[F_AT]         = w_at;
 
     always @(posedge clk) begin
@@ -54,6 +54,6 @@ module span_buffer_v2 #(
 
     assign r_shade = rdw[F_SHADE];
     assign r_id    = rdw[F_ID   +: 10];
-    assign r_invw  = rdw[F_INVW +: 32];
+    assign r_invw  = rdw[F_INVW +: 31];
     assign r_at    = rdw[F_AT];
 endmodule

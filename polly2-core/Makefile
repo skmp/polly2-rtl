@@ -165,7 +165,7 @@ regen:
 # streaming read + concurrent write/read, against the real M10K tile_ram. Self-checking.
 taginvw: | $(BUILD)
 	+$(VERILATOR) --binary $(VFLAGS) -Wno-BLKSEQ --top-module taginvw_selftest \
-	  rtl/tsp/tsp_pkg.sv rtl/isp_min/tile_ram.sv rtl/buffers/taginvw_tile_buffer.sv \
+	  -Irtl/gen $(TSP_PKG) rtl/isp/tile_ram.sv rtl/buffers/taginvw_tile_buffer.sv \
 	  tb/taginvw_selftest.sv --Mdir $(BUILD)/obj_taginvw -o taginvw
 	./$(BUILD)/obj_taginvw/taginvw
 
@@ -231,9 +231,8 @@ golden-check: frontendtsplp-build
 # pass "<dir> <first> <count>" (default: spanner_test_vectors 0 8).
 spannerv2: | $(BUILD)
 	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ --public-flat-rw \
-	  --top-module spanner_v2_tb_top \
-	  $(TSP_RTL) tb/spanner_v2_tb_top.sv tb/sim_ddr_fb.sv \
-	  $(wildcard rtl/isp_min/*.sv) \
+	  --top-module spanner_v2_tb_top $(RTL_INC) \
+	  $(TSP_PKG) $(RTL_EXTRA) tb/spanner_v2_tb_top.sv tb/sim_ddr_fb.sv \
 	  $(CWD)/tb/spanner_v2_tb.cpp --Mdir $(BUILD)/obj_spannerv2 -o tb
 	./$(BUILD)/obj_spannerv2/tb $(ARGS)
 
