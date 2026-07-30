@@ -33,11 +33,15 @@
 //   if (valid) more=1;                                          // displaced a staged frag
 //   // caller: *zb=invW; valid=1; *pb=tag;
 //
+// Depths are 31-bit SIGN-STRIPPED floats (always positive non-zero, sign bit
+// not stored): positive floats order like unsigned integers, so the depth
+// compares are plain unsigned operators.
+//
 module isp_depth_cmp_lp (
-    input      [31:0] nw,       // new depth (invW) for this fragment
+    input      [30:0] nw,       // new depth (invW, sign-stripped) for this fragment
     input      [31:0] tag,      // new fragment's CoreTag
-    input      [31:0] zb,       // depthBufferA (this pass, closest-so-far)
-    input      [31:0] zb2,      // depthBufferB (reference from prior pass)
+    input      [30:0] zb,       // depthBufferA (this pass, closest-so-far)
+    input      [30:0] zb2,      // depthBufferB (reference from prior pass)
     input      [31:0] pb,       // tagBufferA   (this pass, pending tag)
     input      [31:0] pb2,      // tagBufferB   (last-rendered tag)
     input             valid,    // tagStatus.valid (staged this pass)
@@ -50,27 +54,6 @@ module isp_depth_cmp_lp (
     output            o_nw_gt_zb,   // nw >  zb
     output            o_nw_lt_zb2   // nw <  zb2
 );
-    // signed-float greater-than a > b (no NaN/inf; DaZ handled by ==0 test),
-    // identical to isp_depth_cmp.
-    function fgt(input [31:0] a, input [31:0] b);
-        reg az,bz; reg [30:0] am,bm;
-        begin
-            az=(a[30:0]==0); bz=(b[30:0]==0);
-            am=a[30:0]; bm=b[30:0];
-            if (az&&bz)           fgt=1'b0;
-            else if (a[31]^b[31]) fgt = b[31];      // a>b if b negative
-            else if (~a[31])      fgt = (am>bm);     // both >=0
-            else                  fgt = (am<bm);     // both <0
-        end
-    endfunction
-
-    // float equal (DaZ: +/-0 compare equal)
-    function feq(input [31:0] a, input [31:0] b);
-        begin
-            feq = (a[30:0]==31'd0 && b[30:0]==31'd0) ? 1'b1 : (a==b);
-        end
-    endfunction
-
     localparam [23:0] SORT_MASK_HI = 24'hFFFFFF; // documents PARAMETER_TAG_SORT_MASK
     // sort key = low 24 bits of the tag. `pb` (this pass's pending tag) is unused: refsw2's
     // RM_TRANSLUCENT tie-break only compares against pb2 (the last-rendered tag at the ref
@@ -78,9 +61,9 @@ module isp_depth_cmp_lp (
     wire [23:0] s_new = tag[23:0];
     wire [23:0] s_pb2 = pb2[23:0];
 
-    wire nw_gt_zb  = fgt(nw, zb);           // invW >  zb   (mode-3 LESS_EQUAL pre-test)
-    wire nw_lt_zb2 = fgt(zb2, nw);          // invW <  zb2
-    wire nw_eq_zb2 = feq(nw, zb2);          // invW == zb2
+    wire nw_gt_zb  = (nw >  zb);            // invW >  zb   (mode-3 LESS_EQUAL pre-test)
+    wire nw_lt_zb2 = (nw <  zb2);           // invW <  zb2
+    wire nw_eq_zb2 = (nw == zb2);           // invW == zb2
     wire pb2_valid = (pb2 != 32'hFFFFFFFF); // last-rendered tag is real
     assign o_nw_gt_zb  = nw_gt_zb;
     assign o_nw_lt_zb2 = nw_lt_zb2;

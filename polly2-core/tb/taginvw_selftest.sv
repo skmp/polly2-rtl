@@ -13,14 +13,14 @@ module taginvw_selftest import tsp_pkg::*; ;
     reg  [LANES-1:0]  wr_we;
     reg  [4:0]        wr_y, wr_x;
     reg  [31:0]       wr_tag;
-    reg  [32*LANES-1:0] wr_invw;
+    reg  [31*LANES-1:0] wr_invw;
     reg               wr_pt;
-    reg               clr_valid; reg [7:0] clr_addr; reg [31:0] clr_depth, clr_tag;
+    reg               clr_valid; reg [7:0] clr_addr; reg [30:0] clr_depth; reg [31:0] clr_tag;
     reg               pbc_valid; reg [7:0] pbc_addr;
     reg               rd4_valid; reg [9:0] rd4_group;
     wire [3:0]        g4_valid, g4_pt;
     wire [31:0]       g4_tag [0:3];
-    wire [31:0]       g4_invw [0:3];
+    wire [30:0]       g4_invw [0:3];
 
     taginvw_tile_buffer #(.LANES(LANES)) dut (
         .clk(clk), .reset(reset),
@@ -38,7 +38,7 @@ module taginvw_selftest import tsp_pkg::*; ;
     // write ONE lane (single tag, single-lane we mask) at chunk (y, x-aligned).
     // lane = which pixel in the group (0..3); places tag/invw into that bank.
     task wr1(input [4:0] y, input [4:0] xbase, input [1:0] lane,
-             input [31:0] tag, input [31:0] invw);
+             input [31:0] tag, input [30:0] invw);
         begin
             wr_valid = 1'b1;
             wr_we    = (4'b0001 << lane);
@@ -68,7 +68,7 @@ module taginvw_selftest import tsp_pkg::*; ;
             end
         end
     endtask
-    task chk_invw(input [1:0] lane, input [31:0] want);
+    task chk_invw(input [1:0] lane, input [30:0] want);
         begin
             if (g4_invw[lane] !== want) begin
                 $display("FAIL lane %0d invw %08x != want %08x", lane, g4_invw[lane], want);
@@ -138,7 +138,7 @@ module taginvw_selftest import tsp_pkg::*; ;
         // instance, but exercises the shared raddr/waddr paths co-asserted). ----
         rd4_group = 10'd0; rd4_valid = 1'b1;
         wr_valid = 1'b1; wr_we = 4'b0001; wr_y = 5'd10; wr_x = 5'd12; wr_tag = 32'h99990000;
-        wr_invw = {4{32'h7777_0000}}; wr_pt = 1'b0;
+        wr_invw = {4{31'h7777_0000}}; wr_pt = 1'b0;
         @(posedge clk); #1;                        // read g0 while writing (10,12) lane0
         wr_valid = 1'b0; wr_we = '0;
         if (g4_tag[0]!==32'hAAAA0000) begin $display("FAIL concurrent r/w: g0 lane0=%08x != AAAA0000", g4_tag[0]); errs=errs+1; end

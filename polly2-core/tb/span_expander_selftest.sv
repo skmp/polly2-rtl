@@ -5,10 +5,10 @@ module span_expander_selftest;
     reg reset;
 
     reg          sp_we; reg [9:0] sp_idx; reg [2:0] sp_rep;
-    reg  [31:0]  sp_invw [0:3]; reg [3:0] sp_shmask; reg [9:0] sp_id; reg sp_at;
+    reg  [30:0]  sp_invw [0:3]; reg [3:0] sp_shmask; reg [9:0] sp_id; reg sp_at;
     wire         sp_ready;
     wire         xe_we; wire [9:0] xe_addr; wire xe_shade; wire [9:0] xe_id;
-    wire [31:0]  xe_invw; wire xe_at;
+    wire [30:0]  xe_invw; wire xe_at;
 
     span_expander dut (
         .clk(clk), .reset(reset),

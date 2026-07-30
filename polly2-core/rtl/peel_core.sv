@@ -236,7 +236,7 @@ module peel_core import tsp_pkg::*; #(
     // (typed per-client request ports + a same-cycle single-driver assertion), rather
     // than leaving an inline port mux governed only by convention:
     //   * peel_tile_buffer (u_peel): the five peel depth/tag buffers packed into ONE
-    //     129-bit x 8-bank tile_ram {valid, tag2, tag, depth2, depth} per lane. It
+    //     127-bit x 8-bank tile_ram {valid, tag2, tag, depth2, depth} per lane. It
     //     owns the depth compare (isp_depth_cmp / isp_depth_cmp_lp) and the raster
     //     stage-A read / stage-B RMW, the shade single-pixel read, the CLEAR walk and
     //     the PeelBuffers RMW walk. Bank = x[2:0], addr = {y[4:0], x[4:3]}.
@@ -262,7 +262,11 @@ module peel_core import tsp_pkg::*; #(
     // over NCHUNK chunks. (LANES=8 -> 7-bit addr, 128 chunks; 4 -> 8-bit, 256.)
     localparam integer NCHUNK   = (TILE_W/RAS_LANES) * TILE_H;   // chunks/tile
     localparam integer CHUNK_AW = $clog2(NCHUNK);                // per-bank addr width
-    localparam [31:0] FLT_MAX = 32'h7F7FFFFF;  // refsw PeelBuffers depth clear value
+    // Depths (invW) are guaranteed positive non-zero, so the sign bit is STRIPPED at
+    // raster stage-B and every downstream depth store/transport is 31 bits wide
+    // (peel/taginvw tile buffers, span ring, invW side RAM, Zres). Positive floats
+    // order like unsigned ints, so all depth compares are plain unsigned compares.
+    // Float consumers (the shade RCP) zero-extend back to 32 bits.
 
     // dt_pt kept as a register array (see note above)
     reg        dt_pt [0:TILE_W*TILE_H-1];      // winning peel fragment came from PT list
@@ -391,8 +395,12 @@ module peel_core import tsp_pkg::*; #(
     wire        ras_out_valid;
     wire [RAS_LANES-1:0]    ras_inside;
     wire [32*RAS_LANES-1:0] ras_invw_flat;
-    function [31:0] ras_invw(input integer lane);
-        ras_invw = ras_invw_flat[32*lane +: 32];
+    // strip the (always-0) sign bit from each raster lane's invW: everything past
+    // stage B stores/carries 31-bit depths.
+    function [31*RAS_LANES-1:0] drop_sign(input [32*RAS_LANES-1:0] w);
+        integer l;
+        for (l = 0; l < RAS_LANES; l = l + 1)
+            drop_sign[31*l +: 31] = w[32*l +: 31];
     endfunction
 
     wire [4:0] ras_ox, ras_oy;     // coords echoed with the result chunk
@@ -474,7 +482,7 @@ module peel_core import tsp_pkg::*; #(
     // lanes. It echoes b_pass_lp (peel accept, for dt_pt) and b_more (MoreToDraw).
     reg                    b_valid;
     reg [RAS_LANES-1:0]    b_inside;
-    reg [32*RAS_LANES-1:0] b_invw;
+    reg [31*RAS_LANES-1:0] b_invw;     // per-lane invW, sign-stripped
     reg [4:0]              b_ox, b_oy;
     reg [31:0]             b_tag;
     reg [2:0]              b_mode;
@@ -561,7 +569,7 @@ module peel_core import tsp_pkg::*; #(
         // CLEAR (depth+tag). Gated on !zk_l: a z_keep=1 entry KEEPS depth (u_peel not
         // touched); only u_taginvw's tags are invalidated below.
         .clr_valid(pb_clr_depth_valid), .clr_addr(pb_clr_addr),
-        .clr_depth(regs.isp_backgnd_d), .clr_tag(regs.isp_backgnd_t),
+        .clr_depth(regs.isp_backgnd_d[30:0]), .clr_tag(regs.isp_backgnd_t),
         // PeelBuffers RMW walk
         .pb_rd_valid(pb_bufrd_valid), .pb_rd_addr(pb_bufrd_addr),
         .pb_wr_valid(pb_bufwr_valid), .pb_wr_addr(pb_bufwr_addr),
@@ -642,7 +650,7 @@ module peel_core import tsp_pkg::*; #(
     // per-half 4-wide aligned read outputs; the spanner consumes the CONSUMER half (tsp_tag)
     wire [3:0]  g4_valid_h [0:1];
     wire [31:0] g4_tag_h   [0:1][0:3];
-    wire [31:0] g4_invw_h  [0:1][0:3];
+    wire [30:0] g4_invw_h  [0:1][0:3];
     wire [3:0]  g4_pt_h    [0:1];
     genvar gti;
     generate
@@ -658,7 +666,7 @@ module peel_core import tsp_pkg::*; #(
                                                     // any forward PT-resolve fragment)
             // CLEAR (producer half only)
             .clr_valid(ti_prod && pb_clr_valid), .clr_addr(pb_clr_addr),
-            .clr_depth(regs.isp_backgnd_d), .clr_tag(regs.isp_backgnd_t),
+            .clr_depth(regs.isp_backgnd_d[30:0]), .clr_tag(regs.isp_backgnd_t),
             // PeelBuffers valid-clear walk (producer half; mirrors u_peel's pb write)
             .pbc_valid(ti_prod && pb_bufwr_valid), .pbc_addr(pb_bufwr_addr),
             // single-pixel shade read retired: spanner_v2 uses the 4-wide port
@@ -748,7 +756,7 @@ module peel_core import tsp_pkg::*; #(
     wire [9:0]         sp_start;
     wire [9:0]         sp_id;
     wire [2:0]         sp_rep;
-    wire [31:0]        sp_invw [0:3];
+    wire [30:0]        sp_invw [0:3];
     wire               sp_at;
     // TSP reader read port (one span/slot) into the shared ring
     reg  [SPAN_AW-1:0] dsr_addr;
@@ -761,7 +769,7 @@ module peel_core import tsp_pkg::*; #(
     wire [9:0]         dsr_start;
     wire [9:0]         dsr_id;
     wire [2:0]         dsr_rep;
-    wire [31:0]        dsr_invw  [0:3];
+    wire [30:0]        dsr_invw  [0:3];
     wire               dsr_at;
     dense_span_buffer #(.DEPTH(SPAN_NSLOT), .IDW(10)) u_span (
         .clk(clk),
@@ -825,7 +833,7 @@ module peel_core import tsp_pkg::*; #(
     // ---- 4-wide taginvw read muxed to the CONSUMER half (tsp_tag). g4_*_h come from the
     // taginvw generate above; spv_rd_valid/spv_rd_group are driven by spanner_v2 below. ----
     wire [31:0] g4_tag_c  [0:3];
-    wire [31:0] g4_invw_c [0:3];
+    wire [30:0] g4_invw_c [0:3];
     wire [3:0]  g4_valid_c = g4_valid_h[tsp_tag];
     wire [3:0]  g4_pt_c    = g4_pt_h[tsp_tag];
     genvar gm;
@@ -901,7 +909,7 @@ module peel_core import tsp_pkg::*; #(
                               // ~100 id-slots (incl. the 64-deep, ASYNC-READ payload
                               // window) cost ~3.2k FFs; the RAM costs 4 M10K.
     reg  [4:0]   pp_px, pp_py;
-    reg  [31:0]  pp_invw;
+    reg  [30:0]  pp_invw;   // sign-stripped; zero-extended into the shade RCP
     reg  [31:0]  pp_tsp, pp_tcw; reg pp_ptex, pp_pofs;
     reg  [31:0]  pp_ddx [0:9];
     reg  [31:0]  pp_ddy [0:9];
@@ -928,7 +936,7 @@ module peel_core import tsp_pkg::*; #(
     // first tile is shaded (raster/region-walk runs first), so this is free in practice.
     tsp_shade_v2_pp #(.IDW(11)) u_shade (
         .clk(clk),.reset(reset),.flush(go),
-        .in_valid(pp_in_valid),.in_id(pp_in_id),.px(pp_px),.py(pp_py),.invw_in(pp_invw),
+        .in_valid(pp_in_valid),.in_id(pp_in_id),.px(pp_px),.py(pp_py),.invw_in({1'b0, pp_invw}),
         .in_ddx(pp_ddx),.in_ddy(pp_ddy),.in_c(pp_c),
         .tsp(pp_tsp),.tcw(pp_tcw),.text_ctrl(regs.text_control[4:0]),
         .pal_fmt(regs.pal_ram_ctrl[1:0]),
@@ -1024,7 +1032,7 @@ module peel_core import tsp_pkg::*; #(
     reg  [9:0]   cb_id;
     reg  [31:0]  cb_argb, cb_tsp;
     reg          cb_at_en;    // alpha-test enable snapshot (peeling && dt_pt[id])
-    wire [31:0]  cb_invw;    // CB stage: pixel's invW (from the invW side RAM;
+    wire [30:0]  cb_invw;    // CB stage: pixel's invW (from the invW side RAM;
                              // its read was presented with pp_out_valid last cycle,
                              // so it lands exactly aligned with cb_valid/cb_id)
     // ---- invW SIDE RAM: the PT-resolve depth feedback, keyed by pixel id ----
@@ -1040,7 +1048,7 @@ module peel_core import tsp_pkg::*; #(
     // never rewritten while an earlier instance is still in flight.
     // The read is presented on pp_out_valid and lands 1 cycle later, exactly when
     // cb_valid/cb_id are live: no extra stage, no realignment.
-    bram_sdp #(.W(32), .D(1024)) u_iwr (
+    bram_sdp #(.W(31), .D(1024)) u_iwr (
         .clk(clk),
         .we(pp_in_valid && !pp_stall), .waddr(s2_p), .din(s2_invw),
         .re(pp_out_valid), .raddr(pp_out_id[9:0]), .q(cb_invw));
@@ -1050,7 +1058,7 @@ module peel_core import tsp_pkg::*; #(
     reg          cb2_valid;
     reg  [9:0]   cb2_id;
     reg          cb2_ptres;  // CC stage: blend belongs to a PT-resolve pass
-    reg  [31:0]  cb2_invw;   // CC stage: pixel's invW
+    reg  [30:0]  cb2_invw;   // CC stage: pixel's invW
     // ---- Zres: per-pixel RESOLVED DEPTH, written by the blend when a PT pixel's
     // alpha passes (the invW rode the shade pipe in pp_out_id[42:11]). Making the
     // BLEND the depth authority (not the raster's parked boundary) is what lets
@@ -1064,18 +1072,18 @@ module peel_core import tsp_pkg::*; #(
     localparam integer ZR_AW = 10 - ZR_BB;
     wire [RAS_LANES-1:0]     zr_we;
     wire [ZR_AW*RAS_LANES-1:0] zr_waddr, zr_raddr;
-    wire [32*RAS_LANES-1:0]  zr_wdata, zr_rdata;
+    wire [31*RAS_LANES-1:0]  zr_wdata, zr_rdata;
     wire                     zr_wr = pr_set;
     genvar gzr;
     generate
       for (gzr = 0; gzr < RAS_LANES; gzr = gzr + 1) begin : gzres
         assign zr_we   [gzr]              = zr_wr && (cb2_id[ZR_BB-1:0] == ZR_BB'(gzr));
         assign zr_waddr[ZR_AW*gzr +: ZR_AW] = {cb2_id[9:5], cb2_id[4:ZR_BB]};
-        assign zr_wdata[32*gzr +: 32]     = cb2_invw;
+        assign zr_wdata[31*gzr +: 31]     = cb2_invw;
         assign zr_raddr[ZR_AW*gzr +: ZR_AW] = pb_rd;   // PT_FIX read-ahead cursor
       end
     endgenerate
-    tile_ram #(.WIDTH(32), .NBANKS(RAS_LANES)) u_zres (
+    tile_ram #(.WIDTH(31), .NBANKS(RAS_LANES)) u_zres (
         .clk(clk), .we(zr_we), .waddr(zr_waddr), .wdata(zr_wdata),
         .raddr(zr_raddr), .rdata(zr_rdata));
 
@@ -1266,21 +1274,21 @@ module peel_core import tsp_pkg::*; #(
     reg        ns_v;
     reg [9:0]  ns_start, ns_id;
     reg [2:0]  ns_rep;
-    reg [31:0] ns_invw [0:3];
+    reg [30:0] ns_invw [0:3];
     reg        ns_at;
     reg [12:0] ns_wm;
     // Stage C expand: current span being expanded + pixel counter k
     reg        cs_v;          // a span is being expanded (cs_* valid)
     reg [9:0]  cs_start, cs_id;
     reg [2:0]  cs_rep;
-    reg [31:0] cs_invw [0:3];
+    reg [30:0] cs_invw [0:3];
     reg        cs_at;
     reg [12:0] cs_wm;
     reg [2:0]  cs_k;          // pixel-within-span 0..rep-1
     // Stage C: the pixel emitted last cycle -> feeds pp with fresh planes (tsg_r_* for cs_id).
     reg        s2_v;          // Stage C occupied (a pixel to feed pp this cycle)
     reg [9:0]  s2_p;          // pixel index (y:x)
-    reg [31:0] s2_invw;
+    reg [30:0] s2_invw;
     reg        s2_at;
     reg [9:0]  s2_id;         // held to re-present the tsg read on pp_stall
     reg [12:0] s2_wm;         // its span's alloc watermark (cons_seq feedback)
@@ -1861,7 +1869,7 @@ module peel_core import tsp_pkg::*; #(
             if (ras_out_valid) begin
                 b_valid  <= 1'b1;
                 b_inside <= ras_inside;
-                b_invw   <= ras_invw_flat;
+                b_invw   <= drop_sign(ras_invw_flat);
                 b_ox     <= ras_ox;
                 b_oy     <= ras_oy;
                 // identity via the exit-aligned sideband slot (NOT the POP-latched
@@ -2773,7 +2781,7 @@ module peel_core import tsp_pkg::*; #(
                 reg [9:0]  src_start, src_id;
                 reg [2:0]  src_rep;
                 reg        src_at;
-                reg [31:0] src_invw [0:3];
+                reg [30:0] src_invw [0:3];
                 reg [12:0] src_wm;
                 integer    si;
                 // current expand span finishes this cycle (or none in flight)

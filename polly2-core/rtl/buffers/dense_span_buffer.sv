@@ -23,7 +23,7 @@ module dense_span_buffer #(
     input      [IDW-1:0]  w_id,             // setup id (-> triangle_setups)
     input      [WMW-1:0]  w_wm,             // alloc-seq watermark (streaming setup/free gate)
     input      [2:0]      w_rep,            // run length 1..4
-    input      [31:0]     w_invw [0:3],     // per-covered-pixel invW
+    input      [30:0]     w_invw [0:3],     // per-covered-pixel invW (sign-stripped)
     input                 w_at,             // PT alpha-test enable
     // ---- READ (reader): present raddr, span valid next cycle ----
     input      [AW-1:0]   raddr,
@@ -31,16 +31,16 @@ module dense_span_buffer #(
     output     [IDW-1:0]  r_id,
     output     [WMW-1:0]  r_wm,
     output     [2:0]      r_rep,
-    output     [31:0]     r_invw [0:3],
+    output     [30:0]     r_invw [0:3],
     output                r_at
 );
     localparam integer F_START = 0;           // 10
     localparam integer F_ID    = 10;          // IDW
     localparam integer F_REP   = 10 + IDW;    // 3
-    localparam integer F_INVW  = 13 + IDW;    // 128 (4 x 32)
-    localparam integer F_AT    = 141 + IDW;   // 1
-    localparam integer F_WM    = 142 + IDW;   // WMW
-    localparam integer PW      = 142 + IDW + WMW;
+    localparam integer F_INVW  = 13 + IDW;    // 124 (4 x 31, sign-stripped)
+    localparam integer F_AT    = 137 + IDW;   // 1
+    localparam integer F_WM    = 138 + IDW;   // WMW
+    localparam integer PW      = 138 + IDW + WMW;
 
     (* ramstyle = "M10K, no_rw_check" *) reg [PW-1:0] mem [0:DEPTH-1];
     reg [PW-1:0] rdw;
@@ -54,7 +54,7 @@ module dense_span_buffer #(
     genvar gi;
     generate
       for (gi = 0; gi < 4; gi = gi + 1) begin : g_wr_invw
-        assign wrw[F_INVW + 32*gi +: 32] = w_invw[gi];
+        assign wrw[F_INVW + 31*gi +: 31] = w_invw[gi];
       end
     endgenerate
 
@@ -71,7 +71,7 @@ module dense_span_buffer #(
     genvar gr;
     generate
       for (gr = 0; gr < 4; gr = gr + 1) begin : g_rd_invw
-        assign r_invw[gr] = rdw[F_INVW + 32*gr +: 32];
+        assign r_invw[gr] = rdw[F_INVW + 31*gr +: 31];
       end
     endgenerate
 endmodule

@@ -5,32 +5,21 @@
 // (refsw: 0 never, 1 less, 2 equal, 3 less-or-equal, 4 greater, 5 not-equal,
 // 6 greater-or-equal, 7 always; "reject" cases inverted to a pass flag).
 //
-// Non-IEEE float compare: no NaN/inf handling, +/-0 compare equal (DaZ is
+// Depths are 31-bit SIGN-STRIPPED floats (always positive non-zero, so the
+// sign bit is not stored anywhere): positive floats order like unsigned
+// integers, so this is a plain unsigned compare. No NaN/inf handling (DaZ is
 // handled upstream). Instantiate one per rasterizer lane.
 //
 module isp_depth_cmp (
     input      [2:0]  mode,   // ISP DepthMode (isp_word[31:29])
-    input      [31:0] nw,     // new depth (invW)
-    input      [31:0] ob,     // stored depth
+    input      [30:0] nw,     // new depth (invW, sign-stripped)
+    input      [30:0] ob,     // stored depth (sign-stripped)
     output reg        pass
 );
-    // signed-float greater-than a > b (no NaN/inf; DaZ handled by ==0 test)
-    function fgt(input [31:0] a, input [31:0] b);
-        reg az,bz; reg [30:0] am,bm;
-        begin
-            az=(a[30:0]==0); bz=(b[30:0]==0);
-            am=a[30:0]; bm=b[30:0];
-            if (az&&bz)          fgt=1'b0;
-            else if (a[31]^b[31]) fgt = b[31];         // a>b if b negative
-            else if (~a[31])      fgt = (am>bm);        // both >=0
-            else                  fgt = (am<bm);        // both <0
-        end
-    endfunction
-
     reg lt,eq,gt;
     always @* begin
-        eq = (nw[30:0]==31'd0 && ob[30:0]==31'd0) ? 1'b1 : (nw==ob);
-        gt = fgt(nw,ob);
+        eq = (nw==ob);
+        gt = (nw>ob);
         lt = ~eq & ~gt;
         case (mode)
             3'd0: pass = 1'b0;      // never

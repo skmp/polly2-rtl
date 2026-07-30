@@ -2,8 +2,10 @@
 // peel_tile_buffer - the layer-peel depth/tag tile buffer, banked into M10K, with
 // its access pattern ENFORCED by typed per-client ports (not by convention).
 //
-// Storage: ONE simple-dual-port tile_ram (u_ram), WIDTH = 129 bits/lane packing
-// {valid, tag2[31:0], tag[31:0], depth2[31:0], depth[31:0]}, NBANKS = LANES banks.
+// Storage: ONE simple-dual-port tile_ram (u_ram), WIDTH = 127 bits/lane packing
+// {valid, tag2[31:0], tag[31:0], depth2[30:0], depth[30:0]}, NBANKS = LANES banks.
+// Depths are 31-bit SIGN-STRIPPED floats: invW is always positive non-zero, so
+// the sign bit is never stored and positive-float ordering == unsigned ordering.
 // Bank = x[BANK_BITS-1:0], addr = {y[4:0], x[4:BANK_BITS]} (AW bits, 1024/LANES
 // entries/bank) - a whole LANES-pixel raster chunk is one address across all
 // banks. For a 32x32 tile: LANES=8 -> 3 bank bits, 7-bit addr, 128/bank;
@@ -47,7 +49,7 @@ module peel_tile_buffer import tsp_pkg::*; #(
     // ---- RASTER stage B: RMW write-back of the chunk stage A read last cycle ----
     input                       ras_b_valid,
     input      [LANES-1:0]      b_inside,
-    input      [32*LANES-1:0]   b_invw,      // per-lane new invW (flat)
+    input      [31*LANES-1:0]   b_invw,      // per-lane new invW (flat, sign-stripped)
     input      [4:0]            b_y,
     input      [4:0]            b_x,         // chunk base (LANES-aligned)
     input      [31:0]           b_tag,       // fragment CoreTag
@@ -80,12 +82,12 @@ module peel_tile_buffer import tsp_pkg::*; #(
     input      [9:0]            sh_rd_id,
     output reg                  sh_valid,    // staged-this-pass bit  (1-cyc latency)
     output reg [31:0]           sh_tag,      // pending tag           (1-cyc latency)
-    output reg [31:0]           sh_depth,    // depthBufferA (invW)   (1-cyc latency)
+    output reg [30:0]           sh_depth,    // depthBufferA (invW)   (1-cyc latency)
 
     // ---- CLEAR: write {depth, tag} background to all banks at clr_addr ----
     input                       clr_valid,
     input      [10-$clog2(LANES)-1:0] clr_addr,
-    input      [31:0]           clr_depth,
+    input      [30:0]           clr_depth,
     input      [31:0]           clr_tag,
 
     // ---- PEELBUFFERS RMW walk (read-ahead / delayed write) ----
@@ -114,7 +116,7 @@ module peel_tile_buffer import tsp_pkg::*; #(
     input                       pb_ptswap,
     input                       pb_ptfix,
     input      [LANES-1:0]      pb_res,      // per-lane resolved bit for pb_wr chunk
-    input      [32*LANES-1:0]   pb_zres,     // per-lane blend-resolved depth
+    input      [31*LANES-1:0]   pb_zres,     // per-lane blend-resolved depth
     // ---- z_keep depth-restore RMW (reuses the pb_rd/pb_wr cursors) ----
     // When pb_zkeep is asserted alongside the pb_wr write, the transform is NOT the
     // PeelBuffers reference-swap: instead it RESTORES the kept depth for a z_keep=1 OP
@@ -129,13 +131,13 @@ module peel_tile_buffer import tsp_pkg::*; #(
     localparam integer NB     = LANES;
     localparam integer BANK_BITS = $clog2(LANES);       // 3 for 8, 2 for 4
     localparam integer AW        = 10 - BANK_BITS;       // per-bank addr width (7 / 8)
-    localparam integer PW_DEPTH  = 0;    // [31:0]  depthBufferA (zb)
-    localparam integer PW_DEPTH2 = 32;   // [31:0]  depthBufferB (zb2, reference)
-    localparam integer PW_TAG    = 64;   // [31:0]  tagBufferA   (pb)
-    localparam integer PW_TAG2   = 96;   // [31:0]  tagBufferB   (pb2)
-    localparam integer PW_VALID  = 128;  // [0]     tagStatus.valid
-    localparam integer PEEL_W = 129;
-    localparam [31:0]  FLT_MAX = 32'h7F7FFFFF;
+    localparam integer PW_DEPTH  = 0;    // [30:0]  depthBufferA (zb)
+    localparam integer PW_DEPTH2 = 31;   // [30:0]  depthBufferB (zb2, reference)
+    localparam integer PW_TAG    = 62;   // [31:0]  tagBufferA   (pb)
+    localparam integer PW_TAG2   = 94;   // [31:0]  tagBufferB   (pb2)
+    localparam integer PW_VALID  = 126;  // [0]     tagStatus.valid
+    localparam integer PEEL_W = 127;
+    localparam [30:0]  FLT_MAX = 31'h7F7FFFFF;
     // the three PT walks share one write-mux case (see the pb_ptwalk block)
     wire pb_ptwalk = pb_ptinit | pb_ptswap | pb_ptfix;
 
@@ -161,14 +163,18 @@ module peel_tile_buffer import tsp_pkg::*; #(
         end
     endfunction
     // per-lane field extractors from a packed chunk word
-    function automatic [31:0] f_depth (input [PEEL_W*NB-1:0] w, input integer b);
-        f_depth  = w[PEEL_W*b + PW_DEPTH  +: 32]; endfunction
-    function automatic [31:0] f_depth2(input [PEEL_W*NB-1:0] w, input integer b);
-        f_depth2 = w[PEEL_W*b + PW_DEPTH2 +: 32]; endfunction
+    function automatic [30:0] f_depth (input [PEEL_W*NB-1:0] w, input integer b);
+        f_depth  = w[PEEL_W*b + PW_DEPTH  +: 31]; endfunction
+    function automatic [30:0] f_depth2(input [PEEL_W*NB-1:0] w, input integer b);
+        f_depth2 = w[PEEL_W*b + PW_DEPTH2 +: 31]; endfunction
     function automatic [31:0] f_tag   (input [PEEL_W*NB-1:0] w, input integer b);
         f_tag    = w[PEEL_W*b + PW_TAG    +: 32]; endfunction
     function automatic [31:0] f_tag2  (input [PEEL_W*NB-1:0] w, input integer b);
         f_tag2   = w[PEEL_W*b + PW_TAG2   +: 32]; endfunction
+    // Zceil view of tag2: during the PT phase tag2 parks the (sign-stripped)
+    // opaque depth, zero-extended into the 32-bit tag field.
+    function automatic [30:0] f_zceil (input [PEEL_W*NB-1:0] w, input integer b);
+        f_zceil  = w[PEEL_W*b + PW_TAG2   +: 31]; endfunction
     function automatic       f_valid  (input [PEEL_W*NB-1:0] w, input integer b);
         f_valid  = w[PEEL_W*b + PW_VALID]; endfunction
 
@@ -188,11 +194,11 @@ module peel_tile_buffer import tsp_pkg::*; #(
             // would mis-compare against the opaque ceiling.
             isp_depth_cmp u_cmp (
                 .mode(b_fwd ? 3'd6 : b_mode),
-                .nw  (b_invw[32*gd +: 32]),
-                .ob  (b_fwd ? f_tag2(rdata, gd) : f_depth(rdata, gd)),
+                .nw  (b_invw[31*gd +: 31]),
+                .ob  (b_fwd ? f_zceil(rdata, gd) : f_depth(rdata, gd)),
                 .pass(ras_pass_op[gd]));
             isp_depth_cmp_lp u_cmp_lp (
-                .nw   (b_invw[32*gd +: 32]),
+                .nw   (b_invw[31*gd +: 31]),
                 .tag  (b_tag),
                 .zb   (f_depth (rdata, gd)),
                 .zb2  (f_depth2(rdata, gd)),
@@ -249,7 +255,7 @@ module peel_tile_buffer import tsp_pkg::*; #(
             we    = {NB{1'b1}};
             waddr = {NB{clr_addr}};
             for (cw = 0; cw < NB; cw = cw + 1) begin
-                wdata[PEEL_W*cw + PW_DEPTH +: 32] = clr_depth;
+                wdata[PEEL_W*cw + PW_DEPTH +: 31] = clr_depth;
                 wdata[PEEL_W*cw + PW_TAG   +: 32] = clr_tag;
                 // depth2/tag2/valid don't-care for OP; PeelBuffers sets them.
             end
@@ -257,8 +263,8 @@ module peel_tile_buffer import tsp_pkg::*; #(
             // ---- PT phase walks, ONE transform ----
             // init / swap / fix are all "read chunk, permute the depth planes, write
             // back with valid=0 and tag kept". Folding them into a single case keeps
-            // the 1032-bit (PEEL_W x NB) write mux at ONE input instead of three -
-            // the per-field selects below are 8 x 32-bit muxes, not three parallel
+            // the 1016-bit (PEEL_W x NB) write mux at ONE input instead of three -
+            // the per-field selects below are 8 x field-wide muxes, not three parallel
             // full-width datapaths.
             //   zb    : init/swap -> 0 (working seed); fix -> Zfinal (the blend's
             //           resolved depth where the pixel locked, else the opaque Z
@@ -270,17 +276,17 @@ module peel_tile_buffer import tsp_pkg::*; #(
             we    = {NB{1'b1}};
             waddr = {NB{pb_wr_addr}};
             for (cw = 0; cw < NB; cw = cw + 1) begin
-                wdata[PEEL_W*cw + PW_DEPTH  +: 32] =
-                    pb_ptfix ? (pb_res[cw] ? pb_zres[32*cw +: 32]
-                                           : f_tag2(rdata, cw))
-                             : 32'h0;
-                wdata[PEEL_W*cw + PW_DEPTH2 +: 32] =
+                wdata[PEEL_W*cw + PW_DEPTH  +: 31] =
+                    pb_ptfix ? (pb_res[cw] ? pb_zres[31*cw +: 31]
+                                           : f_zceil(rdata, cw))
+                             : 31'h0;
+                wdata[PEEL_W*cw + PW_DEPTH2 +: 31] =
                     pb_ptinit ? FLT_MAX
-                  : pb_ptswap ? ((f_depth(rdata, cw) == 32'h0) ? f_depth2(rdata, cw)
+                  : pb_ptswap ? ((f_depth(rdata, cw) == 31'h0) ? f_depth2(rdata, cw)
                                                                : f_depth (rdata, cw))
                               : f_depth2(rdata, cw);
                 wdata[PEEL_W*cw + PW_TAG2   +: 32] =
-                    pb_ptinit ? f_depth(rdata, cw) : f_tag2(rdata, cw);
+                    pb_ptinit ? {1'b0, f_depth(rdata, cw)} : f_tag2(rdata, cw);
                 wdata[PEEL_W*cw + PW_TAG    +: 32] = f_tag(rdata, cw);
                 wdata[PEEL_W*cw + PW_VALID]        = 1'b0;
             end
@@ -292,10 +298,10 @@ module peel_tile_buffer import tsp_pkg::*; #(
             we    = {NB{1'b1}};
             waddr = {NB{pb_wr_addr}};
             for (cw = 0; cw < NB; cw = cw + 1) begin
-                wdata[PEEL_W*cw + PW_DEPTH  +: 32] =
+                wdata[PEEL_W*cw + PW_DEPTH  +: 31] =
                     (f_depth(rdata, cw) == FLT_MAX) ? f_depth2(rdata, cw)
                                                     : f_depth (rdata, cw);
-                wdata[PEEL_W*cw + PW_DEPTH2 +: 32] = f_depth2(rdata, cw);
+                wdata[PEEL_W*cw + PW_DEPTH2 +: 31] = f_depth2(rdata, cw);
                 wdata[PEEL_W*cw + PW_TAG    +: 32] = f_tag  (rdata, cw);
                 wdata[PEEL_W*cw + PW_TAG2   +: 32] = f_tag2 (rdata, cw);
                 wdata[PEEL_W*cw + PW_VALID]        = f_valid(rdata, cw);
@@ -304,7 +310,7 @@ module peel_tile_buffer import tsp_pkg::*; #(
             we    = {NB{1'b1}};
             waddr = {NB{pb_wr_addr}};
             for (cw = 0; cw < NB; cw = cw + 1) begin
-                wdata[PEEL_W*cw + PW_DEPTH  +: 32] = FLT_MAX;
+                wdata[PEEL_W*cw + PW_DEPTH  +: 31] = FLT_MAX;
                 // reference (zb2) <- zb (old depth), EXCEPT when zb is the FLT_MAX sentinel
                 // (this pixel peeled NOTHING last pass): then KEEP the old zb2. Without this,
                 // an entry's FIRST PeelBuffers would swap the sentinel in and discard the
@@ -312,7 +318,7 @@ module peel_tile_buffer import tsp_pkg::*; #(
                 // is the only surviving copy of the opaque Z. That refsw2 bug wrongly z-fails
                 // the entry's TR (e.g. the THPS2 OSD occluded by the frozen scene). Merging
                 // odepth into zb2 this way needs no extra buffer - just the right reload.
-                wdata[PEEL_W*cw + PW_DEPTH2 +: 32] =
+                wdata[PEEL_W*cw + PW_DEPTH2 +: 31] =
                     (f_depth(rdata, cw) == FLT_MAX) ? f_depth2(rdata, cw)
                                                     : f_depth (rdata, cw);
                 wdata[PEEL_W*cw + PW_TAG    +: 32] = f_tag  (rdata, cw);
@@ -329,19 +335,19 @@ module peel_tile_buffer import tsp_pkg::*; #(
                         // zb <- invW, pb <- tag, valid <- 1; boundary/Zceil kept.
                         if (b_peeling ? ras_pass_lp[cw] : ras_pass_fwd[cw]) begin
                             we[cw] = 1'b1;
-                            wdata[PEEL_W*cw + PW_DEPTH  +: 32] = b_invw[32*cw +: 32];
+                            wdata[PEEL_W*cw + PW_DEPTH  +: 31] = b_invw[31*cw +: 31];
                             wdata[PEEL_W*cw + PW_TAG    +: 32] = b_tag;
                             wdata[PEEL_W*cw + PW_VALID]        = 1'b1;
-                            wdata[PEEL_W*cw + PW_DEPTH2 +: 32] = f_depth2(rdata, cw);
+                            wdata[PEEL_W*cw + PW_DEPTH2 +: 31] = f_depth2(rdata, cw);
                             wdata[PEEL_W*cw + PW_TAG2   +: 32] = f_tag2  (rdata, cw);
                         end
                     end else begin
                         if (ras_pass_op[cw]) begin // opaque: tag<-tag, depth<-invW
                             we[cw] = 1'b1;
-                            wdata[PEEL_W*cw + PW_DEPTH  +: 32] =
-                                b_zwdis ? f_depth(rdata, cw) : b_invw[32*cw +: 32];
+                            wdata[PEEL_W*cw + PW_DEPTH  +: 31] =
+                                b_zwdis ? f_depth(rdata, cw) : b_invw[31*cw +: 31];
                             wdata[PEEL_W*cw + PW_TAG    +: 32] = b_tag;
-                            wdata[PEEL_W*cw + PW_DEPTH2 +: 32] = f_depth2(rdata, cw);
+                            wdata[PEEL_W*cw + PW_DEPTH2 +: 31] = f_depth2(rdata, cw);
                             wdata[PEEL_W*cw + PW_TAG2   +: 32] = f_tag2  (rdata, cw);
                             wdata[PEEL_W*cw + PW_VALID]        = f_valid (rdata, cw);
                         end
