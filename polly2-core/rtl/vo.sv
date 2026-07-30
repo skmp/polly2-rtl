@@ -85,6 +85,8 @@ module vo import tsp_pkg::*; #(
     input                 [31:0] fb_w_sof1,
     input  fb_w_linestride_reg_t fb_w_linestride,
     input  scaler_ctl_reg_t      scaler_ctl,
+    input  fb_x_clip_reg_t       fb_x_clip,     // FB write clip window, min/max
+    input  fb_y_clip_reg_t       fb_y_clip,     // INCLUSIVE, in written-FB pixels
 
     // ================= PIXEL port (from peel_core) =================
     input  fb_wr_req_t  fbw_req,
@@ -146,6 +148,14 @@ module vo import tsp_pkg::*; #(
     wire [31:0] sel_argb = hs_en ? {hs_a[8:1], hs_r[8:1], hs_g[8:1], hs_b[8:1]}
                                  : fbw_req.argb;
     wire [10:0] sel_px   = hs_en ? {1'b0, fbw_req.px[10:1]} : fbw_req.px;
+
+    // FB_X_CLIP / FB_Y_CLIP: inclusive clip window for the framebuffer write, in
+    // units of WRITTEN-FB pixels - so the post-hscale x (the coordinate the pixel
+    // lands at) is what is tested. A clipped pixel still flows through hs pairing
+    // (it must: its neighbour may be inside the window) but produces no write,
+    // the same drop mechanism the hscale even-x pixel uses (p0_wr).
+    wire clip_ok = (sel_px      >= fb_x_clip.min) && (sel_px      <= fb_x_clip.max)
+                && (fbw_req.py  >= fb_y_clip.min) && (fbw_req.py  <= fb_y_clip.max);
 
     // ---- 4x4 Bayer dither bias ROM: refsw2's bayerBias[y&3][x&3] ----
     // (= 4x4 Bayer * 16 + 8). Read SYNCHRONOUSLY off {py[1:0], px[1:0]} so the
@@ -399,7 +409,7 @@ module vo import tsp_pkg::*; #(
             if (!a_stall) begin
                 p0_v <= acc;
                 if (acc) begin
-                    p0_wr   <= px_pass;
+                    p0_wr   <= px_pass && clip_ok;
                     p0_argb <= sel_argb;
                     p0_px   <= sel_px;
                     p0_py   <= fbw_req.py;

@@ -172,6 +172,8 @@ module simplex_pvr_top import tsp_pkg::*; (
         .fb_w_sof1(regs.fb_w_sof1),
         .fb_w_linestride(regs.fb_w_linestride),
         .scaler_ctl(regs.scaler_ctl),
+        .fb_x_clip(regs.fb_x_clip),
+        .fb_y_clip(regs.fb_y_clip),
         .fbw_req(fbw_req), .fbw_resp(fbw_resp),
         .ddr_busy(DDRAM2_BUSY),
         .ddr_burstcnt(DDRAM2_BURSTCNT),

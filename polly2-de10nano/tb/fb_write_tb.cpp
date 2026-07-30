@@ -12,6 +12,9 @@
 //                    W, byte W*8 + bank*4, bank = SOF bit 22; BE-masked)
 //   FB_W_SOF1[24]=1: dense 64-bit-view render-to-texture mirror (FB byte F
 //                    -> DDR byte F; whole beats)
+// FB_X_CLIP/FB_Y_CLIP give an INCLUSIVE min/max window in WRITTEN-FB pixels
+// (post-hscale x); pixels outside produce NO bytes at all (the extra-byte
+// check makes a leaked clipped pixel a hard FAIL).
 // Addressing: SOF + py*FB_W_LINESTRIDE*8 + px*bpp. SCALER_CTL.hscale
 // averages horizontally-adjacent pixel pairs ((even+odd)>>1 per channel)
 // into one written pixel at x>>1 - checked both as 1280->640 (supersampled)
@@ -81,6 +84,8 @@ struct Cfg {
     bool hscale; int in_w;                // rendered width (write out w/2 if hscale)
     uint32_t sof_off;                     // byte offset (SOF low bits)
     uint8_t kval, ath; uint16_t xorpat;
+    // FB_X/Y_CLIP window, inclusive, in written-FB pixels (defaults wide open)
+    int x_min = 0, x_max = 2047, y_min = 0, y_max = 1023;
 };
 
 static int bpp_of(int pm) { return pm == 4 ? 3 : (pm >= 5 ? 4 : 2); }
@@ -119,6 +124,8 @@ static void run_config(const Cfg& c) {
     regwrite(28, stride);
     regwrite(32, c.hscale ? (1u << 16) : 0);   // scaler_ctl
     regwrite(36, (uint32_t)(c.in_w / 32));     // tile-mode width
+    regwrite(40, (uint32_t)c.x_min | ((uint32_t)c.x_max << 16));   // fb_x_clip
+    regwrite(44, (uint32_t)c.y_min | ((uint32_t)c.y_max << 16));   // fb_y_clip
     regwrite(20, 1);                           // stream the frame, tile order
     for (int i = 0; i < c.in_w * 480 * 3 + 100000; i++) tick();
     if (w_expect != 0) { printf("[%s] FAIL: burst left open\n", c.name); errors++; }
@@ -128,6 +135,8 @@ static void run_config(const Cfg& c) {
     std::map<uint64_t, uint8_t> want;
     for (int y = 0; y < 480; y++)
         for (int x = 0; x < out_w; x++) {
+            if (x < c.x_min || x > c.x_max || y < c.y_min || y > c.y_max)
+                continue;                  // clipped: no bytes expected
             uint32_t argb;
             if (c.hscale) {                    // (even + odd) >> 1 per channel
                 uint32_t a0 = src_argb(c, 2 * x, y), a1 = src_argb(c, 2 * x + 1, y);
@@ -212,11 +221,51 @@ int main(int argc, char** argv) {
         // 640 -> 320 pixel_double partner; dither phase follows WRITTEN x
         { "565/hx1280+d",   1, true,  false, 1, true,  1280, 0x070000, 0x00, 0x00, 0x6543 },
         { "8888/hx640/rtt", 6, false, true,  0, true,   640, 0x300000, 0x00, 0x00, 0xA5A5 },
+        // FB_X/Y_CLIP: inclusive window in written-FB pixels. Edges chosen off
+        // tile/word boundaries so partial words/beats/bursts at the clip edge
+        // are exercised; the map-equality check fails on any leaked pixel.
+        { "565/clip",       1, false, false, 1, false,  640, 0x080000, 0x00, 0x00, 0xB1B1,
+          101, 538, 33, 446 },
+        { "888/clip",       4, false, false, 1, false,  640, 0x090000, 0x00, 0x00, 0xC2C2,
+          3, 636, 1, 478 },
+        { "8888/rtt+clip",  6, false, true,  0, false,  640, 0x380000, 0x00, 0x00, 0xD3D3,
+          160, 479, 120, 359 },
+        // clip + hscale: the window applies to the WRITTEN (post-hscale) x
+        { "565/hx1280+clip",1, false, false, 1, true,  1280, 0x0A0000, 0x00, 0x00, 0xE4E4,
+          50, 589, 10, 469 },
+        // degenerate: single-pixel window (min == max, both axes)
+        { "565/clip1px",    1, false, false, 1, false,  640, 0x0B0000, 0x00, 0x00, 0xF5F5,
+          320, 320, 240, 240 },
     };
     for (const Cfg& c : cfgs) {
         run_config(c);
         if (errors) break;
     }
+
+    // ---- format x clip matrix: EVERY packmode (0..7, 7 = the treated-as-8888
+    // quirk) over the 640x480 tile-order render, against three windows:
+    //   0-649/0-479 : x max beyond the frame edge -> must clip NOTHING
+    //   0-511/0-256 : mid-frame edges (y max 256 inclusive = 257 rows)
+    //   0-127/0-127 : corner window smaller than the frame
+    // 16-bit modes run with dither so the Bayer phase is checked against the
+    // clip window too; kval/ath give modes 0/3/5 non-trivial K/A bits.
+    static const struct { const char* tag; int x1, y1; } wins[] = {
+        { "649x479", 649, 479 },
+        { "511x256", 511, 256 },
+        { "127x127", 127, 127 },
+    };
+    char names[8 * 3][24];
+    int ni = 0;
+    for (int pm = 0; pm <= 7 && !errors; pm++)
+        for (int wi = 0; wi < 3 && !errors; wi++, ni++) {
+            snprintf(names[ni], sizeof names[ni], "pm%d/clip%s", pm, wins[wi].tag);
+            Cfg c{ names[ni], pm, /*dither*/ pm < 4, /*rtt*/ false, /*half*/ pm & 1,
+                   /*hscale*/ false, 640, 0x010000u + (uint32_t)ni * 4,
+                   /*kval*/ 0xA5, /*ath*/ 0x80, (uint16_t)(0x1000 + ni * 0x111) };
+            c.x_min = 0; c.x_max = wins[wi].x1;
+            c.y_min = 0; c.y_max = wins[wi].y1;
+            run_config(c);
+        }
 
     printf(errors ? "FAIL (%d errors)\n" : "PASS\n", errors);
     delete dut;
