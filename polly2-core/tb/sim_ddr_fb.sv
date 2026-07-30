@@ -56,6 +56,21 @@ module sim_ddr_fb import tsp_pkg::*; #(
     assign ddr_resp.busy   = q_full;
     assign ddr_resp.dout   = d_do;
     assign ddr_resp.dready = d_dv;
+    // GUARD: mirror the DE10 read adapter's burst constraints (simplex_pvr_top
+    // RD_MAX_BEATS = 128 = Avalon 8-bit-burstcount legal max; worst legal client
+    // burst is the iterator record read, 3 hdr + 8 verts x 11 words = 91). This
+    // model would happily accept burst 0/255 that wedge or violate the bus on
+    // hardware (rez_ingame: a 71-beat burst vs the old 64-beat budget deadlocked
+    // the DE10 while sim rendered fine). $fatal, not $error: this model ACCEPTS
+    // the illegal burst and still renders correctly, so a continuing sim would
+    // pass golden-check's md5 and hide the violation - kill the run so it shows
+    // up as a RENDER FAIL instead.
+    always @(posedge clk) if (!reset && ddr_req.rd && !q_full) begin
+        if (ddr_req.burst == 8'd0 || ddr_req.burst > 8'd128)
+            $fatal(1, "sim_ddr_fb: illegal burst %0d (addr=%07x) - HW adapter allows 1..128",
+                   ddr_req.burst, ddr_req.addr);
+    end
+
     always @(posedge clk) begin
         d_dv <= 1'b0;
         if (reset) begin q_wp <= 3'd0; q_rp <= 3'd0; end
