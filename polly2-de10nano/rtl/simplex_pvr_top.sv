@@ -113,7 +113,13 @@ module simplex_pvr_top import tsp_pkg::*; (
     // Avalon: assert read+address+burstcount until !waitrequest (accepted), then
     // `burst` readdatavalid beats stream back, in command order.
     // ==================================================================
-    localparam integer RD_MAX_BEATS = 64;   // outstanding-beat budget (4x8-beat wc)
+    // Outstanding-beat budget. Must cover the LARGEST single burst any client can
+    // issue, or that request can never satisfy rd_cap and the core deadlocks
+    // (rez_ingame: a 71-beat iterator record burst vs the old 64 budget). Worst
+    // case is the iterator's record read: 3 hdr + 8 verts x 11 words (xyz + 2x
+    // base + 2x offset + 2x uv) = 91 beats; 128 covers it and is the Avalon
+    // 8-bit-burstcount legal max.
+    localparam integer RD_MAX_BEATS = 128;
     reg [9:0]  rd_beats   = 10'd0;  // beats accepted but not yet returned
     reg        rd_flush   = 1'b0;   // bursts orphaned by a reset: swallow their beats
     wire       rd_cap     = ({2'd0, rd_beats} + {4'd0, ddr_req.burst}) <= 12'(RD_MAX_BEATS);

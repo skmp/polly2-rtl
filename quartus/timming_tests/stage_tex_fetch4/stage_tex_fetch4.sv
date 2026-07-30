@@ -72,7 +72,7 @@ module stage_tex_fetch4 import tsp_pkg::*; (
     //      arbiter's order FIFO routes returned beats by issue order, which the Avalon
     //      bridge preserves). ----
     ddr_rd_req_t  ddr_req;  ddr_rd_resp_t ddr_resp;
-    localparam integer RD_MAX_BEATS = 64;   // outstanding-beat budget (4x8-beat wc)
+    localparam integer RD_MAX_BEATS = 128;   // outstanding-beat budget (4x8-beat wc)
     reg [9:0]  rd_beats   = 10'd0;  // beats accepted but not yet returned
     reg        rd_flush   = 1'b0;   // bursts orphaned by a reset: swallow their beats
     wire       rd_cap     = ({2'd0, rd_beats} + {4'd0, ddr_req.burst}) <= 12'(RD_MAX_BEATS);
