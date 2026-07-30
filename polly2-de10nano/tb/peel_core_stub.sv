@@ -15,6 +15,8 @@
 //   wr_addr 32 : set scaler_ctl  = wr_data (bit 16 = hscale)
 //   wr_addr 36 : set tile-mode frame width in 32-px tiles (default 20 =
 //                640; 40 = the 1280-wide hscale render shape)
+//   wr_addr 40 : set fb_x_clip = wr_data (default wide open: min 0, max 2047)
+//   wr_addr 44 : set fb_y_clip = wr_data (default wide open: min 0, max 1023)
 // argb pattern: hash32({py, px}) ^ {xorpat, xorpat}, keyed on the SCREEN
 // coordinate (py*2048 + px) so it is width-independent:
 // hash32(i) = i*0x9E3779B1
@@ -52,6 +54,8 @@ module peel_core import tsp_pkg::*; (
     reg [31:0] wctrl   = 32'd1;     // fb_w_ctrl: packmode 565, no dither
     reg [31:0] wstride = 32'd160;   // fb_w_linestride: 1280 bytes/line
     reg [31:0] sctl    = 32'd0;     // scaler_ctl: no hscale
+    reg [31:0] xclip   = 32'h07FF_0000;  // fb_x_clip: min 0, max 2047 (wide open)
+    reg [31:0] yclip   = 32'h03FF_0000;  // fb_y_clip: min 0, max 1023 (wide open)
     reg [5:0]  t_tw    = 6'd20;     // tile-mode width in tiles (20 = 640)
 
     // tile-order streaming (wr_addr 20): col fastest, then row, tx, ty
@@ -82,6 +86,8 @@ module peel_core import tsp_pkg::*; (
         regs_out.fb_w_ctrl       = wctrl;
         regs_out.fb_w_linestride = wstride;
         regs_out.scaler_ctl      = sctl;
+        regs_out.fb_x_clip       = xclip;
+        regs_out.fb_y_clip       = yclip;
         regs_out.fb_w_sof2       = unexp;
         regs_out.test_select     = beats;
         regs_out.fb_r_sof1       = lastd;
@@ -115,6 +121,8 @@ module peel_core import tsp_pkg::*; (
                     13'd28: wstride <= wr_data;
                     13'd32: sctl <= wr_data;
                     13'd36: t_tw <= wr_data[5:0];
+                    13'd40: xclip <= wr_data;
+                    13'd44: yclip <= wr_data;
                     13'd20: begin
                         tile_mode <= 1'b1;
                         t_col <= 5'd0; t_row <= 5'd0;
@@ -147,16 +155,19 @@ module peel_core import tsp_pkg::*; (
                 end
             end
 
+            // real-core protocol: rd is a strobe, accepted when !resp.busy and
+            // DROPPED that cycle. Holding it until the beats returned (the old
+            // behaviour) made the MULTI-OUTSTANDING adapter re-accept the same
+            // burst every non-busy cycle until its beat budget blocked - 8/16
+            // duplicate bursts at budget 64/128.
+            if (rd_on && !ddr_resp.busy) rd_on <= 1'b0;
+
             if (ddr_resp.dready) begin
                 beats <= beats + 32'd1;
                 lastd <= ddr_resp.dout[31:0];
                 xacc  <= xacc ^ ddr_resp.dout[31:0];
-                if (rleft != 4'd0) begin
-                    rleft <= rleft - 4'd1;
-                    if (rleft == 4'd1) rd_on <= 1'b0;
-                end else begin
-                    unexp <= unexp + 32'd1;
-                end
+                if (rleft != 4'd0) rleft <= rleft - 4'd1;
+                else               unexp <= unexp + 32'd1;
             end
         end
     end
