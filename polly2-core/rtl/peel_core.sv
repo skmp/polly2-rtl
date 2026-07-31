@@ -3418,8 +3418,14 @@ module peel_core import tsp_pkg::*; #(
     //   U <idx> <name>            unit directory (idx = 2-bit lane in the hex vector)
     //   V <idx> <name>            value directory
     //   E <vidx> <n>:<NAME>,...   enum decode for value <vidx>
+    //   T <tidx> <name> <kind>    EVENT-track directory (kind = stall|info)
     //   R <cycle>                 render start (go)
     //   @<cycle> <hex> [v<i>=<n> ...]   state vector + CHANGED values only
+    //   X <tidx> <cycle> <len> <addr>   one INTERVAL event on track <tidx>: it began
+    //                             at <cycle>, lasted <len> clocks, and concerned
+    //                             64-bit-word address <addr> (hex). Emitted on the
+    //                             CLOSING edge, so the file is not in cycle order for
+    //                             X lines - the viewer sorts them.
     //   D <cycle>                 render done
     localparam integer OCC_NU = 21;
     localparam [1:0] OC_U = 2'd0, OC_B = 2'd1, OC_O = 2'd2;
@@ -3549,6 +3555,54 @@ module peel_core import tsp_pkg::*; #(
         endcase
     endfunction
 
+    // ==================== texture-cache EVENT tracks ====================
+    // Interval events sampled off the two tex caches' sim-only ev_* observation
+    // signals (see tex_cache_4p_1c). Each track is an independent {level, start,
+    // addr} triple; the sampler times the level and emits ONE X record per episode
+    // with its length, so a miss that stalled 400 cycles is one line, not 400.
+    //
+    // Tracks: data cache misses / demand bursts / prefetch-receiver activity /
+    // hitchhike waits, and the VQ codebook cache's misses + bursts (it has no
+    // prefetcher - its probe and fill ports are tied off, so there is nothing to
+    // log for the prefetch kinds).
+    //
+    // MISS is the full stall; FETCH and PFWAIT are disjoint subsets of it (a miss
+    // either issues its own burst or rides a prefetch, never both for the same
+    // line). MISS - FETCH - PFWAIT is therefore the overhead: DDR arbiter wait in
+    // S_MISS plus the post-fill retest walk.
+    localparam integer OCC_NT = 6;
+    wire            occ_ev_lv [0:OCC_NT-1];
+    wire            occ_ev_go [0:OCC_NT-1];
+    wire [28:0]     occ_ev_ad [0:OCC_NT-1];
+    // line address -> the 64-bit-WORD address the client asked for ({line, 2'b00}),
+    // so the viewer's addresses are in the same units as tex_addr/tex_offset.
+    assign occ_ev_lv[0] = u_shade.u_tex.u_fetch.u_tc4.ev_miss;
+    assign occ_ev_go[0] = u_shade.u_tex.u_fetch.u_tc4.ev_miss_go;
+    assign occ_ev_ad[0] = {u_shade.u_tex.u_fetch.u_tc4.t_line[
+                           u_shade.u_tex.u_fetch.u_tc4.fm[1:0]], 2'b00};
+    // FETCH: m_line is already latched when the burst issues (S_RUN/S_RT2 set it on
+    // the miss decision), so it is the right address at the start pulse.
+    assign occ_ev_lv[1] = u_shade.u_tex.u_fetch.u_tc4.ev_fetch;
+    assign occ_ev_go[1] = u_shade.u_tex.u_fetch.u_tc4.ev_fetch_go;
+    assign occ_ev_ad[1] = {u_shade.u_tex.u_fetch.u_tc4.m_line, 2'b00};
+    // the COMBINATIONAL level, not the registered ev_pfw: the registered copy
+    // deasserts a cycle late, which made a dropped hitchhike (re-check found the
+    // line resident -> demand issues its own burst) overlap the FETCH that follows
+    // it by one cycle. The two are disjoint in hardware; sample them that way.
+    assign occ_ev_lv[2] = u_shade.u_tex.u_fetch.u_tc4.ev_pfw_lv;
+    assign occ_ev_go[2] = u_shade.u_tex.u_fetch.u_tc4.ev_pfw_go;
+    assign occ_ev_ad[2] = {u_shade.u_tex.u_fetch.u_tc4.m_line, 2'b00};
+    assign occ_ev_lv[3] = u_shade.u_tex.u_fetch.u_tc4.ev_pf;
+    assign occ_ev_go[3] = u_shade.u_tex.u_fetch.u_tc4.ev_pf_go;
+    assign occ_ev_ad[3] = {u_shade.u_tex.u_fetch.u_tc4.pf_fline, 2'b00};
+    assign occ_ev_lv[4] = u_shade.u_tex.u_fetch.u_vq4.ev_miss;
+    assign occ_ev_go[4] = u_shade.u_tex.u_fetch.u_vq4.ev_miss_go;
+    assign occ_ev_ad[4] = {u_shade.u_tex.u_fetch.u_vq4.t_line[
+                           u_shade.u_tex.u_fetch.u_vq4.fm[1:0]], 2'b00};
+    assign occ_ev_lv[5] = u_shade.u_tex.u_fetch.u_vq4.ev_fetch;
+    assign occ_ev_go[5] = u_shade.u_tex.u_fetch.u_vq4.ev_fetch_go;
+    assign occ_ev_ad[5] = {u_shade.u_tex.u_fetch.u_vq4.m_line, 2'b00};
+
     integer      occ_fd = 0;
     reg          occ_log_en = 1'b0;
     reg [1023:0] occ_fname;
@@ -3589,11 +3643,31 @@ module peel_core import tsp_pkg::*; #(
             $fwrite(occ_fd, "E 17 0:TEX,1:VQ,2:SPN_FETCH,3:PARAM,4:OLWALK,5:REGION,6:TEX_PF\n");
             $fwrite(occ_fd, "E 22 0:IDLE,1:START,2:RUN\n");
             $fwrite(occ_fd, "E 23 0:IDLE,1:ACTIVE\n");
+            // T <idx> <name> <kind>: event tracks. kind=stall means the episode
+            // holds up the shade pipe (drawn hot); kind=info is overlap-friendly
+            // background work (drawn cool).
+            // ordered so the demand path reads top-to-bottom - MISS is the whole
+            // stall, FETCH and PFWAIT are the two disjoint ways it is spent, and
+            // PREFETCH (the speculative client) sits below them.
+            $fwrite(occ_fd, "T 0 TC$MISS stall\n");
+            $fwrite(occ_fd, "T 1 TC$FETCH stall\n");
+            $fwrite(occ_fd, "T 2 TC$PFWAIT stall\n");
+            $fwrite(occ_fd, "T 3 TC$PREFETCH info\n");
+            $fwrite(occ_fd, "T 4 VQ$MISS stall\n");
+            $fwrite(occ_fd, "T 5 VQ$FETCH stall\n");
         end
     end
+    // per-track open-episode bookkeeping (cycle it started + the address it is for)
+    longint  occ_ev_c0 [0:OCC_NT-1];
+    reg [28:0] occ_ev_a0 [0:OCC_NT-1];
+    reg      occ_ev_op [0:OCC_NT-1];
+    integer  occ_t;
+    initial for (occ_t = 0; occ_t < OCC_NT; occ_t = occ_t + 1) occ_ev_op[occ_t] = 1'b0;
+
     always @(posedge clk) if (occ_log_en && !reset) begin : occemit
         reg     occ_any;
         integer occ_i, occ_vv;
+        integer occ_k;
         if (go) begin
             occ_run = 1'b1;
             $fwrite(occ_fd, "R %0d\n", occ_cyc);
@@ -3615,6 +3689,24 @@ module peel_core import tsp_pkg::*; #(
                 occ_prev  = occ_vec;
                 occ_first = 1'b0;
             end
+            // ---- event tracks: time each level, emit one X per closed episode ----
+            // Sampled AFTER the state line so an episode's start cycle lines up with
+            // the @ record that shows the units stalling for it. A track that is
+            // still high at the last clock is closed by the `final` flush below.
+            for (occ_k = 0; occ_k < OCC_NT; occ_k = occ_k + 1) begin
+                // close first: a start pulse on the same edge as the end of the
+                // previous episode (back-to-back misses) must yield TWO records.
+                if (occ_ev_op[occ_k] && (!occ_ev_lv[occ_k] || occ_ev_go[occ_k])) begin
+                    $fwrite(occ_fd, "X %0d %0d %0d %0h\n", occ_k, occ_ev_c0[occ_k],
+                            occ_cyc - occ_ev_c0[occ_k], occ_ev_a0[occ_k]);
+                    occ_ev_op[occ_k] = 1'b0;
+                end
+                if (occ_ev_go[occ_k]) begin
+                    occ_ev_op[occ_k] = 1'b1;
+                    occ_ev_c0[occ_k] = occ_cyc;
+                    occ_ev_a0[occ_k] = occ_ev_ad[occ_k];
+                end
+            end
             // keyed on st (not `done`): the TB stops clocking the edge `done` rises,
             // so the registered pulse would never be sampled here.
             if (st == 6'(S_DONE)) $fwrite(occ_fd, "D %0d\n", occ_cyc);
@@ -3622,6 +3714,12 @@ module peel_core import tsp_pkg::*; #(
         end
     end
     final if (occ_log_en && occ_fd != 0) begin
+        // an episode still open when the sim stops (the TB stops clocking on done)
+        // would otherwise vanish from the trace entirely - close it at the last clock
+        for (int occ_f = 0; occ_f < OCC_NT; occ_f = occ_f + 1)
+            if (occ_ev_op[occ_f])
+                $fwrite(occ_fd, "X %0d %0d %0d %0h\n", occ_f, occ_ev_c0[occ_f],
+                        occ_cyc - occ_ev_c0[occ_f], occ_ev_a0[occ_f]);
         $fflush(occ_fd); $fclose(occ_fd);
         $display("[peel_core] occupancy trace: %0d clocks -> %0s", occ_cyc, occ_fname);
     end

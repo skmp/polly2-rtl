@@ -594,6 +594,62 @@ module tex_cache_4p_1c import tsp_pkg::*; (
     end
 
 `ifndef SYNTHESIS
+    // ==================== +occlog EVENT observation (sim only) ====================
+    // Three INTERVAL events, each exposed as {level, start-pulse, line address} for
+    // peel_core's occlog to sample hierarchically (same pattern as the u_shade /
+    // u_spanner refs). Durations are measured by the sampler from the level, so the
+    // cache only has to say WHAT is happening and TO WHICH LINE:
+    //
+    //   ev_miss  - a demand miss episode: from the S_RUN/S_RT2 decision that latched
+    //              a missing line until the group finally acks. Covers the whole
+    //              freeze (issue + burst + retest + any further fills of the same
+    //              group), which is exactly the shade-pipe stall the trace is for.
+    //   ev_pf    - the prefetch receiver is occupied with one speculative line
+    //              (P_CK0 take .. commit/drop). Not a stall - shown to see whether
+    //              prefetches actually overlap the demand misses next to them.
+    //   ev_pfw   - the hitchhike wait: a demand miss whose line is already in flight
+    //              on the prefetch client, sitting in S_MISS for that commit. This
+    //              is a SUBSET of ev_miss (a miss episode that cost nothing extra in
+    //              DDR traffic but still stalled), so the viewer can separate
+    //              "missed and fetched" from "missed and waited on a prefetch".
+    //   ev_fetch - the demand DDR burst itself: S_FILL, from the accepted issue to
+    //              the 4th beat. Also a SUBSET of ev_miss, and the complement of
+    //              ev_pfw in the interesting sense - together they split a miss
+    //              episode into "time actually moving data" vs "time waiting on
+    //              someone else's transfer", with the remainder being arbiter wait
+    //              in S_MISS (dresp.busy) plus the retest walk. ONE burst per
+    //              event: a group that misses on several lines re-enters S_MISS
+    //              and gets a separate ev_fetch per line, each with its own addr.
+    //
+    // ev_*_a is the LINE address (LAW bits), valid from the start pulse onward.
+    reg            ev_miss, ev_pfw;
+    reg [LAW-1:0]  ev_miss_a;
+    wire           ev_miss_go = (st == S_RUN || st == S_RT2) && t_miss;
+    wire           ev_miss_end = group_ack && (t_v[0]||t_v[1]||t_v[2]||t_v[3]);
+    wire           ev_pf     = p_active;
+    wire [LAW-1:0] ev_pf_a   = p_line;
+    wire           ev_pf_go  = pf_take;
+    wire           ev_pfw_lv = (st == S_MISS) && m_pf_ride;
+    wire           ev_pfw_go = ev_pfw_lv && !ev_pfw;
+    // the exact burst-issue condition (mirrors the S_MISS arm above): not riding a
+    // prefetch, and the DDR client accepted the request this cycle
+    wire           ev_fetch_go = (st == S_MISS) && !m_pf_ride && !dresp.busy;
+    wire           ev_fetch    = (st == S_FILL);
+    always @(posedge clk) begin
+        if (reset || flush) begin
+            ev_miss <= 1'b0; ev_pfw <= 1'b0;
+        end else begin
+            // miss episode: opens on the latch of a missing line, closes on the ack
+            // that retires the group (the same edge a new episode can open on, so
+            // the open wins - back-to-back groups each get their own event).
+            if (ev_miss_go)       begin ev_miss <= 1'b1; ev_miss_a <= t_line[fm[1:0]]; end
+            else if (ev_miss_end) ev_miss <= 1'b0;
+            // hitchhike wait: ev_pfw is the DELAYED copy, used only to edge-detect
+            // the start (ev_pfw_lv is the live level the sampler tracks)
+            ev_pfw <= ev_pfw_lv;
+        end
+    end
+
     // ---- LIVELOCK detector (kept as a regression net, should never fire) ----
     // The t_done/t_word capture means every fill strictly shrinks the missing set -
     // dozens of back-to-back fills without a group ack means the invariant broke

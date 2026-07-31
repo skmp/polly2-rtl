@@ -45,6 +45,10 @@
   .swatch { display:inline-block; width:12px; height:12px; border-radius:2px; }
   canvas { display:block; }
   #overview { width:100%; height:56px; background:var(--panel); border-radius:4px; cursor:crosshair; }
+  #evlegend { margin:4px 0 3px; font-size:12px; color:var(--dim); gap:14px; }
+  #evlegend .ev { display:inline-flex; align-items:center; gap:5px; }
+  #evlegend .ev b { color:var(--fg); font-family:Consolas,monospace; font-weight:600; }
+  #evlegend .ev span.k { color:var(--dim); font-family:Consolas,monospace; }
   #tracks   { width:100%; background:var(--panel); border-radius:4px; cursor:crosshair; margin-top:6px; }
   #seekrow  { margin-top:6px; }
   #seek { flex:1; }
@@ -92,7 +96,9 @@
         empty&rarr;half&rarr;full</span>
     </span>
     <span class="hint">wheel: zoom &nbsp; drag: pan &nbsp; click: seek &nbsp; &larr;/&rarr;: step change &nbsp; shift+&larr;/&rarr;: &plusmn;1% </span>
+    <span class="hint">event rows: bar height = share of the column stalled; zoom in for line addresses</span>
   </div>
+  <div class="row" id="evlegend"></div>
   <canvas id="overview"></canvas>
   <canvas id="tracks"></canvas>
   <div class="row" id="seekrow">
@@ -120,7 +126,33 @@ const DB = {
   marks: [],                                // {c, t:'R'|'D'}
   total: 0,
   order: [],                                // track DISPLAY order (row -> unit idx)
+  // ---- interval EVENT tracks (X records): tex-cache misses / prefetches / waits ----
+  // Per track, three parallel arrays sorted by start cycle (the log emits an X on the
+  // episode's CLOSING edge, so file order is by END - the parser sorts). Kept as flat
+  // typed arrays for the same reason the state records are: a busy scene has tens of
+  // thousands of misses and per-event objects are what made the first cut sluggish.
+  ev: [],                                   // tidx -> {name, kind, c0, len, addr, n}
 };
+// Event colours. Stall tracks are HOT (they are lost shade-pipe cycles); the info
+// track (prefetch) is COOL - it overlaps demand work on purpose, so it must not
+// read as damage. PFWAIT is amber: a stall, but one that cost no extra DDR traffic.
+const EV_COLORS = { 'TC$MISS': '#e0483c', 'TC$PREFETCH': '#3d7fd6',
+                    'TC$PFWAIT': '#e08a2e', 'TC$FETCH': '#8d5ad6',
+                    'VQ$MISS': '#b5379c', 'VQ$FETCH': '#c98ad6' };
+const EV_FALLBACK = ['#e0483c', '#3d7fd6', '#e08a2e', '#b5379c', '#59b8a8', '#c8c840'];
+function evColor(t) { return EV_COLORS[t.name] || EV_FALLBACK[t.idx % EV_FALLBACK.length]; }
+// index of the last event on track t starting at or before cycle c (-1 if none)
+function evIdxAt(t, c) { return idxAt(t.c0, t.n, c); }
+// events overlapping [t0,t1), as index range [i,j). Episodes can be long, so the
+// scan starts a bounded distance back from t0 rather than at 0: MAXLEN is the
+// track's longest episode, and nothing starting before t0-MAXLEN can reach t0.
+function evRange(t, t0, t1) {
+  let i = idxAt(t.c0, t.n, t0 - t.maxLen);
+  if (i < 0) i = 0;
+  let j = idxAt(t.c0, t.n, t1 - 1) + 1;
+  if (j < i) j = i;
+  return [i, j];
+}
 // Display order: log unit indices are stable, but SORTC moved architecturally
 // (pre-fetch check: it now gates records BEFORE the iterator's param fetch), so
 // show its row between EQ and ITER. Falls back to identity for unknown names.
@@ -272,7 +304,7 @@ function enumName(vid, v) {
 
 // ============================== parser ==============================
 function parseLog(text, done, progress) {
-  const units = [], vals = [], enums = {}, fifos = [];
+  const units = [], vals = [], enums = {}, fifos = [], evd = [], evRaw = [];
   let sCyc = new Float64Array(1<<16), sLo = new Uint32Array(1<<16),
       sHi = new Uint32Array(1<<16), nS = 0;
   const vCyc = [], vVal = [];
@@ -336,6 +368,15 @@ function parseLog(text, done, progress) {
           const t = line.split(' '); const m = {};
           for (const kv of t[2].split(',')) { const [k, n] = kv.split(':'); m[+k] = n; }
           enums[+t[1]] = m;
+        } else if (c0 === 84) {                     // 'T idx NAME kind'
+          const t = line.split(' ');
+          evd[+t[1]] = { name: t[2], kind: t[3] || 'stall' };
+          (evRaw[+t[1]] || (evRaw[+t[1]] = []));
+        } else if (c0 === 88) {                     // 'X tidx cyc len addr'
+          const t = line.split(' ');
+          const ti = +t[1], c = +t[2], ln = +t[3];
+          (evRaw[ti] || (evRaw[ti] = [])).push(c, ln, parseInt(t[4], 16));
+          total = Math.max(total, c + ln);
         } else if (c0 === 82 || c0 === 68) {        // 'R c' / 'D c'
           const t = line.split(' ');
           marks.push({ c: +t[1], t: line[0] });
@@ -351,6 +392,26 @@ function parseLog(text, done, progress) {
     DB.vCyc = vCyc.map(a => a ? Float64Array.from(a) : null);
     DB.vVal = vVal.map(a => a ? Float64Array.from(a) : null);
     DB.marks = marks; DB.total = total + 1;
+    // Event tracks: X lines arrive in CLOSE order, so sort each track by start
+    // cycle (the binary searches all assume it) and pack into typed arrays.
+    DB.ev = [];
+    for (let ti = 0; ti < evd.length; ti++) {
+      if (!evd[ti]) continue;
+      const r = evRaw[ti] || [];
+      const n = r.length / 3;
+      const ord = Array.from({ length: n }, (_, k) => k)
+                       .sort((a, b) => r[a*3] - r[b*3]);
+      const c0 = new Float64Array(n), len = new Float64Array(n), addr = new Float64Array(n);
+      let maxLen = 0, sum = 0;
+      for (let k = 0; k < n; k++) {
+        const s = ord[k] * 3;
+        c0[k] = r[s]; len[k] = r[s+1]; addr[k] = r[s+2];
+        if (len[k] > maxLen) maxLen = len[k];
+        sum += len[k];
+      }
+      DB.ev.push({ idx: DB.ev.length, name: evd[ti].name, kind: evd[ti].kind,
+                   c0, len, addr, n, maxLen, cycles: sum });
+    }
     done();
   }
   setTimeout(step, 0);
@@ -495,10 +556,105 @@ function paintBins(ctx, t0, t1, x0, W, rowH, rowGap, topY) {
   }
 }
 
+// Event rows live BELOW the unit rows in the same zoomable canvas, separated by a
+// gap. Row geometry helpers (used by the hit-testing in the hover handler too).
+const EV_ROW_SEP = 8;
+function evRowTop() { return AXIS_H + nUnits() * (ROW_H + ROW_GAP) + EV_ROW_SEP; }
+function evRowAt(y) {                       // canvas y -> event track index (or -1)
+  if (!DB.ev.length) return -1;
+  const r = Math.floor((y - evRowTop()) / (ROW_H + ROW_GAP));
+  return (r >= 0 && r < DB.ev.length) ? r : -1;
+}
+// Draw one event track's episodes over [t0,t1).
+//
+// Like the unit rows, a pixel column can cover far more than one cycle, and a
+// column that is only PARTLY inside an episode must not read the same as one that
+// is fully covered. So a column is drawn at a HEIGHT proportional to its coverage
+// (the same "collapse to height" treatment the state stacks use): fully covered =
+// the whole row, half covered = half height, BOTTOM-ALIGNED so the row reads as a
+// bar chart off a common baseline - heights are comparable at a glance, which a
+// centred ribbon does not give you. A column with several short episodes in it sums
+// their coverage, so a burst of ten 4-cycle misses in a 100-cycle column is a
+// 40%-height bar - visibly different from one long stall.
+//
+// Zoomed in far enough that an episode exceeds ADDR_MIN_PX, its ADDRESS is written
+// inside the span - which is the whole point of the track: "which line stalled
+// here", not just "a stall happened here".
+const ADDR_MIN_PX = 46;
+const EV_MIN_H = 2;                     // a covered column is never thinner than this
+function paintEvRow(ctx, t, t0, t1, x0, W, y, rowH) {
+  ctx.fillStyle = '#26262c'; ctx.fillRect(x0, y, W, rowH);
+  if (!t.n) return;
+  const span = t1 - t0;
+  const cpp = span / W;
+  const col = evColor(t);
+  const [i0, j0] = evRange(t, t0, t1);
+  // per-column coverage in cycles + how many episodes touched it (the count is what
+  // separates "one long stall" from "many short ones" in the tooltip and the label
+  // rule below)
+  const cov = new Float64Array(W);
+  const cnt = new Uint32Array(W);
+  const labels = [];
+  for (let k = i0; k < j0; k++) {
+    const c0 = t.c0[k], c1 = c0 + t.len[k];
+    if (c1 <= t0 || c0 >= t1) continue;
+    const a = Math.max(c0, t0), b = Math.min(c1, t1);
+    let px0 = Math.floor((a - t0) / span * W);
+    let px1 = Math.ceil ((b - t0) / span * W);
+    if (px0 < 0) px0 = 0; if (px1 > W) px1 = W;
+    if (px1 <= px0) px1 = px0 + 1;
+    for (let px = px0; px < px1 && px < W; px++) {
+      const pc0 = t0 + px / W * span, pc1 = t0 + (px+1) / W * span;
+      const ov = Math.min(b, pc1) - Math.max(a, pc0);
+      if (ov > 0) { cov[px] += ov; cnt[px]++; }
+    }
+    // an episode wide enough to hold text gets a label (its true, unclipped width
+    // decides, so a span running off the left edge still gets one)
+    const w = (b - a) / span * W;
+    if (w >= ADDR_MIN_PX) labels.push({ x: x0 + (a - t0) / span * W, w, k, cov: b - a });
+  }
+  // paint, merging equal-height neighbours into runs (a zoomed-in view is then one
+  // fillRect per episode rather than one per pixel)
+  ctx.fillStyle = col;
+  let runStart = -1, runH = -1;
+  const flush = (pxEnd) => {
+    if (runStart >= 0 && runH > 0)
+      ctx.fillRect(x0 + runStart, y + rowH - runH, pxEnd - runStart, runH);
+    runStart = -1; runH = -1;
+  };
+  for (let px = 0; px < W; px++) {
+    let h = 0;
+    if (cov[px] > 0) {
+      const f = Math.min(1, cov[px] / cpp);
+      h = Math.max(EV_MIN_H, Math.round(f * rowH));
+    }
+    if (h !== runH) { flush(px); runStart = px; runH = h; }
+  }
+  flush(W);
+  if (!labels.length) return;
+  ctx.font = '10px Consolas, monospace';
+  for (const L of labels) {
+    // address + duration; drop the duration first when the span is tight
+    const a = '0x' + t.addr[L.k].toString(16);
+    const txt = L.w >= ADDR_MIN_PX + 44 ? `${a}  ${t.len[L.k]}c` : a;
+    // A labelled episode spans whole pixels, so its bar is full height and the text
+    // sits ON it (dark ink). Only when the bar is short - a labelled span sharing
+    // its columns with empty cycles - does the text fall outside it, so light ink
+    // on the row background is used instead.
+    const barH = Math.max(EV_MIN_H, Math.round(Math.min(1, L.cov / (L.w * cpp)) * rowH));
+    ctx.fillStyle = barH >= rowH - 2 ? '#12121a' : '#cfcfd6';
+    ctx.save();
+    ctx.beginPath(); ctx.rect(L.x, y, L.w, rowH); ctx.clip();
+    ctx.fillText(txt, L.x + 3, y + rowH - 6);
+    ctx.restore();
+  }
+}
+
 function drawTracks() {
   const NU = nUnits();
   const cssW = trkCv.clientWidth || trkCv.parentElement.clientWidth;
-  const H = AXIS_H + NU * (ROW_H + ROW_GAP);
+  const H = AXIS_H + NU * (ROW_H + ROW_GAP)
+          + (DB.ev.length ? EV_ROW_SEP + DB.ev.length * (ROW_H + ROW_GAP) : 0);
   const dpr = window.devicePixelRatio || 1;
   trkCv.width = cssW * dpr; trkCv.height = H * dpr;
   trkCv.style.height = H + 'px';
@@ -526,6 +682,21 @@ function drawTracks() {
     ctx.fillText(DB.units[DB.order[r] ?? r], 6, y + ROW_H - 6);
   }
   paintBins(ctx, view.t0, view.t1, GUTTER, Math.max(1, Math.floor(W)), ROW_H, ROW_GAP, AXIS_H);
+
+  // event rows (tex-cache misses / prefetches / waits), below the unit rows
+  if (DB.ev.length) {
+    const top = evRowTop();
+    ctx.fillStyle = '#3a3a42'; ctx.fillRect(GUTTER, top - EV_ROW_SEP/2, W, 1);
+    ctx.font = '11px Consolas, monospace';
+    for (let ti = 0; ti < DB.ev.length; ti++) {
+      const y = top + ti * (ROW_H + ROW_GAP);
+      ctx.fillStyle = evColor(DB.ev[ti]);
+      ctx.fillText(DB.ev[ti].name, 6, y + ROW_H - 6);
+      paintEvRow(ctx, DB.ev[ti], view.t0, view.t1, GUTTER,
+                 Math.max(1, Math.floor(W)), y, ROW_H);
+    }
+    ctx.font = '12px Consolas, monospace';
+  }
 
   // render marks
   for (const m of DB.marks) {
@@ -567,6 +738,19 @@ function drawOverview() {
   // cursor
   const cx = cursor / DB.total * cssW;
   ctx.fillStyle = '#fff'; ctx.fillRect(cx, 0, 1, H);
+}
+
+// ============================== event track helpers ==============================
+function buildEvLegend() {
+  const el = document.getElementById('evlegend');
+  if (!DB.ev.length) { el.innerHTML = ''; return; }
+  el.innerHTML = DB.ev.map(t => {
+    const pct = DB.total ? (t.cycles / DB.total * 100).toFixed(1) : '0.0';
+    const avg = t.n ? (t.cycles / t.n).toFixed(1) : '0';
+    return `<span class="ev"><i class="swatch" style="background:${evColor(t)}"></i>` +
+           `<b>${t.name}</b> <span class="k">${t.n.toLocaleString()} ev, ` +
+           `${t.cycles.toLocaleString()} cyc (${pct}%), avg ${avg}</span></span>`;
+  }).join('');
 }
 
 // ============================== SVG pipeline diagram ==============================
@@ -758,6 +942,8 @@ function updateValues() {
 }
 
 // ============================== interaction ==============================
+// every canvas that shows the current view/cursor, repainted together
+function redrawTimeline() { drawTracks(); drawOverview(); }
 const seek = document.getElementById('seek');
 function setCursor(c, recenters) {
   cursor = Math.max(0, Math.min(DB.total - 1, Math.round(c)));
@@ -769,7 +955,7 @@ function setCursor(c, recenters) {
     view.t0 = Math.max(0, cursor - span/2);
     view.t1 = Math.min(DB.total, view.t0 + span);
   }
-  drawTracks(); drawOverview(); updateSvg(); updateValues();
+  redrawTimeline(); updateSvg(); updateValues();
 }
 function clampView() {
   const span = Math.max(10, Math.min(DB.total, view.t1 - view.t0));
@@ -789,7 +975,7 @@ trkCv.addEventListener('wheel', ev => {
   const f = ev.deltaY > 0 ? 1.3 : 1/1.3;
   view.t0 = t - (t - view.t0) * f;
   view.t1 = t + (view.t1 - t) * f;
-  clampView(); drawTracks(); drawOverview();
+  clampView(); redrawTimeline();
 }, { passive: false });
 
 let drag = null;
@@ -803,13 +989,46 @@ window.addEventListener('mousemove', ev => {
     const dt = (ev.clientX - drag.x) / W * (drag.t1 - drag.t0);
     if (Math.abs(ev.clientX - drag.x) > 3) drag.moved = true;
     view.t0 = drag.t0 - dt; view.t1 = drag.t1 - dt;
-    clampView(); drawTracks(); drawOverview();
+    clampView(); redrawTimeline();
   } else if (ev.target === trkCv) {
     // hover tooltip
     const rect = trkCv.getBoundingClientRect();
     const row = Math.floor((ev.clientY - rect.top - AXIS_H) / (ROW_H + ROW_GAP));
+    const erow = evRowAt(ev.clientY - rect.top);
     const tt = document.getElementById('tooltip');
-    if (row >= 0 && row < nUnits() && ev.clientX - rect.left > GUTTER) {
+    if (erow >= 0 && ev.clientX - rect.left > GUTTER) {
+      // EVENT row: report the episode under the cursor exactly (address + span), or
+      // the aggregate when the column covers more than one.
+      const t = DB.ev[erow];
+      const c = Math.round(trackTime(ev));
+      const W = rect.width - GUTTER;
+      const cpp = (view.t1 - view.t0) / Math.max(1, W);
+      const lo = c - cpp/2, hi = c + cpp/2;
+      const [i0, j0] = evRange(t, lo, Math.max(hi, lo + 1));
+      const hits = [];
+      for (let k = i0; k < j0; k++)
+        if (t.c0[k] + t.len[k] > lo && t.c0[k] < hi) hits.push(k);
+      const head = `${t.name} (${t.kind}) @ ${c.toLocaleString()}` +
+                   (cpp > 1.0001 ? `   (${Math.round(cpp).toLocaleString()} cyc/px)` : '');
+      if (!hits.length) tt.textContent = head + '\nno event';
+      else if (hits.length === 1) {
+        const k = hits[0];
+        tt.textContent = head +
+          `\naddr 0x${t.addr[k].toString(16)}  (line 0x${(t.addr[k] >>> 2).toString(16)})` +
+          `\n${t.c0[k].toLocaleString()} .. ${(t.c0[k]+t.len[k]).toLocaleString()}` +
+          `   ${t.len[k].toLocaleString()} cycles`;
+      } else {
+        let cyc = 0;
+        for (const k of hits) cyc += Math.min(t.c0[k]+t.len[k], hi) - Math.max(t.c0[k], lo);
+        tt.textContent = head +
+          `\n${hits.length} events here, ${Math.round(cyc).toLocaleString()} cycles covered` +
+          `\nfirst 0x${t.addr[hits[0]].toString(16)}  last 0x${t.addr[hits[hits.length-1]].toString(16)}` +
+          `\n(zoom in for per-event addresses)`;
+      }
+      tt.style.display = 'block';
+      tt.style.left = (ev.clientX + 14) + 'px';
+      tt.style.top  = (ev.clientY + 12) + 'px';
+    } else if (row >= 0 && row < nUnits() && ev.clientX - rect.left > GUTTER) {
       const u = DB.order[row] ?? row;
       const t = Math.round(trackTime(ev));
       // one pixel column covers `cpp` cycles; when that is more than one, a
@@ -855,13 +1074,14 @@ trkCv.addEventListener('mouseleave', () =>
   document.getElementById('tooltip').style.display = 'none');
 
 let ovDrag = false;
-function ovSeek(ev) {
-  const rect = ovCv.getBoundingClientRect();
+function stripSeek(cv, ev) {
+  const rect = cv.getBoundingClientRect();
   const t = (ev.clientX - rect.left) / rect.width * DB.total;
   const span = view.t1 - view.t0;
   view.t0 = t - span/2; view.t1 = t + span/2;
   clampView(); setCursor(t, false);
 }
+function ovSeek(ev) { stripSeek(ovCv, ev); }
 ovCv.addEventListener('mousedown', ev => { ovDrag = true; ovSeek(ev); });
 window.addEventListener('mousemove', ev => { if (ovDrag) ovSeek(ev); });
 window.addEventListener('mouseup', () => ovDrag = false);
@@ -885,7 +1105,7 @@ window.addEventListener('keydown', ev => {
   if (ev.key === 'ArrowLeft')  { ev.shiftKey ? setCursor(cursor - DB.total/100, true) : stepChange(-1); ev.preventDefault(); }
   if (ev.key === 'ArrowRight') { ev.shiftKey ? setCursor(cursor + DB.total/100, true) : stepChange(+1); ev.preventDefault(); }
 });
-window.addEventListener('resize', () => { drawTracks(); drawOverview(); });
+window.addEventListener('resize', () => { redrawTimeline(); });
 
 // ============================== file loading ==============================
 const dropArea = document.getElementById('drop-area');
@@ -923,6 +1143,7 @@ function loadText(name, text) {
     view = { t0: 0, t1: DB.total };
     buildSvg();
     buildOverview();
+    buildEvLegend();
     setCursor(0, false);
   }, f => document.getElementById('pbar').style.width = (f*100).toFixed(1) + '%');
 }
