@@ -1197,6 +1197,19 @@ module peel_core import tsp_pkg::*; #(
     reg          ti_ptres [0:1];  // per-half: handed pass is a PT-resolve pass
     reg          md_ptres [0:MD_N-1];  // per-queued-pass PT-resolve flag
     localparam integer PEEL_MAX_PASS = 64;
+    // ---- EMPTY-PASS shade skip: did the CURRENT raster pass stage anything? ----
+    // Set on any stage-B accept into u_taginvw (b_we), cleared when a pass's raster
+    // is kicked. A pass that staged NOTHING has nothing to shade: handing it to the
+    // spanner would walk 1024 invalid pixels, emit 0 spans and bounce through the
+    // reader just to report "nothing happened" - so the hand is SKIPPED wherever
+    // the shade is valid-gated (PT resolve, TL peel, z_keep OP). For the PT resolve
+    // this also moves the STOP verdict to raster time: an empty pass IS the
+    // convergence condition (no staged pixels -> no possible fails), so the FSM
+    // stops issuing immediately instead of parking in S_PT_NEXT waiting for the
+    // empty pass's zero-fail verdict to travel through the spanner+reader.
+    // (Plain OP passes always hand: shade_mode=1 shades ALL pixels incl. the
+    // background poly, staged or not.)
+    reg          pass_drew;
 
     // ---- M10K bulk-op walk counters (NCHUNK addresses = whole 32x32 tile) ----
     reg        zk_l;             // z_keep of the CLEAR being walked: 1 => tag-invalidate
@@ -1500,9 +1513,11 @@ module peel_core import tsp_pkg::*; #(
     integer pc_ras_corner;      // RS_CORNER: per-triangle 4-corner probe wait (8 cyc/tri)
     integer pc_corner_cull;     // triangles trivially rejected by the 4-corner test
     integer pc_sort_skip;       // triangles skipped by the sort cache (fully rendered)
-    integer pc_pt_pass;         // forward PT-resolve passes run
+    integer pc_pt_pass;         // forward PT-resolve passes HANDED to shade
     integer pc_pt_tiles;        // entries that ran a PT-resolve phase
     integer pc_ptbb_skip;       // PT triangles sweep-skipped by the fail bbox
+    integer pc_pt_empty;        // PT passes rastered EMPTY -> shade skipped, early stop
+    integer pc_peel_empty;      // peel/zk-OP passes rastered EMPTY -> handover skipped
     // TSP / shade engine (classified by top FSM `st` when in a shade sub-phase)
     integer pc_sh_present;      // SH_PRESENT accepted: pixel issued into shade pipe
     integer pc_sh_tex_stall;    // SH_PRESENT && pp_stall: blocked on texture fetch
@@ -1715,6 +1730,7 @@ module peel_core import tsp_pkg::*; #(
             pc_prefetch<=0; pc_pf_hit<=0; pc_pf_wasted<=0;
             pc_m_promote<=0; pc_m_waithit<=0; pc_m_waitmiss<=0; pc_m_cold<=0;
             pc_sort_skip<=0; pc_pt_pass<=0; pc_pt_tiles<=0; pc_ptbb_skip<=0;
+            pc_pt_empty<=0; pc_peel_empty<=0;
 `endif
             rs_st<=RS_IDLE; tri_qi<=2'd0;
             pq_head<=0; pq_tail<=0; pq_count<=0;
@@ -1750,6 +1766,7 @@ module peel_core import tsp_pkg::*; #(
             ti_postonly[0]<=1'b0; ti_postonly[1]<=1'b0;
             // htile = ISP u_taginvw producer half (per pass); tsp_tag/tsp_col above.
             htile<=1'b0;
+            pass_drew<=1'b0;
         end else begin
 `ifndef SYNTHESIS
             // -------- performance counters: charge THIS clock to its buckets --------
@@ -1902,6 +1919,7 @@ module peel_core import tsp_pkg::*; #(
                     if (b_more[l]) more_to_draw <= 1'b1;
                     /* verilator lint_on WIDTH */
                 end
+                if (|b_we) pass_drew <= 1'b1;   // this pass staged >=1 pixel
             end
             ras_inflight <= ras_inflight + (ras_in_valid ? 1 : 0) - (ras_out_valid ? 1 : 0);
 
@@ -2115,6 +2133,7 @@ module peel_core import tsp_pkg::*; #(
                 // corrupt a shade in flight. z_keep=0 tiles were fully cleared already.
                 RSTATE_OP: if (!ti_ready[htile]) begin
                     peeling  <= 1'b0;
+                    pass_drew <= 1'b0;         // fresh pass: track its stage-B accepts
                     ol_list_ptr <= ra_out.list_ptr;
                     ol_start <= 1'b1;          // walk starts NOW either way: during
                     ol_walk_done <= 1'b0;      // S_ZK_INV the walker/iterator/setup
@@ -2177,6 +2196,7 @@ module peel_core import tsp_pkg::*; #(
                             pt_phase   <= 1'b1;
                             pt_pass    <= 8'd1;
                             pt_stop    <= 1'b0;
+                            pass_drew  <= 1'b0;   // pass 1: track its stage-B accepts
                             pt_more    <= 11'd0;
                             pt_bb_v    <= 1'b0;                   // no clip until a verdict
                             pt_fbb_x0  <= 5'd31; pt_fbb_x1 <= 5'd0;
@@ -2280,7 +2300,8 @@ module peel_core import tsp_pkg::*; #(
             end
             // continue/stop decision, taken IMMEDIATELY after handing a pass's
             // shade (which now proceeds in the background): keep issuing passes
-            // until a COMPLETED shade reported zero fails (pt_stop). The
+            // until a COMPLETED shade reported zero fails, OR a pass rastered
+            // EMPTY (pt_stop, set at S_DRAIN without any shade round-trip). The
             // ping-pong credit (!ti_ready[htile]) is the natural 1-pass-ahead
             // throttle, exactly as in the TL peel.
             S_PT_NEXT:
@@ -2294,6 +2315,7 @@ module peel_core import tsp_pkg::*; #(
                          && (pt_sh_pend + (pt_hand_p ? 3'd1 : 3'd0)
                                         - (pt_free_p ? 3'd1 : 3'd0)) < 3'd2) begin
                     pt_pass    <= pt_pass + 8'd1;
+                    pass_drew  <= 1'b0;          // next pass: track its accepts
                     peel_which <= 1'b0;
                     ol_list_ptr <= pt_ptr_l; ol_start <= 1'b1; ol_walk_done <= 1'b0;
                     pb_rd <= '0; pb_i <= '0; pb_pipe <= 1'b0;
@@ -2346,6 +2368,25 @@ module peel_core import tsp_pkg::*; #(
             //  - peel: run the peel shade sub-phase, then decide whether to peel again.
             S_DRAIN: if (fq_empty && consumer_idle) begin
                 if (pt_phase) begin
+                    if (!pass_drew) begin
+                        // EMPTY PT pass: nothing beat the Zceil/boundary test, so
+                        // there is nothing to shade AND the verdict is already
+                        // known - zero staged pixels can produce zero fails, i.e.
+                        // the resolve has CONVERGED. Skip the spanner handover
+                        // (u_taginvw[htile] stays ours, no htile flip) and stop
+                        // issuing NOW instead of waiting for the empty pass to
+                        // bounce through the spanner+reader for its no-op
+                        // verdict. S_PT_WAIT still drains earlier in-flight
+                        // passes; their late alpha-fails cannot need another
+                        // pass - a failing pixel's NEXT fragment would have
+                        // staged in THIS (empty) pass.
+                        pt_stop <= 1'b1;
+`ifndef SYNTHESIS
+                        pc_pt_empty <= pc_pt_empty + 1;
+                        if (pt_pass == 8'd1) pc_pt_tiles <= pc_pt_tiles + 1;
+`endif
+                        st <= S_PT_NEXT;
+                    end else begin
                     // PT pass fully rastered: hand to shade (valid-gated; R/alpha
                     // feedback happens at blend), then WAIT for its drain - the
                     // pt_res mask must be final before the next pass rasters.
@@ -2363,6 +2404,7 @@ module peel_core import tsp_pkg::*; #(
                     if (pt_pass == 8'd1) pc_pt_tiles <= pc_pt_tiles + 1;
 `endif
                     st <= S_PT_NEXT;
+                    end
                 end else if (peeling) begin
                     // Both the PT and TL lists of this pass have already been rastered into
                     // the same u_taginvw[htile]/u_peel (the PT->TL chain in S_OL_RUN streamed
@@ -2377,6 +2419,7 @@ module peel_core import tsp_pkg::*; #(
                         // entry writes out (wo_l) - intermediate (no_writeout) entries peel
                         // into u_col and accumulate WITHOUT posting; a later writeout entry
                         // posts the finished tile.
+                        if (pass_drew) begin
                         ti_ready[htile] <= 1'b1;
                         ti_mode [htile] <= 1'b1;                 // PEEL
                         ti_last [htile] <= !more_to_draw && wo_l;
@@ -2389,11 +2432,34 @@ module peel_core import tsp_pkg::*; #(
 `ifndef SYNTHESIS
                         pc_hand <= pc_hand + 1;
 `endif
+                        end else if (!more_to_draw && wo_l) begin
+                            // EMPTY final peel pass on a writeout entry: nothing
+                            // staged -> the valid-gated shade would be a no-op,
+                            // but the tile's accumulated color must still POST to
+                            // VO. Hand a post-only instead of a real shade.
+                            ti_ready[htile] <= 1'b1;
+                            ti_postonly[htile] <= 1'b1;
+                            ti_last [htile] <= 1'b1;
+                            ti_ptres[htile] <= 1'b0;
+                            ti_tx[htile] <= cur_tx; ti_ty[htile] <= cur_ty;
+                            htile <= ~htile;
+`ifndef SYNTHESIS
+                            pc_hand <= pc_hand + 1;
+`endif
+                        end
+                        // (empty non-final pass: NO handover at all - the spanner
+                        // would walk 1024 invalid pixels and emit nothing. Loop
+                        // control below is raster-driven (more_to_draw), so the
+                        // peel continues/terminates exactly as before.)
+`ifndef SYNTHESIS
+                        if (!pass_drew) pc_peel_empty <= pc_peel_empty + 1;
+`endif
                         if (more_to_draw && peel_pass < PEEL_MAX_PASS[7:0]) begin
                             // another pass: advance the counter and kick off its OL
                             // walk NOW - the walker/iterator/setup run through the
                             // credit wait + PeelBuffers swap (raster is fenced).
                             peel_pass <= peel_pass + 8'd1;
+                            pass_drew <= 1'b0;   // next pass: track its accepts
                             if (has_pt) begin
                                 peel_which <= 1'b0; ol_list_ptr <= pt_ptr_l;
                             end else begin
@@ -2412,6 +2478,16 @@ module peel_core import tsp_pkg::*; #(
                             ra_ack.list_done <= 1'b1; st <= S_RA_ACK;
                         end
                     end
+                end else if (zk_entry && !pass_drew) begin
+                    // EMPTY z_keep OP pass: the valid-gated shade (ti_mode=1) would
+                    // shade nothing - skip the spanner handover entirely (no htile
+                    // flip). op_shaded still advances via S_OP_DONE so the FLUSH
+                    // post-only path is unchanged. (A z_keep=0 OP always hands:
+                    // shade_mode=1 must render the background poly.)
+`ifndef SYNTHESIS
+                    pc_peel_empty <= pc_peel_empty + 1;
+`endif
+                    st <= S_OP_DONE;
                 end else begin
                     // OP region fully rastered into u_taginvw[htile]. HAND to TSP and run
                     // ahead. NOT last: the tile's FLUSH state (later) issues the final
@@ -2454,6 +2530,7 @@ module peel_core import tsp_pkg::*; #(
             // pb2 = 0xFFFFFFFF, zb2 = OP depth.
             S_PEEL_INIT: begin
                 peeling    <= 1'b1;  // (pre-peel OP shade may have cleared it)
+                pass_drew  <= 1'b0;  // pass 1: track its stage-B accepts
                 peel_pass  <= 8'd1;  // pass 1 (counter now advances at the pass
                                      // DECISION, not the walk end, so sc_skip_en
                                      // is correct for the early-started OL walk)
@@ -2533,6 +2610,8 @@ module peel_core import tsp_pkg::*; #(
                 $display("  PT-RESOLVE:  %0d forward passes over %0d entries (avg %0d passes/entry)  bbox-skips=%0d",
                     pc_pt_pass, pc_pt_tiles, pc_pt_tiles ? pc_pt_pass/pc_pt_tiles : 0,
                     pc_ptbb_skip);
+                $display("  EMPTY-SKIP:  PT passes aborted at raster=%0d  peel/zk handovers skipped=%0d",
+                    pc_pt_empty, pc_peel_empty);
                 // WHY is raster IDLE? Partition RS_IDLE by top `st`. %% is of the IDLE total.
                 // SHADE = overlapped (good: raster done, spanner/reader still shading); the
                 // rest is serial ISP overhead with no downstream running.
