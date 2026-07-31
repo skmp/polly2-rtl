@@ -127,6 +127,7 @@ module isp_setup_streamed (
     function istl(input [31:0] fdx, input [31:0] fdy);   // IsTopLeft on sgn-normalized edges
         istl=(fzero(fdy)&&fpos(fdx))||fneg(fdy); endfunction
     function [31:0] fnegf(input [31:0] f); fnegf={~f[31],f[30:0]}; endfunction
+    function fnfin(input [31:0] f); fnfin=(f[30:23]==8'hff); endfunction  // inf/NaN
     // NOTE on the top-left rule: C is NOT biased. The old "-1 raw ulp on C
     // when not top-left" wrapped C=+0 to 0xFFFFFFFF (-NaN, exponent FF),
     // which dominated every Xhs sum - any tile whose origin lies exactly on
@@ -172,6 +173,7 @@ module isp_setup_streamed (
     reg [31:0] X1,Y1,Z1, X2,Y2,Z2, X3,Y3,Z3, X4,Y4, XB,YB;
     reg [31:0] ISPW, TAGr;
     reg        PTr, Qr;
+    reg        NFIN;               // any x/y coord inf/NaN -> unconditional cull
 
     // ================================================================
     // control: front cnt (1..15) + tail pulse SR (d[1..16], parity alongside)
@@ -307,6 +309,14 @@ module isp_setup_streamed (
                 if (latch_now) begin
                     X1<=x1;Y1<=y1;Z1<=z1; X2<=x2;Y2<=y2;Z2<=z2; X3<=x3;Y3<=y3;Z3<=z3;
                     X4<=x4;Y4<=y4; XB<=xbase;YB<=ybase;
+                    // non-finite screen coords (inf/NaN, e.g. SA2's fullscreen +-inf
+                    // strip): in IEEE refsw the edge constants come out NaN and every
+                    // Xhs>=0 compare fails, so the triangle NEVER rasters a pixel. Our
+                    // FP has no NaN semantics (saturates to +-FLT_MAX), which leaked
+                    // "inside" pixels near each tile origin with invW=FLT_MAX (black
+                    // 2x2 tile corners / first-column stripes). Cull at setup instead.
+                    NFIN <= fnfin(x1)|fnfin(y1)|fnfin(x2)|fnfin(y2)|fnfin(x3)|fnfin(y3)
+                          | (quad & (fnfin(x4)|fnfin(y4)));
                     ISPW<=isp_word; TAGr<=in_tag; PTr<=in_pt; Qr<=quad;
                     cur_par <= ~cur_par;
                     front<=1'b1; cnt<=6'd1;
@@ -406,7 +416,7 @@ module isp_setup_streamed (
                           reg [1:0] cm; reg wrong;
                           cm=ISPW[28:27];
                           wrong=(cm[0]==1'b0&&fneg(a0_y))||(cm[0]==1'b1&&fpos(a0_y));
-                          bCULL[cur_par]<=(cm>=2'd2)&&wrong;
+                          bCULL[cur_par]<=((cm>=2'd2)&&wrong)||NFIN;
                         end
                         // sgn = -1 iff area > 0: pure sign-bit flips, NO multiplies
                         bDX12[cur_par] <= fpos(a0_y) ? fnegf(dX1X2) : dX1X2;

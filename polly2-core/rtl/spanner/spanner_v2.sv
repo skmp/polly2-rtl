@@ -627,6 +627,12 @@ module spanner_v2 import tsp_pkg::*; #(
                 // ---------- COAL: coalesce one span off ti_* (the current group) ----------
                 if (coal_fires) begin
 `ifndef SYNTHESIS
+                    // +ttspan: what the spanner READS for the first pixels of rows 0/1
+                    if ($test$plusargs("ttspan") && (sg_x < 4 || (sg_x >= 32 && sg_x < 36)))
+                        $display("[TTS] xb=%08x yb=%08x mode=%b sg_x=%0d val=%b tags=%08x %08x %08x %08x invw=%08x %08x rep=%0d ok0=%b",
+                                 xbase, ybase, shade_mode, sg_x, ti_valid,
+                                 ti_tag[0], ti_tag[1], ti_tag[2], ti_tag[3],
+                                 {1'b0,ti_invw[0]}, {1'b0,ti_invw[1]}, run_rep, run_ok0);
                     if ($test$plusargs("coaltrace"))
                         $display("[COAL] sg_x=%0d rdgrp=%0d rdv=%b ti_tag=%08x %08x %08x %08x val=%b",
                                  sg_x, rd_group, rd_valid, ti_tag[0], ti_tag[1], ti_tag[2], ti_tag[3], ti_valid);

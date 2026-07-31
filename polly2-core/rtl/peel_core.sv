@@ -1856,6 +1856,12 @@ module peel_core import tsp_pkg::*; #(
 `ifndef SYNTHESIS
             if ($test$plusargs("coaltrace") && b_valid && (|b_we))
                 $display("[WRITE] htile=%b tile(%0d,%0d) y=%0d x=%0d tag=%08x", htile, cur_tx, cur_ty, b_oy, b_ox, b_tag);
+            // +tagtrace: stage-B trace of chunk (x=0, y<=1) of tile(7,12) - the black-corner probe
+            if ($test$plusargs("tagtrace") && b_valid && cur_tx==6'd7 && cur_ty==6'd12
+                && b_ox==5'd0 && b_oy<=5'd1)
+                $display("[TT] y=%0d inside=%b we=%b pass_lp=%b more=%b tag=%08x mode=%0d zwdis=%b peel=%b fwd=%b invw0=%08x invw1=%08x invw2=%08x",
+                         b_oy, b_inside, b_we, b_pass_lp, b_more, b_tag, b_mode, b_zwdis,
+                         b_peeling, b_fwd, b_invw[0 +: 31], b_invw[31 +: 31], b_invw[62 +: 31]);
             if ($test$plusargs("coaltrace") && spv_start)
                 $display("[START] tsp_tag=%b spn tile(%0d,%0d) shade_mode(~ti)=%b ti_ready=%b", tsp_tag, ti_tx[tsp_tag], ti_ty[tsp_tag], ~ti_mode[tsp_tag], ti_ready);
             // +passtrace: log every shade handoff START (tile, OP/PEEL mode, last, postonly)
