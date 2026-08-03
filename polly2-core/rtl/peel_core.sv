@@ -1434,12 +1434,22 @@ module peel_core import tsp_pkg::*; #(
     // skips the whole sweep (the triangle can only touch resolved/exhausted
     // pixels - and its missing demotes correctly retire it from sort$ too).
     wire       ptc_en    = pt_phase && pt_bb_v;
+    // PEEK-AHEAD ABORT: pt_stop landing (a completed pass had zero fails) makes the
+    // speculative in-flight pass MOOT - every pixel it could stage was staged by the
+    // zero-fail pass too (the boundary only tightens, so staged sets shrink
+    // monotonically) and is therefore already LOCKED: its blends would all drop at
+    // the cb_wr_en gate. So once pt_dead, the pass's remaining triangles are dropped
+    // instead of swept: ptc_empty forces the RS_POP clip-skip (pop, no sweep, no
+    // stage-B writes) and the setup retire stops pushing pq. The pass then reaches
+    // S_DRAIN fast, where the pt_stop peek skips the spanner handover too.
+    wire       pt_dead   = pt_phase && pt_stop;
     wire [4:0] rp_bx0    = pq_rdw[QF_BX0 +: 5];
     wire [4:0] rp_bx1    = pq_rdw[QF_BX1 +: 5];
     wire [4:0] rp_by0    = pq_rdw[QF_BY0 +: 5];
     wire [4:0] rp_by1    = pq_rdw[QF_BY1 +: 5];
-    wire       ptc_empty = ptc_en && (pt_bb_x1 < rp_bx0 || pt_bb_x0 > rp_bx1
-                                   || pt_bb_y1 < rp_by0 || pt_bb_y0 > rp_by1);
+    wire       ptc_empty = pt_dead
+                        || (ptc_en && (pt_bb_x1 < rp_bx0 || pt_bb_x0 > rp_bx1
+                                    || pt_bb_y1 < rp_by0 || pt_bb_y0 > rp_by1));
     wire [4:0] ptc_x0 = (ptc_en && pt_bb_x0 > rp_bx0) ? pt_bb_x0 : rp_bx0;
     wire [4:0] ptc_x1 = (ptc_en && pt_bb_x1 < rp_bx1) ? pt_bb_x1 : rp_bx1;
     wire [4:0] ptc_y0 = (ptc_en && pt_bb_y0 > rp_by0) ? pt_bb_y0 : rp_by0;
@@ -1517,6 +1527,7 @@ module peel_core import tsp_pkg::*; #(
     integer pc_pt_tiles;        // entries that ran a PT-resolve phase
     integer pc_ptbb_skip;       // PT triangles sweep-skipped by the fail bbox
     integer pc_pt_empty;        // PT passes rastered EMPTY -> shade skipped, early stop
+    integer pc_pt_late;         // speculative PT passes killed by a landing verdict
     integer pc_peel_empty;      // peel/zk-OP passes rastered EMPTY -> handover skipped
     // TSP / shade engine (classified by top FSM `st` when in a shade sub-phase)
     integer pc_sh_present;      // SH_PRESENT accepted: pixel issued into shade pipe
@@ -1730,7 +1741,7 @@ module peel_core import tsp_pkg::*; #(
             pc_prefetch<=0; pc_pf_hit<=0; pc_pf_wasted<=0;
             pc_m_promote<=0; pc_m_waithit<=0; pc_m_waitmiss<=0; pc_m_cold<=0;
             pc_sort_skip<=0; pc_pt_pass<=0; pc_pt_tiles<=0; pc_ptbb_skip<=0;
-            pc_pt_empty<=0; pc_peel_empty<=0;
+            pc_pt_empty<=0; pc_pt_late<=0; pc_peel_empty<=0;
 `endif
             rs_st<=RS_IDLE; tri_qi<=2'd0;
             pq_head<=0; pq_tail<=0; pq_count<=0;
@@ -2368,21 +2379,28 @@ module peel_core import tsp_pkg::*; #(
             //  - peel: run the peel shade sub-phase, then decide whether to peel again.
             S_DRAIN: if (fq_empty && consumer_idle) begin
                 if (pt_phase) begin
-                    if (!pass_drew) begin
-                        // EMPTY PT pass: nothing beat the Zceil/boundary test, so
-                        // there is nothing to shade AND the verdict is already
-                        // known - zero staged pixels can produce zero fails, i.e.
-                        // the resolve has CONVERGED. Skip the spanner handover
-                        // (u_taginvw[htile] stays ours, no htile flip) and stop
-                        // issuing NOW instead of waiting for the empty pass to
-                        // bounce through the spanner+reader for its no-op
-                        // verdict. S_PT_WAIT still drains earlier in-flight
-                        // passes; their late alpha-fails cannot need another
-                        // pass - a failing pixel's NEXT fragment would have
-                        // staged in THIS (empty) pass.
+                    if (!pass_drew || pt_stop) begin
+                        // ABORTED PT pass, two flavours, both skipping the spanner
+                        // handover (u_taginvw[htile] stays ours, no htile flip):
+                        //  * EMPTY (!pass_drew): nothing beat the Zceil/boundary
+                        //    test, so there is nothing to shade AND the verdict is
+                        //    already known - zero staged pixels can produce zero
+                        //    fails, i.e. the resolve has CONVERGED -> set pt_stop
+                        //    at raster time, no shade round-trip.
+                        //  * PEEK-AHEAD (pt_stop): a completed pass's zero-fail
+                        //    verdict landed while this speculative pass was in
+                        //    flight (pt_dead drained its remaining triangles via
+                        //    the clip-skip). Anything it DID stage was staged and
+                        //    LOCKED by the zero-fail pass too - its blends would
+                        //    all drop at cb_wr_en - so the shade is a guaranteed
+                        //    no-op: skip it.
+                        // S_PT_WAIT still drains earlier in-flight passes; their
+                        // late alpha-fails cannot need another pass - a failing
+                        // pixel's NEXT fragment would have staged here.
                         pt_stop <= 1'b1;
 `ifndef SYNTHESIS
-                        pc_pt_empty <= pc_pt_empty + 1;
+                        if (!pass_drew) pc_pt_empty <= pc_pt_empty + 1;
+                        else            pc_pt_late  <= pc_pt_late  + 1;
                         if (pt_pass == 8'd1) pc_pt_tiles <= pc_pt_tiles + 1;
 `endif
                         st <= S_PT_NEXT;
@@ -2610,8 +2628,8 @@ module peel_core import tsp_pkg::*; #(
                 $display("  PT-RESOLVE:  %0d forward passes over %0d entries (avg %0d passes/entry)  bbox-skips=%0d",
                     pc_pt_pass, pc_pt_tiles, pc_pt_tiles ? pc_pt_pass/pc_pt_tiles : 0,
                     pc_ptbb_skip);
-                $display("  EMPTY-SKIP:  PT passes aborted at raster=%0d  peel/zk handovers skipped=%0d",
-                    pc_pt_empty, pc_peel_empty);
+                $display("  EMPTY-SKIP:  PT passes aborted at raster=%0d  verdict-killed=%0d  peel/zk handovers skipped=%0d",
+                    pc_pt_empty, pc_pt_late, pc_peel_empty);
                 // WHY is raster IDLE? Partition RS_IDLE by top `st`. %% is of the IDLE total.
                 // SHADE = overlapped (good: raster done, spanner/reader still shading); the
                 // rest is serial ISP overhead with no downstream running.
@@ -3144,10 +3162,11 @@ module peel_core import tsp_pkg::*; #(
             end
 
             // retire: on out_valid, push non-culled triangles into the plane FIFO.
+            // pt_dead: the PT pass is moot (verdict arrived) - drop instead of push.
             if (su_out_valid) begin
                 if (isp_cull) begin
                     cull_count <= cull_count + 1;
-                end else begin
+                end else if (!pt_dead) begin
                     pq_ram[pq_tail[2:0]] <= pq_wrw;   // one packed M10K word
                     pq_tail <= (pq_tail==PQ_N-1) ? 4'd0 : pq_tail+4'd1;
                     pq_push  = 1'b1;
