@@ -236,7 +236,7 @@ module peel_core import tsp_pkg::*; #(
     // (typed per-client request ports + a same-cycle single-driver assertion), rather
     // than leaving an inline port mux governed only by convention:
     //   * peel_tile_buffer (u_peel): the five peel depth/tag buffers packed into ONE
-    //     127-bit x 8-bank tile_ram {valid, tag2, tag, depth2, depth} per lane. It
+    //     150-bit x 8-bank tile_ram {valid, zceil, refsort, tag, depth2, depth} per lane. It
     //     owns the depth compare (isp_depth_cmp / isp_depth_cmp_lp) and the raster
     //     stage-A read / stage-B RMW, the shade single-pixel read, the CLEAR walk and
     //     the PeelBuffers RMW walk. Bank = x[2:0], addr = {y[4:0], x[4:3]}.
@@ -1158,7 +1158,7 @@ module peel_core import tsp_pkg::*; #(
     // ---- FORWARD punch-through resolve (PT phase) ----
     // PT lists resolve FRONT-TO-BACK before the TL peel: each pass rasters the
     // nearest not-yet-consumed PT fragment per pixel (forward compare in u_peel,
-    // planes: zb=working, zb2=boundary, tag2=Zceil), shades it with the alpha
+    // planes: zb/pb=working, zb2/refsort=boundary key, zceil=opaque ceiling), shades it with the alpha
     // test, and the BLEND stage feeds back per-pixel resolution: alpha PASS
     // locks the pixel (pt_res) and its color; FAIL advances that pixel to the
     // next pass. Passes stop when a pass produces no fails (pt_more==0), i.e.
@@ -2545,7 +2545,7 @@ module peel_core import tsp_pkg::*; #(
             // yet" tag must sort BELOW every real fragment at the same depth, not above.
             // The seed is FOLDED into the first PeelBuffers of this tile (see
             // S_PEEL_BUF_RUN + the combi block): instead of a separate walk writing
-            // dt_tag then copying A->B, the first PeelBuffers writes tag2 <- the sentinel
+            // dt_tag then copying A->B, the first PeelBuffers writes refsort <- the sentinel's sort field
             // directly (first_peel), while still copying depth2 <- depth (the OP depth
             // reference). Net pass-1 state: pb2 = TAG_INVALID_SENTINEL, zb2 = OP depth.
             S_PEEL_INIT: begin
@@ -2566,7 +2566,7 @@ module peel_core import tsp_pkg::*; #(
                 st <= S_PEEL_BUF;    // S_PEEL_BUF gates on !ti_ready[htile]
             end
 
-            // PeelBuffers(FLT_MAX, 0): per pixel depth2<-depth, tag2<-tag (or
+            // PeelBuffers(FLT_MAX, 0): per pixel depth2<-depth, refsort<-tag[23:0] (or
             // 0xFFFFFFFF on pass 1 via first_peel), depth<-FLT_MAX, valid<-0. As an
             // M10K RMW this is a read(A chunk N)->write(B transformed chunk N-1) walk
             // over 128 chunk addresses (S_PEEL_BUF_RUN). dt_pt is a reg: cleared here
