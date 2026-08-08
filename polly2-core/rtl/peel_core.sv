@@ -1220,8 +1220,8 @@ module peel_core import tsp_pkg::*; #(
     reg [CHUNK_AW-1:0]  pb_i;     // PeelBuffers chunk-address counter 0..NCHUNK-1
     reg [CHUNK_AW-1:0]  pb_rd;    // PeelBuffers read-ahead chunk (1 ahead of pb_i)
     reg        pb_pipe;         // PeelBuffers RMW pipe primed (stage-B has valid rdata)
-    reg        first_peel;      // this tile's FIRST PeelBuffers (folds refsw SetTagToMax:
-                                //   pb2 <- 0xFFFFFFFF instead of copying tagA)
+    reg        first_peel;      // this tile's FIRST PeelBuffers (seeds the reference tag:
+                                //   pb2 <- TAG_INVALID_SENTINEL instead of copying tagA)
 
     // ---- single shared shade sub-phase (ONE tsp_shade_v2_pp pipeline) ----
     // Invoked as a subroutine after OP and after each peel pass. The TSP pipeline
@@ -2534,18 +2534,20 @@ module peel_core import tsp_pkg::*; #(
             S_OP_DONE: begin op_shaded <= 1'b1; ra_ack.list_done <= 1'b1; st <= S_RA_ACK; end
 
             // -------- layer-peel pass loop (refsw2 RM_TRANSLUCENT_AUTOSORT) --------
-            // refsw SetTagToMax(): set tagBufferA (dt_tag) = 0xFFFFFFFF for the whole
-            // tile. The FIRST PeelBuffers then copies A->B so pb2 = 0xFFFFFFFF on
-            // pass 1 (NOT the OP tags). depthA (dt_depth) still holds the OP depth,
-            // which PeelBuffers copies to the reference zb2. Note: this discards the
-            // OP tags in dt_tag, but the OP shade already ran (col_buf holds it), so
-            // dt_tag is only used as the peel pending tag from here on.
-            // refsw SetTagToMax() is FOLDED into the first PeelBuffers of this tile
-            // (see S_PEEL_BUF_RUN + the combi block): instead of a separate walk
-            // writing dt_tag=0xFFFFFFFF then copying A->B, the first PeelBuffers
-            // writes tag2 <- 0xFFFFFFFF directly (first_peel), while still copying
-            // depth2 <- depth (the OP depth reference). Net pass-1 state is identical:
-            // pb2 = 0xFFFFFFFF, zb2 = OP depth.
+            // Seed the peel reference tag: tagBufferA (dt_tag) = TAG_INVALID_SENTINEL
+            // (0x8000_0000) for the whole tile. The FIRST PeelBuffers then copies A->B
+            // so pb2 = the sentinel on pass 1 (NOT the OP tags). depthA (dt_depth) still
+            // holds the OP depth, which PeelBuffers copies to the reference zb2. Note:
+            // this discards the OP tags in dt_tag, but the OP shade already ran (col_buf
+            // holds it), so dt_tag is only used as the peel pending tag from here on.
+            // NOT refsw's SetTagToMax(0xFFFFFFFF): the composite peel key in
+            // isp_depth_cmp_lp folds tag[23:0] into the depth, so the "nothing rendered
+            // yet" tag must sort BELOW every real fragment at the same depth, not above.
+            // The seed is FOLDED into the first PeelBuffers of this tile (see
+            // S_PEEL_BUF_RUN + the combi block): instead of a separate walk writing
+            // dt_tag then copying A->B, the first PeelBuffers writes tag2 <- the sentinel
+            // directly (first_peel), while still copying depth2 <- depth (the OP depth
+            // reference). Net pass-1 state: pb2 = TAG_INVALID_SENTINEL, zb2 = OP depth.
             S_PEEL_INIT: begin
                 peeling    <= 1'b1;  // (pre-peel OP shade may have cleared it)
                 pass_drew  <= 1'b0;  // pass 1: track its stage-B accepts

@@ -35,7 +35,7 @@ VFLAGS    = -Wno-WIDTH -Wno-UNOPTFLAT -Wno-UNSIGNED -Wno-DECLFILENAME -Irtl/tsp/
 BUILD = build
 CWD  := $(shell pwd)
 
-.PHONY: shade-drop raster-topleft texfetchpl clean test tex tex-addr tex-uv tex-decode tex-filter tex-combiner \
+.PHONY: shade-drop raster-topleft depth-cmp-lp texfetchpl clean test tex tex-addr tex-uv tex-decode tex-filter tex-combiner \
         oparse region regfile regen sortcache itquad itskip taginvw dense_span_buffer \
         frontendtsplp frontendtsplp-build golden-check spannerv2 mulc9 mul16sppro \
         add24sppro mulc9sppro add3sppro mul24sppro mul24c9sppro
@@ -86,6 +86,17 @@ shade-drop: | $(BUILD)
 	  $(CWD)/tb/shade_drop_tb.cpp \
 	  --Mdir $(BUILD)/obj_shadedrop -o tb
 	./$(BUILD)/obj_shadedrop/tb
+
+# layer-peel depth/tag compare: drives the whole peel loop around isp_depth_cmp_lp
+# and checks the emitted layer order against an independent composite-key sort
+# (coplanar translucent must peel in SUBMISSION order, back to front).
+depth-cmp-lp: | $(BUILD)
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ -Wno-PINCONNECTEMPTY \
+	  --top-module depth_cmp_lp_tb_top $(RTL_INC) \
+	  $(TSP_PKG) $(RTL_EXTRA) tb/depth_cmp_lp_tb_top.sv \
+	  $(CWD)/tb/depth_cmp_lp_tb.cpp \
+	  --Mdir $(BUILD)/obj_depthcmplp -o tb
+	./$(BUILD)/obj_depthcmplp/tb $(ARGS)
 
 raster-topleft: | $(BUILD)
 	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ -Wno-PINCONNECTEMPTY \

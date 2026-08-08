@@ -31,7 +31,7 @@
 //   * CLEAR: clr_valid writes {clr_depth, clr_tag} to all banks at clr_addr.
 //   * PEELBUFFERS: an RMW walk - pb_rd_valid+pb_rd_addr read chunk N; the next cycle
 //     pb_wr_valid+pb_wr_addr write the transformed chunk (depth2<-depth UNLESS depth is
-//     the FLT_MAX sentinel -> keep old depth2; tag2<-tag or 0xFFFFFFFF when pb_first;
+//     the FLT_MAX sentinel -> keep old depth2; tag2<-tag or TAG_INVALID_SENTINEL when pb_first;
 //     depth<-FLT_MAX, valid<-0). The sentinel guard preserves the opaque-Z reference a
 //     later z_keep=1 empty-opaque entry inherits (see the PW_DEPTH2 write comment).
 //
@@ -95,7 +95,7 @@ module peel_tile_buffer import tsp_pkg::*; #(
     input      [10-$clog2(LANES)-1:0] pb_rd_addr,
     input                       pb_wr_valid,
     input      [10-$clog2(LANES)-1:0] pb_wr_addr,
-    input                       pb_first,    // fold SetTagToMax: tag2 <- 0xFFFFFFFF
+    input                       pb_first,    // seed the peel reference tag: tag2 <- TAG_INVALID_SENTINEL
     // ---- PT forward-resolve walks (reuse the pb_rd/pb_wr cursors) ----
     //  pb_ptinit: seed the PT phase:  tag2 <- zb (Zceil = opaque depth),
     //             zb2 <- FLT_MAX (boundary = nearest), zb <- 0 (working seed),
@@ -323,7 +323,7 @@ module peel_tile_buffer import tsp_pkg::*; #(
                                                     : f_depth (rdata, cw);
                 wdata[PEEL_W*cw + PW_TAG    +: 32] = f_tag  (rdata, cw);
                 wdata[PEEL_W*cw + PW_TAG2   +: 32] =
-                    pb_first ? 32'hFFFFFFFF : f_tag(rdata, cw);
+                    pb_first ? TAG_INVALID_SENTINEL : f_tag(rdata, cw);
                 wdata[PEEL_W*cw + PW_VALID]        = 1'b0;
             end
         end else if (ras_b_valid) begin            // stage B: depth-cmp write-back
