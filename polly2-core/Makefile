@@ -36,7 +36,7 @@ BUILD = build
 CWD  := $(shell pwd)
 
 .PHONY: shade-drop raster-topleft depth-cmp-lp texfetchpl clean test tex tex-addr tex-uv tex-decode tex-filter tex-combiner \
-        oparse region regfile regen sortcache itquad itskip taginvw dense_span_buffer \
+        oparse region regfile regen sortcache itquad itskip taginvw dense_span_buffer fog \
         frontendtsplp frontendtsplp-build golden-check spannerv2 mulc9 mul16sppro \
         add24sppro mulc9sppro add3sppro mul24sppro mul24c9sppro
 
@@ -56,7 +56,7 @@ RTL_EXTRA = rtl/fp/fp_add24.sv rtl/tsp/stage_interp.sv
 RTL_INC   = $(addprefix -y ,$(RTL_DIRS)) -Irtl/gen
 
 # ---- run the fast unit tests (TSP texture blocks + front-end block tests) ----
-test: tex oparse region regfile sortcache itquad itskip raster-topleft
+test: tex oparse region regfile sortcache itquad itskip raster-topleft fog
 
 # ---- top-left bias / exact-edge raster regression ----
 # isp_setup_streamed + isp_raster_line on a coplanar fullscreen quad whose
@@ -97,6 +97,18 @@ depth-cmp-lp: | $(BUILD)
 	  $(CWD)/tb/depth_cmp_lp_tb.cpp \
 	  --Mdir $(BUILD)/obj_depthcmplp -o tb
 	./$(BUILD)/obj_depthcmplp/tb $(ARGS)
+
+# ---- FOG unit regression ----
+# reg_file's write-time fog precompute ({base255,delta} table entries + FOG_DENSITY
+# -> f32) + fog_lut (1/W -> fog alpha) + fog_blend (colour clamp + fog blend) vs a C
+# model of refsw2's LookupFogTable / FogUnit.
+fog: | $(BUILD)
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ -Wno-PINCONNECTEMPTY \
+	  --top-module fog_tb_top $(RTL_INC) \
+	  $(TSP_PKG) $(RTL_EXTRA) tb/fog_tb_top.sv \
+	  $(CWD)/tb/fog_tb.cpp \
+	  --Mdir $(BUILD)/obj_fog -o tb
+	./$(BUILD)/obj_fog/tb
 
 raster-topleft: | $(BUILD)
 	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ -Wno-PINCONNECTEMPTY \

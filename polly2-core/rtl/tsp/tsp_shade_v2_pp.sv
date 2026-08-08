@@ -12,6 +12,8 @@
 //                                                              palette; variable latency,
 //                                                              its own in_ready backpressure)
 //   COMB   : texenv + offset -> ARGB          color_combiner  (3 cyc; now streamed)
+//   FOG    : colour clamp + fog blend         fog_lut (7 cyc, in PARALLEL with the front)
+//                                             + fog_blend (3 cyc, behind COMB)
 //
 // The old shader's separate UV / 4x-fetch / FILT stages are ALL subsumed by tex_unit,
 // which takes interpolated float U/V (+ decoded per-pixel config) and returns one
@@ -56,6 +58,15 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
     input             pp_texture,
     input             pp_offset,
 
+    // ---- FOG unit: per-render constants + the FOG_TABLE read port (reg_file) ----
+    input      [31:0] fog_den_f32,        // FOG_DENSITY, pre-normalized to f32
+    input      [31:0] fog_col_ram,        // FOG_COL_RAM
+    input      [31:0] fog_col_vert,       // FOG_COL_VERT
+    input      [31:0] fog_clamp_max,      // FOG_CLAMP_MAX
+    input      [31:0] fog_clamp_min,      // FOG_CLAMP_MIN
+    output fog_rd_req_t  fog_req,
+    input  fog_rd_resp_t fog_resp,
+
     // ---- output ----
     output reg           out_valid,
     output reg [IDW-1:0] out_id,
@@ -99,6 +110,25 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
                         .x(invw_in),.out_valid(rc_ov),.y(rc_W));
 
     localparam RCPLAT = 5;             // fp_rcp_faster latency
+
+    // ==============================================================
+    // STAGE FOG-LUT: the pixel's fog alpha from its 1/W (fog_lut, 7 clocks), computed
+    // in PARALLEL with RCP+INTERP off the same accepted pixel - it shares only `en`,
+    // so it adds NO latency and NO logic to any existing stage. Its 8-bit result is
+    // aligned to the tex_unit issue point and then rides the COMB payload FIFO across
+    // tex_unit's variable latency: carrying 8 bits there is far cheaper than carrying
+    // the 32-bit invW and doing the lookup at the back.
+    // NOTE the fog LUT is read off the pixel's INTERPOLATED 1/W (invw_in) rather than
+    // refsw2's 1/(1/invW) round-trip; see the fog_lut header.
+    // ==============================================================
+    wire       fl_ov;
+    wire [7:0] fl_alpha;
+    fog_lut u_fog (
+        .clk(clk),.reset(reset),.stall(stall),.in_valid(in_valid & en),
+        .invw(invw_in),.fog_den(fog_den_f32),
+        .fog_req(fog_req),.fog_resp(fog_resp),
+        .out_valid(fl_ov),.fog_alpha(fl_alpha));
+    localparam FOGLAT = 7;             // fog_lut latency
 
     // --- wide operands (ddx/ddy/c, 10 planes x 32b) via M10K delay lines ---
     wire [319:0] q_ddx, q_ddy, q_c;
@@ -205,6 +235,33 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
             c_ptx[s]<=c_ptx[s-1]; c_pof[s]<=c_pof[s-1]; c_id[s]<=c_id[s-1];
         end
     end
+    // fog alpha (FOGLAT deep) -> align with iv_ov (RCPLAT+INTERPLAT deep): delay the rest.
+    localparam FOGDLY = RCPLAT + INTERPLAT - FOGLAT;
+    reg [7:0] fog_dl [0:FOGDLY-1];
+    always @(posedge clk) if (en) begin
+        fog_dl[0] <= fl_alpha;
+        for (s=1;s<FOGDLY;s=s+1) fog_dl[s] <= fog_dl[s-1];
+    end
+    wire [7:0] iv_fa = fog_dl[FOGDLY-1];
+`ifndef SYNTHESIS
+    // The fog LUT and the RCP+INTERP front are rigid en-gated chains off the SAME accepted
+    // pixel, so their valids must land together at the tex_unit issue point. A wrong FOGLAT
+    // would silently shear every pixel's fog alpha onto a neighbour instead of failing.
+    reg fog_vdl [0:FOGDLY-1];
+    reg fog_align_fired = 1'b0;
+    always @(posedge clk) if (en) begin
+        fog_vdl[0] <= fl_ov;
+        for (s=1;s<FOGDLY;s=s+1) fog_vdl[s] <= fog_vdl[s-1];
+    end
+    always @(posedge clk)
+        if (!reset && en && !fog_align_fired && !$isunknown(fog_vdl[FOGDLY-1])
+            && (fog_vdl[FOGDLY-1] != iv_ov)) begin
+            fog_align_fired <= 1'b1;
+            $display("[tsp_shade_v2_pp] FOG MISALIGNED: fog valid=%b vs interp valid=%b @t=%0t (FOGLAT/FOGDLY wrong)",
+                     fog_vdl[FOGDLY-1], iv_ov, $time);
+        end
+`endif
+
     wire [31:0] iv_tsp = c_tsp[INTERPLAT-1];
     wire [31:0] iv_tcw = c_tcw[INTERPLAT-1];
     wire [4:0]  iv_tc  = c_tc[INTERPLAT-1];
@@ -285,8 +342,8 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
     // popped on tu_ov. Since tex_unit is in-order lockstep, the k-th pushed payload lines up
     // with the k-th texel result. id is also echoed by tex_unit (tu_oid) for cross-check.
     // ==============================================================
-    localparam integer PLW = 32+32+32+1+1+IDW;   // base, ofs, tsp, ptx, pof, id
-    wire [PLW-1:0] pl_in = { iv_base, iv_ofs, iv_tsp, iv_ptx, iv_pof, iv_id };
+    localparam integer PLW = 32+32+32+1+1+8+IDW; // base, ofs, tsp, ptx, pof, fogalpha, id
+    wire [PLW-1:0] pl_in = { iv_base, iv_ofs, iv_tsp, iv_ptx, iv_pof, iv_fa, iv_id };
     localparam integer PLD = 64, PLAW = 6;
     // ---- M10K FWFT payload FIFO ----
     // The body lives in block RAM; only the HEAD is a register. A head register is
@@ -394,6 +451,7 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
     wire [31:0]    P_tsp  = pl_out[PLW-1-64     -: 32];
     wire           P_ptx  = pl_out[PLW-1-96];
     wire           P_pof  = pl_out[PLW-1-97];
+    wire [7:0]     P_fa   = pl_out[IDW          +: 8];   // fog_lut alpha for this pixel
     wire [IDW-1:0] P_id   = pl_out[IDW-1        : 0];
 
     // ==============================================================
@@ -417,22 +475,51 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
         .out_valid(cc_ov),.col(comb_col));
     localparam COMBLAT = 3;
 
-    // tsp + id delayed by COMBLAT to align with cc_ov (color_combiner result).
-    reg [31:0]    o_tsp [0:COMBLAT-1];
-    reg [IDW-1:0] o_id  [0:COMBLAT-1];
+    // ==============================================================
+    // STAGE FOG: colour clamp + fog blend (fog_blend, 3 cyc), BEHIND the combiner - the
+    // reference applies both after ColorCombiner and before BlendingUnit. Its own three
+    // stages keep the clamp, the multiply and the accumulate apart, so nothing here
+    // lengthens an existing combinational path.
+    // ==============================================================
+    localparam FOGBLAT = 3;
+    localparam OUTLAT  = COMBLAT + FOGBLAT;
+
+    // per-pixel payload the fog stage needs, delayed to the COMB result (tap COMBLAT-1)
+    // and on to the pipe output (tap OUTLAT-1).
+    reg [31:0]    o_tsp [0:OUTLAT-1];
+    reg [IDW-1:0] o_id  [0:OUTLAT-1];
+    reg [7:0]     o_fa  [0:COMBLAT-1];    // fog_lut alpha
+    reg [7:0]     o_ofa [0:COMBLAT-1];    // offset alpha (per-vertex fog weight)
+    reg           o_pof [0:COMBLAT-1];    // ISP.Offset (gates per-vertex fog)
     always @(posedge clk) begin
         o_tsp[0]<=P_tsp; o_id[0]<=P_id;
-        for (s=1;s<COMBLAT;s=s+1) begin o_tsp[s]<=o_tsp[s-1]; o_id[s]<=o_id[s-1]; end
+        o_fa[0]<=P_fa;   o_ofa[0]<=P_ofs[31:24]; o_pof[0]<=P_pof;
+        for (s=1;s<OUTLAT;s=s+1) begin o_tsp[s]<=o_tsp[s-1]; o_id[s]<=o_id[s-1]; end
+        for (s=1;s<COMBLAT;s=s+1) begin
+            o_fa[s]<=o_fa[s-1]; o_ofa[s]<=o_ofa[s-1]; o_pof[s]<=o_pof[s-1];
+        end
     end
+    wire [31:0] fb_tsp = o_tsp[COMBLAT-1];
+
+    wire        fb_ov;
+    wire [31:0] fog_col;
+    fog_blend u_fb (
+        .clk(clk),.reset(reset),.in_valid(cc_ov),
+        .col(comb_col),
+        .fog_alpha(o_fa[COMBLAT-1]),.offs_a(o_ofa[COMBLAT-1]),
+        .fog_ctrl(fb_tsp[23:22]),.color_clamp(fb_tsp[21]),.pp_offset(o_pof[COMBLAT-1]),
+        .fog_col_ram(fog_col_ram),.fog_col_vert(fog_col_vert),
+        .fog_clamp_max(fog_clamp_max),.fog_clamp_min(fog_clamp_min),
+        .out_valid(fb_ov),.out_col(fog_col));
 
     always @(posedge clk) begin
         if (reset) out_valid<=0;
         else begin
-            out_valid <= cc_ov;
-            if (cc_ov) begin
-                out_argb <= comb_col;
-                out_id   <= o_id[COMBLAT-1];
-                out_tsp  <= o_tsp[COMBLAT-1];
+            out_valid <= fb_ov;
+            if (fb_ov) begin
+                out_argb <= fog_col;
+                out_id   <= o_id[OUTLAT-1];
+                out_tsp  <= o_tsp[OUTLAT-1];
             end
         end
     end
