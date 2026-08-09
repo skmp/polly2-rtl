@@ -35,6 +35,7 @@ module tex_unit import tsp_pkg::*; #(
     input      [2:0]  texu, texv,
     input      [3:0]  miplevel,
     input             clampu, clampv, flipu, flipv,
+    input             half_texel,   // HALF_OFFSET.texure_pixel_half_offset
     // texture config (decoded named params, forwarded to base_addr/decode/filter)
     input      [20:0] tex_addr_in,       // TCW.TexAddr (word base)
     input             tex,               // textured pixel (0 -> fetch bypass, texel = 0)
@@ -81,6 +82,7 @@ module tex_unit import tsp_pkg::*; #(
         .clk(clk),.reset(reset),.stall(front_stall),.in_valid(in_valid),
         .u(u),.v(v),.texu(texu),.texv(texv),.miplevel(miplevel),
         .clampu(clampu),.clampv(clampv),.flipu(flipu),.flipv(flipv),
+        .half_texel(half_texel),
         .out_valid(uv_ov),
         .c00u(c00u),.c00v(c00v),.c01u(c01u),.c01v(c01v),
         .c10u(c10u),.c10v(c10v),.c11u(c11u),.c11v(c11v),.ufrac(ufr),.vfrac(vfr));

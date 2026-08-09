@@ -17,9 +17,21 @@ static int clampflip(int clamp,int flip,int coord,int size){
     return coord;
 }
 
+static Vtex_uvmap* d;
+// tex_uvmap is a 3-STAGE PIPELINE (S1 shift-amount, S2 barrel shift, S3 sign+corners).
+// This tb used to set inputs and call eval() with no clock at all, so it compared
+// against stale register contents and only passed by luck. Inputs are held stable and
+// the pipe is clocked through before the outputs are read.
+static const int UVLAT = 3;
+static void tick(){ d->clk=0; d->eval(); d->clk=1; d->eval(); }
+static void settle(){ for(int i=0;i<UVLAT+1;i++) tick(); }
+
 int main(int c,char**v){
     Verilated::commandArgs(c,v);
-    auto*d=new Vtex_uvmap;
+    d=new Vtex_uvmap;
+    d->clk=0; d->reset=1; d->stall=0; d->in_valid=1;
+    for(int i=0;i<4;i++) tick();
+    d->reset=0;
     int fails=0,total=0;
     // all 16 clamp/flip combos, 96 random (u,v,texu,texv) each - INCLUDING
     // negative and large UVs (wrap/flip must handle negatives: e.g. daytona road
@@ -33,16 +45,22 @@ int main(int c,char**v){
         float fu = (float)((int)(rnd()%32768) - 16384)/1024.0f;  // -16..~16
         float fv = (float)((int)(rnd()%32768) - 16384)/1024.0f;
         d->u=f2b(fu); d->v=f2b(fv); d->texu=texu; d->texv=texv;
-        d->clampu=clampu; d->clampv=clampv; d->flipu=flipu; d->flipv=flipv; d->eval();
+        d->clampu=clampu; d->clampv=clampv; d->flipu=flipu; d->flipv=flipv;
+        // HALF-TEXEL OFFSET: exercise both settings. -128 = exactly 0.5 texel
+        // (256 = 1.0). refsw2 uses -127; this design deliberately does not.
+        int half = (i & 1);
+        d->half_texel = half;
+        settle();
 
-        // ref: ui = fu*sizeU*256 (truncate), texel = ui>>8, frac = ui&255
-        long ui=(long)(fu*sizeU*256.0f), vi=(long)(fv*sizeV*256.0f);
-        int u0=ui>>8, v0=vi>>8, u1=u0+1, v1=v0+1;
+        // ref: ui = fu*sizeU*256 (truncate) + halfpixel, texel = ui>>8, frac = ui&255
+        long hp = half ? -128 : 0;
+        long ui=(long)(fu*sizeU*256.0f)+hp, vi=(long)(fv*sizeV*256.0f)+hp;
+        int u0=(int)(ui>>8), v0=(int)(vi>>8), u1=u0+1, v1=v0+1;   // arith (floor)
         int r_c00u=clampflip(clampu,flipu,u1,sizeU), r_c00v=clampflip(clampv,flipv,v1,sizeV);
         int r_c01u=clampflip(clampu,flipu,u0,sizeU), r_c01v=clampflip(clampv,flipv,v1,sizeV);
         int r_c10u=clampflip(clampu,flipu,u1,sizeU), r_c10v=clampflip(clampv,flipv,v0,sizeV);
         int r_c11u=clampflip(clampu,flipu,u0,sizeU), r_c11v=clampflip(clampv,flipv,v0,sizeV);
-        int r_uf=ui&255, r_vf=vi&255;
+        int r_uf=(int)(ui&255), r_vf=(int)(vi&255);
         total++;
         bool ok = (int)d->c00u==r_c00u&&(int)d->c00v==r_c00v&&(int)d->c01u==r_c01u&&(int)d->c01v==r_c01v
                 &&(int)d->c10u==r_c10u&&(int)d->c10v==r_c10v&&(int)d->c11u==r_c11u&&(int)d->c11v==r_c11v;
@@ -74,7 +92,7 @@ int main(int c,char**v){
                 int clampv=(tsp>>15)&1, clampu=(tsp>>16)&1, flipv=(tsp>>17)&1, flipu=(tsp>>18)&1;
                 d->u=au; d->v=av; d->texu=texu; d->texv=texv;
                 d->clampu=clampu; d->clampv=clampv; d->flipu=flipu; d->flipv=flipv;
-                d->miplevel=mip; d->eval();
+                d->miplevel=mip; d->half_texel=0; settle();
                 gtot++;
                 bool ok = (int)d->c00u==e00u&&(int)d->c00v==e00v&&(int)d->c01u==e01u&&(int)d->c01v==e01v
                         &&(int)d->c10u==e10u&&(int)d->c10v==e10v&&(int)d->c11u==e11u&&(int)d->c11v==e11v

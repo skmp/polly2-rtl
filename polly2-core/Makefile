@@ -160,7 +160,7 @@ tex-addr: | $(BUILD)
 
 tex-uv: | $(BUILD)
 	+$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module tex_uvmap \
-	  $(TSP)/tex_uvmap.sv $(CWD)/tb/tex_uvmap_tb.cpp \
+	  $(TSP)/tex/tex_uvmap.sv $(CWD)/tb/tex_uvmap_tb.cpp \
 	  --Mdir $(BUILD)/obj_texuv -o tb
 	./$(BUILD)/obj_texuv/tb
 

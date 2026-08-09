@@ -942,7 +942,8 @@ module peel_core import tsp_pkg::*; #(
     tsp_shade_v2_pp #(.IDW(11)) u_shade (
         .clk(clk),.reset(reset),.flush(go),
         .in_valid(pp_in_valid),.in_id(pp_in_id),.px(pp_px),.py(pp_py),
-        .half(regs.half_offset.tsp_pixel_half_offset),.invw_in({1'b0, pp_invw}),
+        .half(regs.half_offset.tsp_pixel_half_offset),
+        .half_texel(regs.half_offset.texure_pixel_half_offset),.invw_in({1'b0, pp_invw}),
         .in_ddx(pp_ddx),.in_ddy(pp_ddy),.in_c(pp_c),
         .tsp(pp_tsp),.tcw(pp_tcw),.text_ctrl(regs.text_control[4:0]),
         .pal_fmt(regs.pal_ram_ctrl[1:0]),
