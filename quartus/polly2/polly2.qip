@@ -50,6 +50,9 @@ set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/setup/isp_s
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/setup/tsp_setup_stream.sv
 
 # ---- ISP rasterize + depth compare ----
+# coordinate -> fp32 (absolute-coord raster/interp). Must precede isp_raster_line
+# and stage_interp, which instantiate it.
+set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/isp/coord_f32.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/isp/isp_raster_line.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/isp/isp_depth_cmp.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/isp/isp_depth_cmp_lp.sv

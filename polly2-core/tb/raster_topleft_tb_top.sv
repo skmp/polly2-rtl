@@ -14,7 +14,7 @@ module raster_topleft_tb_top (
     input  wire [31:0] x1, input wire [31:0] y1, input wire [31:0] z1,
     input  wire [31:0] x2, input wire [31:0] y2, input wire [31:0] z2,
     input  wire [31:0] x3, input wire [31:0] y3, input wire [31:0] z3,
-    input  wire [31:0] xbase, input wire [31:0] ybase,
+    input  wire [10:0] xbase, input wire [10:0] ybase,   // integer tile origin (absolute)
     input  wire        s_clear,        // clear s_done before the next triangle
     output reg         s_done,         // sticky: coefficients captured below
     output reg         s_cull,
@@ -23,14 +23,20 @@ module raster_topleft_tb_top (
     // ---- raster issue (uses the captured coefficients) ----
     input  wire        r_valid,
     input  wire        r_probe,
-    input  wire [4:0]  r_y,
-    input  wire [4:0]  r_xb,
+    input  wire [10:0] r_y,          // ABSOLUTE screen row
+    input  wire [10:0] r_xb,         // ABSOLUTE screen col of lane 0
+    input  wire        r_half,       // pixel-centre select
     output wire        out_valid,
     output wire [7:0]  inside_mask,
     output wire [4:0]  out_x,
     output wire [4:0]  out_y,
     output wire        probe_valid,
-    output wire        probe_reject
+    output wire        probe_reject,
+    // ---- invW check: the raster's OTHER output. Unlike the edge tests (which are
+    // reduced to a sign by fp_ge and so tolerate truncation), invW is consumed
+    // downstream at FULL WIDTH - it becomes the depth and the composite sort key. ----
+    output wire [255:0] invw_flat,        // 8 lanes x 32b
+    output wire [31:0]  ddx_dbg, ddy_dbg, cw_dbg   // the invW plane setup produced
 );
     wire        so_valid, w_cull;
     wire [31:0] w_dx12,w_dx23,w_dx31,w_dx41;
@@ -73,17 +79,21 @@ module raster_topleft_tb_top (
         end
     end
 
+    assign ddx_dbg = rddx;
+    assign ddy_dbg = rddy;
+    assign cw_dbg  = rcw;
+
     isp_raster_line #(.LANES(8)) u_ras (
         .clk(clk), .reset(reset),
-        .in_valid(r_valid), .y(r_y), .x_base(r_xb),
+        .in_valid(r_valid), .y(r_y), .x_base(r_xb), .half(r_half),
         .c1(rc1),.c2(rc2),.c3(rc3),.c4(rc4),
         .dx12(rdx12),.dx23(rdx23),.dx31(rdx31),.dx41(rdx41),
         .dy12(rdy12),.dy23(rdy23),.dy31(rdy31),.dy41(rdy41),
         .ddx(rddx),.ddy(rddy),.c_invw(rcw),
         .tl(rtl),
         .probe(r_probe), .probe_reject(probe_reject), .probe_valid(probe_valid),
-        .out_valid(out_valid), .inside_mask(inside_mask), .invw_flat(),
-        .qi(2'd0), .out_qi(),
+        .out_valid(out_valid), .inside_mask(inside_mask), .invw_flat(invw_flat),
+        .qi(3'd0), .out_qi(),
         .out_x(out_x), .out_y(out_y)
     );
 endmodule

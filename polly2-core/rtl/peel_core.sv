@@ -314,7 +314,7 @@ module peel_core import tsp_pkg::*; #(
     // pq) used by the depth compare / tag write. The streamed setup accepts from the
     // tri FIFO (fq) head and retires planes into the 8-deep plane FIFO (pq).
     reg  [31:0] isp_word;                  // active (raster) triangle's isp
-    reg  [31:0] t_xbase, t_ybase;          // ISP's current tile origin (raster/ISP setup)
+    reg  [10:0] t_xbase, t_ybase;          // ISP's current tile origin, INTEGER screen coord
     // SPANNER's OWN tile origin: the spanner runs BEHIND ISP and may be shading an
     // earlier tile, so tsp_setup_min (u_tsp) must use the xbase/ybase of the tile the
     // SPANNER is resolving, NOT ISP's live t_xbase. Latched per pass at P_IDLE from the
@@ -328,12 +328,12 @@ module peel_core import tsp_pkg::*; #(
     // once, so stage A must look the owner up by the 2-bit index that rode the
     // pipe (u_line qi/out_qi) instead of the POP-latched regs. 4 slots > the
     // max 3 concurrent (a triangle occupies >= 3 cycles: POP+CORNER+>=1 sweep).
-    reg  [1:0]  tri_qi;                    // current triangle's sideband slot
-    reg  [31:0] tq_tag  [0:3];
-    reg  [2:0]  tq_mode [0:3];
-    reg         tq_zwdis[0:3];
-    reg         tq_ispt [0:3];
-    wire [1:0]  ras_qi;                    // exit-aligned slot from u_line
+    reg  [2:0]  tri_qi;                    // current triangle's sideband slot
+    reg  [31:0] tq_tag  [0:7];
+    reg  [2:0]  tq_mode [0:7];
+    reg         tq_zwdis[0:7];
+    reg         tq_ispt [0:7];
+    wire [2:0]  ras_qi;                    // exit-aligned slot from u_line
     wire        isp_sgn_neg, isp_cull;
     wire [4:0]  w_bx0, w_bx1, w_by0, w_by1;   // tile-local bbox from setup
     wire [31:0] w_dx12,w_dx23,w_dx31,w_dx41, w_dy12,w_dy23,w_dy31,w_dy41;
@@ -421,14 +421,18 @@ module peel_core import tsp_pkg::*; #(
     // is guaranteed to be THIS triangle's verdict (only one probe in flight, serial sweeps).
     // The countdown runs CONCURRENTLY with the sweep (no stall). CR_LAT = probe issue->verdict.
     // CR_LAT chosen so cr_cnt==1 (the sample) lands exactly on the cycle probe_reject pulses
-    // (LAT=6 pipe: issue -> verdict valid 7 cycles later). Set in RS_CORNER, decremented each
+    // (LAT=15 pipe: issue -> verdict valid 16 cycles later). Set in RS_CORNER, decremented each
     // RS_RAS cycle; read cr_cnt==1 on cyc7 after issue. A sweep that ends before then (tiny
     // bbox) simply never samples the (moot) verdict - correct, no stale-verdict leak.
-    localparam integer CR_LAT = 7;
-    reg  [3:0] cr_cnt;            // per-triangle verdict countdown (0 => idle/expired)
+    localparam integer CR_LAT = 16;
+    reg  [4:0] cr_cnt;            // per-triangle verdict countdown (0 => idle/expired)
     isp_raster_line #(.LANES(RAS_LANES)) u_line (
         .clk(clk), .reset(reset),
-        .in_valid(ras_in_valid || cr_issue), .y(ras_y), .x_base(ras_x),
+        // ABSOLUTE screen coordinates. The tile base is 32-aligned and ras_x/ras_y are
+        // the 5-bit tile offsets, so the screen coordinate is a CONCATENATION - no adder.
+        .in_valid(ras_in_valid || cr_issue),
+        .y({cur_ty, ras_y}), .x_base({cur_tx, ras_x}),
+        .half(regs.half_offset.fpu_pixel_half_offset),
         .c1(isp_c1), .c2(isp_c2), .c3(isp_c3), .c4(isp_c4),
         .dx12(isp_dx12),.dx23(isp_dx23),.dx31(isp_dx31),.dx41(isp_dx41),
         .dy12(isp_dy12),.dy23(isp_dy23),.dy31(isp_dy31),.dy41(isp_dy41),
@@ -909,7 +913,7 @@ module peel_core import tsp_pkg::*; #(
                               // the returning id (see u_iwr). Carrying it through
                               // ~100 id-slots (incl. the 64-deep, ASYNC-READ payload
                               // window) cost ~3.2k FFs; the RAM costs 4 M10K.
-    reg  [4:0]   pp_px, pp_py;
+    reg  [10:0]  pp_px, pp_py;   // ABSOLUTE screen coords (tile base | tile offset)
     reg  [30:0]  pp_invw;   // sign-stripped; zero-extended into the shade RCP
     reg  [31:0]  pp_tsp, pp_tcw; reg pp_ptex, pp_pofs;
     reg  [31:0]  pp_ddx [0:9];
@@ -937,7 +941,8 @@ module peel_core import tsp_pkg::*; #(
     // first tile is shaded (raster/region-walk runs first), so this is free in practice.
     tsp_shade_v2_pp #(.IDW(11)) u_shade (
         .clk(clk),.reset(reset),.flush(go),
-        .in_valid(pp_in_valid),.in_id(pp_in_id),.px(pp_px),.py(pp_py),.invw_in({1'b0, pp_invw}),
+        .in_valid(pp_in_valid),.in_id(pp_in_id),.px(pp_px),.py(pp_py),
+        .half(regs.half_offset.tsp_pixel_half_offset),.invw_in({1'b0, pp_invw}),
         .in_ddx(pp_ddx),.in_ddy(pp_ddy),.in_c(pp_c),
         .tsp(pp_tsp),.tcw(pp_tcw),.text_ctrl(regs.text_control[4:0]),
         .pal_fmt(regs.pal_ram_ctrl[1:0]),
@@ -978,8 +983,8 @@ module peel_core import tsp_pkg::*; #(
     // so absence here = rasterized-but-rejected OR not covered.)
     always @(posedge clk) if (!reset && $test$plusargs("ptx") && pp_in_valid && !pp_stall) begin : iwtr
         integer ipx, ipy; reg [10:0] isx, isy;
-        isx = {5'd0, md_tx[md_rp[MD_AW-1:0]]}*11'd32 + {6'd0, pp_px};
-        isy = {5'd0, md_ty[md_rp[MD_AW-1:0]]}*11'd32 + {6'd0, pp_py};
+        isx = pp_px;   // already absolute
+        isy = pp_py;
         ipx = 0; ipy = 0;
         void'($value$plusargs("ptx=%d", ipx));
         void'($value$plusargs("pty=%d", ipy));
@@ -1717,8 +1722,16 @@ module peel_core import tsp_pkg::*; #(
             pp_ddy[pj] = tsg_r_ddy[pj];
             pp_c[pj]   = tsg_r_c  [pj];
         end
-        pp_px = pp_in_id[4:0];
-        pp_py = pp_in_id[9:5];    // [10] is the at-bit, not part of px/py
+        // ABSOLUTE screen coordinates: the pixel id carries the TILE-LOCAL offset, and
+        // the tile base is 32-aligned, so the screen coordinate is a CONCATENATION.
+        // The tile MUST come from the md_* metadata FIFO at the READER's pointer - the
+        // pass being drained right now - NOT from spn_tx/spn_ty. spn_* is latched when
+        // the SPANNER starts a pass, and the spanner runs ahead of the reader (that is
+        // what the md_* FIFO is for), so spn_* names a later tile than the pixels being
+        // presented. The pre-existing shade-input dump and the +ptx trace below already
+        // reconstruct the screen coordinate this way - they are the reference for it.
+        pp_px = {md_tx[md_rp[MD_AW-1:0]], pp_in_id[4:0]};
+        pp_py = {md_ty[md_rp[MD_AW-1:0]], pp_in_id[9:5]};   // [10] is the at-bit
     end
 
     always @(posedge clk) begin
@@ -1731,7 +1744,7 @@ module peel_core import tsp_pkg::*; #(
 `ifndef SYNTHESIS
             pc_total<=0;
             pc_ras_active<=0; pc_ras_pop<=0; pc_ras_drain<=0; pc_ras_idle<=0;
-            pc_ras_corner<=0; pc_corner_cull<=0; cr_issue<=1'b0; cr_seen<=1'b0; cr_cnt<=4'd0;
+            pc_ras_corner<=0; pc_corner_cull<=0; cr_issue<=1'b0; cr_seen<=1'b0; cr_cnt<=5'd0;
             pc_sh_present<=0; pc_sh_tex_stall<=0; pc_sh_setup_wait<=0; pc_sh_fetch<=0;
             pc_sh_look<=0; pc_sh_drain<=0; pc_sh_none<=0;
             pc_top_clear<=0; pc_top_peelbuf<=0; pc_top_flush<=0; pc_top_ol<=0;
@@ -1748,7 +1761,7 @@ module peel_core import tsp_pkg::*; #(
             pc_sort_skip<=0; pc_pt_pass<=0; pc_pt_tiles<=0; pc_ptbb_skip<=0;
             pc_pt_empty<=0; pc_pt_late<=0; pc_peel_empty<=0;
 `endif
-            rs_st<=RS_IDLE; tri_qi<=2'd0;
+            rs_st<=RS_IDLE; tri_qi<=3'd0;
             pq_head<=0; pq_tail<=0; pq_count<=0;
             fq_head<=0; fq_tail<=0; fq_count<=0; fq_out_valid<=1'b0;
             eq_head<=0; eq_tail<=0; eq_count<=0;
@@ -2106,8 +2119,12 @@ module peel_core import tsp_pkg::*; #(
 
             S_STATE: begin
                 // tile origin (floats) for both isp_setup and tsp_setup
-                t_xbase <= i2f({10'd0, cur_tx} * 16'd32);
-                t_ybase <= i2f({10'd0, cur_ty} * 16'd32);
+                // ABSOLUTE-COORD REWORK: the tile origin is an INTEGER screen coord now
+                // (32-aligned), used only to fold the vertex bbox into the tile sweep
+                // bounds. The i2f() of tx*32 that fed the old float subtract is gone,
+                // along with the subtract itself (see isp_setup_streamed).
+                t_xbase <= {cur_tx, 5'd0};
+                t_ybase <= {cur_ty, 5'd0};
                 case (ra_out.state)
                 // CLEAR touches the whole tile buffer: BARRIER first (consumer of
                 // the previous state must be fully done). The M10K CLEAR is a 128-
@@ -3217,15 +3234,17 @@ module peel_core import tsp_pkg::*; #(
                 // identity sideband: claim the next slot for this triangle (its
                 // chunks carry the slot index through u_line to stage A). A
                 // clip-skipped triangle issues NO chunks and must NOT claim -
-                // 1-cycle skip chains would otherwise wrap the 4 slots onto a
+                // 1-cycle skip chains would otherwise wrap the slots onto a
                 // still-in-flight triangle. Real claims are >= 3 cycles apart
-                // (POP+CORNER+sweep), so 4 slots cover the 7-deep pipe.
+                // (POP+CORNER+sweep). The absolute-coord raster pipe is 15 deep
+                // (was 6), so the old 4 slots no longer cover it - 8 do (8*3 = 24
+                // > 16 = the deepest an in-flight chunk can be).
                 if (!ptc_empty) begin
-                    tri_qi <= tri_qi + 2'd1;
-                    tq_tag  [tri_qi + 2'd1] <= pq_rdw[QF_TAG +:32];
-                    tq_mode [tri_qi + 2'd1] <= pq_rdw[QF_ISP+29 +: 3];
-                    tq_zwdis[tri_qi + 2'd1] <= pq_rdw[QF_ISP+26];
-                    tq_ispt [tri_qi + 2'd1] <= pq_rdw[QF_PT];
+                    tri_qi <= tri_qi + 3'd1;
+                    tq_tag  [tri_qi + 3'd1] <= pq_rdw[QF_TAG +:32];
+                    tq_mode [tri_qi + 3'd1] <= pq_rdw[QF_ISP+29 +: 3];
+                    tq_zwdis[tri_qi + 3'd1] <= pq_rdw[QF_ISP+26];
+                    tq_ispt [tri_qi + 3'd1] <= pq_rdw[QF_PT];
                 end
                 tri_count<=tri_count+1;
                 // chunk-aligned x range + row range from the bbox, CLIPPED to the
@@ -3278,7 +3297,7 @@ module peel_core import tsp_pkg::*; #(
             // per-triangle verdict countdown here (probe enters the pipe THIS cycle).
             RS_CORNER: begin
                 cr_issue <= 1'b0;      // 1-cycle probe issue pulse
-                cr_cnt   <= CR_LAT[3:0];
+                cr_cnt   <= CR_LAT[4:0];
                 rs_st <= RS_RAS;
             end
             RS_RAS: begin
@@ -3288,8 +3307,8 @@ module peel_core import tsp_pkg::*; #(
                 // (stop issuing remaining chunks -> DRAIN the in-flight no-op writes). If the
                 // sweep ends before the countdown expires (tiny bbox), we just leave RS_RAS;
                 // the moot verdict is never sampled (correct - a finished sweep can't abort).
-                if (cr_cnt != 4'd0) cr_cnt <= cr_cnt - 4'd1;
-                if (cr_en && !cr_seen && cr_cnt == 4'd1) begin
+                if (cr_cnt != 5'd0) cr_cnt <= cr_cnt - 5'd1;
+                if (cr_en && !cr_seen && cr_cnt == 5'd1) begin
                     cr_seen <= 1'b1;
 `ifndef SYNTHESIS
                     if ($test$plusargs("probedump"))
@@ -3310,7 +3329,7 @@ module peel_core import tsp_pkg::*; #(
                         end else rs_st <= RS_DRAIN;
                     end
                 end
-                if (!(cr_en && !cr_seen && cr_cnt == 4'd1 && ras_probe_reject)) begin
+                if (!(cr_en && !cr_seen && cr_cnt == 5'd1 && ras_probe_reject)) begin
                     if (ras_x == rbx1) begin
                         ras_x <= rbx0;
                         if (ras_y == rby1) begin

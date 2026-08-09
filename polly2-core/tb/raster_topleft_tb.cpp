@@ -52,16 +52,29 @@ static bool model_inside(const Tri& t, double bx, double by, int x, int y) {
            (e3 > 0 || (T3 && e3 == 0));
 }
 
+// invW tolerance: the raster's FP units truncate (fp_mul16 keeps 16 significand bits,
+// fp_add24 truncates), so an exact match is not the bar. 2^-12 is roughly what a
+// 16-bit-significand product chain should hold; anything far above that means the
+// absolute-coordinate form has cost real depth precision.
+static const double INVW_TOL = 2.44e-4;   // 2^-12
+static double invw_worst = 0.0, invw_worst_got = 0, invw_worst_exp = 0;
+static char   invw_worst_where[128] = "none";
+static double b2f(uint32_t u) { float f; memcpy(&f, &u, 4); return (double)f; }
+
 // run setup for (tri, tile), sweep the tile + probe; compare
 static void run_tile(const Tri& t, int tx, int ty, const char* name) {
     double bx = tx * 32.0, by = ty * 32.0;
 
     // ---- setup ----
     dut->s_clear = 1; tick(); dut->s_clear = 0;
+    // DISTINCT per-vertex Z: a FLAT plane (all three equal) makes ddx/ddy exactly zero,
+    // so invW is constant and every FP path reproduces it bit-exactly - the invW check
+    // below would be vacuous. These give the plane a real slope in both x and y.
     dut->x1 = f2b((float)t.x1); dut->y1 = f2b((float)t.y1); dut->z1 = f2b(0.000015f);
-    dut->x2 = f2b((float)t.x2); dut->y2 = f2b((float)t.y2); dut->z2 = f2b(0.000015f);
-    dut->x3 = f2b((float)t.x3); dut->y3 = f2b((float)t.y3); dut->z3 = f2b(0.000015f);
-    dut->xbase = f2b((float)bx); dut->ybase = f2b((float)by);
+    dut->x2 = f2b((float)t.x2); dut->y2 = f2b((float)t.y2); dut->z2 = f2b(0.000031f);
+    dut->x3 = f2b((float)t.x3); dut->y3 = f2b((float)t.y3); dut->z3 = f2b(0.000022f);
+    dut->xbase = tx * 32; dut->ybase = ty * 32;   // integer tile origin
+    dut->r_half = 0;                              // sample pixel edges (as the model does)
     dut->s_valid = 1;
     int guard = 0;
     while (!(dut->s_ready) && ++guard < 100) tick();
@@ -73,7 +86,7 @@ static void run_tile(const Tri& t, int tx, int ty, const char* name) {
     if (getenv("DBG_C2")) printf("[%s %d,%d] c2 = %08x\n", name, tx, ty, dut->c2_dbg);
 
     // ---- corner probe ----
-    dut->r_valid = 1; dut->r_probe = 1; dut->r_y = 0; dut->r_xb = 0;
+    dut->r_valid = 1; dut->r_probe = 1; dut->r_y = ty*32; dut->r_xb = tx*32;
     tick();
     dut->r_valid = 0; dut->r_probe = 0;
     guard = 0;
@@ -81,15 +94,19 @@ static void run_tile(const Tri& t, int tx, int ty, const char* name) {
     int rejected = dut->probe_valid ? dut->probe_reject : -1;
 
     // ---- full sweep: 32 rows x 4 chunks of 8 lanes ----
-    static uint8_t got[32][32];
+    static uint8_t  got [32][32];
+    static uint32_t gotw[32][32];   // per-pixel invW as the raster computed it
     memset(got, 0xFF, sizeof(got));
+    memset(gotw, 0, sizeof(gotw));
     int outstanding = 0;
     auto drain = [&](bool all) {
         while (outstanding > 0) {
             tick();
             if (dut->out_valid) {
-                for (int l = 0; l < 8; l++)
-                    got[dut->out_y][dut->out_x + l] = (dut->inside_mask >> l) & 1;
+                for (int l = 0; l < 8; l++) {
+                    got [dut->out_y][dut->out_x + l] = (dut->inside_mask >> l) & 1;
+                    gotw[dut->out_y][dut->out_x + l] = dut->invw_flat[l];
+                }
                 outstanding--;
             }
             if (!all) break;
@@ -97,11 +114,13 @@ static void run_tile(const Tri& t, int tx, int ty, const char* name) {
     };
     for (int y = 0; y < 32; y++)
         for (int xb = 0; xb < 32; xb += 8) {
-            dut->r_valid = 1; dut->r_y = y; dut->r_xb = xb;
+            dut->r_valid = 1; dut->r_y = ty*32 + y; dut->r_xb = tx*32 + xb;
             tick();
             if (dut->out_valid) {
-                for (int l = 0; l < 8; l++)
-                    got[dut->out_y][dut->out_x + l] = (dut->inside_mask >> l) & 1;
+                for (int l = 0; l < 8; l++) {
+                    got [dut->out_y][dut->out_x + l] = (dut->inside_mask >> l) & 1;
+                    gotw[dut->out_y][dut->out_x + l] = dut->invw_flat[l];
+                }
                 outstanding--;
             }
             outstanding++;
@@ -111,8 +130,10 @@ static void run_tile(const Tri& t, int tx, int ty, const char* name) {
     while (outstanding > 0 && ++g2 < 200) {
         tick();
         if (dut->out_valid) {
-            for (int l = 0; l < 8; l++)
-                got[dut->out_y][dut->out_x + l] = (dut->inside_mask >> l) & 1;
+            for (int l = 0; l < 8; l++) {
+                got [dut->out_y][dut->out_x + l] = (dut->inside_mask >> l) & 1;
+                gotw[dut->out_y][dut->out_x + l] = dut->invw_flat[l];
+            }
             outstanding--;
         }
     }
@@ -133,6 +154,35 @@ static void run_tile(const Tri& t, int tx, int ty, const char* name) {
             }
         }
     if (diffs) { printf("[%s tile %d,%d] FAIL: %d pixel diffs\n", name, tx, ty, diffs); errors++; }
+
+    // ---- invW accuracy. Coverage only needs the SIGN of each edge test, so it survives
+    // truncated multiplies; invW is different - its full 31 bits become the depth and the
+    // low 24 of the composite peel sort key, so a relative error here is a depth error.
+    // The reference is the plane the RTL's own setup produced, evaluated in double at the
+    // same ABSOLUTE coordinate the raster sampled. ----
+    {
+        double ddx = b2f(dut->ddx_dbg), ddy = b2f(dut->ddy_dbg), cw = b2f(dut->cw_dbg);
+        double worst = 0.0; int wx = -1, wy = -1; double wgot = 0, wexp = 0;
+        for (int y = 0; y < 32; y++)
+            for (int x = 0; x < 32; x++) {
+                if (got[y][x] != 1) continue;             // only covered pixels matter
+                double ax = tx * 32 + x, ay = ty * 32 + y;
+                double exp = cw + ddx * ax + ddy * ay;    // absolute-coord plane
+                double g   = b2f(gotw[y][x]);
+                double rel = (exp != 0.0) ? fabs(g - exp) / fabs(exp) : fabs(g - exp);
+                if (rel > worst) { worst = rel; wx = x; wy = y; wgot = g; wexp = exp; }
+            }
+        if (worst > invw_worst) {
+            invw_worst = worst; invw_worst_got = wgot; invw_worst_exp = wexp;
+            snprintf(invw_worst_where, sizeof(invw_worst_where), "%s tile %d,%d px(%d,%d) abs(%d,%d)",
+                     name, tx, ty, wx, wy, tx*32+wx, ty*32+wy);
+        }
+        if (worst > INVW_TOL) {
+            printf("[%s tile %d,%d] FAIL invW: rel err %.3e at px(%d,%d) got %.9g want %.9g\n",
+                   name, tx, ty, worst, wx, wy, wgot, wexp);
+            errors++;
+        }
+    }
     if (covered > 0 && rejected != 0) {
         printf("[%s tile %d,%d] FAIL: probe rejected a covered tile (%d px)\n",
                name, tx, ty, covered);
@@ -170,6 +220,9 @@ int main(int argc, char** argv) {
         printf("model sanity FAIL: (173,178) not in tri1\n"); errors++;
     }
 
+    printf("invW: worst relative error %.3e  (tol %.3e)  at %s\n"
+           "      got %.9g  want %.9g\n",
+           invw_worst, INVW_TOL, invw_worst_where, invw_worst_got, invw_worst_exp);
     printf(errors ? "FAIL (%d errors)\n" : "PASS\n", errors);
     delete dut;
     return errors != 0;

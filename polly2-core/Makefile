@@ -29,13 +29,13 @@ MAKEFLAGS += -j$(NJOBS)
 VTHREADS ?= 1
 VFLAGS    = -Wno-WIDTH -Wno-UNOPTFLAT -Wno-UNSIGNED -Wno-DECLFILENAME -Irtl/tsp/gen \
             -j $(NJOBS) $(if $(filter-out 1,$(VTHREADS)),--threads $(VTHREADS),) \
-            --output-split 40000 --output-split-cfuncs 1000 \
+            --output-split 40000 --output-split-cfuncs 2000 \
             -CFLAGS "-O3 -march=native"
 
 BUILD = build
 CWD  := $(shell pwd)
 
-.PHONY: shade-drop raster-topleft depth-cmp-lp texfetchpl clean test tex tex-addr tex-uv tex-decode tex-filter tex-combiner \
+.PHONY: shade-drop raster-topleft coord-f32 interp depth-cmp-lp texfetchpl clean test tex tex-addr tex-uv tex-decode tex-filter tex-combiner \
         oparse region regfile regen sortcache itquad itskip taginvw dense_span_buffer fog \
         frontendtsplp frontendtsplp-build golden-check spannerv2 mulc9 mul16sppro \
         add24sppro mulc9sppro add3sppro mul24sppro mul24c9sppro
@@ -56,7 +56,7 @@ RTL_EXTRA = rtl/fp/fp_add24.sv rtl/tsp/stage_interp.sv
 RTL_INC   = $(addprefix -y ,$(RTL_DIRS)) -Irtl/gen
 
 # ---- run the fast unit tests (TSP texture blocks + front-end block tests) ----
-test: tex oparse region regfile sortcache itquad itskip raster-topleft fog
+test: tex oparse region regfile sortcache itquad itskip raster-topleft coord-f32 interp fog
 
 # ---- top-left bias / exact-edge raster regression ----
 # isp_setup_streamed + isp_raster_line on a coplanar fullscreen quad whose
@@ -109,6 +109,29 @@ fog: | $(BUILD)
 	  $(CWD)/tb/fog_tb.cpp \
 	  --Mdir $(BUILD)/obj_fog -o tb
 	./$(BUILD)/obj_fog/tb
+
+# ---- coordinate -> fp32 lookup (absolute-coord raster/interp rework) ----
+# Exhaustive: all 4096 (coord, half) entries vs host float, both STYLEs bit-identical,
+# plus the packing invariants (sign 0, mantissa[11:0] 0) and the en=0 hold.
+coord-f32: | $(BUILD)
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ -Wno-PINCONNECTEMPTY \
+	  --top-module coord_f32_tb_top $(RTL_INC) \
+	  $(TSP_PKG) $(RTL_EXTRA) tb/coord_f32_tb_top.sv \
+	  $(CWD)/tb/coord_f32_tb.cpp \
+	  --Mdir $(BUILD)/obj_coordf32 -o tb
+	./$(BUILD)/obj_coordf32/tb
+
+# ---- interp_unit directed latency/handshake test ----
+# The absolute-coord rework changed i1 from a comb-out unit behind a wrapper register
+# to a registered-output fp_mul16_spp_ro with a LIVE valid - a handshake change, not
+# just a delay count. Exact-arithmetic operands, so it is purely structural.
+interp: | $(BUILD)
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ -Wno-PINCONNECTEMPTY \
+	  --top-module interp_unit_tb_top $(RTL_INC) \
+	  $(TSP_PKG) $(RTL_EXTRA) tb/interp_unit_tb_top.sv \
+	  $(CWD)/tb/interp_unit_tb.cpp \
+	  --Mdir $(BUILD)/obj_interp -o tb
+	./$(BUILD)/obj_interp/tb
 
 raster-topleft: | $(BUILD)
 	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ -Wno-PINCONNECTEMPTY \
