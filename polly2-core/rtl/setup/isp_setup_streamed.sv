@@ -101,7 +101,13 @@ module isp_setup_streamed (
     input      [31:0] x2, input [31:0] y2, input [31:0] z2,
     input      [31:0] x3, input [31:0] y3, input [31:0] z3,
     input      [31:0] x4, input [31:0] y4,
-    input      [31:0] xbase, input [31:0] ybase,
+    // ABSOLUTE-COORD REWORK: the tile origin is no longer subtracted from the
+    // vertices - the plane constants are anchored at the SCREEN origin and the
+    // raster samples absolute coordinates. The origin is still needed to turn the
+    // (absolute) vertex bbox into the tile-local sweep bounds, and for THAT it is
+    // wanted as an integer, so it arrives as one: the 32-aligned screen coordinate
+    // of the tile's top-left pixel. (Was a float; peel_core's i2f of tx*32 is gone.)
+    input      [10:0] xbase, input [10:0] ybase,
 
     output            busy,
     input             out_ready,
@@ -170,7 +176,8 @@ module isp_setup_streamed (
     // ================================================================
     // latched triangle (input-unbuffered: written only on latch)
     // ================================================================
-    reg [31:0] X1,Y1,Z1, X2,Y2,Z2, X3,Y3,Z3, X4,Y4, XB,YB;
+    reg [31:0] X1,Y1,Z1, X2,Y2,Z2, X3,Y3,Z3, X4,Y4;
+    reg [10:0] XB,YB;              // integer tile origin (bbox only - see the port note)
     reg [31:0] ISPW, TAGr;
     reg        PTr, Qr;
     reg        NFIN;               // any x/y coord inf/NaN -> unconditional cull
@@ -245,9 +252,15 @@ module isp_setup_streamed (
             6'd2: begin g0a_c=X2;g0b_c=X3;g0v_c=1;  g1a_c=X1;g1b_c=X2;g1v_c=1;  g2a_c=Y1;g2b_c=Y2;g2v_c=1; end
             6'd3: begin g0a_c=Z2;g0b_c=Z1;g0v_c=1;  g1a_c=Z3;g1b_c=Z1;g1v_c=1;  g2a_c=X3;g2b_c=Wx;g2v_c=1; end
             6'd4: begin g0a_c=Y3;g0b_c=Wy;g0v_c=1;  g1a_c=X4;g1b_c=X1;g1v_c=1;  g2a_c=Y4;g2b_c=Y1;g2v_c=1; end
-            6'd5: begin g0a_c=X1;g0b_c=XB;g0v_c=1;  g1a_c=Y1;g1b_c=YB;g1v_c=1;  g2a_c=X2;g2b_c=XB;g2v_c=1; end
-            6'd6: begin g0a_c=Y2;g0b_c=YB;g0v_c=1;  g1a_c=X3;g1b_c=XB;g1v_c=1;  g2a_c=Y3;g2b_c=YB;g2v_c=1; end
-            6'd7: begin g0a_c=X4;g0b_c=XB;g0v_c=1;  g1a_c=Y4;g1b_c=YB;g1v_c=1; end
+            // sel5..7 used to be the ORIGIN SUBS (X1-XB, Y1-YB, ...) that made the edge
+            // anchors tile-local. In absolute coordinates the anchor IS the raw vertex,
+            // so the second operand is ZERO. The slots are deliberately KEPT (rather
+            // than deleted and the schedule compacted): every issue slot, bank write cnt
+            // and tail read cnt in this file is hand-derived, and `v - 0` costs nothing
+            // but preserves all of it. Reclaim them only with the schedule re-derived.
+            6'd5: begin g0a_c=X1;g0b_c=ZERO;g0v_c=1;  g1a_c=Y1;g1b_c=ZERO;g1v_c=1;  g2a_c=X2;g2b_c=ZERO;g2v_c=1; end
+            6'd6: begin g0a_c=Y2;g0b_c=ZERO;g0v_c=1;  g1a_c=X3;g1b_c=ZERO;g1v_c=1;  g2a_c=Y3;g2b_c=ZERO;g2v_c=1; end
+            6'd7: begin g0a_c=X4;g0b_c=ZERO;g0v_c=1;  g1a_c=Y4;g1b_c=ZERO;g1v_c=1; end
             default: ;
         endcase
     end
@@ -360,7 +373,7 @@ module isp_setup_streamed (
                         fX3r<=f2i_floor(X3); fX4r<=f2i_floor(X4);
                         fY1r<=f2i_floor(Y1); fY2r<=f2i_floor(Y2);
                         fY3r<=f2i_floor(Y3); fY4r<=f2i_floor(Y4);
-                        fXBr<=f2i_floor(XB); fYBr<=f2i_floor(YB);
+                        fXBr<=$signed({5'b0, XB}); fYBr<=$signed({5'b0, YB});  // integer origin
                     end
                     if (cnt==6'd3) begin
                         lXa<=fX1r-fXBr; lXb<=fX2r-fXBr; lXc<=fX3r-fXBr;

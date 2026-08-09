@@ -45,8 +45,9 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
     // ---- input pixel (buffered by caller; consumed when in_valid && !stall) ----
     input             in_valid,
     input      [IDW-1:0] in_id,           // opaque tag echoed on the output
-    input      [4:0]  px,
-    input      [4:0]  py,
+    input      [10:0] px,                 // ABSOLUTE screen x (tile base | tile offset)
+    input      [10:0] py,                 // ABSOLUTE screen y
+    input             half,               // pixel-centre select (HALF_OFFSET.tsp_*)
     input      [31:0] invw_in,
     input      [31:0] in_ddx [0:9],
     input      [31:0] in_ddy [0:9],
@@ -156,8 +157,8 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
     endgenerate
 
     // --- narrow scalars: plain flop shift chain ---
-    reg [4:0]  d_px  [0:RCPLAT-1];
-    reg [4:0]  d_py  [0:RCPLAT-1];
+    reg [10:0] d_px  [0:RCPLAT-1];
+    reg [10:0] d_py  [0:RCPLAT-1];
     reg [31:0] d_tsp [0:RCPLAT-1];
     reg [31:0] d_tcw [0:RCPLAT-1];
     reg [4:0]  d_tc  [0:RCPLAT-1];
@@ -175,8 +176,8 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
             end
         end
     end
-    wire [4:0]  rc_px  = d_px[RCPLAT-1];
-    wire [4:0]  rc_py  = d_py[RCPLAT-1];
+    wire [10:0] rc_px  = d_px[RCPLAT-1];
+    wire [10:0] rc_py  = d_py[RCPLAT-1];
     wire [31:0] rc_tsp = d_tsp[RCPLAT-1];
     wire [31:0] rc_tcw = d_tcw[RCPLAT-1];
     wire [4:0]  rc_tc  = d_tc[RCPLAT-1];
@@ -191,9 +192,9 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
     wire [31:0] iv_attr [0:9];
     interp_unit u_iv (
         .clk(clk),.reset(reset),.stall(stall),.in_valid(rc_ov),
-        .ddx(rcp_ddx),.ddy(rcp_ddy),.c(rcp_c),.px(rc_px),.py(rc_py),.w(rc_W),
+        .ddx(rcp_ddx),.ddy(rcp_ddy),.c(rcp_c),.px(rc_px),.py(rc_py),.half(half),.w(rc_W),
         .out_valid(iv_ov),.attr(iv_attr));
-    localparam INTERPLAT = 9;
+    localparam INTERPLAT = 10;   // +1: the coordinate conversion (see interp_unit)
 
     // ==============================================================
     // MIP LEVEL (exponent-domain LOD). Off the RCP-aligned U/V planes (0=U, 1=V) and rc_W.

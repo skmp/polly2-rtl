@@ -86,6 +86,11 @@ module tsp_setup_stream (
     input             offset,
 
     input      [31:0] x1,y1,z1, x2,y2,z2, x3,y3,z3,
+    // ABSOLUTE-COORD REWORK: unused - the TSP planes are anchored at the SCREEN
+    // origin now (interp_unit samples absolute px/py), so the per-tile origin is
+    // no longer subtracted from the vertices. Kept as a port so the caller's
+    // spn_xbase/ybase plumbing (which tracks the tile the SPANNER is on, not ISP's
+    // live tile) does not have to be unpicked in the same change.
     input      [31:0] xbase, ybase,
     input      [31:0] u1,v1, u2,v2, u3,v3,
     input      [31:0] col1,col2,col3,
@@ -215,12 +220,12 @@ module tsp_setup_stream (
                         g1a_c=Yv[1]; g1b_c=Yv[0]; g1v_c=1'b1;     // Y21
                         g2a_c=Xv[2]; g2b_c=Xv[0]; g2v_c=1'b1; end // X31
             6'd2: begin g0a_c=Xv[1]; g0b_c=Xv[0]; g0v_c=1'b1;     // X21
-                        g1a_c=Xv[0]; g1b_c=XB;    g1v_c=1'b1;     // XL1
-                        g2a_c=Yv[0]; g2b_c=YB;    g2v_c=1'b1; end // YT1
-            6'd3: begin g0a_c=Xv[1]; g0b_c=XB;    g0v_c=1'b1;     // XL2
-                        g1a_c=Yv[1]; g1b_c=YB;    g1v_c=1'b1;     // YT2
-                        g2a_c=Xv[2]; g2b_c=XB;    g2v_c=1'b1; end // XL3
-            6'd4: begin g0a_c=Yv[2]; g0b_c=YB;    g0v_c=1'b1; end // YT3
+                        g1a_c=Xv[0]; g1b_c=32'd0; g1v_c=1'b1;     // XL1 (absolute: -0)
+                        g2a_c=Yv[0]; g2b_c=32'd0; g2v_c=1'b1; end // YT1
+            6'd3: begin g0a_c=Xv[1]; g0b_c=32'd0; g0v_c=1'b1;     // XL2
+                        g1a_c=Yv[1]; g1b_c=32'd0; g1v_c=1'b1;     // YT2
+                        g2a_c=Xv[2]; g2b_c=32'd0; g2v_c=1'b1; end // XL3
+            6'd4: begin g0a_c=Yv[2]; g0b_c=32'd0; g0v_c=1'b1; end // YT3
             6'd9: begin g0a_c=m0_y;  g0b_c=m1_y;  g0v_c=1'b1; end // area = M0-M1
             default: ;
         endcase
