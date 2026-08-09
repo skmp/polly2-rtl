@@ -32,6 +32,23 @@
 // No input/output buffering: S1 samples module inputs directly (caller holds them
 // stable while in_valid && !stall); corner outputs drive straight off the S4 regs.
 // --------------------------------------------------------------------------------
+// TODO: VERIFY THE TEXEL SAMPLING AGAINST REAL HARDWARE. Two things in this file are
+// deliberate divergences from refsw2, both justified by rendered artifacts and by the
+// texel-centre reading of HALF_OFFSET (see tex_unit's note), neither by silicon:
+//
+//   * the half-texel bias is -128, EXACTLY half a texel (256 = 1.0). refsw2 uses -127,
+//     which lands 1/256 short and leaves frac=1 on every texel of a 1:1 sprite forever.
+//     -128 is what makes frac come out 0, which is the point of the setting. If a HW
+//     capture ever shows a systematic 1/256 bias, refsw2's constant is the right one.
+//
+//   * the float->fixed step ROUNDS UP by 1/64 LSB (EPS below) instead of truncating.
+//     This is a workaround for OUR arithmetic, not a model of the hardware: the
+//     interpolation chain lands a hair below an exact 8.8 boundary and plain truncation
+//     then costs a WHOLE texel. If the interpolation is ever made exact at the boundary
+//     (the reciprocal was the dominant term and is now ~3.3e-7), this epsilon should be
+//     re-measured and probably removed rather than left in as folklore.
+//     The +uvx/+uvy probe in tsp_shade_v2_pp reports the remainder that sizes it.
+//
 module tex_uvmap (
     input             clk,
     input             reset,
@@ -45,10 +62,11 @@ module tex_uvmap (
     input             clampu, clampv, flipu, flipv,
     // HALF-TEXEL OFFSET (HALF_OFFSET.texure_pixel_half_offset). Applied to the 8.8
     // fixed texel coordinate, so it shifts BOTH the corner selection and the bilinear
-    // fractions - which is the point: it moves the sample to the texel CENTRE.
-    // NOTE this deliberately subtracts 128, i.e. exactly 0.5 texel (256 = 1.0 texel).
-    // refsw2 subtracts 127, which is 0.496 of a texel - an off-by-one that biases every
-    // filtered sample slightly toward the lower texel and never quite reaches the centre.
+    // fractions - which is the point: it moves the sample toward the texel CENTRE.
+    // The bias is -128, i.e. EXACTLY half a texel (256 = 1.0 texel). refsw2 uses -127,
+    // which lands 1/256 of a texel short and biases every filtered sample slightly
+    // toward the lower texel; this design does not copy that off-by-one. Expect a
+    // 1-LSB-scale difference against refsw2 captures because of it.
     input             half_texel,
 
     output            out_valid,
@@ -96,20 +114,24 @@ module tex_uvmap (
     // ================= STAGE 2 : barrel shift (MAGNITUDE only) ========================
     // |ui| = sig << p (p>=0) or sig >> -p (p<0), Q19.8. No negate here - the sign is
     // deferred to S3. sig is 24b at bit .23; shifting by p lands the value in Q19.8.
-    function [26:0] barrel(input [23:0] sig, input signed [9:0] p, input zero);
-        reg [55:0] wide;
+    // Produces Q19.14 - SIX guard bits beyond the Q19.8 the corner/frac outputs need,
+    // so S3 can nudge a value that sits a hair below an integer boundary without
+    // disturbing one that legitimately sits mid-texel. See the S3 note.
+    function [32:0] barrel(input [23:0] sig, input signed [9:0] p, input zero);
+        reg [55:0] wide; reg signed [9:0] p1;
         begin
-            if (zero) barrel = 27'd0;
+            if (zero) barrel = 33'd0;
             else begin
+                p1   = p + 10'sd6;                  // keep six guard bits
                 wide = {32'd0, sig};
-                if (p >= 0) wide = wide << p[5:0];
-                else        wide = wide >> (-p);
-                barrel = wide[26:0];
+                if (p1 >= 0) wide = wide << p1[5:0];
+                else         wide = wide >> (-p1);
+                barrel = wide[32:0];
             end
         end
     endfunction
     reg               v2;
-    reg        [26:0] s2_magu, s2_magv;     // |ui|, |vi| in Q19.8 (unsigned magnitude)
+    reg        [32:0] s2_magu, s2_magv;     // |ui|, |vi| in Q19.14 (unsigned magnitude)
     reg               s2_su, s2_sv;
     reg               s2_half;
     reg        [10:0] s2_sizeU, s2_sizeV;
@@ -132,10 +154,27 @@ module tex_uvmap (
     // ui = sign ? -mag : mag (two's comp) ; uint = ui>>>8 ; u0/u1/v0/v1 corners ;
     // then 8x ClampFlip straight into the output registers. All combinational off the
     // registered s2_mag/sign; the negate/>>8/+1 and clampflip fan-out share this clock.
+    // SNAP-UP, not round-to-nearest. With HALF_OFFSET active the exact answer sits ON an
+    // integer 8.8 boundary by construction (the -128 texel bias cancels the +0.5 pixel
+    // centre, so a 1:1 sprite wants frac=0 on every pixel), and the interpolation chain
+    // (truncating multiplies + a truncating 3-input add) lands a hair BELOW it. Plain
+    // truncation then costs a WHOLE texel - texel -1 wrapping at a sprite's last row,
+    // seen as a one-pixel line.
+    // The correction is sized from measurement, not guessed: the observed shortfall is
+    // ~0.007 LSB (remainder 0.993), while genuine mid-texel samples sit 0.24-0.32 away
+    // from the boundary. EPS = 1/64 LSB catches any remainder >= 63/64 and leaves
+    // everything else untouched - ~45x margin below the nearest legitimate value.
+    // Round-to-nearest (+1/2 LSB) was tried first and is far too blunt: it would also
+    // shove every value past the midpoint into the next texel.
+    // NOTE a deliberate divergence from refsw2, which truncates - it computes in host
+    // floats that land exactly, so it never sees the shortfall.
+    localparam [32:0] EPS = 33'd1;                 // 1/64 LSB, with 6 guard bits
+    wire [26:0] magu8 = (s2_magu + EPS) >> 6;
+    wire [26:0] magv8 = (s2_magv + EPS) >> 6;
     // sign applied first, THEN the half-texel bias - matching refsw2's
     // `ui = u*size*256 + halfpixel`, where the product is already signed.
-    wire signed [26:0] ui_raw = s2_su ? -$signed(s2_magu) : $signed(s2_magu);
-    wire signed [26:0] vi_raw = s2_sv ? -$signed(s2_magv) : $signed(s2_magv);
+    wire signed [26:0] ui_raw = s2_su ? -$signed(magu8) : $signed(magu8);
+    wire signed [26:0] vi_raw = s2_sv ? -$signed(magv8) : $signed(magv8);
     wire signed [26:0] half_bias = s2_half ? -27'sd128 : 27'sd0;   // -0.5 texel exactly
     wire signed [26:0] ui = ui_raw + half_bias;
     wire signed [26:0] vi = vi_raw + half_bias;

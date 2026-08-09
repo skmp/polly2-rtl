@@ -190,6 +190,50 @@ static void run_tile(const Tri& t, int tx, int ty, const char* name) {
     }
 }
 
+// Setup + sweep one tile at a chosen pixel-centre setting, then report which ABSOLUTE
+// rows are covered in a middle column. No model comparison - this observes the sample
+// position directly.
+static void sweep_rows(const Tri& t, int tx, int ty, int half, const char* name,
+                       int quad = 0, double x4 = 0, double y4 = 0) {
+    dut->s_clear = 1; tick(); dut->s_clear = 0;
+    dut->x1 = f2b((float)t.x1); dut->y1 = f2b((float)t.y1); dut->z1 = f2b(0.002f);
+    dut->x2 = f2b((float)t.x2); dut->y2 = f2b((float)t.y2); dut->z2 = f2b(0.002f);
+    dut->x3 = f2b((float)t.x3); dut->y3 = f2b((float)t.y3); dut->z3 = f2b(0.002f);
+    dut->s_quad = quad; dut->x4 = f2b((float)x4); dut->y4 = f2b((float)y4);
+    dut->xbase = tx * 32; dut->ybase = ty * 32; dut->r_half = half;
+    dut->s_valid = 1;
+    int guard = 0; while (!(dut->s_ready) && ++guard < 100) tick();
+    tick(); dut->s_valid = 0;
+    guard = 0; while (!dut->s_done && ++guard < 200) tick();
+    if (!dut->s_done) { printf("[%s half=%d] setup timeout\n", name, half); errors++; return; }
+
+    static uint8_t cov[32][32];
+    memset(cov, 0, sizeof(cov));
+    int outstanding = 0;
+    auto collect = [&]{
+        if (dut->out_valid) {
+            for (int l = 0; l < 8; l++)
+                cov[dut->out_y][dut->out_x + l] = (dut->inside_mask >> l) & 1;
+            outstanding--;
+        }
+    };
+    for (int y = 0; y < 32; y++)
+        for (int xb = 0; xb < 32; xb += 8) {
+            dut->r_valid = 1; dut->r_y = ty*32 + y; dut->r_xb = tx*32 + xb;
+            tick(); collect(); outstanding++;
+        }
+    dut->r_valid = 0;
+    int g2 = 0; while (outstanding > 0 && ++g2 < 200) { tick(); collect(); }
+
+    const int col = 4;                    // absolute x = tx*32+4 = 100
+    int lo = -1, hi = -1;
+    for (int y = 0; y < 32; y++) if (cov[y][col]) { if (lo < 0) lo = y; hi = y; }
+    printf("  [%s half=%d] col x=%d covered abs rows %d..%d%s\n",
+           name, half, tx*32+col,
+           lo < 0 ? -1 : ty*32+lo, hi < 0 ? -1 : ty*32+hi,
+           (hi >= 0 && ty*32+hi == 272) ? "   <-- includes row 272" : "");
+}
+
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     dut = new Vraster_topleft_tb_top;
@@ -212,6 +256,28 @@ int main(int argc, char** argv) {
     for (auto& tt : tiles) {
         run_tile(t1, tt[0], tt[1], "tri1");
         run_tile(t2, tt[0], tt[1], "tri2");
+    }
+
+    // ---- DIRECTED: the crazy_title sprite quad (48,144)-(176,272), whose BOTTOM edge
+    // sits on the exact integer row y=272. The scene render covers row 272 with this
+    // quad; both sampling conventions say it must not (centre: 272.5 is outside
+    // [144,272); corner: exactly on a non-top-left edge). Sweep the tile containing
+    // row 272 with half=0 and half=1 and print the covered rows, so the sample position
+    // is observed rather than argued about. ----
+    {
+        // the quad as its two triangles; the second carries the bottom edge
+        const Tri q1 = { 48,144,  176,144,  176,272 };
+        const Tri q2 = { 48,144,  176,272,   48,272 };
+        const int qtx = 3, qty = 8;              // x 96..127, y 256..287 -> row 272 is local 16
+        for (int h = 0; h <= 1; h++) {
+            for (int which = 0; which < 2; which++) {
+                const Tri& q = which ? q2 : q1;
+                sweep_rows(q, qtx, qty, h, which ? "q2(bottom edge)" : "q1");
+            }
+            // the REAL primitive: one 4-vertex quad, v1..v3 + v4, as the scene submits it
+            const Tri qv = { 48,144, 176,144, 176,272 };
+            sweep_rows(qv, qtx, qty, h, "QUAD(4-vertex)", 1, 48, 272);
+        }
     }
 
     // pin the reported black pixel: (173,178) is tile (5,5) local (13,18),

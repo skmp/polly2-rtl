@@ -14,6 +14,11 @@ module raster_topleft_tb_top (
     input  wire [31:0] x1, input wire [31:0] y1, input wire [31:0] z1,
     input  wire [31:0] x2, input wire [31:0] y2, input wire [31:0] z2,
     input  wire [31:0] x3, input wire [31:0] y3, input wire [31:0] z3,
+    // QUAD support: sprites are 4-vertex primitives and take an entirely different
+    // fourth edge in setup (DX41/DY41/C4 anchored over v4/v1) instead of the triangle
+    // fallback (DX41=DY41=0, C4=1.0). A triangle decomposition does NOT exercise it.
+    input  wire        s_quad,
+    input  wire [31:0] x4, input wire [31:0] y4,
     input  wire [10:0] xbase, input wire [10:0] ybase,   // integer tile origin (absolute)
     input  wire        s_clear,        // clear s_done before the next triangle
     output reg         s_done,         // sticky: coefficients captured below
@@ -47,9 +52,9 @@ module raster_topleft_tb_top (
     isp_setup_streamed u_setup (
         .clk(clk), .reset(reset),
         .in_valid(s_valid), .in_ready(s_ready),
-        .isp_word(32'd0), .in_tag(32'd0), .in_pt(1'b0), .quad(1'b0),
+        .isp_word(32'd0), .in_tag(32'd0), .in_pt(1'b0), .quad(s_quad),
         .x1(x1),.y1(y1),.z1(z1), .x2(x2),.y2(y2),.z2(z2), .x3(x3),.y3(y3),.z3(z3),
-        .x4(32'd0),.y4(32'd0),
+        .x4(x4),.y4(y4),
         .xbase(xbase), .ybase(ybase),
         .busy(), .out_ready(1'b1), .out_valid(so_valid),
         .out_tag(), .out_pt(), .out_isp(), .sgn_neg(), .cull(w_cull),

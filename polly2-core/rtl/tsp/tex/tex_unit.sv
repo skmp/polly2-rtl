@@ -82,7 +82,28 @@ module tex_unit import tsp_pkg::*; #(
         .clk(clk),.reset(reset),.stall(front_stall),.in_valid(in_valid),
         .u(u),.v(v),.texu(texu),.texv(texv),.miplevel(miplevel),
         .clampu(clampu),.clampv(clampv),.flipu(flipu),.flipv(flipv),
-        .half_texel(half_texel),
+        // POINT SAMPLING TAKES NO TEXEL BIAS.
+        // HALF_OFFSET's texel bit is NOT a sample-position shift like its two pixel
+        // bits (which are +0.5 on x/y). It selects the TEXEL-CENTRE CONVENTION: with
+        // the bit set, texel i's centre is at i+0.5 rather than at i. That does not
+        // move the sample - it moves the texel grid - so it only matters when you need
+        // the two texels whose centres BRACKET the sample:
+        //     bilinear : i0 = floor(t - 0.5), frac = t - 0.5 - i0   <- the -0.5
+        //     point    : i  = floor(t)                              <- unaffected
+        // which is also why the constant is NEGATIVE while the pixel offsets are
+        // positive. Biasing a point sample shifts the pick by half a texel; at a
+        // sprite's edge row that lands on texel -1, which under wrap fetches the far
+        // edge of the atlas and draws a dark seam (mvsc2_ingame, FilterMode=0).
+        // refsw2 applies the bias unconditionally, before its filter-mode branch.
+        //
+        // TODO: VERIFY ON REAL HARDWARE. This is an interpretation of the register. An equivalent formulation -
+        // apply the bias unconditionally but ROUND the point-sample index instead of
+        // truncating - gives an IDENTICAL texel for every input, so the result is robust
+        // even if the mechanism is not. What a capture would settle:
+        //   * a magnified point-sampled sprite with WRAP at an atlas boundary: does the
+        //     DC show the seam we are removing here?
+        //   * does HALF_OFFSET's texel bit affect point-sampled primitives at all?
+        .half_texel(half_texel && (filter_mode != 2'd0)),
         .out_valid(uv_ov),
         .c00u(c00u),.c00v(c00v),.c01u(c01u),.c01v(c01v),
         .c10u(c10u),.c10v(c10v),.c11u(c11u),.c11v(c11v),.ufrac(ufr),.vfrac(vfr));

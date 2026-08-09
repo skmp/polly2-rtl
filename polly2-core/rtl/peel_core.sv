@@ -1654,6 +1654,18 @@ module peel_core import tsp_pkg::*; #(
     end
     final if (fbd_en && fbd_fd!=0) begin $fflush(fbd_fd); $fclose(fbd_fd);
         $display("[peel_core] framebuffer writes: %0d -> %0s", fbd_n, fbd_name); end
+    // +vtxdump : the vertices ISP setup ACCEPTS, per primitive, with its tile and the
+    // quad flag. Raw hex - decode offline (printing floats from a bit pattern needs
+    // $bitstoshortreal, which Verilator will not promote to real). This answers "what
+    // are this sprite's actual edge coordinates", which decides whether a coverage
+    // difference at a boundary row is the pixel-centre feature working as intended
+    // (fractional edge) or a bug (integer edge).
+    always @(posedge clk) if (!reset && $test$plusargs("vtxdump") && su_in_valid && su_in_ready)
+        $display("[VTX] tile(%0d,%0d) quad=%b tag=%08x v1=%08x,%08x v2=%08x,%08x v3=%08x,%08x v4=%08x,%08x",
+                 cur_tx, cur_ty, fq_out[FF_QUAD], fq_out[FF_TAG +:32],
+                 fq_out[FF_X1 +:32], fq_out[FF_Y1 +:32], fq_out[FF_X2 +:32], fq_out[FF_Y2 +:32],
+                 fq_out[FF_X3 +:32], fq_out[FF_Y3 +:32], fq_out[FF_X4 +:32], fq_out[FF_Y4 +:32]);
+
     final $display("[peel_core] corner-cull: %0d triangle(s) trivially rejected (256-chunk sweep skipped)", pc_corner_cull);
 `endif
 
