@@ -46,8 +46,8 @@ int main(int c,char**v){
         float fv = (float)((int)(rnd()%32768) - 16384)/1024.0f;
         d->u=f2b(fu); d->v=f2b(fv); d->texu=texu; d->texv=texv;
         d->clampu=clampu; d->clampv=clampv; d->flipu=flipu; d->flipv=flipv;
-        // HALF-TEXEL OFFSET: exercise both settings. -128 = exactly 0.5 texel
-        // (256 = 1.0). refsw2 uses -127; this design deliberately does not.
+        // HALF-TEXEL OFFSET: exercise both settings. -128 = exactly half a texel
+        // (256 = 1.0 texel). refsw2 uses -127; this design deliberately does not.
         int half = (i & 1);
         d->half_texel = half;
         settle();

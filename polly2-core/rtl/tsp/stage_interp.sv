@@ -21,7 +21,7 @@
 // attr) and holds the module inputs. Per-unit internal register counts:
 //   coord_f32 + fp_mul16_spp_ro : 1 + 2, registered out -> NO wrapper reg = 3 cyc
 //   fp_add3_24_pp : 4 internal  -> +1 wrapper reg = 5 cyc
-//   fp_mul16_pp   : 1 internal  -> +1 wrapper reg = 2 cyc
+//   fp_mul24_spp_ro: 2 cyc, registered out -> NO wrapper reg = 2 cyc
 // Total INTERP latency = 3 + 5 + 2 = 10 cycles (was 9: the coordinate conversion).
 //
 // DATAFLOW / ALIGNMENT. The pipes chain by valid. The carried operands are delay-
@@ -48,7 +48,7 @@ module interp_unit (
     input             half,                 // pixel-centre select (+0.5)
     input      [31:0] w,                    // 1/invW (i3 multiplicand)
     output            out_valid,
-    output reg [31:0] attr [0:9]
+    output     [31:0] attr [0:9]      // driven by i3's registered unit output
 );
     localparam integer LAT_I1 = 3;          // coord_f32 (1) + fp_mul16_spp_ro (2, reg out)
     localparam integer LAT_I2 = 5;          // fp_add3_24_pp (4 internal) + boundary reg
@@ -114,10 +114,26 @@ module interp_unit (
         // old comb-out fp_mul_i5_pp it needs no wrapper boundary register - prx_r/pry_r
         // below are fed directly from it (kept as the i2 operand source so the rest of
         // the wrapper's structure is unchanged).
-        fp_mul16_spp_ro u_mx (.clk(clk),.reset(reset),.stall(stall),.in_valid(conv_v),
-            .a(ddx_c[gi]),.b(pxf),.out_valid(i1_ov_c[gi]),.y(prx_c[gi]));
-        fp_mul16_spp_ro u_my (.clk(clk),.reset(reset),.stall(stall),.in_valid(conv_v),
-            .a(ddy_c[gi]),.b(pyf),.out_valid(),.y(pry_c[gi]));
+        // PRECISION SPLIT. Planes 0/1 are U/V and feed tex_uvmap's float->fixed step,
+        // which TRUNCATES to 8.8. A 1:1 sprite puts the exact answer ON an integer
+        // boundary (ui_raw = 128 for the first column), so a result a fraction low
+        // truncates to 127 and the sample drops a WHOLE texel to -1/frac 255 - the
+        // one-pixel shift. fp_mul16's 16-bit significands are not enough to land that
+        // exactly at absolute screen coordinates, so U/V take the full-mantissa unit.
+        // Planes 2..9 are colour/offset and end up as 8 bits through f2u8, where the
+        // truncation is invisible - they keep fp_mul16 and stay out of the DSPs
+        // (4 DSP-eligible multiplies here instead of 20).
+        if (gi < 2) begin : g_uv
+            fp_mul24_spp_ro u_mx (.clk(clk),.reset(reset),.stall(stall),.in_valid(conv_v),
+                .a(ddx_c[gi]),.b(pxf),.out_valid(i1_ov_c[gi]),.y(prx_c[gi]));
+            fp_mul24_spp_ro u_my (.clk(clk),.reset(reset),.stall(stall),.in_valid(conv_v),
+                .a(ddy_c[gi]),.b(pyf),.out_valid(),.y(pry_c[gi]));
+        end else begin : g_col
+            fp_mul16_spp_ro u_mx (.clk(clk),.reset(reset),.stall(stall),.in_valid(conv_v),
+                .a(ddx_c[gi]),.b(pxf),.out_valid(i1_ov_c[gi]),.y(prx_c[gi]));
+            fp_mul16_spp_ro u_my (.clk(clk),.reset(reset),.stall(stall),.in_valid(conv_v),
+                .a(ddy_c[gi]),.b(pyf),.out_valid(),.y(pry_c[gi]));
+        end
 
         assign prx_r[gi] = prx_c[gi];
         assign pry_r[gi] = pry_c[gi];
@@ -127,8 +143,16 @@ module interp_unit (
             .out_valid(i2_ov_c[gi]),.y(sum_c[gi]));
 
         // i3: sum_r * W(aligned). Fed from the i2 boundary register.
-        fp_mul16_pp u_mul (.clk(clk),.reset(reset),.stall(stall),.in_valid(i2_v),
+        // FULL MANTISSA, all planes. The U/V planes feed tex_uvmap's TRUNCATING
+        // float->fixed step, where a 1:1 sprite puts the exact answer ON an 8.8 integer
+        // boundary - landing a fraction low costs a WHOLE texel (vi_raw 18303 vs 18304
+        // -> texel 70 instead of 71, a one-pixel shift). fp_mul16 here was enough for U
+        // (tiny, ~0.004) but not for V (~0.56), where the same relative truncation is a
+        // much larger absolute error. Registered-output, so unlike fp_mul16_pp it needs
+        // NO wrapper register - the 2-cycle total, and INTERPLAT, are unchanged.
+        fp_mul24_spp_ro u_mul (.clk(clk),.reset(reset),.stall(stall),.in_valid(i2_v),
             .a(sum_r[gi]),.b(w_aligned),.out_valid(i3_ov_c[gi]),.y(attr_c[gi]));
+        assign attr[gi] = attr_c[gi];
       end
     endgenerate
 
@@ -141,16 +165,10 @@ module interp_unit (
             // i2 result -> boundary reg (feeds i3)
             for (d=0; d<10; d=d+1) sum_r[d] <= sum_c[d];
             i2_v <= i2_ov_c[0];
-            // i3 result -> output reg (attr)
-            for (d=0; d<10; d=d+1) attr[d] <= attr_c[d];
         end
     end
 
-    // out_valid tracks the i3 result being captured into attr (one more cycle after i2_v).
-    reg attr_v;
-    always @(posedge clk) begin
-        if (reset) attr_v <= 1'b0;
-        else if (!stall) attr_v <= i3_ov_c[0];
-    end
-    assign out_valid = attr_v;
+    // out_valid is i3's own registered valid - attr is the unit's registered output, so
+    // the two are already co-aligned (no wrapper register to account for).
+    assign out_valid = i3_ov_c[0];
 endmodule

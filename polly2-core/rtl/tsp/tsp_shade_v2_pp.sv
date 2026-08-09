@@ -338,6 +338,68 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
         .pal_addr(pal_addr),.pal_data(pal_data),
         .ddr_req(ddr_req),.ddr_resp(ddr_resp));
 
+`ifndef SYNTHESIS
+    // ---- +uvx=<X> +uvy=<Y> : decode the INTERPOLATED U/V at the tex_unit ISSUE point ----
+    // The shade-input dump carries the plane COEFFICIENTS, not the interpolated attribute,
+    // so it cannot show whether the TSP pixel-centre offset actually landed. This can: it
+    // prints the U/V that tex_unit is about to consume, plus the 8.8 fixed value and the
+    // texel/fraction that tex_uvmap will derive from it. For a 1:1 sprite with both
+    // offsets active the expected result is frac=0 (the -128 texel bias exactly cancels
+    // the +0.5 pixel centre); frac=128 means one of the two did not land.
+    reg [10:0] pxd [0:INTERPLAT-1], pyd [0:INTERPLAT-1];
+    always @(posedge clk) if (en) begin
+        pxd[0] <= rc_px; pyd[0] <= rc_py;
+        for (k = 1; k < INTERPLAT; k = k + 1) begin pxd[k] <= pxd[k-1]; pyd[k] <= pyd[k-1]; end
+    end
+    wire [10:0] iv_px = pxd[INTERPLAT-1];
+    wire [10:0] iv_py = pyd[INTERPLAT-1];
+    integer uvx = -1, uvy = -1;
+    initial begin
+        void'($value$plusargs("uvx=%d", uvx));
+        void'($value$plusargs("uvy=%d", uvy));
+    end
+    real      uv_u, uv_v;
+    integer   uv_szu, uv_szv, uv_raw, uv_ui, uv_rawv, uv_vi;
+    // manual IEEE-754 decode: $bitstoshortreal exists but Verilator refuses to promote
+    // its shortreal result to real, so do the unpack here.
+    function real f2r(input [31:0] f);
+        real m; integer e;
+        begin
+            if (f[30:23] == 8'd0) f2r = 0.0;
+            else begin
+                e = $signed({1'b0, f[30:23]}) - 127;
+                m = 1.0 + $itor({9'd0, f[22:0]}) / 8388608.0;
+                f2r = m * (2.0 ** e);
+                if (f[31]) f2r = -f2r;
+            end
+        end
+    endfunction
+    always @(posedge clk)
+        if (!reset && tu_issue && uvx >= 0 && iv_px == uvx[10:0] && iv_py == uvy[10:0]) begin
+            uv_u    = f2r(iv_attr[0]);
+            uv_v    = f2r(iv_attr[1]);
+            // V has its OWN size (TSP.TexV), which need not equal TexU - decode both.
+            uv_szu  = 8 << tu_texu;                       // mip 0
+            uv_szv  = 8 << tu_texv;
+            uv_raw  = $rtoi(uv_u * uv_szu * 256.0);
+            // mirror tex_unit: point sampling takes NO texel bias
+            uv_ui   = uv_raw  - ((half_texel && tu_filter != 2'd0) ? 128 : 0);
+            uv_rawv = $rtoi(uv_v * uv_szv * 256.0);
+            uv_vi   = uv_rawv - ((half_texel && tu_filter != 2'd0) ? 128 : 0);
+            // the REMAINDER is what sizes any epsilon/rounding fix: it says how far
+            // below the exact 8.8 boundary the interpolated value actually lands.
+            $display("[UVR] (%0d,%0d) u_exact=%.6f (rem %.6f)  v_exact=%.6f (rem %.6f)",
+                     iv_px, iv_py,
+                     uv_u * uv_szu * 256.0, uv_u * uv_szu * 256.0 - uv_raw,
+                     uv_v * uv_szv * 256.0, uv_v * uv_szv * 256.0 - uv_rawv);
+            $display("[UV] (%0d,%0d) U=%f V=%f | sizeU=%0d ui_raw=%0d ui=%0d -> u_texel=%0d u_frac=%0d | sizeV=%0d vi_raw=%0d vi=%0d -> v_texel=%0d v_frac=%0d | half=%b half_texel=%b",
+                     iv_px, iv_py, uv_u, uv_v,
+                     uv_szu, uv_raw,  uv_ui,  uv_ui  >>> 8, uv_ui  & 255,
+                     uv_szv, uv_rawv, uv_vi,  uv_vi  >>> 8, uv_vi  & 255,
+                     half, (half_texel && tu_filter != 2'd0));
+        end
+`endif
+
     // ==============================================================
     // COMB payload FIFO: pushed when tex_unit ACCEPTS a pixel (tu_take), popped on tu_ov
     // (tex_unit result). Carries the per-pixel colour base/offset, tsp, ptx/pof, id across

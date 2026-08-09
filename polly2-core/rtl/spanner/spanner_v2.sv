@@ -444,6 +444,17 @@ module spanner_v2 import tsp_pkg::*; #(
     wire             tsp_done, tsp_pvalid;
     wire [3:0]       tsp_pidx;
     wire [31:0]      tsp_pddx, tsp_pddy, tsp_pc;
+`ifndef SYNTHESIS
+    // +uvvtx : the PER-VERTEX u/v (and x/y) handed to TSP setup, i.e. the values the
+    // interpolated UV planes are built from. Raw hex - decode offline. This separates
+    // "the submitted UVs are odd" from "the interpolation lost precision".
+    always @(posedge clk) if (!reset && $test$plusargs("uvvtx") && start)
+        $display("[UVVTX] xy1=%08x,%08x uv1=%08x,%08x | xy2=%08x,%08x uv2=%08x,%08x | xy3=%08x,%08x uv3=%08x,%08x",
+                 fv_x[0], fv_y[0], fv_u[0], fv_v[0],
+                 fv_x[1], fv_y[1], fv_u[1], fv_v[1],
+                 fv_x[2], fv_y[2], fv_u[2], fv_v[2]);
+`endif
+
     tsp_setup_stream u_tsp (
         // .rdy: back-to-back handshake unused here - spanner_v2 waits for done
         // (done implies rdy), so the legacy start-after-done flow still works.
