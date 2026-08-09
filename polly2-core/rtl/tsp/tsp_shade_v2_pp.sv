@@ -48,6 +48,7 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
     input      [10:0] px,                 // ABSOLUTE screen x (tile base | tile offset)
     input      [10:0] py,                 // ABSOLUTE screen y
     input             half,               // pixel-centre select (HALF_OFFSET.tsp_*)
+    input             half_texel,         // texel-centre select (HALF_OFFSET.texure_*)
     input      [31:0] invw_in,
     input      [31:0] in_ddx [0:9],
     input      [31:0] in_ddy [0:9],
@@ -331,6 +332,7 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
         .vq(tu_vq),.scan(tu_scan),.stride_sel(tu_stridesel),.mipmapped(tu_mipmapped),
         .pixfmt(tu_pixfmt),.pal_fmt(pal_fmt),.palsel(tu_palsel),
         .text_ctrl(iv_tc),.filter_mode(tu_filter),.ignore_texa(tu_ignorea),
+        .half_texel(half_texel),
         .in_ready(tu_ready),
         .out_valid(tu_ov),.out_id(tu_oid),.out_argb(tu_argb),
         .pal_addr(pal_addr),.pal_data(pal_data),

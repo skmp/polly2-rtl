@@ -3,7 +3,8 @@
 // four bilinear corner integer coords (ClampFlip'd). STREAMED 3-stage pipeline.
 //
 // refsw: sizeU=8<<TexU, sizeV=8<<TexV (no mipmap here).
-//   ui = u*sizeU*256 (+halfpixel, 0 here) ; vi = v*sizeV*256
+//   ui = u*sizeU*256 (+halfpixel) ; vi = v*sizeV*256 (+halfpixel)
+//   halfpixel = half_texel ? -128 : 0   (-0.5 texel exactly; refsw2 uses -127)
 //   base texel = (ui>>8, vi>>8); corners: (+1,+1)(+0,+1)(+1,+0)(+0,+0)
 //   each corner ClampFlip(coord,size). fractions ufrac=ui&255, vfrac=vi&255.
 //
@@ -42,6 +43,13 @@ module tex_uvmap (
     input      [2:0]  texv,
     input      [3:0]  miplevel,     // mip level (0 = base); size = (8<<TexU)>>mip
     input             clampu, clampv, flipu, flipv,
+    // HALF-TEXEL OFFSET (HALF_OFFSET.texure_pixel_half_offset). Applied to the 8.8
+    // fixed texel coordinate, so it shifts BOTH the corner selection and the bilinear
+    // fractions - which is the point: it moves the sample to the texel CENTRE.
+    // NOTE this deliberately subtracts 128, i.e. exactly 0.5 texel (256 = 1.0 texel).
+    // refsw2 subtracts 127, which is 0.496 of a texel - an off-by-one that biases every
+    // filtered sample slightly toward the lower texel and never quite reaches the centre.
+    input             half_texel,
 
     output            out_valid,
     output reg [10:0] c00u, output reg [10:0] c00v,   // (u+1,v+1)
@@ -63,6 +71,7 @@ module tex_uvmap (
     reg signed [9:0]  s1_pu, s1_pv;         // shift amounts
     reg        [23:0] s1_sigu, s1_sigv;     // 1.m mantissas
     reg               s1_su, s1_sv;         // sign bits (f[31])
+    reg               s1_half;            // half-texel offset select, riding the pipe
     reg               s1_zu, s1_zv;         // operand-is-zero (e==0 -> result 0)
     reg        [10:0] s1_sizeU, s1_sizeV;
     reg               s1_clampu,s1_clampv,s1_flipu,s1_flipv;
@@ -75,6 +84,7 @@ module tex_uvmap (
             s1_sigu<= {1'b1, u[22:0]};
             s1_sigv<= {1'b1, v[22:0]};
             s1_su  <= u[31];  s1_sv <= v[31];
+            s1_half<= half_texel;
             s1_zu  <= (u[30:23]==8'd0);
             s1_zv  <= (v[30:23]==8'd0);
             s1_sizeU<= sizeU_c; s1_sizeV<= sizeV_c;
@@ -101,6 +111,7 @@ module tex_uvmap (
     reg               v2;
     reg        [26:0] s2_magu, s2_magv;     // |ui|, |vi| in Q19.8 (unsigned magnitude)
     reg               s2_su, s2_sv;
+    reg               s2_half;
     reg        [10:0] s2_sizeU, s2_sizeV;
     reg               s2_clampu,s2_clampv,s2_flipu,s2_flipv;
     always @(posedge clk) begin
@@ -110,6 +121,7 @@ module tex_uvmap (
             s2_magu <= barrel(s1_sigu, s1_pu, s1_zu);
             s2_magv <= barrel(s1_sigv, s1_pv, s1_zv);
             s2_su   <= s1_su; s2_sv <= s1_sv;
+            s2_half <= s1_half;
             s2_sizeU<= s1_sizeU; s2_sizeV<= s1_sizeV;
             s2_clampu<= s1_clampu; s2_clampv<= s1_clampv;
             s2_flipu <= s1_flipu;  s2_flipv <= s1_flipv;
@@ -120,8 +132,13 @@ module tex_uvmap (
     // ui = sign ? -mag : mag (two's comp) ; uint = ui>>>8 ; u0/u1/v0/v1 corners ;
     // then 8x ClampFlip straight into the output registers. All combinational off the
     // registered s2_mag/sign; the negate/>>8/+1 and clampflip fan-out share this clock.
-    wire signed [26:0] ui = s2_su ? -$signed(s2_magu) : $signed(s2_magu);
-    wire signed [26:0] vi = s2_sv ? -$signed(s2_magv) : $signed(s2_magv);
+    // sign applied first, THEN the half-texel bias - matching refsw2's
+    // `ui = u*size*256 + halfpixel`, where the product is already signed.
+    wire signed [26:0] ui_raw = s2_su ? -$signed(s2_magu) : $signed(s2_magu);
+    wire signed [26:0] vi_raw = s2_sv ? -$signed(s2_magv) : $signed(s2_magv);
+    wire signed [26:0] half_bias = s2_half ? -27'sd128 : 27'sd0;   // -0.5 texel exactly
+    wire signed [26:0] ui = ui_raw + half_bias;
+    wire signed [26:0] vi = vi_raw + half_bias;
     wire signed [18:0] uint = ui >>> 8;      // arith (floors toward -inf, matching refsw)
     wire signed [18:0] vint = vi >>> 8;
     wire signed [20:0] cu0 = 21'(signed'(uint));
