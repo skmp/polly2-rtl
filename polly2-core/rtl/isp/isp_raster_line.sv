@@ -48,6 +48,13 @@
 // magnitude compares - bit-exact vs an fp_add24 sub (incl. +0 on exact cancellation,
 // which is only reachable at shamt==0, and the underflow flush keeping s_big).
 //
+// SHIFT-REGISTER RAM INFERENCE MUST BE OFF HERE. The operand-alignment delay chains
+// below (xf_dl, dy*_d, ddx_d, probe_d, tl_dl, eb*_m, ge_dl) are uniform-depth shift
+// registers, which Quartus happily converts into altshift_taps backed by M10K. That is
+// exactly wrong for these: they sit BETWEEN pipeline stages on the datapath, so a RAM
+// access lands on the critical path, and they spend block RAM (11 M10K in this module
+// alone, including one per fp_ge instance) in a design already at 98% M10K.
+(* altera_attribute = "-name AUTO_SHIFT_REGISTER_RECOGNITION OFF" *)
 module isp_raster_line #(
     parameter integer LANES = 8
 ) (

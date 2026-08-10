@@ -329,10 +329,16 @@ module peel_core import tsp_pkg::*; #(
     // pipe (u_line qi/out_qi) instead of the POP-latched regs. 4 slots > the
     // max 3 concurrent (a triangle occupies >= 3 cycles: POP+CORNER+>=1 sweep).
     reg  [2:0]  tri_qi;                    // current triangle's sideband slot
-    reg  [31:0] tq_tag  [0:7];
-    reg  [2:0]  tq_mode [0:7];
-    reg         tq_zwdis[0:7];
-    reg         tq_ispt [0:7];
+    // KEEP THESE IN LOGIC. They are read combinationally at the raster's stage-A exit
+    // (tq_tag[ras_qi] -> b_tag) and feed the tile buffers, so a block-RAM read lands
+    // straight on that path. At the old 4 entries Quartus kept them in registers; at 8
+    // (needed once the absolute-coord raster pipe grew to 15 deep) it inferred an
+    // altsyncram, and tq_tag_rtl_0 alone became 3313 of the top 10000 failing setup
+    // paths at -7.253 - a third of the whole failure list, from 256 bits of storage.
+    (* ramstyle = "logic" *) reg  [31:0] tq_tag  [0:7];
+    (* ramstyle = "logic" *) reg  [2:0]  tq_mode [0:7];
+    (* ramstyle = "logic" *) reg         tq_zwdis[0:7];
+    (* ramstyle = "logic" *) reg         tq_ispt [0:7];
     wire [2:0]  ras_qi;                    // exit-aligned slot from u_line
     wire        isp_sgn_neg, isp_cull;
     wire [4:0]  w_bx0, w_bx1, w_by0, w_by1;   // tile-local bbox from setup
