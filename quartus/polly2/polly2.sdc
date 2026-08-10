@@ -72,3 +72,21 @@ set_false_path -from [get_registers {*|reg_file:*|r[*]}]
 
 #set_instance_assignment -name RAM_STYLE "AUTO" -to cache_tags
 #set_instance_assignment -name RAM_STYLE "AUTO" -to cache_data
+
+# ---- PVR core reset is STRETCHED, not timing-critical ----
+# pvr_mmio drives pvr_rst from a 9-bit stretcher (pvr_rst <= (rst_cnt != 0)), so the
+# reset is asserted for up to 511 consecutive cycles and the core does not begin work
+# until the separate `go` strobe, many cycles after release. Nothing depends on reset
+# ARRIVING in one cycle - only on it eventually arriving and eventually releasing - so
+# a few cycles of skew across the die is harmless in both directions.
+#
+# Left untimed, this single register fans out to every pipeline stage in peel_core and
+# became the design's critical path (-10.5 ns, 901 of the top 10000 setup paths) once
+# the absolute-coordinate rework replaced 45 combinational fp_mul_i5 instances with 58
+# registered *_spp_ro FP units, all of which take reset. It does not appear at all in
+# the pre-rework report.
+#
+# NOTE this makes reset RELEASE skewed by construction. That is safe here only because
+# of the `go` handshake above; if a future change ever starts traffic immediately on
+# release, this cut must go and the reset must be pipelined/duplicated instead.
+set_false_path -from [get_registers {*pvr_mmio*|pvr_rst}]

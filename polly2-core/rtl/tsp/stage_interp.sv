@@ -35,6 +35,10 @@
 // in_valid -> out_valid. No input/output buffering at the module edge beyond the
 // boundary regs the wrapper owns (caller holds inputs stable while in_valid && !stall).
 //
+// See isp_raster_line: the c/W alignment chains here are the same uniform-depth shape
+// that Quartus turns into M10K-backed altshift_taps, which belongs nowhere on a
+// datapath between pipeline stages.
+(* altera_attribute = "-name AUTO_SHIFT_REGISTER_RECOGNITION OFF" *)
 module interp_unit (
     input             clk,
     input             reset,
