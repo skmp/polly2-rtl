@@ -158,10 +158,11 @@ localparam [11:0] H_ACT    = H_ACTIVE;
 localparam [10:0] V_ACT    = V_ACTIVE;
 // Display scale. 1080p needed 2x to fill a 1920x1080 raster from a 640x480 source;
 // 480p is a 1:1 fit, so the game window is SRC_W x SRC_H placed directly.
-// NOTE: SCALE is currently only honoured by the window placement below. The pixel and
-// line ADDRESS generators still assume 2x (see n_pre's x_pre[10:1] and the y_rel[0]
-// fetch gating). Raster timing is therefore correct at 1:1 while image sampling is not
-// yet — tracked as task `spg-scale`. spg-480p asserts timing; spg-bands covers sampling.
+// SCALE is honoured by the window placement below AND by the address generators: the
+// horizontal shift (n_pre), the vertical shift (vshift), the prefetch lookahead
+// (y_look_raw) and the underrun gate all derive from it. fb_pix_dbl / fb_line_dbl
+// compose on top, so a 320-wide or 240-line source still fills the window at either
+// scale. spg-480p asserts the raster; spg-1to1 asserts the sampling.
 localparam        SCALE    = 1;
 // At SCALE=1 the 480-line source exactly fills the 480-line raster, so Y0 == 0 and there is
 // NO vertical margin left for the top/bottom border bands. Every `vcnt < Y0` / `y_look < Y0`
@@ -233,8 +234,11 @@ reg [27:0] bot_base_lat = 28'd0;
 reg        top_en_lat   = 1'b0;
 reg        bot_en_lat   = 1'b0;
 
-// line-doubling shift: output lines per source line = 2 (480) or 4 (240p)
-wire [1:0] vshift = dbl_lat ? 2'd2 : 2'd1;
+// Line shift: output lines per source line = SCALE for a 480-line source, 2*SCALE for a
+// 240p one. At SCALE=2 (1080p) that is the familiar 2 / 4; at SCALE=1 a 480-line source
+// maps one output line per source line and only fb_line_dbl still doubles.
+wire [1:0] vshift = (SCALE == 2) ? (dbl_lat ? 2'd2 : 2'd1)
+                                 : (dbl_lat ? 2'd1 : 2'd0);
 
 // Per-line base stability filter: {fb_disp_half, fb_base} originates in
 // another clock domain and may change mid-frame; adopt a value only after
@@ -252,11 +256,13 @@ end
 // Fetch requests (video domain -> Avalon domain)
 //////////////////////////////////////////////////////////////////////////
 
-// Two output lines ahead of the raster, decide which SOURCE line (of which
+// One SOURCE line ahead of the raster, decide which source line (of which
 // region) will be needed and request it once. Buffer parity = source line
 // LSB, so the line being written is never the line being displayed - this
 // holds across region seams too (each region restarts at src 0 an even
 // number of output lines after the previous region's last line began).
+// The lookahead is counted in OUTPUT lines while the invariant it protects is
+// in SOURCE lines, so it has to track SCALE - see y_look_raw below.
 reg        req_toggle = 1'b0;
 reg        req_sof    = 1'b0;   // first line of its region: reset the render offset
 reg        req_buf    = 1'b0;
@@ -271,9 +277,15 @@ reg  [1:0] cnt_req    = 2'd0;
 reg  [3:0] line_roff [0:1];
 initial begin line_roff[0] = 4'd0; line_roff[1] = 4'd0; end
 
-// wraps only for the top band, whose first request lands 2 lines before
-// the raster does (V_TOTAL-2 -> line 0)
-wire [10:0] y_look_raw = vcnt + 11'd2;
+// Exactly ONE source line of lookahead, expressed in output lines: 2 at
+// SCALE=2, 1 at SCALE=1. This is a correctness constraint, not a tuning knob.
+// Deeper is not "safer": with only two line buffers keyed on source-line
+// parity, 2 output lines at 1:1 is 2 source lines ahead, look_src[0] ==
+// src_cur[0], and the prefetch overwrites the line being scanned out.
+// Shallower leaves no fetch time. Wraps for the first fetched line of the
+// frame - the top band at SCALE=2, the first game line at SCALE=1 where
+// Y0 == 0 (V_TOTAL-SCALE -> line 0).
+wire [10:0] y_look_raw = (SCALE == 2) ? vcnt + 11'd2 : vcnt + 11'd1;
 wire [10:0] y_look     = (y_look_raw >= V_TOTAL) ? y_look_raw - V_TOTAL
                                                  : y_look_raw;
 
@@ -311,10 +323,10 @@ wire  [8:0] look_beats = bb_geo + {8'd0, look_roff != 4'd0};
 
 // look_* are LINE-CONSTANT (vcnt only changes when hcnt wraps): register the
 // whole lookahead cone per clock (copies are settled from hcnt==1 on) and
-// fire the request at hcnt==2 instead of hcnt==0, so the vcnt+2 wrap adder /
+// fire the request at hcnt==2 instead of hcnt==0, so the y_look_raw wrap adder /
 // region subtracts / 12-bit dedup compare never gate the req_* enables
 // combinationally (they were an STA-failing family into req_base). The two
-// pixel clocks of extra latency are nothing against the ~2-output-line
+// pixel clocks of extra latency are nothing against the one-source-line
 // fetch-ahead margin, and the per-line config latches at hcnt==0 have
 // settled a full cycle before the registered copies are consumed.
 reg        look_in_r    = 1'b0;
@@ -573,15 +585,17 @@ assign rbuf = rbuf_r;
 // (overlapping pixels) and rotates channels across the write->scanout
 // round trip (SC pre-intro: red logo showed green, teal water pink, plus
 // a 1-px comb from the odd/even split - while the core render was right).
-// /2: source pixel 0..639; pixel_double game lines: /4, source 0..319
-// (bands are always 640 wide at 2x)
+// The divide is SCALE (source pixel 0..639) or 2*SCALE on pixel_double game
+// lines (source 0..319): /2 and /4 at SCALE=2, /1 and /2 at 1:1. Bands are
+// always 640 wide at 2x, but they only exist while Y0 > 0.
 //
 // The byte address is REGISTERED (b_pre_r) with the lookahead deepened to
 // hcnt+2, so the bank RAMs' address registers see only the short bump/
 // increment cone off a register slice. Overall RGB alignment vs the
 // counters is unchanged: the extra register stage is exactly absorbed by
 // the extra pixel of lookahead.
-wire  [9:0] n_pre    = pd_sel_r ? x_pre[11:2] : x_pre[10:1];
+wire  [9:0] n_pre    = (SCALE == 2) ? (pd_sel_r ? x_pre[11:2] : x_pre[10:1])
+                                    : (pd_sel_r ? x_pre[10:1] : x_pre[9:0]);
 reg  [11:0] b_pre_r  = 12'd0;
 always @(posedge clk) begin
 	b_pre_r <=
@@ -702,9 +716,13 @@ always @(posedge clk or posedge reset) begin
 		vblank_out <= (vcnt == Y0 && hcnt == 12'd0);
 
 		// Just before the window pixels of the FIRST output line of each
-		// source line: the fetch for this line (issued 2 output lines ago)
+		// source line: the fetch for this line (issued one source line ago)
 		// must have completed; only the next line's fetch may be in flight.
-		if (img_v && hcnt == X0 - 12'd4 && y_rel[0] == 1'b0
+		// At SCALE=2 a source line spans two output lines and y_rel[0]
+		// picks the first of them. At 1:1 every output line starts a new
+		// source line, so the term must go - keeping it would check only
+		// the even lines, which is half-blind rather than wrong.
+		if (img_v && hcnt == X0 - 12'd4 && ((SCALE != 2) || y_rel[0] == 1'b0)
 		    && (cnt_req - cnt_done) >= 2'd2) underrun <= 1'b1;
 	end
 end
