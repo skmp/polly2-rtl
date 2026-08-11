@@ -82,6 +82,15 @@ obj_dir/spg_bands_tb: rtl/spg.sv tb/spg_bands_tb.cpp
 spg-sync: obj_dir/spg_sync_tb
 	./obj_dir/spg_sync_tb
 
+#   make spg-480p  - asserts the 480p target raster (CEA-861 VIC 2/3, 720x480p@59.94,
+#                    27 MHz, 858x525). Written test-first: FAILS against the stock 1080p
+#                    spg.sv by design, and passes only once the parameters are retargeted.
+obj_dir/spg_480p_tb: rtl/spg.sv tb/spg_480p_tb.cpp
+	$(VERILATOR) --cc --exe --build $(VFLAGS) rtl/spg.sv tb/spg_480p_tb.cpp -o spg_480p_tb
+
+spg-480p: obj_dir/spg_480p_tb
+	./obj_dir/spg_480p_tb
+
 #   make audio-i2s - MMIO AUDIO_DATA -> 2048-entry async FIFO -> I2S:
 #                    framing/order/one-shot delivery, blocking-write
 #                    backpressure when full, non-audio accesses unaffected,
