@@ -90,12 +90,19 @@ module tex_filter (
     reg        [7:0]  s2_vf;
     reg               s2_filter, s2_ignta;
     reg        [31:0] s2_t11;
-    integer i2; reg signed [8:0] uf_s;
+    // U WEIGHT IS THE 0..256 RESCALE. refsw2: ublend = to_u8_256(ui & 255), so a weight
+    // of 255 lands FULLY on the far texel (255*256>>8 = 255) instead of one short
+    // (255*255>>8 = 254). The droop is invisible in colour but fails a punch-through
+    // alpha test against PT_ALPHA_REF=255 at every texel boundary - the car body in
+    // jgr_car going transparent in patches. (refsw2 leaves the V weight raw; that
+    // asymmetry is reproduced deliberately rather than "fixed" - see the note at s4.)
+    integer i2; reg signed [9:0] uf_s;
+    function [8:0] u8_256(input [7:0] v); u8_256 = {1'b0,v} + {8'b0, v[7]}; endfunction
     always @(posedge clk) begin
         if (reset) v2 <= 1'b0;
         else begin
             v2 <= v1;
-            uf_s = $signed({1'b0, s1_uf});
+            uf_s = $signed({1'b0, u8_256(s1_uf)});   // 0..256
             for (i2=0; i2<4; i2=i2+1) begin
                 s2_pa[i2] <= s1_da[i2] * uf_s;
                 s2_pb[i2] <= s1_db[i2] * uf_s;
