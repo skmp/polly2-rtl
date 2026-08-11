@@ -22,6 +22,22 @@ static void clr_inputs(){
     for(int w=0;w<WAYS;w++) dut->wr_tag[w]=0;
 }
 
+// THE WRITE SIDE IS REGISTERED (sort_cache captures en_*/wr_* before they reach
+// the way RAMs), so a write presented at cycle T only reaches the RAM at T+1, and
+// a check presented at T sees the state produced by inputs up to T-2. The model
+// therefore carries the previous cycle's write as `pw` and applies it one step
+// late; the caller's rule (the module header's "allow 2 cycles after the last
+// demote") is exactly this.
+struct PendWr { bool en; uint32_t en_tag; uint8_t dm; uint32_t dtag[4]; };
+static PendWr pw = {false,0,0,{0,0,0,0}};
+
+static void model_apply(const PendWr&w){
+    for(int i=0;i<WAYS;i++){
+        if(w.dm&(1u<<i))  model[i][idx_of(w.dtag[i])] = { w.dtag[i], false };
+        else if(w.en)     model[i][idx_of(w.en_tag)]  = { w.en_tag,  true  };
+    }
+}
+
 // apply one cycle of (enter?, demotes[], check?) to DUT+model; returns model's
 // expected chk_done for the check issued THIS cycle (result visible next cycle).
 static bool step(bool en, uint32_t en_tag, uint8_t dm, const uint32_t dtag[4],
@@ -30,21 +46,23 @@ static bool step(bool en, uint32_t en_tag, uint8_t dm, const uint32_t dtag[4],
     dut->wr_valid = dm;
     for(int w=0;w<WAYS;w++) dut->wr_tag[w] = dtag ? dtag[w] : 0;
     dut->chk_valid = chk; dut->chk_tag = chk_tag;
-    // model: check reads PRE-write state (registered read of same-edge write
-    // returns the old entry)
+    // the check reads state produced by inputs up to T-2: `pw` (the T-1 write) is
+    // still in the input registers and has NOT reached the RAM yet.
     bool exp = true;
     for(int w=0;w<WAYS;w++){
         Ent&e = model[w][idx_of(chk_tag)];
         if(!(e.done && e.tag==chk_tag)) exp=false;
     }
-    // model writes: per way, demote wins over enter
-    for(int w=0;w<WAYS;w++){
-        if(dm&(1u<<w))  model[w][idx_of(dtag[w])] = { dtag[w], false };
-        else if(en)     model[w][idx_of(en_tag)]  = { en_tag,  true  };
-    }
+    model_apply(pw);                       // T-1's write lands on this edge
+    pw.en = en; pw.en_tag = en_tag; pw.dm = dm;
+    for(int w=0;w<WAYS;w++) pw.dtag[w] = dtag ? dtag[w] : 0;
     tick();
     return exp;
 }
+
+// one idle cycle: lets a just-presented write cross the input registers into the
+// way RAMs before a check is issued.
+static void settle(){ clr_inputs(); tick(); }
 
 static int fails=0;
 static void expect(bool cond, const char*what){
@@ -76,29 +94,29 @@ int main(int argc,char**argv){
     };
 
     // ---- enter -> done; demote one way -> not done; re-enter -> done ----
-    clr_inputs(); dut->en_valid=1; dut->en_tag=A; tick();
+    clr_inputs(); dut->en_valid=1; dut->en_tag=A; tick(); settle();
     expect(check_now(A)==true,  "A done after enter");
-    { uint32_t d[4]={0,0,A,0}; clr_inputs(); dut->wr_valid=1u<<2; for(int w=0;w<4;w++) dut->wr_tag[w]=d[w]; tick(); }
+    { uint32_t d[4]={0,0,A,0}; clr_inputs(); dut->wr_valid=1u<<2; for(int w=0;w<4;w++) dut->wr_tag[w]=d[w]; tick(); settle(); }
     expect(check_now(A)==false, "A not done after way2 demote");
-    clr_inputs(); dut->en_valid=1; dut->en_tag=A; tick();
+    clr_inputs(); dut->en_valid=1; dut->en_tag=A; tick(); settle();
     expect(check_now(A)==true,  "A done after re-enter");
 
     // ---- alias: demote B (same idx) on way1 kills A's agreement ----
-    { clr_inputs(); dut->wr_valid=1u<<1; dut->wr_tag[1]=Bx; tick(); }
+    { clr_inputs(); dut->wr_valid=1u<<1; dut->wr_tag[1]=Bx; tick(); settle(); }
     expect(check_now(A)==false, "A not done after alias B demote way1");
     expect(check_now(Bx)==false,"B not done (demoted entry)");
 
     // ---- same-cycle conflict, same tag: demote wins in its way ----
-    { clr_inputs(); dut->en_valid=1; dut->en_tag=A; dut->wr_valid=1u<<3; dut->wr_tag[3]=A; tick(); }
+    { clr_inputs(); dut->en_valid=1; dut->en_tag=A; dut->wr_valid=1u<<3; dut->wr_tag[3]=A; tick(); settle(); }
     expect(check_now(A)==false, "demote beats enter (same tag, way3)");
 
     // ---- same-cycle conflict, different index: enter lands in other ways only ----
     const uint32_t C=0x00200008u, D=0x00300010u;
     expect(idx_of(C)!=idx_of(D), "C/D distinct idx");
-    { clr_inputs(); dut->en_valid=1; dut->en_tag=C; dut->wr_valid=1u<<0; dut->wr_tag[0]=D; tick(); }
+    { clr_inputs(); dut->en_valid=1; dut->en_tag=C; dut->wr_valid=1u<<0; dut->wr_tag[0]=D; tick(); settle(); }
     expect(check_now(C)==false, "enter lost way0 -> conservative not-done");
     expect(check_now(D)==false, "demoted D not done");
-    clr_inputs(); dut->en_valid=1; dut->en_tag=C; tick();     // clean re-enter
+    clr_inputs(); dut->en_valid=1; dut->en_tag=C; tick(); settle();  // clean re-enter
     expect(check_now(C)==true,  "C done after clean enter");
 
     // ---- randomized soak vs model ----
@@ -106,6 +124,7 @@ int main(int argc,char**argv){
     // re-sync model: sweep again via reset
     clr_inputs(); dut->reset=1; tick(); dut->reset=0;
     while(!dut->ready) tick();
+    pw = {false,0,0,{0,0,0,0}};
     uint32_t seed=0xC0FFEE;
     auto rnd=[&]{ seed=seed*1664525u+1013904223u; return seed; };
     // small tag pool so aliases + rechecks are frequent

@@ -1,7 +1,8 @@
 //
 // dense_span_buffer - the DENSE spanner_v2 -> TSP handoff. spanner_v2 emits shaded spans
 // into a shared RING; this stores one span per slot:
-//   { start (run-start pixel y:x), rep (1..4), id (triangle_setups slot), invw[0:3], at }
+//   { start (run-start pixel y:x), rep (1..4), id (triangle_setups slot), invw[0:3], at,
+//     inv[0:3] (per-pixel modifier-volume "in shadow volume" bit) }
 // The TSP reader walks a pass's ring range (base..base+cnt-1, wrapping), reads a span, and
 // EXPANDS its `rep` pixels into the shade pipeline (pixel k = start+k, invw[k]). No per-pixel
 // dense walk, no shade mask - every stored span is shaded. ONE shared RING instance (the ring
@@ -25,6 +26,7 @@ module dense_span_buffer #(
     input      [2:0]      w_rep,            // run length 1..4
     input      [30:0]     w_invw [0:3],     // per-covered-pixel invW (sign-stripped)
     input                 w_at,             // PT alpha-test enable
+    input      [3:0]      w_inv,            // per-covered-pixel in-shadow-volume bit
     // ---- READ (reader): present raddr, span valid next cycle ----
     input      [AW-1:0]   raddr,
     output     [9:0]      r_start,
@@ -32,15 +34,17 @@ module dense_span_buffer #(
     output     [WMW-1:0]  r_wm,
     output     [2:0]      r_rep,
     output     [30:0]     r_invw [0:3],
-    output                r_at
+    output                r_at,
+    output     [3:0]      r_inv
 );
     localparam integer F_START = 0;           // 10
     localparam integer F_ID    = 10;          // IDW
     localparam integer F_REP   = 10 + IDW;    // 3
     localparam integer F_INVW  = 13 + IDW;    // 124 (4 x 31, sign-stripped)
     localparam integer F_AT    = 137 + IDW;   // 1
-    localparam integer F_WM    = 138 + IDW;   // WMW
-    localparam integer PW      = 138 + IDW + WMW;
+    localparam integer F_INV   = 138 + IDW;   // 4
+    localparam integer F_WM    = 142 + IDW;   // WMW
+    localparam integer PW      = 142 + IDW + WMW;
 
     (* ramstyle = "M10K, no_rw_check" *) reg [PW-1:0] mem [0:DEPTH-1];
     reg [PW-1:0] rdw;
@@ -51,6 +55,7 @@ module dense_span_buffer #(
     assign wrw[F_WM    +: WMW] = w_wm;
     assign wrw[F_REP   +: 3]  = w_rep;
     assign wrw[F_AT]          = w_at;
+    assign wrw[F_INV   +: 4]  = w_inv;
     genvar gi;
     generate
       for (gi = 0; gi < 4; gi = gi + 1) begin : g_wr_invw
@@ -68,6 +73,7 @@ module dense_span_buffer #(
     assign r_wm    = rdw[F_WM    +: WMW];
     assign r_rep   = rdw[F_REP   +: 3];
     assign r_at    = rdw[F_AT];
+    assign r_inv   = rdw[F_INV   +: 4];
     genvar gr;
     generate
       for (gr = 0; gr < 4; gr = gr + 1) begin : g_rd_invw

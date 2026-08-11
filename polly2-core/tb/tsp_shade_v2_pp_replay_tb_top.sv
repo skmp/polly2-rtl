@@ -32,6 +32,8 @@ module tsp_shade_v2_pp_replay_tb_top import tsp_pkg::*; (
     input      [4:0]  text_ctrl,
     input             pp_texture,
     input             pp_offset,
+    input             in_vol,          // cheap-shadow: pixel inside a modifier volume
+    input      [8:0]  shad_mult,       // to_u8_256(FPU_SHAD_SCALE.scale_factor)
 
     // ---- outputs (compared in C++) ----
     output            pp_stall,
@@ -107,6 +109,7 @@ module tsp_shade_v2_pp_replay_tb_top import tsp_pkg::*; (
         .tsp(tsp),.tcw(tcw),.text_ctrl(text_ctrl),
         .pal_fmt(regs.pal_ram_ctrl[1:0]),
         .pp_texture(pp_texture),.pp_offset(pp_offset),
+        .in_vol(in_vol),.shad_mult(shad_mult),
         .out_valid(pp_out_valid),.out_id(pp_out_id),.out_argb(pp_out_argb),
         .out_tsp(pp_out_tsp),
         .stall(pp_stall),

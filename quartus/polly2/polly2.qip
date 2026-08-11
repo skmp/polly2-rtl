@@ -68,6 +68,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/buffers/bra
 #      peel depth/tag buffers, colour) ----
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/buffers/peel_tile_buffer.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/buffers/taginvw_tile_buffer.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/buffers/stencil_tile_buffer.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/buffers/color_tile_buffer.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/buffers/delay_ram.sv
 

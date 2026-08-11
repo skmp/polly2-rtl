@@ -29,7 +29,7 @@ static void put_word(uint32_t byte_addr, uint32_t val){
 }
 
 // region_state_e one-hot (must match tsp_pkg)
-enum { RS_CLEAR=1, RS_OP=2, RS_PT=4, RS_TR=8, RS_FLUSH=16 };
+enum { RS_CLEAR=1, RS_OP=2, RS_OM=4, RS_PT=8, RS_TR=16, RS_FLUSH=32 };
 
 static uint32_t control_word(uint32_t tx,uint32_t ty,bool z_keep,bool no_writeout,bool last){
     return (0u<<0) | ((tx&0x3F)<<2) | ((ty&0x3F)<<8) |
@@ -44,7 +44,7 @@ static uint32_t listptr(uint32_t ptr_words,bool empty){
 
 struct Entry {
     uint32_t tx,ty; bool z_keep, no_writeout, last;
-    bool op_e, pt_e, tr_e; uint32_t op_p, pt_p, tr_p;
+    bool op_e, om_e, pt_e, tr_e; uint32_t op_p, om_p, pt_p, tr_p;
 };
 struct GoldState { uint32_t tx,ty,state,ptr,wo,zk; };
 
@@ -52,7 +52,7 @@ struct GoldState { uint32_t tx,ty,state,ptr,wo,zk; };
 static void build_entry(uint32_t base, const Entry&e){
     put_word(base+0,  control_word(e.tx,e.ty,e.z_keep,e.no_writeout,e.last));
     put_word(base+4,  listptr(e.op_p, !e.op_e));
-    put_word(base+8,  listptr(rnd(), true));         // opaque_mod (ignored)
+    put_word(base+8,  listptr(e.om_p, !e.om_e));     // opaque_mod -> RSTATE_OM
     put_word(base+12, listptr(e.tr_p, !e.tr_e));
     put_word(base+16, listptr(rnd(), true));         // trans_mod (ignored)
     put_word(base+20, listptr(e.pt_p, !e.pt_e));
@@ -66,6 +66,9 @@ static void build_entry(uint32_t base, const Entry&e){
 static void gold_entry(const Entry&e, std::vector<GoldState>&out){
     out.push_back({e.tx,e.ty,RS_CLEAR, 0, 0, e.z_keep?1u:0u});
     if (e.op_e)         out.push_back({e.tx,e.ty,RS_OP,    e.op_p*4, 0, 0});
+    // OM only when the OPAQUE list is also non-empty (refsw2 nests it inside
+    // `if (!entry.opaque.empty)`), so an orphan opaque_mod list never renders.
+    if (e.op_e && e.om_e) out.push_back({e.tx,e.ty,RS_OM,  e.om_p*4, 0, 0});
     if (e.pt_e)         out.push_back({e.tx,e.ty,RS_PT,    e.pt_p*4, 0, 0});
     if (e.tr_e)         out.push_back({e.tx,e.ty,RS_TR,    e.tr_p*4, 0, 0});
     out.push_back({e.tx,e.ty,RS_FLUSH, 0, e.no_writeout?0u:1u, 0});
@@ -120,28 +123,28 @@ int main(int argc,char**argv){
 
     // case 1: single tile, all states (clear+op+pt+tr+flush)
     { std::vector<Entry> e = {
-        {3,5, false,false,true, true,true,true, 0x100,0x200,0x300} };
+        {3,5, false,false,true, true,true,true,true, 0x100,0x180,0x200,0x300} };
       run_case("all_states", 0, e); }
 
     // case 2: op only, z_keep set (no clear); no_writeout=1 -> FLUSH still emitted
     // (end-of-entry marker) but with writeout=0
     { std::vector<Entry> e = {
-        {1,1, true,true,true, true,false,false, 0x400,0,0} };
+        {1,1, true,true,true, true,false,false,false, 0x400,0,0,0} };
       run_case("op_only", 40, e); }
 
     // case 3: every entry now emits CLEAR(start) + FLUSH(end), so NO entry is skipped.
     // entry 0: z_keep=1,no_writeout=1,no lists -> CLEAR(zk=1)+FLUSH(wo=0).
     // entry 1: z_keep=0,writeout,no lists      -> CLEAR(zk=0)+FLUSH(wo=1).
     { std::vector<Entry> e = {
-        {2,2, true,true,false, false,false,false, 0,0,0},
-        {7,7, false,false,true, false,false,false, 0,0,0} };
+        {2,2, true,true,false, false,true,false,false, 0,0x88,0,0},   // orphan opaque_mod: no OM
+        {7,7, false,false,true, false,false,false,false, 0,0,0,0} };
       run_case("empty_then_real", 80, e); }
 
     // case 4: multi-tile sequence
     { std::vector<Entry> e = {
-        {0,0, false,false,false, true,false,false, 0x10,0,0},
-        {1,0, true, false,false, false,false,true, 0,0,0x20},
-        {2,0, false,true, true, true,true,false, 0x30,0x40,0x50} };
+        {0,0, false,false,false, true,true,false,false, 0x10,0x18,0,0},
+        {1,0, true, false,false, false,false,false,true, 0,0,0,0x20},
+        {2,0, false,true, true, true,false,true,false, 0x30,0,0x40,0x50} };
       run_case("multi_tile", 120, e); }
 
     // case 5: randomized
@@ -152,8 +155,9 @@ int main(int argc,char**argv){
             Entry en;
             en.tx=rnd()&0x3F; en.ty=rnd()&0x3F;
             en.z_keep=rnd()&1; en.no_writeout=rnd()&1; en.last=(i==n-1);
-            en.op_e=rnd()&1; en.pt_e=rnd()&1; en.tr_e=rnd()&1;
-            en.op_p=rnd()&0x3FFFFF; en.pt_p=rnd()&0x3FFFFF; en.tr_p=rnd()&0x3FFFFF;
+            en.op_e=rnd()&1; en.om_e=rnd()&1; en.pt_e=rnd()&1; en.tr_e=rnd()&1;
+            en.op_p=rnd()&0x3FFFFF; en.om_p=rnd()&0x3FFFFF;
+            en.pt_p=rnd()&0x3FFFFF; en.tr_p=rnd()&0x3FFFFF;
             e.push_back(en);
         }
         char name[32]; snprintf(name,sizeof(name),"rand%d",t);

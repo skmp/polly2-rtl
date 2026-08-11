@@ -500,7 +500,9 @@ module peel_core import tsp_pkg::*; #(
     reg                    b_zwdis;
     reg                    b_peeling;   // carry the peel/opaque select into stage B
     reg                    b_fwd;       // carry the FORWARD PT-resolve select into stage B
+    reg                    b_modvol;    // carry the MODIFIER-VOLUME select into stage B
     reg                    b_which;     // per-triangle is_pt (tri_is_pt) snapshot (PT => dt_pt=1)
+    wire [RAS_LANES-1:0]   b_mv_we;     // per-lane modvol depth-test pass (-> u_stencil)
 
     // ---- peel + color tile buffers (own the RAM ports + access-pattern enforcement) ----
     // per-lane resolved-bit slices for the forward PT compare (stage B chunk) and
@@ -568,6 +570,7 @@ module peel_core import tsp_pkg::*; #(
         .b_y(b_oy), .b_x(b_ox), .b_tag(b_tag), .b_mode(b_mode),
         .b_zwdis(b_zwdis), .b_peeling(b_peeling),
         .b_fwd(b_fwd), .b_res(b_res_w),
+        .b_modvol(b_modvol), .b_mv_we(b_mv_we),
         .b_pass_lp(b_pass_lp), .b_more(b_more), .b_oldtag(b_oldtag), .b_we(b_we),
         // forward PT-resolve walks (share the pb_rd/pb_wr cursors)
         .pb_ptinit(st == S_PT_INIT), .pb_ptswap(st == S_PT_SWAP),
@@ -663,6 +666,15 @@ module peel_core import tsp_pkg::*; #(
     wire [31:0] g4_tag_h   [0:1][0:3];
     wire [30:0] g4_invw_h  [0:1][0:3];
     wire [3:0]  g4_pt_h    [0:1];
+    // ---- MODIFIER-VOLUME stencil (u_stencil, ping-ponged alongside u_taginvw) ----
+    wire [3:0]  g4_inv_h   [0:1];
+    reg         mv_phase;        // the OM (opaque modifier volume) list is rastering
+    reg         mv_sum_and;      // pending summarize is AND (VolumeMode 2), else OR (1)
+    // stencil CLEAR/zero walk: the tile CLEAR (refsw ClearBuffers stencilValue=0) plus
+    // every PT/TL peel walk (refsw PeelBuffers / PeelBuffersPTInitial also zero the
+    // stencil, so a translucent pass never inherits the opaque pass's shadow mask).
+    wire        st_clr_valid;
+    wire [CHUNK_AW-1:0] st_clr_addr;
     genvar gti;
     generate
       for (gti = 0; gti < 2; gti = gti + 1) begin : gtibuf
@@ -688,6 +700,7 @@ module peel_core import tsp_pkg::*; #(
             .g4_valid(g4_valid_h[gti]), .g4_tag(g4_tag_h[gti]),
             .g4_invw(g4_invw_h[gti]), .g4_pt(g4_pt_h[gti])
         );
+
       end
     endgenerate
 
@@ -769,6 +782,7 @@ module peel_core import tsp_pkg::*; #(
     wire [2:0]         sp_rep;
     wire [30:0]        sp_invw [0:3];
     wire               sp_at;
+    wire [3:0]         sp_inv;
     // TSP reader read port (one span/slot) into the shared ring
     reg  [SPAN_AW-1:0] dsr_addr;
     // streaming plumbing: live span head + per-span watermark + setup progress
@@ -782,13 +796,15 @@ module peel_core import tsp_pkg::*; #(
     wire [2:0]         dsr_rep;
     wire [30:0]        dsr_invw  [0:3];
     wire               dsr_at;
+    wire [3:0]         dsr_inv;
     dense_span_buffer #(.DEPTH(SPAN_NSLOT), .IDW(10)) u_span (
         .clk(clk),
         .we(sp_we), .waddr(sp_slot),
-        .w_start(sp_start), .w_id(sp_id), .w_wm(spv_sp_wm), .w_rep(sp_rep), .w_invw(sp_invw), .w_at(sp_at),
+        .w_start(sp_start), .w_id(sp_id), .w_wm(spv_sp_wm), .w_rep(sp_rep), .w_invw(sp_invw),
+        .w_at(sp_at), .w_inv(sp_inv),
         .raddr(dsr_addr),
         .r_start(dsr_start), .r_id(dsr_id), .r_wm(dsr_wm), .r_rep(dsr_rep),
-        .r_invw(dsr_invw), .r_at(dsr_at)
+        .r_invw(dsr_invw), .r_at(dsr_at), .r_inv(dsr_inv)
     );
 
     // ---- DECOUPLED VIDEO-OUT (FLUSH) engine + color-buffer credit handshake ----
@@ -876,12 +892,13 @@ module peel_core import tsp_pkg::*; #(
         .tsp_go(spv_tsp_go), .tsp_rd_done(spv_rd_done),
         .rd_valid(spv_rd_valid), .rd_group(spv_rd_group),
         .ti_valid(g4_valid_c), .ti_tag(g4_tag_c), .ti_invw(g4_invw_c), .ti_pt(g4_pt_c),
+        .ti_inv(g4_inv_h[tsp_tag]),
         .ts_we(ts_we), .ts_id(ts_id), .ts_isp(ts_isp), .ts_tsp(ts_tsp), .ts_tcw(ts_tcw),
         .ts_ddx(ts_ddx), .ts_ddy(ts_ddy), .ts_c(ts_c),
         .sp_we(sp_we), .sp_slot(sp_slot),
         .sp_range_base(spv_sp_range_base), .sp_range_cnt(spv_sp_range_cnt),
         .sp_start(sp_start), .sp_id(sp_id), .sp_rep(sp_rep),
-        .sp_invw(sp_invw), .sp_at(sp_at), .sp_ready(sp_ready),
+        .sp_invw(sp_invw), .sp_at(sp_at), .sp_inv(sp_inv), .sp_ready(sp_ready),
         .dreq(ts_dreq), .dresp(ts_dresp)
     );
     // The expander is gone: spanner_v2 writes dense_span_buffer directly. sp_ready is 1'b1
@@ -922,6 +939,7 @@ module peel_core import tsp_pkg::*; #(
     reg  [10:0]  pp_px, pp_py;   // ABSOLUTE screen coords (tile base | tile offset)
     reg  [30:0]  pp_invw;   // sign-stripped; zero-extended into the shade RCP
     reg  [31:0]  pp_tsp, pp_tcw; reg pp_ptex, pp_pofs;
+    reg          pp_invol;  // cheap-shadow: this pixel is inside a modifier volume
     reg  [31:0]  pp_ddx [0:9];
     reg  [31:0]  pp_ddy [0:9];
     reg  [31:0]  pp_c   [0:9];
@@ -954,6 +972,10 @@ module peel_core import tsp_pkg::*; #(
         .tsp(pp_tsp),.tcw(pp_tcw),.text_ctrl(regs.text_control[4:0]),
         .pal_fmt(regs.pal_ram_ctrl[1:0]),
         .pp_texture(pp_ptex),.pp_offset(pp_pofs),
+        // CHEAP SHADOWS: to_u8_256(scale_factor) = s + (s >> 7), 0..256 (refsw2)
+        .in_vol(pp_invol),
+        .shad_mult({1'b0, regs.fpu_shad_scale.scale_factor}
+                   + {8'd0, regs.fpu_shad_scale.scale_factor[7]}),
         .fog_den_f32(fog_den_f32),
         .fog_col_ram(regs.fog_col_ram),.fog_col_vert(regs.fog_col_vert),
         .fog_clamp_max(regs.fog_clamp_max),.fog_clamp_min(regs.fog_clamp_min),
@@ -1160,6 +1182,7 @@ module peel_core import tsp_pkg::*; #(
                S_CLEAR_WR=34,              // CLEAR: write {bg_depth, bg_tag} chunks
                S_PEEL_BUF_RUN=35,          // PeelBuffers RMW walk (read A -> write B)
                S_ZK_INV=36,                // z_keep=1 OP: invalidate htile tags (keep depth)
+               S_MV_SUM=37,                // modvol volume end: SummarizeStencilOr/And walk
                // forward punch-through resolve phase (see the pt_phase comment)
                S_PT_BUF=39,                // wait taginvw credit; clear pt_res; prime walk
                S_PT_INIT=40,               // seed walk: Zceil<-Zop, boundary, working
@@ -1259,6 +1282,31 @@ module peel_core import tsp_pkg::*; #(
     reg        first_peel;      // this tile's FIRST PeelBuffers (seeds the reference tag:
                                 //   pb2 <- TAG_INVALID_SENTINEL instead of copying tagA)
 
+    // ---- OPAQUE MODIFIER VOLUMES (RSTATE_OM; mv_phase declared with u_stencil) ----
+    // refsw2 RenderCORE order for a tile is: raster the OPAQUE list -> raster the
+    // OPAQUE_MOD list into the stencil -> RenderParamTags<RM_OPAQUE> (the shade that
+    // reads the stencil). polly2 normally hands the OP shade off the moment the OP
+    // raster drains; with modifier volumes that handoff must WAIT for the OM list,
+    // because handing it flips htile and the stencil the shade needs is built in the
+    // half it is flipping away from. om_pending records "this entry has an OM list"
+    // (region_out.has_om, latched at RSTATE_OP) and op_drew snapshots the OP raster's
+    // pass_drew across the OM raster, which resets it.
+    reg        mv_en;           // +nomodvol: skip the OM phase entirely (A/B bisect aid)
+`ifndef SYNTHESIS
+    initial mv_en = !$test$plusargs("nomodvol");
+`else
+    initial mv_en = 1'b1;
+`endif
+    reg        om_pending;      // defer this entry's OP shade until RSTATE_OM completes
+    reg        op_drew;         // pass_drew of the DEFERRED OP raster
+    // A volume ends at a triangle whose ISP word carries VolumeMode != 0 (the same
+    // bits as DepthMode), and refsw2 summarizes the whole tile right after
+    // rasterizing it. So the modvol raster is BARRIERED per volume: the triangle is
+    // popped with chaining disabled (mv_hold), the consumer drains to RS_IDLE, the
+    // FSM runs the S_MV_SUM walk, and only then may the next triangle pop.
+    reg        mv_hold;         // a volume-last triangle is in flight / its summarize is due
+    reg        mv_ret_drain;    // S_MV_SUM returns to S_DRAIN (else S_OL_RUN)
+
     // ---- single shared shade sub-phase (ONE tsp_shade_v2_pp pipeline) ----
     // Invoked as a subroutine after OP and after each peel pass. The TSP pipeline
     // ALWAYS blends (refsw PixelFlush_tsp always runs BlendingUnit); the tag's
@@ -1267,6 +1315,55 @@ module peel_core import tsp_pkg::*; #(
     //   0 = OP  : shade every pixel of the tile
     //   1 = PEEL: shade only pixels staged this pass (dt_valid)
     integer    sh_pending;   // pixels presented this shade sub-phase (PEEL skips some)
+
+    // ============ MODIFIER-VOLUME stencil instances (ping-pong on htile) ============
+    // Placed here, not beside u_taginvw, because its ports reference the FSM state
+    // (st/mv_phase) and the bulk-walk cursors declared just above.
+    wire        st_pb_zero = pb_bufwr_valid && ((st == S_PEEL_BUF_RUN) || (st == S_PT_INIT)
+                                             || (st == S_PT_SWAP)     || (st == S_PT_FIX));
+    assign st_clr_valid = pb_clr_valid || st_pb_zero;
+    assign st_clr_addr  = pb_clr_valid ? pb_clr_addr : pb_bufwr_addr;
+    genvar gst;
+    generate
+      for (gst = 0; gst < 2; gst = gst + 1) begin : gstencil
+        wire ti_prod = (tag_prod == gst[0]);
+        wire ti_cons = (tag_cons == gst[0]);
+        // ---- MODIFIER-VOLUME stencil, ping-ponged on the SAME htile index ----
+        // Produced entirely within one raster half: the tile CLEAR zeroes it, the OM
+        // list's raster flips it, the summarize walk folds it into the INV bit, and
+        // the OP shade that immediately follows reads it out of the consumer half.
+        // Sharing htile is what keeps it coherent with the tags it qualifies - the
+        // credit that says "ISP may write this half again" is the same credit.
+        //
+        // z_keep=1 CAVEAT: refsw2 carries the stencil INV bit across a z_keep entry
+        // (only ClearBuffers zeroes it), but a z_keep entry's OP lands on the OTHER
+        // half, whose INV is two passes stale. No dump in polly2-data has more than
+        // one region entry per tile except `logo`, which has no modifier volumes, so
+        // this has never been observable; fixing it would need a copy walk at the
+        // handoff (or an unconditional stall on both halves) and neither is worth it
+        // until a scene shows it.
+        stencil_tile_buffer #(.LANES(RAS_LANES)) u_stencil (
+            .clk(clk), .reset(reset),
+            // raster stage A / stage B (producer half only)
+            // (only the modvol phase reads/writes it - gating stage A on mv_phase
+            //  keeps the buffer completely inert for OP/PT/TL rasters)
+            .ras_a_valid(ti_prod && pb_ra_valid && mv_phase),
+            .ras_a_y(ras_oy), .ras_a_x(ras_ox),
+            .ras_b_valid(ti_prod && b_valid && b_modvol), .mv_we(b_mv_we),
+            .b_y(b_oy), .b_x(b_ox),
+            // CLEAR + the PT/TL peel zero walks (producer half only)
+            .clr_valid(ti_prod && st_clr_valid), .clr_addr(st_clr_addr),
+            // summarize RMW walk (producer half only)
+            .sum_rd_valid(ti_prod && (st == S_MV_SUM)),      .sum_rd_addr(pb_rd),
+            .sum_wr_valid(ti_prod && (st == S_MV_SUM) && pb_pipe), .sum_wr_addr(pb_i),
+            .sum_and(mv_sum_and),
+            // 4-wide aligned read (spanner_v2), consumer half only
+            .rd4_valid(ti_cons && spv_rd_valid), .rd4_group(spv_rd_group),
+            .g4_inv(g4_inv_h[gst])
+        );
+      end
+    endgenerate
+
 
     // ---- CONCURRENT TSP shade FSM (tst) + ISP<->TSP handshake (Milestone 2) ----
     // The shade sub-phase is now its own state machine (tst), stepped every cycle in
@@ -1325,6 +1422,7 @@ module peel_core import tsp_pkg::*; #(
     reg [2:0]  ns_rep;
     reg [30:0] ns_invw [0:3];
     reg        ns_at;
+    reg [3:0]  ns_inv;
     reg [12:0] ns_wm;
     // Stage C expand: current span being expanded + pixel counter k
     reg        cs_v;          // a span is being expanded (cs_* valid)
@@ -1332,6 +1430,7 @@ module peel_core import tsp_pkg::*; #(
     reg [2:0]  cs_rep;
     reg [30:0] cs_invw [0:3];
     reg        cs_at;
+    reg [3:0]  cs_inv;
     reg [12:0] cs_wm;
     reg [2:0]  cs_k;          // pixel-within-span 0..rep-1
     // Stage C: the pixel emitted last cycle -> feeds pp with fresh planes (tsg_r_* for cs_id).
@@ -1339,6 +1438,7 @@ module peel_core import tsp_pkg::*; #(
     reg [9:0]  s2_p;          // pixel index (y:x)
     reg [30:0] s2_invw;
     reg        s2_at;
+    reg        s2_inv;        // this pixel is inside a shadow volume (cheap-shadow scale)
     reg [9:0]  s2_id;         // held to re-present the tsg read on pp_stall
     reg [12:0] s2_wm;         // its span's alloc watermark (cons_seq feedback)
     reg        s2_last;       // this pixel is its span's LAST -> advance cons_seq
@@ -1514,6 +1614,10 @@ module peel_core import tsp_pkg::*; #(
     // stage-B writes) and the setup retire stops pushing pq. The pass then reaches
     // S_DRAIN fast, where the pt_stop peek skips the spanner handover too.
     wire       pt_dead   = pt_phase && pt_stop;
+    // MODVOL "this triangle closes a volume", evaluated at RS_POP off the plane-FIFO
+    // word being spliced in. ISP[31:29] is VolumeMode for a modifier-volume record.
+    wire       mv_vlast = mv_phase && (pq_rdw[QF_ISP+29 +: 3] != 3'd0);
+
     wire [4:0] rp_bx0    = pq_rdw[QF_BX0 +: 5];
     wire [4:0] rp_bx1    = pq_rdw[QF_BX1 +: 5];
     wire [4:0] rp_by0    = pq_rdw[QF_BY0 +: 5];
@@ -1626,6 +1730,33 @@ module peel_core import tsp_pkg::*; #(
     integer pc_occ [0:7];       // occupancy histogram, index = {isp,spn,tsp}
     integer pc_i;               // loop var (reset / dump)
     integer pc_isp_busy, pc_spn_busy, pc_tsp_busy;   // per-engine busy-cycle totals
+    // ---- +mvdump : PER-PIXEL modifier-volume complexity, written out as its own BMP.
+    // Three screen-sized counters, in ABSOLUTE screen coordinates:
+    //   mvpx_cover : modvol fragments whose coverage test accepted this pixel
+    //   mvpx_pass  : of those, how many also passed the forced-GE depth test - i.e.
+    //                how many times the pixel's stencil FLIP bit was toggled
+    //   mvpx_shade : the pixel was finally shaded with in_vol=1 (the shadow applied)
+    // A CLOSED volume touches every pixel an EVEN number of times, so an odd
+    // mvpx_cover is a watertightness failure (a dropped or duplicated face) and an
+    // odd mvpx_pass within a volume is what actually leaks a shadow. Screen-sized
+    // (not tile-sized) so tile-aligned discontinuities are visible at a glance.
+    localparam integer MVPX_W = 1280, MVPX_H = 480;
+    (* verilator public_flat_rw *) integer mvpx_cover [0:MVPX_W*MVPX_H-1];
+    (* verilator public_flat_rw *) integer mvpx_pass  [0:MVPX_W*MVPX_H-1];
+    (* verilator public_flat_rw *) integer mvpx_shade [0:MVPX_W*MVPX_H-1];
+    integer mvpx_en = 0;
+    integer mvpx_i;
+    initial begin
+        if ($test$plusargs("mvdump")) mvpx_en = 1;
+        for (mvpx_i = 0; mvpx_i < MVPX_W*MVPX_H; mvpx_i = mvpx_i + 1) begin
+            mvpx_cover[mvpx_i] = 0; mvpx_pass[mvpx_i] = 0; mvpx_shade[mvpx_i] = 0;
+        end
+    end
+
+    integer pc_mv_sum;          // SummarizeStencilOr/And walks run
+    integer pc_mv_tri;          // modvol triangles rastered
+    integer pc_mv_flip;         // modvol stage-B chunks with >=1 lane flipping
+    integer pc_mv_inv;          // shaded pixels with in_vol=1
     integer pc_shwait;          // ISP stalled on the u_taginvw credit (S_PEEL_BUF)
     integer pc_post_stall;      // reader stalled on the u_col credit (R_POST)
     integer pc_op_ff;           // OP-region shade fire-and-forgets (count of requests)
@@ -1790,6 +1921,7 @@ module peel_core import tsp_pkg::*; #(
         pp_tcw      = tsg_r_tcw;
         pp_ptex     = tsg_r_ptex;
         pp_pofs     = tsg_r_pofs;
+        pp_invol    = s2_inv;
         for (pj = 0; pj < 10; pj = pj + 1) begin
             pp_ddx[pj] = tsg_r_ddx[pj];
             pp_ddy[pj] = tsg_r_ddy[pj];
@@ -1826,6 +1958,7 @@ module peel_core import tsp_pkg::*; #(
             for (pc_i=0; pc_i<8; pc_i=pc_i+1) pc_occ[pc_i]<=0;
             pc_isp_busy<=0; pc_spn_busy<=0; pc_tsp_busy<=0;
             pc_shwait<=0; pc_post_stall<=0; pc_op_ff<=0;
+            pc_mv_sum<=0; pc_mv_tri<=0; pc_mv_flip<=0; pc_mv_inv<=0;
             for (pc_i=0; pc_i<IA_N; pc_i=pc_i+1) pc_isp_alone[pc_i]<=0;
             for (pc_i=0; pc_i<RI_N; pc_i=pc_i+1) pc_ras_idle_by[pc_i]<=0;
             pc_hand<=0; pc_span<=0; pc_drain<=0; pc_blend<=0; pc_swrite<=0;
@@ -1842,6 +1975,8 @@ module peel_core import tsp_pkg::*; #(
             ol_walk_done<=1'b0;
             pt_phase<=1'b0; pt_pass<=8'd0; pt_sh_pend<=3'd0; pt_more<=11'd0;
             pt_hand_p<=1'b0; pt_free_p<=1'b0; pt_stop<=1'b0;
+            mv_phase<=1'b0; mv_hold<=1'b0; mv_sum_and<=1'b0; mv_ret_drain<=1'b0;
+            om_pending<=1'b0; op_drew<=1'b0; b_modvol<=1'b0;
             cb_ptres<=1'b0; cb2_ptres<=1'b0;
             ti_ptres[0]<=1'b0; ti_ptres[1]<=1'b0;
             b_fwd<=1'b0;
@@ -2005,6 +2140,7 @@ module peel_core import tsp_pkg::*; #(
                 b_zwdis  <= tq_zwdis[ras_qi];
                 b_peeling<= peeling;
                 b_fwd    <= pt_phase;   // forward PT-resolve compare select
+                b_modvol <= mv_phase;   // modifier-volume (stencil-only) select
                 b_which  <= tq_ispt [ras_qi]; // per-triangle list-kind (threaded via
                                          // fq/pq), NOT the live peel_which reg -> safe
                                          // when PT+TL coexist in-flight
@@ -2118,6 +2254,39 @@ module peel_core import tsp_pkg::*; #(
             end
 `ifndef SYNTHESIS
             if (sp_we) pc_swrite <= pc_swrite + 1;   // spans written to the dense buffer
+            // +mvpx=X +mvpy=Y : every modifier-volume fragment tested at one screen
+            // pixel, with its coverage and its forced-GE depth verdict. This is the
+            // only place the stencil PARITY is observable: a closed volume shows an
+            // even number of covering faces with an ODD number passing when the
+            // surface is inside it. An odd COVERING count means the volume is open
+            // (or a face was dropped) - the classic shadow leak.
+            if ($test$plusargs("mvpx") && b_valid && b_modvol) begin : mvpxtr
+                integer mvx, mvy, ml;
+                mvx = -1; mvy = -1;
+                void'($value$plusargs("mvpx=%d", mvx));
+                void'($value$plusargs("mvpy=%d", mvy));
+                for (ml = 0; ml < RAS_LANES; ml = ml + 1)
+                    if (({cur_tx, b_ox} + ml) == mvx && {cur_ty, b_oy} == mvy)
+                        $display("[MVPX] (%0d,%0d) tag=%08x covers=%b pass=%b invw=%08x",
+                                 mvx, mvy, b_tag, b_inside[ml], b_mv_we[ml], b_invw[31*ml +: 31]);
+            end
+            if (mvpx_en && b_valid && b_modvol) begin : mvpxacc
+                integer ml; integer sx, sy;
+                sy = {cur_ty, b_oy};
+                for (ml = 0; ml < RAS_LANES; ml = ml + 1) begin
+                    sx = {cur_tx, b_ox} + ml;
+                    if (sx < MVPX_W && sy < MVPX_H) begin
+                        if (b_inside[ml]) mvpx_cover[sy*MVPX_W + sx] = mvpx_cover[sy*MVPX_W + sx] + 1;
+                        if (b_mv_we[ml])  mvpx_pass [sy*MVPX_W + sx] = mvpx_pass [sy*MVPX_W + sx] + 1;
+                    end
+                end
+            end
+            if (mvpx_en && pp_in_valid && !pp_stall && pp_invol
+                && pp_px < MVPX_W && pp_py < MVPX_H)
+                mvpx_shade[pp_py*MVPX_W + pp_px] = mvpx_shade[pp_py*MVPX_W + pp_px] + 1;
+            if (mv_phase && rs_st==RS_POP)          pc_mv_tri  <= pc_mv_tri + 1;
+            if (b_valid && b_modvol && (|b_mv_we))  pc_mv_flip <= pc_mv_flip + 1;
+            if (pp_in_valid && !pp_stall && pp_invol) pc_mv_inv <= pc_mv_inv + 1;
 `endif
 
             // ============ OL->eq PRODUCER + list-done / PT->TL chain ============
@@ -2240,6 +2409,13 @@ module peel_core import tsp_pkg::*; #(
                 RSTATE_OP: if (!ti_ready[htile]) begin
                     peeling  <= 1'b0;
                     pass_drew <= 1'b0;         // fresh pass: track its stage-B accepts
+                    // Modifier volumes for this entry? Then the OP SHADE is deferred
+                    // until RSTATE_OM has built the stencil (see the om_pending decl).
+                    // Only in CHEAP-SHADOW mode: with intensity_shadow=0 the volume
+                    // would select a second TSP/TCW + colour plane set, which is not
+                    // implemented, so the whole OM phase is skipped and the scene
+                    // renders exactly as it did before.
+                    om_pending <= ra_out.has_om && regs.fpu_shad_scale.intensity_shadow && mv_en;
                     ol_list_ptr <= ra_out.list_ptr;
                     ol_start <= 1'b1;          // walk starts NOW either way: during
                     ol_walk_done <= 1'b0;      // S_ZK_INV the walker/iterator/setup
@@ -2254,6 +2430,27 @@ module peel_core import tsp_pkg::*; #(
                         pb_pipe <= 1'b0;
                         st <= S_ZK_INV;
                     end else begin
+                        st <= S_OL_RUN;
+                    end
+                end
+                // OPAQUE MODIFIER VOLUMES (refsw2 RenderObjectList(RM_MODIFIER, ...)
+                // between the opaque raster and RenderParamTags<RM_OPAQUE>). The OP
+                // shade was NOT handed at RSTATE_OP (om_pending), so u_taginvw[htile]
+                // and u_stencil[htile] are still ours: raster the OM list into the
+                // stencil (mv_phase => forced-GE compare, no depth/tag write, flip
+                // only), summarize at each volume end, then hand the deferred shade
+                // from the mv branch of S_DRAIN.
+                RSTATE_OM: begin
+                    if (!om_pending) begin
+                        // intensity_shadow=0: two-volume mode, not implemented. Skip.
+                        ra_ack.list_done <= 1'b1; st <= S_RA_ACK;
+                    end else begin
+                        peeling   <= 1'b0;
+                        mv_phase  <= 1'b1;
+                        mv_hold   <= 1'b0;
+                        pass_drew <= 1'b0;
+                        ol_list_ptr <= ra_out.list_ptr;
+                        ol_start <= 1'b1; ol_walk_done <= 1'b0;
                         st <= S_OL_RUN;
                     end
                 end
@@ -2466,13 +2663,44 @@ module peel_core import tsp_pkg::*; #(
             // above (it may have started during the PeelBuffers/z_keep walk); this
             // state just waits until every list of the walk has been presented,
             // then closes the pass with the barrier.
-            S_OL_RUN: if (ol_walk_done) st <= S_DRAIN;
+            // A volume-last modvol triangle holds the raster consumer at RS_IDLE
+            // (mv_hold blocks the pop), so the summarize can run before the next
+            // volume starts flipping parity. Take it here as well as at S_DRAIN:
+            // the OL walk may still be feeding triangles behind it.
+            S_OL_RUN: if (mv_hold && rs_st == RS_IDLE && !b_valid) begin
+                pb_rd <= '0; pb_i <= '0; pb_pipe <= 1'b0;
+                mv_ret_drain <= 1'b0;
+                st <= S_MV_SUM;
+            end else if (ol_walk_done) st <= S_DRAIN;
+
+            // SummarizeStencilOr / SummarizeStencilAnd over the whole tile: the same
+            // read-ahead / delayed-write chunk walk as PeelBuffers, but on u_stencil
+            // only (u_peel's ports are idle here). mv_hold gates the raster consumer
+            // for its duration, so no flip can race the fold.
+            S_MV_SUM: begin
+                pb_pipe <= 1'b1;
+                pb_i    <= pb_rd;
+                if (pb_pipe && pb_i == CHUNK_AW'(NCHUNK-1)) begin
+`ifndef SYNTHESIS
+                    pc_mv_sum <= pc_mv_sum + 1;
+`endif
+                    mv_hold <= 1'b0;
+                    st <= mv_ret_drain ? S_DRAIN : S_OL_RUN;
+                end else if (pb_rd != CHUNK_AW'(NCHUNK-1)) pb_rd <= pb_rd + 1'b1;
+            end
 
             // BARRIER at list end: wait for the entry FIFO + iterator + triangle
             // FIFO + setup/raster to all drain before letting region advance.
             //  - OP  : run the OP shade sub-phase, then ack the region.
             //  - peel: run the peel shade sub-phase, then decide whether to peel again.
-            S_DRAIN: if (fq_empty && consumer_idle) begin
+            // A pending volume summarize is taken FIRST: mv_hold parks the raster
+            // consumer at RS_IDLE with pq possibly non-empty, so consumer_idle would
+            // never come true and the barrier below would deadlock.
+            S_DRAIN: if (mv_hold && rs_st == RS_IDLE && !b_valid) begin
+                pb_rd <= '0; pb_i <= '0; pb_pipe <= 1'b0;
+                mv_ret_drain <= 1'b1;
+                st <= S_MV_SUM;
+            end else if (fq_empty && consumer_idle) begin
                 if (pt_phase) begin
                     if (!pass_drew || pt_stop) begin
                         // ABORTED PT pass, two flavours, both skipping the spanner
@@ -2591,6 +2819,37 @@ module peel_core import tsp_pkg::*; #(
                             ra_ack.list_done <= 1'b1; st <= S_RA_ACK;
                         end
                     end
+                end else if (mv_phase || om_pending) begin
+                    // ---- OP shade handoff, DEFERRED across this entry's OM list ----
+                    // !mv_phase : the OP raster just drained but RSTATE_OM has not run
+                    //   yet. Do NOT hand - the handoff flips htile, and the stencil the
+                    //   shade needs is built in the half we would be flipping away from.
+                    //   Snapshot pass_drew (the OM raster resets it) and just ack, so
+                    //   the region parser presents RSTATE_OM.
+                    //  mv_phase : the modvol raster + its final summarize have drained,
+                    //   the stencil is final -> hand the OP shade now. This is the same
+                    //   handoff as the plain-OP branch below, on op_drew instead of
+                    //   pass_drew.
+                    if (mv_phase) begin
+                        mv_phase   <= 1'b0;
+                        om_pending <= 1'b0;
+                        if (!(zk_entry && !op_drew)) begin
+                            ti_ready[htile] <= 1'b1;
+                            ti_mode [htile] <= zk_entry;
+                            ti_last [htile] <= 1'b0;
+                            ti_ptres[htile] <= 1'b0;
+                            ti_postonly[htile] <= 1'b0;
+                            ti_tx   [htile] <= cur_tx; ti_ty[htile] <= cur_ty;
+                            htile <= ~htile;
+`ifndef SYNTHESIS
+                            pc_op_ff <= pc_op_ff + 1;
+                            pc_hand  <= pc_hand + 1;
+`endif
+                        end
+                    end else begin
+                        op_drew <= pass_drew;
+                    end
+                    st <= S_OP_DONE;
                 end else if (zk_entry && !pass_drew) begin
                     // EMPTY z_keep OP pass: the valid-gated shade (ti_mode=1) would
                     // shade nothing - skip the spanner handover entirely (no htile
@@ -2713,6 +2972,8 @@ module peel_core import tsp_pkg::*; #(
                          tri_count, cull_count, hit_count, miss_count);
 `ifndef SYNTHESIS
                 $display("=== PERF (active clks=%0d) ===", pc_total);
+                $display("  MODVOL: tris=%0d flip-chunks=%0d summarize-walks=%0d shaded-in-volume-px=%0d",
+                         pc_mv_tri, pc_mv_flip, pc_mv_sum, pc_mv_inv);
                 $display("  ISP/raster:  RAS=%0d (%0d%%)  POP=%0d  DRAIN=%0d  CORNER=%0d  IDLE=%0d (%0d%%)",
                     pc_ras_active, (pc_ras_active*100)/(pc_total?pc_total:1),
                     pc_ras_pop, pc_ras_drain, pc_ras_corner,
@@ -2981,6 +3242,7 @@ module peel_core import tsp_pkg::*; #(
                 reg [9:0]  src_start, src_id;
                 reg [2:0]  src_rep;
                 reg        src_at;
+                reg [3:0]  src_inv;
                 reg [30:0] src_invw [0:3];
                 reg [12:0] src_wm;
                 integer    si;
@@ -2996,12 +3258,12 @@ module peel_core import tsp_pkg::*; #(
                 src_v = ns_v || dsr_rdy;
                 if (ns_v) begin
                     src_start = ns_start; src_id = ns_id; src_rep = ns_rep; src_at = ns_at;
-                    src_wm = ns_wm;
+                    src_wm = ns_wm; src_inv = ns_inv;
                     for (si=0; si<4; si=si+1) src_invw[si] = ns_invw[si];
                 end else begin  // bypass from dsr_* (shared ring, no half index)
                     src_start = dsr_start; src_id = dsr_id;
                     src_rep = dsr_rep; src_at = dsr_at;
-                    src_wm = dsr_wm;
+                    src_wm = dsr_wm; src_inv = dsr_inv;
                     for (si=0; si<4; si=si+1) src_invw[si] = dsr_invw[si];
                 end
                 // accept a span into EXPAND when the current one finishes and a src is available.
@@ -3019,6 +3281,7 @@ module peel_core import tsp_pkg::*; #(
                     s2_p    <= cs_start + {7'd0, cs_k};
                     s2_invw <= cs_invw[cs_k];
                     s2_at   <= cs_at;
+                    s2_inv  <= cs_inv[cs_k];
                     s2_id   <= cs_id;
                     s2_wm   <= cs_wm;
                     s2_last <= span_done;   // span's final pixel -> cons_seq authority
@@ -3050,6 +3313,7 @@ module peel_core import tsp_pkg::*; #(
                         cs_rep   <= src_rep;
                         cs_wm    <= src_wm;
                         cs_at    <= src_at;
+                        cs_inv   <= src_inv;
                         for (pj2 = 0; pj2 < 4; pj2 = pj2 + 1) cs_invw[pj2] <= src_invw[pj2];
                     end else begin
                         cs_v <= 1'b0;   // nothing available: EXPAND idles
@@ -3072,6 +3336,7 @@ module peel_core import tsp_pkg::*; #(
                     ns_id    <= dsr_id;
                     ns_rep   <= dsr_rep;
                     ns_at    <= dsr_at;
+                    ns_inv   <= dsr_inv;
                     ns_wm    <= dsr_wm;
                     for (pj2 = 0; pj2 < 4; pj2 = pj2 + 1) ns_invw[pj2] <= dsr_invw[pj2];
                 end else if (accept && ns_v) begin
@@ -3294,7 +3559,11 @@ module peel_core import tsp_pkg::*; #(
             // is pre-swap. Raster alone must wait for the walk to finish.
             pq_pop = 1'b0;
             case (rs_st)
-            RS_IDLE: if (!pq_empty && !(st == S_PEEL_BUF || st == S_PEEL_BUF_RUN
+            // mv_hold: a volume-last modvol triangle has been popped and its
+            // SummarizeStencilOr/And has not run yet. The next volume's parity flips
+            // must not start until the fold is done, so hold the pop here (this is
+            // also what lets the top FSM see rs_st==RS_IDLE and take S_MV_SUM).
+            RS_IDLE: if (!pq_empty && !mv_hold && !(st == S_PEEL_BUF || st == S_PEEL_BUF_RUN
                                         || st == S_ZK_INV || st == S_PT_BUF
                                         || st == S_PT_INIT || st == S_PT_SWAP
                                         || st == S_PT_FIX)) begin
@@ -3317,6 +3586,22 @@ module peel_core import tsp_pkg::*; #(
                 isp_tl<=pq_rdw[QF_TL +:4];
                 isp_word<=pq_rdw[QF_ISP +:32]; tri_tag<=pq_rdw[QF_TAG +:32];
                 tri_is_pt<=pq_rdw[QF_PT];
+                // MODVOL volume end: ISP[31:29] is VolumeMode here (same bits as
+                // DepthMode), 1 = "inside last" -> OR fold, 2 = "outside last" -> AND
+                // fold, 0 = a plain interior polygon. A non-zero one closes the
+                // volume: refsw2 summarizes the whole tile immediately after
+                // rasterizing it, so raise mv_hold (blocks the next pop, disables
+                // chaining below) and let the top FSM run S_MV_SUM once this
+                // triangle's chunks have drained.
+`ifndef SYNTHESIS
+                if (mv_phase && $test$plusargs("mvtrace") && mv_vlast)
+                    $display("[MVPOP] tile(%0d,%0d) isp=%08x tag=%08x vlast=%b",
+                             cur_tx, cur_ty, pq_rdw[QF_ISP +:32], pq_rdw[QF_TAG +:32], mv_vlast);
+`endif
+                if (mv_vlast) begin
+                    mv_hold    <= 1'b1;
+                    mv_sum_and <= (pq_rdw[QF_ISP+29 +: 3] == 3'd2);
+                end
                 // identity sideband: claim the next slot for this triangle (its
                 // chunks carry the slot index through u_line to stage A). A
                 // clip-skipped triangle issues NO chunks and must NOT claim -
@@ -3361,7 +3646,7 @@ module peel_core import tsp_pkg::*; #(
                 // next triangle.
                 if (ptc_empty) begin
                     cr_issue <= 1'b0;
-                    if (ch_pop && !pq_empty) begin
+                    if (ch_pop && !pq_empty && !mv_vlast) begin
                         pq_rdw  <= pq_ram[pq_head[2:0]];
                         pq_head <= (pq_head==PQ_N-1) ? 4'd0 : pq_head+4'd1;
                         pq_pop   = 1'b1;
@@ -3407,7 +3692,7 @@ module peel_core import tsp_pkg::*; #(
                         // abort the rest of the sweep; the in-flight chunks are
                         // no-ops (no coverage -> no writes). CHAIN to the next
                         // same-pass triangle if one is queued (see RS_POP note).
-                        if (ch_abort && !pq_empty) begin
+                        if (ch_abort && !pq_empty && !mv_hold) begin
                             pq_rdw  <= pq_ram[pq_head[2:0]];
                             pq_head <= (pq_head==PQ_N-1) ? 4'd0 : pq_head+4'd1;
                             pq_pop   = 1'b1;
@@ -3422,7 +3707,7 @@ module peel_core import tsp_pkg::*; #(
                             // sweep done. Same-pass triangles CHAIN with no pipe
                             // drain: only the pass-end (empty pq) needs RS_DRAIN,
                             // for the barrier + last write-back.
-                            if (ch_row && !pq_empty) begin
+                            if (ch_row && !pq_empty && !mv_hold) begin
                                 pq_rdw  <= pq_ram[pq_head[2:0]];
                                 pq_head <= (pq_head==PQ_N-1) ? 4'd0 : pq_head+4'd1;
                                 pq_pop   = 1'b1;

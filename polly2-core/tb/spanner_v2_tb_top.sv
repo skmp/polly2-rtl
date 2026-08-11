@@ -39,6 +39,7 @@ module spanner_v2_tb_top import tsp_pkg::*; (
     reg  [31:0] ti_tag  [0:3];
     reg  [30:0] ti_invw [0:3];   // sign-stripped (DUT depth transport is 31-bit)
     reg  [3:0]  ti_pt;
+    wire [3:0]  ti_inv = 4'd0;   // no modifier volumes in the replay vectors
 
     // 1-cycle registered read of the 4 aligned lanes [rd_group .. rd_group+3].
     integer li;
@@ -90,6 +91,7 @@ module spanner_v2_tb_top import tsp_pkg::*; (
     wire [2:0]   sp_rep;
     wire [30:0]  sp_invw [0:3];
     wire         sp_at;
+    wire [3:0]   sp_inv;
 
     // span_out store (public), one entry per run-start pixel index.
     (* verilator public_flat_rw *) reg        spo_valid [0:NSLOT-1];  // slot holds a span
@@ -168,12 +170,13 @@ module spanner_v2_tb_top import tsp_pkg::*; (
         .tsp_go(tsp_go), .tsp_rd_done(tsp_rd_done),
         .rd_valid(rd_valid), .rd_group(rd_group),
         .ti_valid(ti_valid), .ti_tag(ti_tag), .ti_invw(ti_invw), .ti_pt(ti_pt),
+        .ti_inv(ti_inv),
         .ts_we(ts_we), .ts_id(ts_id),
         .ts_isp(ts_isp), .ts_tsp(ts_tsp), .ts_tcw(ts_tcw),
         .ts_ddx(ts_ddx), .ts_ddy(ts_ddy), .ts_c(ts_c),
         .sp_we(sp_we), .sp_slot(sp_slot), .sp_first(sp_first), .sp_last(sp_last),
         .sp_cnt_z(sp_cnt_z), .sp_start(sp_start), .sp_id(sp_id), .sp_rep(sp_rep),
-        .sp_invw(sp_invw), .sp_at(sp_at), .sp_ready(1'b1),
+        .sp_invw(sp_invw), .sp_at(sp_at), .sp_inv(sp_inv), .sp_ready(1'b1),
         .dreq(ddr_req), .dresp(ddr_resp)
     );
 endmodule

@@ -93,6 +93,14 @@ module spanner_v2 import tsp_pkg::*; #(
     input      [31:0]           ti_tag  [0:3],
     input      [30:0]           ti_invw [0:3],
     input      [3:0]            ti_pt,       // per-lane PT alpha-test bit
+    // per-lane MODIFIER-VOLUME stencil bit (stencil_tile_buffer, same 4-wide group
+    // read as the tag buffer). refsw2 RenderParamTags:
+    //     InVolume = (stencil & 1) && tag.shadow
+    // and the CHEAP-SHADOW colour scale applies only when
+    // FPU_SHAD_SCALE.intensity_shadow is set (the two-volume TSP/TCW path is not
+    // implemented). Both gates are folded in HERE, at the COAL latch, so the span
+    // carries a ready-to-use per-pixel "apply the shadow scale" bit.
+    input      [3:0]            ti_inv,
 
     // ---- OUT: triangle_setups WRITE (SETUP engine) ----
     output reg                  ts_we,
@@ -120,6 +128,7 @@ module spanner_v2 import tsp_pkg::*; #(
     output reg [2:0]            sp_rep,      // run length 1..4 (all covered pixels shaded)
     output reg [30:0]           sp_invw [0:3], // per-covered-pixel invW (lanes 0..rep-1)
     output reg                  sp_at,       // PT alpha-test enable (run-start lane)
+    output reg [3:0]            sp_inv,      // per-covered-pixel "in shadow volume"
     input                       sp_ready,    // span consumer (expander) can accept this cycle
 
     // ---- DDR client for the internal record_fetcher ----
@@ -260,6 +269,7 @@ module spanner_v2 import tsp_pkg::*; #(
     reg              t_ok;          // this run is SHADED (emit a span); else invalid (skip)
     reg [30:0]       t_invw [0:3];
     reg              t_at;
+    reg [3:0]        t_inv;         // per-covered-pixel "apply the cheap-shadow scale"
 
     wire [1:0] sg_lane = sg_x[1:0];              // intra-group position of sg_x
 
@@ -539,6 +549,7 @@ module spanner_v2 import tsp_pkg::*; #(
         sp_id      = emit_id;              // bump-allocated (or reused) ring id
         sp_rep     = t_rep;
         sp_at      = t_at;
+        sp_inv     = t_inv;
         for (k = 0; k < 4; k = k + 1) sp_invw[k] = t_invw[k];
         // span RING range of this pass (valid at busy->0). base = span_head at pass start,
         // cnt = span_head - base (wrap-safe via the extra MSB). cnt==0 => empty pass.
@@ -750,6 +761,14 @@ module spanner_v2 import tsp_pkg::*; #(
                     t_at     <= ti_pt[sg_lane];
                     for (q = 0; q < 4; q = q + 1)
                         t_invw[q] <= (q < run_rep) ? ti_invw[sg_lane + q[1:0]] : 31'd0;
+                    // InVolume = stencil.INV & tag.shadow, and only in cheap-shadow mode
+                    // (the two-volume TSP/TCW selection is not implemented, so an
+                    // intensity_shadow=0 scene must behave exactly as before). Every lane
+                    // of a shaded run carries run_tag, so the shadow bit is taken once.
+                    for (q = 0; q < 4; q = q + 1)
+                        t_inv[q] <= (q < run_rep)
+                                    ? (ti_inv[sg_lane + q[1:0]] & run_tag[27] & intensity_shadow)
+                                    : 1'b0;
                     // the dedup read for THIS descriptor is presented by the dedicated M10K
                     // block above (dd_re == coal_fires, dd_raddr == run_id); dd_rd_q resolves
                     // next cycle in EMIT. run_id/coal_fires are stable this cycle.

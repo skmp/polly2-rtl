@@ -67,6 +67,14 @@ module peel_tile_buffer import tsp_pkg::*; #(
     input                       b_fwd,       // 1 = forward PT-resolve compare
     input      [LANES-1:0]      b_res,       // per-lane RESOLVED bit (alpha passed
                                              // in an earlier PT pass): lane inert
+    // ---- MODIFIER VOLUME pass (b_peeling and b_fwd must both be 0) ----
+    // refsw2 PixelFlush_isp forces mode = 6 (greater-or-equal) for RM_MODIFIER and
+    // ignores the record's DepthMode field - the ISP word of a modvol record holds
+    // VolumeMode in those bits, not a depth mode. A modvol fragment writes NOTHING
+    // here (no depth, no tag, no valid): its only effect is the stencil flip, which
+    // stencil_tile_buffer performs from b_mv_we.
+    input                       b_modvol,
+    output     [LANES-1:0]      b_mv_we,     // per-lane modvol depth-test pass
     output     [LANES-1:0]      b_pass_lp,   // per-lane peel accept (for dt_pt)
     output     [LANES-1:0]      b_more,      // per-lane MoreToDraw (peel)
     output     [32*LANES-1:0]   b_oldtag,    // per-lane RESIDENT pending tag (tagBufferA
@@ -207,7 +215,7 @@ module peel_tile_buffer import tsp_pkg::*; #(
             // ignores the ISP field, so honoring a game's junk DepthMode here
             // would mis-compare against the opaque ceiling.
             isp_depth_cmp u_cmp (
-                .mode(b_fwd ? 3'd6 : b_mode),
+                .mode((b_fwd | b_modvol) ? 3'd6 : b_mode),
                 .nw  (b_invw[31*gd +: 31]),
                 .ob  (b_fwd ? f_zceil(rdata, gd) : f_depth(rdata, gd)),
                 .pass(ras_pass_op[gd]));
@@ -245,8 +253,11 @@ module peel_tile_buffer import tsp_pkg::*; #(
     // per-lane stage-B write-enable = inside & (peel | forward | opaque accept).
     // Exactly the `we[cw]` computed in the write mux below; exposed so u_taginvw
     // can duplicate the accepted {valid,tag,invW} write with an identical mask.
-    assign b_we = ras_b_valid ? (b_inside &
+    // A MODVOL fragment writes nothing (here or in u_taginvw) - it only flips the
+    // stencil - so b_we is forced low and the accept goes out on b_mv_we instead.
+    assign b_we = (ras_b_valid && !b_modvol) ? (b_inside &
                   (b_peeling ? ras_pass_lp : b_fwd ? ras_pass_fwd : ras_pass_op)) : '0;
+    assign b_mv_we = (ras_b_valid && b_modvol) ? (b_inside & ras_pass_op) : '0;
 
     // -------------------- READ port mux --------------------
     always @(*) begin
@@ -352,7 +363,7 @@ module peel_tile_buffer import tsp_pkg::*; #(
                 wdata[PEEL_W*cw + PW_ZCEIL  +: 31] = f_zceil(rdata, cw);
                 wdata[PEEL_W*cw + PW_VALID]        = 1'b0;
             end
-        end else if (ras_b_valid) begin            // stage B: depth-cmp write-back
+        end else if (ras_b_valid && !b_modvol) begin  // stage B: depth-cmp write-back
             waddr = pack_addr(b_y, b_x);
             for (cw = 0; cw < NB; cw = cw + 1) begin
                 if (b_inside[cw]) begin

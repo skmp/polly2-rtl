@@ -60,6 +60,18 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
     input             pp_texture,
     input             pp_offset,
 
+    // ---- CHEAP SHADOWS (modifier volumes, FPU_SHAD_SCALE.intensity_shadow=1) ----
+    // in_vol is the per-pixel "inside a shadow volume" bit the spanner resolved
+    // (stencil.INV & tag.shadow & intensity_shadow). refsw2 InterpolateBase /
+    // InterpolateOffs then scale the interpolated colour by
+    //     mult = to_u8_256(FPU_SHAD_SCALE.scale_factor) = s + (s >> 7)   (0..256)
+    // - ALL FOUR base channels, but only R/G/B of the offset colour (the reference
+    // leaves Ofs[3], the per-vertex fog weight, alone). The TWO-VOLUME path
+    // (intensity_shadow=0, a second TSP/TCW + colour plane set per record) is not
+    // implemented; peel_core forces in_vol low in that mode.
+    input             in_vol,
+    input      [8:0]  shad_mult,          // to_u8_256(FPU_SHAD_SCALE.scale_factor)
+
     // ---- FOG unit: per-render constants + the FOG_TABLE read port (reg_file) ----
     input      [31:0] fog_den_f32,        // FOG_DENSITY, pre-normalized to f32
     input      [31:0] fog_col_ram,        // FOG_COL_RAM
@@ -168,15 +180,18 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
     reg [4:0]  d_tc  [0:RCPLAT-1];
     reg        d_ptx [0:RCPLAT-1];
     reg        d_pof [0:RCPLAT-1];
+    reg        d_vol [0:RCPLAT-1];
     reg [IDW-1:0] d_id[0:RCPLAT-1];
     always @(posedge clk) begin
         if (en) begin
             d_px[0]<=px; d_py[0]<=py; d_tsp[0]<=tsp; d_tcw[0]<=tcw; d_tc[0]<=text_ctrl;
             d_ptx[0]<=pp_texture; d_pof[0]<=pp_offset; d_id[0]<=in_id;
+            d_vol[0]<=in_vol;
             for (s=1;s<RCPLAT;s=s+1) begin
                 d_px[s]<=d_px[s-1]; d_py[s]<=d_py[s-1]; d_tsp[s]<=d_tsp[s-1];
                 d_tcw[s]<=d_tcw[s-1]; d_tc[s]<=d_tc[s-1];
                 d_ptx[s]<=d_ptx[s-1]; d_pof[s]<=d_pof[s-1]; d_id[s]<=d_id[s-1];
+                d_vol[s]<=d_vol[s-1];
             end
         end
     end
@@ -187,6 +202,7 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
     wire [4:0]  rc_tc  = d_tc[RCPLAT-1];
     wire        rc_ptx = d_ptx[RCPLAT-1];
     wire        rc_pof = d_pof[RCPLAT-1];
+    wire        rc_vol = d_vol[RCPLAT-1];
     wire [IDW-1:0] rc_id = d_id[RCPLAT-1];
 
     // ==============================================================
@@ -231,13 +247,15 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
     reg [31:0] c_tsp [0:INTERPLAT-1], c_tcw [0:INTERPLAT-1];
     reg [4:0]  c_tc  [0:INTERPLAT-1];
     reg        c_ptx [0:INTERPLAT-1], c_pof [0:INTERPLAT-1];
+    reg        c_vol [0:INTERPLAT-1];
     reg [IDW-1:0] c_id[0:INTERPLAT-1];
     always @(posedge clk) if (en) begin
         c_tsp[0]<=rc_tsp; c_tcw[0]<=rc_tcw; c_tc[0]<=rc_tc;
-        c_ptx[0]<=rc_ptx; c_pof[0]<=rc_pof; c_id[0]<=rc_id;
+        c_ptx[0]<=rc_ptx; c_pof[0]<=rc_pof; c_id[0]<=rc_id; c_vol[0]<=rc_vol;
         for (s=1;s<INTERPLAT;s=s+1) begin
             c_tsp[s]<=c_tsp[s-1]; c_tcw[s]<=c_tcw[s-1]; c_tc[s]<=c_tc[s-1];
             c_ptx[s]<=c_ptx[s-1]; c_pof[s]<=c_pof[s-1]; c_id[s]<=c_id[s-1];
+            c_vol[s]<=c_vol[s-1];
         end
     end
     // fog alpha (FOGLAT deep) -> align with iv_ov (RCPLAT+INTERPLAT deep): delay the rest.
@@ -300,6 +318,7 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
     wire [4:0]  iv_tc  = c_tc[INTERPLAT-1];
     wire        iv_ptx = c_ptx[INTERPLAT-1];
     wire        iv_pof = c_pof[INTERPLAT-1];
+    wire        iv_vol = c_vol[INTERPLAT-1];
     wire [IDW-1:0] iv_id = c_id[INTERPLAT-1];
 
     // ---- colour/offset planes (2..9) -> u8 (combinational f2u8), packed for COMB. These
@@ -314,8 +333,31 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
     // (e.g. the bios BACKGROUND: SRCALPHA/INVSRCALPHA with vertex alpha 0) blends to
     // pure dst and shades whatever the colour buffer last held (black on a cold
     // buffer). Offset colour alpha is NOT affected (refsw2 InterpolateOffs).
-    wire [31:0] iv_base = {(iv_tsp[20] ? u8a[5] : 8'd255),u8a[4],u8a[3],u8a[2]};
-    wire [31:0] iv_ofs  = {u8a[9],u8a[8],u8a[7],u8a[6]};
+    // CHEAP-SHADOW scale: round((v * mult) / 256). mult==256 (the not-in-volume
+    // case) reduces to v exactly - v*256 is v<<8 and the +128 rounding term cannot
+    // carry into bit 8 - so a scene with no modifier volumes is bit-identical.
+    // refsw2 rounds the UNQUANTIZED float (`0.5f + IpU8(..) * mult / 256`); rounding
+    // the already-converted u8 instead can differ by at most 1 LSB, and only for
+    // pixels that are actually inside a volume.
+    wire [8:0] sh_mult = iv_vol ? shad_mult : 9'd256;
+    function automatic [7:0] sh_scale(input [7:0] v, input [8:0] m);
+        reg [16:0] p;
+        begin
+            p = {9'd0, v} * {8'd0, m} + 17'd128;
+            sh_scale = p[15:8];
+        end
+    endfunction
+    // ALL FOUR base channels scale (the UseAlpha=0 override below is applied AFTER,
+    // matching InterpolateBase); the offset colour scales R/G/B only.
+    wire [7:0] sb_b = sh_scale(u8a[2], sh_mult);
+    wire [7:0] sb_g = sh_scale(u8a[3], sh_mult);
+    wire [7:0] sb_r = sh_scale(u8a[4], sh_mult);
+    wire [7:0] sb_a = sh_scale(u8a[5], sh_mult);
+    wire [7:0] so_b = sh_scale(u8a[6], sh_mult);
+    wire [7:0] so_g = sh_scale(u8a[7], sh_mult);
+    wire [7:0] so_r = sh_scale(u8a[8], sh_mult);
+    wire [31:0] iv_base = {(iv_tsp[20] ? sb_a : 8'd255),sb_r,sb_g,sb_b};
+    wire [31:0] iv_ofs  = {u8a[9],so_r,so_g,so_b};
 
     // ==============================================================
     // Decode the per-pixel TCW/TSP fields for tex_unit (same bit layout as tex_fetch_pp).

@@ -36,7 +36,7 @@ BUILD = build
 CWD  := $(shell pwd)
 
 .PHONY: shade-drop raster-topleft coord-f32 interp depth-cmp-lp texfetchpl clean test tex tex-addr tex-uv tex-decode tex-filter tex-combiner \
-        oparse region regfile regen sortcache itquad itskip taginvw dense_span_buffer fog \
+        oparse region regfile regen sortcache itquad itskip taginvw dense_span_buffer fog modvol \
         frontendtsplp frontendtsplp-build golden-check spannerv2 mulc9 mul16sppro \
         add24sppro mulc9sppro add3sppro mul24sppro mul24c9sppro
 
@@ -56,7 +56,7 @@ RTL_EXTRA = rtl/fp/fp_add24.sv rtl/tsp/stage_interp.sv
 RTL_INC   = $(addprefix -y ,$(RTL_DIRS)) -Irtl/gen
 
 # ---- run the fast unit tests (TSP texture blocks + front-end block tests) ----
-test: tex oparse region regfile sortcache itquad itskip raster-topleft coord-f32 interp fog
+test: tex oparse region regfile sortcache itquad itskip raster-topleft coord-f32 interp fog modvol
 
 # ---- top-left bias / exact-edge raster regression ----
 # isp_setup_streamed + isp_raster_line on a coplanar fullscreen quad whose
@@ -182,6 +182,16 @@ oparse: | $(BUILD)
 	  $(TSP_PKG) tb/object_list_parser_tb_top.sv rtl/lists/object_list_parser.sv \
 	  $(CWD)/tb/object_list_parser_tb.cpp --Mdir $(BUILD)/obj_oparse -o tb
 	./$(BUILD)/obj_oparse/tb
+
+# opaque MODIFIER VOLUME unit test: stencil_tile_buffer (flip / SummarizeStencilOr /
+# ...And / clear / 4-wide INV read) vs a C model of refsw2's stencil byte, plus
+# peel_tile_buffer's b_modvol path (DepthMode forced to 6, b_mv_we, no write-back).
+modvol: | $(BUILD)
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) $(RTL_INC) --public-flat-rw \
+	  --top-module modvol_tb_top \
+	  $(TSP_PKG) tb/modvol_tb_top.sv \
+	  $(CWD)/tb/modvol_tb.cpp --Mdir $(BUILD)/obj_modvol -o tb
+	./$(BUILD)/obj_modvol/tb
 
 # sort_cache unit test: enter/demote/check semantics, same-cycle demote-wins
 # priority, alias mismatch conservatism, reset sweep, random soak vs a C model.

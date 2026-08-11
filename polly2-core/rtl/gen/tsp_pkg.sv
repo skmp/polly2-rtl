@@ -205,23 +205,35 @@ package tsp_pkg;
     //
     // State derivation from the region entry (refsw RenderCORE):
     //   clear = !control.z_keep          (bit 30 inverted)
-    //   op    = !opaque.empty            (opaque   ListPointer)
-    //   pt    = !puncht.empty            (puncht   ListPointer)
-    //   tr    = !trans.empty             (trans    ListPointer)
+    //   op    = !opaque.empty            (opaque     ListPointer)
+    //   om    = !opaque_mod.empty && op  (opaque_mod ListPointer - OPAQUE MODIFIER VOLUMES)
+    //   pt    = !puncht.empty            (puncht     ListPointer)
+    //   tr    = !trans.empty             (trans      ListPointer)
     //   flush = !control.no_writeout     (bit 28 inverted -> tile written out)
-    typedef enum logic [4:0] {
-        RSTATE_CLEAR = 5'b00001,
-        RSTATE_OP    = 5'b00010,
-        RSTATE_PT    = 5'b00100,
-        RSTATE_TR    = 5'b01000,
-        RSTATE_FLUSH = 5'b10000
+    //
+    // RSTATE_OM is emitted only when the OPAQUE list is also non-empty, exactly as
+    // refsw2 RenderCORE nests it (`if (!opaque.empty) { ...; if (!opaque_mod.empty)
+    // RenderObjectList(RM_MODIFIER, ...) }`). It runs BETWEEN the OP raster and the
+    // OP shade: modifier volumes depth-test against the opaque depth the OP raster
+    // just produced, and the shade they influence is that same OP shade.
+    typedef enum logic [5:0] {
+        RSTATE_CLEAR = 6'b000001,
+        RSTATE_OP    = 6'b000010,
+        RSTATE_OM    = 6'b000100,
+        RSTATE_PT    = 6'b001000,
+        RSTATE_TR    = 6'b010000,
+        RSTATE_FLUSH = 6'b100000
     } region_state_e;
     typedef struct packed {
         logic          list_ready;    // LEVEL: a (tile,state) is presented + stable
         logic [5:0]    tile_x;        // control.tilex (tile column; *32 for pixels)
         logic [5:0]    tile_y;        // control.tiley
-        logic [4:0]    state;         // one-hot region_state_e
-        logic [26:0]   list_ptr;      // byte addr of the list (op/pt/tr); 0 for clear/flush
+        logic [5:0]    state;         // one-hot region_state_e
+        logic [26:0]   list_ptr;      // byte addr of the list (op/om/pt/tr); 0 for clear/flush
+        logic          has_om;        // LEVEL for the WHOLE entry: an RSTATE_OM will be
+                                       // emitted for it. The consumer needs this at RSTATE_OP
+                                       // (before OM is presented) to DEFER the OP shade until
+                                       // the modifier volumes have built the stencil.
         logic          writeout;      // FLUSH only: !control.no_writeout (this entry writes
                                        // out to VRAM). RSTATE_FLUSH is now emitted for EVERY
                                        // entry as the end-of-entry marker (so per-entry PT/TL

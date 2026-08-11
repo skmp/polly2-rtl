@@ -211,6 +211,7 @@ module isp_setup_streamed (
     reg [31:0] dX1X3,dY2Y3,dY1Y3;          // @6
     reg [31:0] dX2X3,dX1X2,dY1Y2;          // @7
     reg [31:0] dZ2Z1,dZ3Z1,dX3W;           // @8
+    reg [31:0] dZ3Z2;                      // @8 (A4) - see the ILL-CONDITIONING note
     reg [31:0] dY3W,dX41d,dY41d;           // @9
     reg [31:0] XL1,YT1,XL2;                // @10
     reg [31:0] YT2,XL3,YT3;                // @11
@@ -276,6 +277,36 @@ module isp_setup_streamed (
         .a(g1a_r), .b_in(g1b_r), .sub(1'b1), .out_valid(), .y(a1_y));
     fp_add24_spp_ro A2 (.clk(clk),.reset(reset),.stall(stall),.in_valid(g2v_r),
         .a(g2a_r), .b_in(g2b_r), .sub(1'b1), .out_valid(), .y(a2_y));
+
+    // ---- A4: z3 - z2, the one diff the Aa/Ba REASSOCIATION below needs ----------
+    // ILL-CONDITIONING. The textbook plane numerator
+    //     Aa = (z3-z1)(y2-y1) - (z2-z1)(y3-y1)
+    // subtracts two products that are nearly equal whenever ONE vertex's z is far
+    // from the other two - exactly the shape a modifier volume has, where the
+    // extruded vertices carry the guest's near-plane clamp (1/w = 100000) and the
+    // cap vertices carry ordinary depths (~0.006). For sa2_ingame2's volume 3 both
+    // products are ~4.39e14 while their true difference is ~9.3e6; one ULP at
+    // 4.39e14 is ~2.6e7, so Aa rounds to ZERO, ddx/ddy collapse, and the
+    // "interpolated" invW comes back as the anchor vertex's z verbatim. That
+    // silently inverts the modvol depth test and leaks shadow slivers.
+    //
+    // Re-anchoring on v2 is the SAME identity with the subtraction moved between
+    // the CLOSE pair, so no cancellation survives to the result:
+    //     Aa = (z3-z2)(y2-y1) + (z2-z1)(y2-y3)
+    //     Ba = (z2-z1)(x3-x2) - (x2-x1)(z3-z2)
+    // (3.4e6 + 5.8e6 for the case above - same sign, nothing lost.)
+    //
+    // z3-z2 CANNOT be formed as dZ3Z1 - dZ2Z1: those are both ~1e5 with a ~0.008
+    // ULP, so their difference (~0.0008) is exactly what rounds away. It has to be
+    // a direct subtract of the two raw z's, and it is needed by the @9 product
+    // issue, so it gets its own adder rather than a slot in the g-mux (whose only
+    // free slot, cnt==7 g2, lands at @12 - three cycles too late, and moving the
+    // hand-derived schedule to suit it is not worth one operand). Fixed operands,
+    // so no mux on the critical path.
+    reg [31:0] a4a_r, a4b_r; reg a4v_r;
+    wire [31:0] a4_y;
+    fp_add24_spp_ro A4 (.clk(clk),.reset(reset),.stall(stall),.in_valid(a4v_r),
+        .a(a4a_r), .b_in(a4b_r), .sub(1'b1), .out_valid(), .y(a4_y));
 
     // ================================================================
     // M0..M3 multiplier lanes (operands pre-registered)
@@ -347,6 +378,9 @@ module isp_setup_streamed (
                 g0a_r<=g0a_c; g0b_r<=g0b_c; g0v_r<=g0v_c && front;
                 g1a_r<=g1a_c; g1b_r<=g1b_c; g1v_r<=g1v_c && front;
                 g2a_r<=g2a_c; g2b_r<=g2b_c; g2v_r<=g2v_c && front;
+                // A4 rides the cnt==3 group (where dZ2Z1/dZ3Z1 are issued) so its
+                // result lands with them at @8, before the @9 Aa/Ba products.
+                a4a_r<=Z3; a4b_r<=Z2; a4v_r<=(cnt==6'd3) && front;
                 area_go_r <= front && (cnt==6'd9);    // A0 area sub in @10 -> y @14
                 rc_go_r   <= front && (cnt==6'd13);   // rcp in @14 (x=area live) -> y @19
 
@@ -354,7 +388,7 @@ module isp_setup_streamed (
                     // ---- FRONT captures ----
                     if (cnt==6'd6)  begin dX1X3<=a0_y; dY2Y3<=a1_y; dY1Y3<=a2_y; end
                     if (cnt==6'd7)  begin dX2X3<=a0_y; dX1X2<=a1_y; dY1Y2<=a2_y; end
-                    if (cnt==6'd8)  begin dZ2Z1<=a0_y; dZ3Z1<=a1_y; dX3W<=a2_y; end
+                    if (cnt==6'd8)  begin dZ2Z1<=a0_y; dZ3Z1<=a1_y; dX3W<=a2_y; dZ3Z2<=a4_y; end
                     if (cnt==6'd9)  begin dY3W<=a0_y; dX41d<=a1_y; dY41d<=a2_y; end
                     if (cnt==6'd10) begin XL1<=a0_y; YT1<=a1_y; XL2<=a2_y; end
                     if (cnt==6'd11) begin YT2<=a0_y; XL3<=a1_y; YT3<=a2_y; end
@@ -458,14 +492,16 @@ module isp_setup_streamed (
                     m0a<=dX1X3; m0b<=dY2Y3; m0v<=1'b1;
                     m1a<=dY1Y3; m1b<=a0_y;  m1v<=1'b1;
                 end
-                // @9: Aa/Ba products, negations folded into operands (sign flips only):
-                //     Aa = (z3-z1)(Y2-Y1) + (z1-z2)(Y3-Y1)
-                //     Ba = (X3-X1)(z2-z1) + (X1-X2)(z3-z1)      [y @12]
+                // @9: Aa/Ba products, RE-ANCHORED ON v2 (see the A4 note), negations
+                //     still folded into operands (sign flips only):
+                //     Aa = (z3-z2)(Y2-Y1) + (z2-z1)(Y2-Y3)
+                //     Ba = (z2-z1)(X3-X2) + (X1-X2)(z3-z2)      [y @12]
+                //     A3 still just sums m0+m1 and m2+m3 - the schedule is untouched.
                 if (front && cnt==6'd9) begin
-                    m0a<=dZ3Z1;        m0b<=fnegf(dY1Y2); m0v<=1'b1;
-                    m1a<=fnegf(dZ2Z1); m1b<=fnegf(dY1Y3); m1v<=1'b1;
-                    m2a<=fnegf(dX1X3); m2b<=dZ2Z1;        m2v<=1'b1;
-                    m3a<=dX1X2;        m3b<=dZ3Z1;        m3v<=1'b1;
+                    m0a<=dZ3Z2;        m0b<=fnegf(dY1Y2); m0v<=1'b1;  // (z3-z2)(y2-y1)
+                    m1a<=dZ2Z1;        m1b<=dY2Y3;        m1v<=1'b1;  // (z2-z1)(y2-y3)
+                    m2a<=dZ2Z1;        m2b<=fnegf(dX2X3); m2v<=1'b1;  // (z2-z1)(x3-x2)
+                    m3a<=dX1X2;        m3b<=dZ3Z2;        m3v<=1'b1;  // (x1-x2)(z3-z2)
                 end
                 // @15: C1/C2 partials (edges 1,2)  [y @18]
                 if (front && cnt==6'd15) begin

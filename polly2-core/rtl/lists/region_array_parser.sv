@@ -2,25 +2,28 @@
 // region_array_parser - walks the PVR REGION ARRAY (refsw RenderCORE /
 // ReadRegionArrayEntry, refsw_lists.cpp) and, for each tile (region entry),
 // strobes the tile's enabled render STATES one at a time, in order:
-//     clear -> op -> pt -> tr -> flush
+//     clear -> op -> om -> pt -> tr -> flush
 // Only enabled states are strobed; a tile with no enabled states is silently
 // skipped. Each state is presented via state_ready (LEVEL) with tile x/y, a
-// one-hot `state`, and the list base pointer (op/pt/tr only); the consumer
+// one-hot `state`, and the list base pointer (op/om/pt/tr only); the consumer
 // pulses list_done when finished, and the parser advances.
 //
 // Region entry layout (24 bytes v2 / 20 bytes v1; refsw ReadRegionArrayEntry):
 //   +0  control : res0[1:0] tilex[7:2] tiley[13:8] res1[27:14]
 //                 no_writeout[28] pre_sort[29] z_keep[30] last_region[31]
 //   +4  opaque      ListPointer : ptr_in_words[23:2], empty[31]
-//   +8  opaque_mod  ListPointer   (modvol - ignored for now)
+//   +8  opaque_mod  ListPointer   (OPAQUE modifier volumes -> RSTATE_OM)
 //   +12 trans       ListPointer
-//   +16 trans_mod   ListPointer   (modvol - ignored for now)
+//   +16 trans_mod   ListPointer   (translucent modvol - not implemented)
 //   +20 puncht      ListPointer   (v2 only; v1 forces puncht empty, stride=20)
 // List byte address = ptr_in_words * 4.
 //
 // State enables (refsw RenderCORE):
 //   clear = !control.z_keep      op = !opaque.empty   pt = !puncht.empty
 //   tr    = !trans.empty         flush = !control.no_writeout
+//   om    = !opaque_mod.empty AND op  - refsw2 nests the modifier-volume walk
+//           INSIDE `if (!entry.opaque.empty)`, so an opaque_mod list attached to a
+//           tile with no opaque geometry is never rendered.
 //
 // Termination: control.last_region set on the just-read entry, OR after 16384
 // tiles read (runaway guard). tiles_parsed pulses when done.
@@ -119,7 +122,7 @@ module region_array_parser import tsp_pkg::*; (
     // ---- output regs ----
     reg          o_ready_r;
     reg [5:0]    o_tx_r, o_ty_r;
-    reg [4:0]    o_state_r;
+    reg [5:0]    o_state_r;
     reg [26:0]   o_ptr_r;
     reg          o_wo_r;              // FLUSH writeout flag (= flush_en = !no_writeout)
     reg          o_zk_r;              // CLEAR z_keep flag (= !clear_en = control.z_keep)
@@ -135,8 +138,12 @@ module region_array_parser import tsp_pkg::*; (
     reg [26:0] base;             // byte addr of current entry
     reg [13:0] tiles_seen;       // runaway guard (>=16384)
     reg [31:0] ctrl;             // control word
-    reg [21:0] op_ptr, pt_ptr, tr_ptr;    // ptr_in_words per list
-    reg        op_en, pt_en, tr_en, clear_en, flush_en, last_r;
+    reg [21:0] op_ptr, om_ptr, pt_ptr, tr_ptr;   // ptr_in_words per list
+    reg        op_en, om_en, pt_en, tr_en, clear_en, flush_en, last_r;
+
+    // LEVEL for the whole entry (stable from S_SEEK on, i.e. before RSTATE_OP is
+    // presented) so the consumer can defer the OP shade until after the modvols.
+    assign rout.has_om = om_en & op_en;
 
     // derived tile coords
     wire [5:0] tilex = ctrl[7:2];
@@ -145,6 +152,7 @@ module region_array_parser import tsp_pkg::*; (
     localparam S_IDLE=4'd0,
                S_CTRL=4'd1, S_CTRLW=4'd2,   // read control word
                S_OPW=4'd3,                  // wait opaque ptr
+               S_OMW=4'd10,                 // wait opaque_mod ptr
                S_TRW=4'd4,                  // wait trans ptr
                S_PTW=4'd5,                  // wait puncht ptr
                S_SEEK=4'd6,                 // pick next enabled phase; load output
@@ -152,7 +160,7 @@ module region_array_parser import tsp_pkg::*; (
                S_NEXT=4'd8,                 // advance to next entry / finish
                S_DONE=4'd9;
     reg [3:0] st;
-    reg [2:0] phase;   // phase to try next: 0=clear 1=op 2=pt 3=tr 4=flush, 5=none
+    reg [2:0] phase;   // next phase to try: 0=clear 1=op 2=om 3=pt 4=tr 5=flush, 6=none
 
     // is phase p enabled?
     function automatic phase_en(input [2:0] p);
@@ -163,13 +171,16 @@ module region_array_parser import tsp_pkg::*; (
         // z_keep=1 entry's OP shade renders ONLY its own OP triangles, not the bg poly.
         3'd0: phase_en = 1'b1;
         3'd1: phase_en = op_en;
-        3'd2: phase_en = pt_en;
-        3'd3: phase_en = tr_en;
+        // OM (opaque modifier volumes) only when there IS opaque geometry - refsw2
+        // nests the RM_MODIFIER walk inside `if (!entry.opaque.empty)`.
+        3'd2: phase_en = om_en & op_en;
+        3'd3: phase_en = pt_en;
+        3'd4: phase_en = tr_en;
         // FLUSH is ALWAYS emitted as the end-of-entry marker so the consumer runs this
         // entry's PT/TL peel now (refsw peels+accumulates per region entry). The
         // control.no_writeout flag rides out as region_out.writeout (flush_en) so the
         // consumer knows whether to actually post the tile to VRAM at this FLUSH.
-        3'd4: phase_en = 1'b1;
+        3'd5: phase_en = 1'b1;
         default: phase_en = 1'b0;
         endcase
     endfunction
@@ -184,8 +195,8 @@ module region_array_parser import tsp_pkg::*; (
             case (st)
             S_IDLE: if (start) begin base<=region_base; busy<=1; tiles_seen<=0; st<=S_CTRL; end
 
-            // read control(+0), opaque(+4), trans(+12), puncht(+20). modvols
-            // (opaque_mod +8, trans_mod +16) are skipped (address math only).
+            // read control(+0), opaque(+4), opaque_mod(+8), trans(+12), puncht(+20).
+            // trans_mod (+16) is skipped (translucent modvols are not implemented).
             S_CTRL:  begin raddr<=base; rd_go<=1'b1; st<=S_CTRLW; end
             S_CTRLW: if (rword_v) begin
                         ctrl<=rword;
@@ -198,6 +209,10 @@ module region_array_parser import tsp_pkg::*; (
             // pad1:7, empty:1}. ptr_in_words = rword[23:2]; byte addr = ptr_in_words*4.
             S_OPW: if (rword_v) begin
                         op_ptr<=rword[23:2]; op_en<=~rword[31];
+                        raddr<=base+27'd8; rd_go<=1'b1; st<=S_OMW;
+                    end
+            S_OMW: if (rword_v) begin
+                        om_ptr<=rword[23:2]; om_en<=~rword[31];
                         raddr<=base+27'd12; rd_go<=1'b1; st<=S_TRW;
                     end
             S_TRW: if (rword_v) begin
@@ -215,7 +230,7 @@ module region_array_parser import tsp_pkg::*; (
 
             // seek to the next enabled phase (>= phase); load the output regs.
             S_SEEK: begin
-                if (phase >= 3'd5) st <= S_NEXT;            // no more enabled states
+                if (phase >= 3'd6) st <= S_NEXT;            // no more enabled states
                 else if (!phase_en(phase)) phase <= phase + 3'd1;
                 else begin
                     o_tx_r <= tilex; o_ty_r <= tiley;
@@ -223,8 +238,9 @@ module region_array_parser import tsp_pkg::*; (
                     case (phase)
                     3'd0: begin o_state_r<=RSTATE_CLEAR; o_ptr_r<=27'd0; o_zk_r<=~clear_en; end
                     3'd1: begin o_state_r<=RSTATE_OP;    o_ptr_r<={op_ptr,2'b00};    end
-                    3'd2: begin o_state_r<=RSTATE_PT;    o_ptr_r<={pt_ptr,2'b00};    end
-                    3'd3: begin o_state_r<=RSTATE_TR;    o_ptr_r<={tr_ptr,2'b00};    end
+                    3'd2: begin o_state_r<=RSTATE_OM;    o_ptr_r<={om_ptr,2'b00};    end
+                    3'd3: begin o_state_r<=RSTATE_PT;    o_ptr_r<={pt_ptr,2'b00};    end
+                    3'd4: begin o_state_r<=RSTATE_TR;    o_ptr_r<={tr_ptr,2'b00};    end
                     default: begin o_state_r<=RSTATE_FLUSH; o_ptr_r<=27'd0; o_wo_r<=flush_en; end
                     endcase
                     st <= S_EMIT;
