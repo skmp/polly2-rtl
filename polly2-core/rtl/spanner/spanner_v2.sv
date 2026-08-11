@@ -386,7 +386,18 @@ module spanner_v2 import tsp_pkg::*; #(
     end
     wire [SLOTW-3:0] sg_grp    = sg_x[SLOTW-1:2];
     wire [SLOTW-3:0] sg_grp_p1 = sg_grp + 1'b1;   // off the register, not off the RAM
-    wire walk_last              = (sg_x_next == '0);          // wrapped past pixel 1023
+    // walk_last: the walk wrapped past the last tile pixel. Written without the adder
+    // for the same reason rd_group is - it was the OTHER consumer of sg_x_next on the
+    // taginvw-RAM -> tag compare -> run_rep -> ... -> sg_active loop, so leaving it
+    // arithmetic just moved that chain's endpoint from the read address to sg_active
+    // (1,959 endpoints, -4.089) instead of removing it.
+    //
+    // sg_x_next == 0 needs sg_x + run_rep == NSLOT exactly. run_rep is 1..4 and the
+    // extend loop never leaves the group, so sg_lane + run_rep <= 4 ALWAYS - meaning
+    // the low two bits can only reach zero when the run ends exactly on the group
+    // boundary, which is precisely sg_carry. So the wrap is "last group, and the run
+    // finishes it", both already available off registers and the tag compare.
+    wire walk_last              = sg_carry && (&sg_grp);      // wrapped past pixel 1023
     // COAL produces a descriptor this cycle iff walking, the group read has landed
     // (g_ready), and the pipeline isn't frozen.
     wire coal_fires = sg_active && g_ready && !pipe_stall;
@@ -577,6 +588,18 @@ module spanner_v2 import tsp_pkg::*; #(
             $display("[spanner_v2] RD_GROUP MISMATCH @t=%0t: fast=%0d arith=%0d  (sg_x=%0d lane=%0d run_rep=%0d carry=%b coal=%b ext=%b ok=%b)",
                      $time, rd_group, { rd_next_x[SLOTW-1:2], 2'b00 },
                      sg_x, sg_lane, run_rep, sg_carry, coal_fires, sg_ext, sg_ok);
+            $fatal(1);
+        end
+
+    // Same treatment for walk_last: checked against the arithmetic it replaced, every
+    // cycle. A false negative here would run the walk past the end of the tile; a
+    // false positive would truncate the pass.
+    always @(posedge clk)
+        if (!reset && sg_active && !$isunknown(sg_x_next)
+            && walk_last != (sg_x_next == '0)) begin
+            $display("[spanner_v2] WALK_LAST MISMATCH @t=%0t: fast=%b arith=%b  (sg_x=%0d lane=%0d run_rep=%0d carry=%b grp=%0d)",
+                     $time, walk_last, (sg_x_next == '0),
+                     sg_x, sg_lane, run_rep, sg_carry, sg_grp);
             $fatal(1);
         end
 `endif
