@@ -1390,6 +1390,22 @@ module peel_core import tsp_pkg::*; #(
     // gap). fq_out_valid gates su_in_valid so setup never consumes a not-yet-loaded
     // head. Push into the slot being (re)loaded is BYPASSED from the write data, since
     // no_rw_check M10K returns OLD data on a same-address same-cycle read+write.
+    //
+    // THE HEAD WORD IS SPLIT IN THREE (fq_ram_q / fq_byp_d / fq_byp_sel) FOR A REASON.
+    // The obvious form - one `fq_out` register assigned EITHER from fq_ram OR from the
+    // bypass word - cannot infer: an M10K's output register loads from the RAM and from
+    // nothing else, so asking for a second source forces the whole array into logic.
+    // It did exactly that: fq_ram was built from 3,112 flops plus an 8:1 418-bit read
+    // mux, in the middle of the most congested region of the die, and the worst setup
+    // path in the design was a fanout-1, ZERO-logic-level 13.065 ns route into one of
+    // them (u_it|tag_r.param_offs_in_words[20] -> fq_ram~1715, -5.438 slack). Its
+    // sibling pq_ram - same depth, same attribute, but read by a plain
+    // `pq_rdw <= pq_ram[pq_head[2:0]]` - inferred 28 M10Ks without complaint.
+    // So: fq_ram_q is the RAM's output register and is assigned from fq_ram and NOTHING
+    // else; the bypass lives in its own enabled register and is selected AFTER the RAM.
+    // Cost of the split is one 418-bit register + a 2:1 mux in front of setup's
+    // combinational inputs; the setup units have the slack for it (they hold no
+    // endpoint in the top 10k failing paths).
     localparam integer FIFO_N = 8;
     localparam integer FQ_W = 418;   // 13 * 32 + 1 (is_pt) + 1 (quad)
     localparam integer FF_ISP=0,  FF_TAG=32,
@@ -1400,7 +1416,10 @@ module peel_core import tsp_pkg::*; #(
                        FF_X4=353, FF_Y4=385,   // QUAD 4th vertex (X/Y only, no Z)
                        FF_QUAD=417;  // 1 = quad record (v4/edge-41 path active)
     (* ramstyle = "M10K, no_rw_check" *) reg [FQ_W-1:0] fq_ram [0:FIFO_N-1];
-    reg [FQ_W-1:0] fq_out;         // registered head entry (FWFT output register)
+    reg [FQ_W-1:0] fq_ram_q;       // M10K OUTPUT REGISTER - assigned from fq_ram only
+    reg [FQ_W-1:0] fq_byp_d;       // write word bypassed around the RAM (empty refill)
+    reg            fq_byp_sel;     // 1 = the head word is fq_byp_d, not fq_ram_q
+    wire [FQ_W-1:0] fq_out = fq_byp_sel ? fq_byp_d : fq_ram_q;   // presented head entry
     reg            fq_out_valid;   // fq_out holds a valid head entry
     reg [3:0]  fq_head, fq_tail;   // ring indices 0..FIFO_N-1 (0..7)
     reg [4:0]  fq_count;
@@ -1420,6 +1439,22 @@ module peel_core import tsp_pkg::*; #(
     assign fq_wrw[FF_QUAD]     = it_trio.quad;
     wire fq_full  = (fq_count == FIFO_N);
     wire fq_empty = (fq_count == 0);
+
+    // ---- fq READ PORT (the M10K's own read side) ----------------------------------
+    // Deliberately its own always block containing ONE statement, so the inference
+    // pattern is unmistakable: a registered read of fq_ram at a combinational address,
+    // with a clock enable, and no reset (a reset on the output register would push the
+    // array back into logic). The main FSM below never assigns fq_ram_q.
+    //
+    // The address/enable are rebuilt here as wires rather than reused from the FSM's
+    // `fifo_pop` blocking intent, which is only meaningful part-way through that block.
+    // fq_pop_c is fifo_pop by construction: the FSM sets it from exactly this condition
+    // (see "accept IS the pop" below), and both su_in_valid and su_in_ready are wires,
+    // so the two cannot drift. Same for the reload condition and the next-head index.
+    wire       fq_pop_c = su_in_valid && su_in_ready;
+    wire [3:0] fq_nh_c  = fq_pop_c ? ((fq_head==FIFO_N-1) ? 4'd0 : fq_head+4'd1) : fq_head;
+    wire       fq_rd_en = fq_pop_c || !fq_out_valid;
+    always @(posedge clk) if (fq_rd_en) fq_ram_q <= fq_ram[fq_nh_c[2:0]];
 
     // ---- 8-deep PLANE FIFO (pq): streamed setup -> rasterizer ----
     // Decouples the (interleaved) setup from the rasterizer so setup runs ahead and
@@ -1801,7 +1836,7 @@ module peel_core import tsp_pkg::*; #(
 `endif
             rs_st<=RS_IDLE; tri_qi<=3'd0;
             pq_head<=0; pq_tail<=0; pq_count<=0;
-            fq_head<=0; fq_tail<=0; fq_count<=0; fq_out_valid<=1'b0;
+            fq_head<=0; fq_tail<=0; fq_count<=0; fq_out_valid<=1'b0; fq_byp_sel<=1'b0;
             eq_head<=0; eq_tail<=0; eq_count<=0;
             peeling<=1'b0; more_to_draw<=1'b0; peel_pass<=8'd0; op_shaded<=1'b0;
             ol_walk_done<=1'b0;
@@ -3203,7 +3238,16 @@ module peel_core import tsp_pkg::*; #(
             // available there iff the occupancy at fq_nh is > 0: that's the current
             // count minus (this cycle's pop) plus (a push landing at fq_nh this cycle).
             // A push whose tail == fq_nh must be BYPASSED from fq_wrw, because the
-            // no_rw_check M10K read below would return the OLD word for that address.
+            // no_rw_check M10K read would return the OLD word for that address. This
+            // block only STEERS: the read itself lives in its own always block above
+            // (see the declarations for why the two must not be merged). fq_ram_q is
+            // reloaded on exactly this block's condition, since fq_rd_en is the same
+            // expression as the `if` below.
+            //
+            // fq_push_here implies fq_avail == 0: tail == next-head means the FIFO is
+            // either empty there or exactly full, and a full FIFO cannot be pushed. So
+            // the bypass register is written only on an empty->non-empty refill, never
+            // in steady-state streaming.
             if (fifo_pop || !fq_out_valid) begin
                 reg [3:0] fq_nh;                 // next head to present
                 reg [4:0] fq_avail;              // entries at/after fq_nh
@@ -3213,15 +3257,19 @@ module peel_core import tsp_pkg::*; #(
                 fq_avail = fq_count - (fifo_pop ? 5'd1 : 5'd0);
                 fq_push_here = fifo_push && (fq_tail[2:0] == fq_nh[2:0]);
                 if (fq_push_here) begin
-                    fq_out       <= fq_wrw;      // bypass: RAM would return stale word
+                    fq_byp_d     <= fq_wrw;      // bypass: RAM would return stale word
+                    fq_byp_sel   <= 1'b1;
                     fq_out_valid <= 1'b1;
                 end else if (fq_avail != 0) begin
-                    fq_out       <= fq_ram[fq_nh[2:0]];   // registered M10K read
+                    fq_byp_sel   <= 1'b0;        // present the RAM word loaded this cycle
                     fq_out_valid <= 1'b1;
                 end else begin
                     fq_out_valid <= 1'b0;        // nothing to present next cycle
                 end
             end
+            // NOTE fq_byp_sel deliberately HOLDS when the block above does not fire: it
+            // describes the word currently sitting in front of setup, which is only
+            // replaced on a reload.
 
             // retire: on out_valid, push non-culled triangles into the plane FIFO.
             // pt_dead: the PT pass is moot (verdict arrived) - drop instead of push.
