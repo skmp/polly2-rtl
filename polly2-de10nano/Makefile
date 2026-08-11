@@ -91,6 +91,18 @@ obj_dir/spg_480p_tb: rtl/spg.sv tb/spg_480p_tb.cpp
 spg-480p: obj_dir/spg_480p_tb
 	./obj_dir/spg_480p_tb
 
+#   make spg-1to1  - per-pixel SAMPLING at the 480p target: source column n lands at
+#                    raster X0+n exactly once, source line m occupies exactly one output
+#                    line, no line buffer is written while it is scanned out, and
+#                    fb_pix_dbl / fb_line_dbl still give 2x. Complements spg-480p, which
+#                    asserts the raster only. Written test-first: FAILS while the address
+#                    generators still assume the 2x doubling 1080p needed.
+obj_dir/spg_1to1_tb: rtl/spg.sv tb/spg_1to1_tb.cpp
+	$(VERILATOR) --cc --exe --build $(VFLAGS) rtl/spg.sv tb/spg_1to1_tb.cpp -o spg_1to1_tb
+
+spg-1to1: obj_dir/spg_1to1_tb
+	./obj_dir/spg_1to1_tb
+
 #   make audio-i2s - MMIO AUDIO_DATA -> 2048-entry async FIFO -> I2S:
 #                    framing/order/one-shot delivery, blocking-write
 #                    backpressure when full, non-audio accesses unaffected,
