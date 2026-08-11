@@ -73,16 +73,20 @@
 
 module spg
 #(
-	// CEA-861 1080p timing
-	parameter H_ACTIVE = 1920,
-	parameter H_FP     = 88,
-	parameter H_SYNC   = 44,
-	parameter H_BP     = 148,   // H total 2200
-	parameter V_ACTIVE = 1080,
-	parameter V_FP     = 4,
-	parameter V_SYNC   = 5,
-	parameter V_BP     = 36,    // V total 1125
-	// source framebuffer (doubled to SRC_W*2 x SRC_H*2 on screen)
+	// CEA-861 VIC 2/3: 720x480p @ 59.94, 27 MHz pixel clock.
+	// Retargeted from 1080p59.94 (2200x1125 @ 148.352 MHz) so the horizontal rate is
+	// 31.47 kHz, which a 31 kHz arcade CRT can lock. 1080p is ~67.4 kHz and cannot be
+	// displayed on one. 480p is also the Dreamcast's own VGA mode, and the 640x480
+	// source maps into it 1:1 with no scaling — unlike the 2x doubling 1080p required.
+	parameter H_ACTIVE = 720,
+	parameter H_FP     = 16,
+	parameter H_SYNC   = 62,
+	parameter H_BP     = 60,    // H total 858  -> 27e6/858  = 31.469 kHz
+	parameter V_ACTIVE = 480,
+	parameter V_FP     = 9,
+	parameter V_SYNC   = 6,
+	parameter V_BP     = 30,    // V total 525  -> 31469/525 = 59.94 Hz
+	// source framebuffer (displayed 1:1 — see SCALE below)
 	parameter SRC_W    = 640,
 	parameter SRC_H    = 480
 )
@@ -152,10 +156,24 @@ localparam [10:0] VS_BEG   = V_ACTIVE + V_FP;
 localparam [10:0] VS_END   = V_ACTIVE + V_FP + V_SYNC;
 localparam [11:0] H_ACT    = H_ACTIVE;
 localparam [10:0] V_ACT    = V_ACTIVE;
-localparam [11:0] X0       = (H_ACTIVE - SRC_W*2)/2;        // 320
-localparam [11:0] X1       = (H_ACTIVE - SRC_W*2)/2 + SRC_W*2; // 1600
-localparam [10:0] Y0       = (V_ACTIVE - SRC_H*2)/2;        // 60
-localparam [10:0] Y1       = (V_ACTIVE - SRC_H*2)/2 + SRC_H*2; // 1020
+// Display scale. 1080p needed 2x to fill a 1920x1080 raster from a 640x480 source;
+// 480p is a 1:1 fit, so the game window is SRC_W x SRC_H placed directly.
+// NOTE: SCALE is currently only honoured by the window placement below. The pixel and
+// line ADDRESS generators still assume 2x (see n_pre's x_pre[10:1] and the y_rel[0]
+// fetch gating). Raster timing is therefore correct at 1:1 while image sampling is not
+// yet — tracked as task `spg-scale`. spg-480p asserts timing; spg-bands covers sampling.
+localparam        SCALE    = 1;
+// At SCALE=1 the 480-line source exactly fills the 480-line raster, so Y0 == 0 and there is
+// NO vertical margin left for the top/bottom border bands. Every `vcnt < Y0` / `y_look < Y0`
+// comparison therefore folds to a constant, which Verilator flags as UNSIGNED. That folding
+// is the intended behaviour — the bands are structurally impossible at 1:1 and correctly
+// disable themselves — so the warning is waived rather than worked around. If a future mode
+// restores a margin (Y0 > 0) the bands come back with no code change.
+/* verilator lint_off UNSIGNED */
+localparam [11:0] X0       = (H_ACTIVE - SRC_W*SCALE)/2;              // 40
+localparam [11:0] X1       = (H_ACTIVE - SRC_W*SCALE)/2 + SRC_W*SCALE; // 680
+localparam [10:0] Y0       = (V_ACTIVE - SRC_H*SCALE)/2;              // 0
+localparam [10:0] Y1       = (V_ACTIVE - SRC_H*SCALE)/2 + SRC_H*SCALE; // 480
 
 localparam        BURST_LEN = 16;        // 128-bit beats per burst (256 bytes)
 localparam [7:0]  BC_FULL   = BURST_LEN; // full burstcount
