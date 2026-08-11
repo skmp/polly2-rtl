@@ -6,8 +6,11 @@
 // is under test: the tb writes raw {b1,b0} table words and a raw {mant,exp} density
 // through reg_file's normal host write path, exactly as a guest would.
 //
-// fog_lut is fed with stall=0 (the shade front's stall behaviour is covered by the
-// full-pipe tbs); back-to-back issue every cycle is what this checks.
+// `lut_stall` is exposed so the STALL case is testable here rather than only in the
+// full-pipe tbs. It has to be: reg_file's FOG_TABLE read register is a stage of fog_lut's
+// pipeline, and a free-running read there corrupted the entry of any pixel stalled in S4
+// (see fog_lut's header). Nothing but a stall-injecting test can see that - the valid
+// strobes stay perfectly aligned while the DATA is wrong.
 module fog_tb_top import tsp_pkg::*; (
     input             clk,
     input             reset,
@@ -19,6 +22,7 @@ module fog_tb_top import tsp_pkg::*; (
 
     // fog_lut input
     input             lut_valid,
+    input             lut_stall,
     input      [31:0] invw,
     output            lut_ov,
     output     [7:0]  lut_alpha,
@@ -48,7 +52,8 @@ module fog_tb_top import tsp_pkg::*; (
         .pal_req(pal_req),.pal_resp(pal_resp));
 
     fog_lut u_lut (
-        .clk(clk),.reset(reset),.stall(1'b0),.in_valid(lut_valid),
+        .clk(clk),.reset(reset),.stall(lut_stall),.in_valid(lut_valid),
+        .dbg_px(11'd0),.dbg_py(11'd0),
         .invw(invw),.fog_den(fog_den_f32),
         .fog_req(fog_req),.fog_resp(fog_resp),
         .out_valid(lut_ov),.fog_alpha(lut_alpha));
