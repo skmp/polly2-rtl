@@ -345,6 +345,47 @@ module spanner_v2 import tsp_pkg::*; #(
 
     // ---- COAL advance: sg_x steps by run_rep; group exhausted when it crosses the group ----
     wire [SLOTW-1:0] sg_x_next   = sg_x + { {(SLOTW-3){1'b0}}, run_rep };
+
+    // ---- GROUP-ONLY advance, for the taginvw read address ------------------------
+    // rd_group below uses ONLY sg_x_next[SLOTW-1:2], so the low two bits of that add
+    // - and the carry chain that produces the top eight - are dead weight on the
+    // worst path in the design: taginvw RAM -> tag compare -> run_rep -> this adder
+    // -> raddr -> the same RAM, closed in one cycle (9,011 endpoints, -4.976).
+    //
+    // The group part is exactly  sg_grp + carry,  carry = (sg_lane + run_rep) >= 4,
+    // because run_rep is 1..4 and sg_lane is 0..3, so the sum never exceeds 7. And
+    // carry needs no adder either: the run starts at sg_lane and can only end at
+    // lane 3 at the latest (the extend loop is confined to the group), so it crosses
+    // the group boundary iff it extended through EVERY lane above sg_lane.
+    //
+    // "Extended through lane l" is tested here as adjacency, ti_tag[l]==ti_tag[l-1],
+    // rather than against run_tag=ti_tag[sg_lane]. Equality is transitive and the
+    // shade-eligibility bits chain the same way, so a full adjacent chain from
+    // sg_lane+1 to 3 is the same predicate - but it drops the 4:1 run_tag mux out of
+    // the address path as well as the adder. sg_grp/sg_grp_p1 come straight off the
+    // sg_x REGISTER, so the increment is on a register-to-register path with a whole
+    // cycle to itself; the RAM only has to drive the mux SELECT.
+    wire [3:0] sg_ok;                             // per-lane shade eligibility
+    genvar gl;
+    generate for (gl = 0; gl < 4; gl = gl + 1) begin : sgok
+        assign sg_ok[gl] = shade_mode | ti_valid[gl];
+    end endgenerate
+    wire [3:1] sg_ext;                            // lane l joins lane l-1
+    generate for (gl = 1; gl < 4; gl = gl + 1) begin : sgext
+        assign sg_ext[gl] = (sg_ok[gl] == sg_ok[gl-1])
+                         && (sg_ok[gl] ? (ti_tag[gl] == ti_tag[gl-1]) : 1'b1);
+    end endgenerate
+    reg sg_carry;                                 // the run leaves this group
+    always @(*) begin
+        case (sg_lane)
+            2'd0:    sg_carry = sg_ext[1] & sg_ext[2] & sg_ext[3];
+            2'd1:    sg_carry = sg_ext[2] & sg_ext[3];
+            2'd2:    sg_carry = sg_ext[3];
+            default: sg_carry = 1'b1;             // already at lane 3: any run leaves
+        endcase
+    end
+    wire [SLOTW-3:0] sg_grp    = sg_x[SLOTW-1:2];
+    wire [SLOTW-3:0] sg_grp_p1 = sg_grp + 1'b1;   // off the register, not off the RAM
     wire walk_last              = (sg_x_next == '0);          // wrapped past pixel 1023
     // COAL produces a descriptor this cycle iff walking, the group read has landed
     // (g_ready), and the pipeline isn't frozen.
@@ -510,7 +551,8 @@ module spanner_v2 import tsp_pkg::*; #(
         // a 1-cycle bubble). rd_next_x already = sg_x while stalled (coal_fires=0), so keeping
         // rd_valid high just re-presents sg_x's group -> ti_* is always correct when COAL resumes.
         rd_valid  = sg_active;
-        rd_group  = { rd_next_x[SLOTW-1:2], 2'b00 };
+        // == { rd_next_x[SLOTW-1:2], 2'b00 }, without the adder (see sg_carry above).
+        rd_group  = { (coal_fires && sg_carry) ? sg_grp_p1 : sg_grp, 2'b00 };
 
         // ----- SETUP -> triangle_setups write -----
         ts_we  = ts_pend;
@@ -522,6 +564,22 @@ module spanner_v2 import tsp_pkg::*; #(
         ts_ddy = acc_ddy;
         ts_c   = acc_c;
     end
+
+`ifndef SYNTHESIS
+    // EQUIVALENCE CHECK for the adder-free rd_group (see sg_carry). The whole
+    // correctness argument for that transformation is an algebraic identity, so it is
+    // CHECKED every cycle against the arithmetic it replaced rather than reasoned
+    // about once. It must never fire; if it does, the fast path is wrong and every
+    // span after it reads the wrong tile group.
+    always @(posedge clk)
+        if (!reset && sg_active && !$isunknown(rd_next_x) && !$isunknown(rd_group)
+            && rd_group != { rd_next_x[SLOTW-1:2], 2'b00 }) begin
+            $display("[spanner_v2] RD_GROUP MISMATCH @t=%0t: fast=%0d arith=%0d  (sg_x=%0d lane=%0d run_rep=%0d carry=%b coal=%b ext=%b ok=%b)",
+                     $time, rd_group, { rd_next_x[SLOTW-1:2], 2'b00 },
+                     sg_x, sg_lane, run_rep, sg_carry, coal_fires, sg_ext, sg_ok);
+            $fatal(1);
+        end
+`endif
 
     // ============================ sequential ============================
     // pass done: SPANGEN drained + the whole setup path drained
