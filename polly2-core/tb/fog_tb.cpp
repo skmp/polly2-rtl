@@ -28,6 +28,8 @@
 static Vfog_tb_top* dut;
 static void tick(){ dut->clk=0; dut->eval(); dut->clk=1; dut->eval(); }
 
+static const int FOGLAT_MAX = 7;   // fog_lut latency (see its header) - stall sweep range
+
 static uint32_t rng_s = 0x12345678u;
 static uint32_t rnd(){ rng_s ^= rng_s<<13; rng_s ^= rng_s>>17; rng_s ^= rng_s<<5; return rng_s; }
 
@@ -145,15 +147,22 @@ static void fail(const char* what, uint32_t got, uint32_t want, const char* ctx)
 // Issues a burst of 1/W values back-to-back and checks the emitted alphas in order.
 struct LutJob { uint32_t invw; uint8_t want; uint32_t index, bf; };
 
-static void run_lut_burst(LutJob* jobs, int n, const char* ctx){
-    int issued=0, got=0;
-    dut->lut_valid=0;
-    while(got<n){
-        dut->lut_valid = (issued<n);
+// spos/swidth optionally inject a stall of `swidth` cycles starting `spos` cycles in.
+// The caller contract is the shade front's: hold the input stable, do not advance the
+// issue pointer, and gate out_valid with ~stall (it legitimately HOLDS while frozen).
+static void run_lut_burst(LutJob* jobs, int n, const char* ctx,
+                          int spos=-1, int swidth=0){
+    int issued=0, got=0, cyc=0;
+    dut->lut_valid=0; dut->lut_stall=0;
+    while(got<n && cyc < n + swidth + 256){
+        bool stalling = (spos>=0) && (cyc>=spos) && (cyc<spos+swidth);
+        dut->lut_stall = stalling;
+        dut->lut_valid = (issued<n) && !stalling;
         dut->invw      = (issued<n) ? jobs[issued].invw : 0;
         tick();
-        if(issued<n) issued++;
-        if(dut->lut_ov){
+        cyc++;
+        if(!stalling && issued<n) issued++;
+        if(dut->lut_ov && !stalling){
             checks++;
             if(dut->lut_alpha != jobs[got].want){
                 char buf[192];
@@ -164,7 +173,8 @@ static void run_lut_burst(LutJob* jobs, int n, const char* ctx){
             got++;
         }
     }
-    dut->lut_valid=0;
+    if(got<n) fail("fog_lut burst stalled out", got, n, ctx);
+    dut->lut_valid=0; dut->lut_stall=0;
 }
 
 int main(int argc,char**argv){
@@ -172,7 +182,7 @@ int main(int argc,char**argv){
     dut=new Vfog_tb_top;
     dut->clk=0; dut->reset=1; dut->wr_en=0; dut->lut_valid=0; dut->bl_valid=0;
     dut->invw=0; dut->bl_col=0; dut->bl_fog_alpha=0; dut->bl_offs_a=0;
-    dut->bl_fog_ctrl=0; dut->bl_color_clamp=0; dut->bl_pp_offset=0;
+    dut->bl_fog_ctrl=0; dut->bl_color_clamp=0; dut->bl_pp_offset=0; dut->lut_stall=0;
     for(int i=0;i<8;i++) tick();
     dut->reset=0; tick();
 
@@ -214,6 +224,51 @@ int main(int argc,char**argv){
         }
         char ctx[64]; snprintf(ctx,sizeof(ctx),"round %d dens=%04x",round,dens);
         run_lut_burst(jobs,N,ctx);
+    }
+
+    // ---------------- 1b. STALL: a stall anywhere must not change one alpha ----------
+    // This is the case that caught a real bug. reg_file's FOG_TABLE read register is a
+    // STAGE of fog_lut's pipeline (it sits between the address stage S3 and the capture
+    // stage S5), and it used to be free-running. A pixel frozen in S4 then had its entry
+    // overwritten by the read of the S3 address - the NEXT pixel's index - and S5 latched
+    // the wrong entry when the stall lifted. The valid strobes stay perfectly aligned
+    // through all of it, so ONLY a data compare across an injected stall can see it.
+    // Consecutive 1/W values are made to land on DIFFERENT table indices on purpose: a
+    // stall between two pixels of the same index would read back the same entry and hide
+    // the fault.
+    {
+        for(int i=0;i<128;i++){ table[i] = rnd() & 0xFFFF; wr(OFF_FOG_TABLE+4*i, table[i]); }
+        wr(OFF_FOG_DENSITY, 0x8000);                 // {mant 0x80, exp 0} = 1.0
+        uint32_t den = fog_den_f32(0x8000);
+
+        const int N=48;
+        LutJob jobs[N];
+        for(int i=0;i<N;i++){
+            // density 1.0 passes 1/W through exactly, so the table address is built here
+            // directly: index = ((e+1)&7)<<4 | m[22:19]. Stepping BOTH fields every job
+            // guarantees consecutive pixels read different entries, which is what makes a
+            // lost entry observable. Exponents 127..134 keep fw off both clamp rails.
+            uint32_t e = 127 + (i % 8), nib = i % 16, bf = (i * 37u) & 0xFF;
+            jobs[i].invw = (e<<23) | (nib<<19) | (bf<<11);
+            jobs[i].want = lookup_fog(den, jobs[i].invw, table, false, false,
+                                      &jobs[i].index, &jobs[i].bf);
+        }
+        int idx_changes=0;
+        for(int i=1;i<N;i++) if(jobs[i].index != jobs[i-1].index) idx_changes++;
+        checks++;
+        if(idx_changes < N/2)
+            fail("stall-test coverage", idx_changes, N/2,
+                 "consecutive jobs must mostly hit different table indices");
+
+        int before = fails;
+        run_lut_burst(jobs, N, "stall sweep reference");     // no stall: the baseline
+        for(int width=1; width<=3; width++)
+            for(int pos=0; pos<N+FOGLAT_MAX; pos++){
+                char ctx[64]; snprintf(ctx,sizeof(ctx),"stall w=%d @%d",width,pos);
+                run_lut_burst(jobs, N, ctx, pos, width);
+            }
+        if(fails==before) printf("  ok  stall sweep: %d positions x widths 1-3, alphas unchanged\n",
+                                 N+FOGLAT_MAX);
     }
 
     // ---------------- 2. directed: the FOG_DENSITY encoding ----------------

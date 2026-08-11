@@ -54,8 +54,14 @@
 //   S6    : m = delta * bf        (9x8 signed, multstyle="logic" reg -> no DSP)
 //   S7    : alpha = (base255 + m) >>> 8
 //
-// `stall` freezes every stage. The table read address is a stage register, so while
-// stalled the RAM re-reads the same word and its output holds - no capture hazard.
+// `stall` freezes every stage, INCLUDING reg_file's FOG_TABLE read register - which is
+// the S4 data register of this pipeline and is held via fog_req.re. An earlier version
+// left that read free-running on the theory that "the address is a stage register, so a
+// stall just re-reads the same word". That is wrong by one stage: a pixel sits in S4 one
+// cycle AFTER its own address left S3, by which point S3 holds the NEXT pixel's index, so
+// a free-running read destroys the stalled pixel's entry and S5 captures the wrong one.
+// Isolated wrong-fog pixels wherever a texture miss-fill stalls the front - and invisible
+// to the valid-strobe alignment check in tsp_shade_v2_pp, since only DATA is corrupted.
 //
 (* multstyle = "logic" *)
 module fog_lut import tsp_pkg::*; (
@@ -63,6 +69,9 @@ module fog_lut import tsp_pkg::*; (
     input             reset,
     input             stall,
     input             in_valid,
+`ifndef SYNTHESIS
+    input      [10:0] dbg_px, dbg_py,   // sim-only: which pixel this issue belongs to
+`endif
     input      [31:0] invw,        // per-pixel 1/W (non-negative, sign-stripped depth)
     input      [31:0] fog_den,     // FOG_DENSITY pre-normalized to f32 (reg_file)
 
@@ -101,6 +110,36 @@ module fog_lut import tsp_pkg::*; (
     wire [6:0]  s3_index_c = {fw_e[2:0] + 3'd1, fw_m[22:19]};   // ((e+1)&7)<<4 | m[22:19]
     wire [7:0]  s3_bf_c    = fw_m[18:11];
 
+`ifndef SYNTHESIS
+    // +fgx=<X> +fgy=<Y> : the fog LUT chain at one pixel. Prints the product, the
+    // clamped value, which rail (if any) it hit, the derived table index / blend
+    // factor. Fog alpha is per-pixel and independent of neighbours, so a single
+    // rogue pixel on a flat fogged surface can only come from this chain.
+    integer fgx = -1, fgy = -1;
+    initial begin
+        void'($value$plusargs("fgx=%d", fgx));
+        void'($value$plusargs("fgy=%d", fgy));
+    end
+    // px/py delayed by the MULTIPLY latency only (2): fw and the clamp/extract that
+    // follow it are combinational off the multiply's registered output, so at the cycle
+    // fw is valid for a pixel, that pixel entered 2 cycles ago. (An earlier version
+    // delayed by 3 and mislabelled every line by one pixel - the printed `invw` is the
+    // LIVE input, i.e. a later pixel's, so it is shown only for reference.)
+    // (carried 4 deep so the S4-hazard probe below can name the pixel sitting in S4)
+    reg [10:0] fgpx [0:3], fgpy [0:3];
+    integer fq;
+    always @(posedge clk) if (!stall) begin
+        fgpx[0] <= dbg_px; fgpy[0] <= dbg_py;
+        for (fq = 1; fq < 4; fq = fq + 1) begin fgpx[fq] <= fgpx[fq-1]; fgpy[fq] <= fgpy[fq-1]; end
+    end
+    always @(posedge clk)
+        if (!reset && !stall && fgx >= 0 && fgpx[1] == fgx[10:0] && fgpy[1] == fgy[10:0])
+            $display("[FOG] (%0d,%0d) live_invw=%08x den=%08x -> fw=%08x  clamped=%08x %s | e=%0d m=%06x -> index=%0d bf=%0d",
+                     fgpx[1], fgpy[1], invw, fog_den, fw, {1'b0,fwc},
+                     lo ? "LO-RAIL" : (mag > FW_MAX) ? "HI-RAIL" : "in-range",
+                     fw_e, fw_m, s3_index_c, s3_bf_c);
+`endif
+
     reg        v3;  reg [6:0] s3_index;  reg [7:0] s3_bf;
     always @(posedge clk) begin
         if (reset) v3 <= 1'b0;
@@ -111,6 +150,12 @@ module fog_lut import tsp_pkg::*; (
         end
     end
     assign fog_req.raddr = s3_index;
+    // READ ENABLE. reg_file's read register is a STAGE OF THIS PIPELINE (it is the S4
+    // data register - see below), so it must freeze on `stall` exactly like v4/s4_bf. It
+    // is NOT enough that the address register holds: by the time a pixel is in S4, S3
+    // already holds the NEXT pixel's index, and a free-running read replaces the stalled
+    // pixel's entry with that one before S5 captures it.
+    assign fog_req.re    = ~stall;
 
     // ---- S4: the FOG_TABLE read is IN FLIGHT --------------------------------------
     // fog_req.raddr is the S3 register, so the address is on the RAM during this cycle
@@ -124,6 +169,21 @@ module fog_lut import tsp_pkg::*; (
             s4_bf <= s3_bf;
         end
     end
+
+`ifndef SYNTHESIS
+    // COVERAGE for the S4 read hazard `fog_req.re` exists to prevent: a pixel frozen in
+    // S4 whose OWN table address has already been replaced in S3 by the next pixel's. A
+    // free-running RAM read would destroy that pixel's entry here. Counted rather than
+    // printed - the interesting number is whether a scene exercises the case at all
+    // (gundam_ingame: 6925, one of them visible as an unfogged pixel at 415,260).
+    reg [6:0] s4_index;
+    always @(posedge clk) if (!stall) s4_index <= s3_index;
+    integer fg_hazard_n = 0;
+    always @(posedge clk)
+        if (!reset && stall && v4 && s3_index != s4_index) fg_hazard_n = fg_hazard_n + 1;
+    final if (fg_hazard_n)
+        $display("[fog_lut] S4 stall-hazard cycles covered by fog_req.re: %0d", fg_hazard_n);
+`endif
 
     // ---- S5: capture the table entry ----------------------------------------------
     reg        v5;  reg [15:0] s5_base255;  reg [8:0] s5_delta;  reg [7:0] s5_bf;

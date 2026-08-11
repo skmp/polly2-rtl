@@ -286,7 +286,15 @@ package tsp_pkg;
     // PAL / FOG table read-port bundles (injected read: addr in -> data out).
     typedef struct packed { logic [9:0] raddr; } pal_rd_req_t;   // 0..1023
     typedef struct packed { logic [31:0] rdata; } pal_rd_resp_t;
-    typedef struct packed { logic [6:0] raddr; } fog_rd_req_t;   // 0..127
+    // The FOG port carries a READ ENABLE as well as the address. Its consumer (fog_lut
+    // stage S5) is one cycle BEHIND the address stage, so the RAM's own read register is
+    // that in-between stage and must freeze with the rest of the pipe: without `re` a
+    // stall leaves the S3 address - the NEXT pixel's - on the RAM, which overwrites the
+    // stalled pixel's entry before S5 can capture it (measured: 6925 stall cycles in
+    // gundam_ingame, one visible as an unfogged pixel at 415,260). The PAL ports need no
+    // such enable: their address is driven COMBINATIONALLY from the stage before the RAM
+    // register, and tex_decode never stalls (see its header).
+    typedef struct packed { logic re; logic [6:0] raddr; } fog_rd_req_t;   // 0..127
     // FOG_TABLE entries are PRECOMPUTED at write time (see reg_file): the host's
     // 16-bit {b1,b0} pair is stored as the delta-lerp form {base255 = b1*255,
     // delta = b0-b1} that fog_lut consumes with a single 9x8 multiply.

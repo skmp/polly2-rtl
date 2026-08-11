@@ -78,7 +78,11 @@ module reg_file import tsp_pkg::*; (
     always @(posedge clk) begin
         // 0x200>>2 = 0x80
         if (wr_en && is_fog) fog_mem[woff - 11'h080] <= {fog_delta, fog_base255};
-        fog_rd_r <= fog_mem[fog_req.raddr];
+        // fog_req.re is the READ ENABLE (M10K rden - no logic cost). It must be honoured:
+        // this register is a PIPELINE STAGE of fog_lut, sitting between its address stage
+        // and the stage that captures the result, so it has to freeze on the same stall.
+        // See fog_rd_req_t in tsp_pkg for what a free-running read costs.
+        if (fog_req.re) fog_rd_r <= fog_mem[fog_req.raddr];
     end
     assign fog_resp = fog_rd_resp_t'(fog_rd_r);
 
