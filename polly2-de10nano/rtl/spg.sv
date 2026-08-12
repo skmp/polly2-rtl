@@ -437,6 +437,13 @@ always @(posedge avl_clk) begin : fetch_fsm
 		fetching <= 1'b0;
 		avl_read <= 1'b0;
 		pending  <= 1'b0;
+		// done_toggle is half of a toggle CDC whose other half (dt_sync,
+		// cnt_done) IS reset. Leaving it set here would present the video
+		// domain with a 0->1 transition on the first clocks after reset and
+		// cnt_done would count a completion that never happened - one that
+		// never un-counts, because these are free-running 2-bit counters.
+		// req_toggle is reset for the same reason.
+		done_toggle <= 1'b0;
 	end
 end
 
@@ -664,6 +671,10 @@ always @(posedge clk or posedge reset) begin
 		src_line   <= 10'd0;
 	end
 	else begin
+		// Sound only because done_toggle is cleared under reset too (see the
+		// fetch FSM): both ends of the CDC leave reset at 0, so the first
+		// counted edge is a real completion. cnt_req/cnt_done are 2-bit and
+		// free-running, so a single phantom edge here is permanent skew.
 		dt_sync <= {dt_sync[1:0], done_toggle};
 		if (dt_sync[2] ^ dt_sync[1]) cnt_done <= cnt_done + 2'd1;
 
