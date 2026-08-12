@@ -121,4 +121,34 @@ module spg_loopback_top import tsp_pkg::*; (
         .underrun  (underrun)
     );
 
+    // ---- stock 1080p override (the spg-loopback-1080p target) ----------------
+    // A -G on the command line reaches the TOP module only, and the top here is
+    // this wrapper rather than spg, so the stock arm cannot be selected the way
+    // spg-sync-1080p selects it. It is injected onto the instance instead.
+    //
+    // Deliberately NOT a parameter list on this wrapper. Parameters would need
+    // defaults, those defaults would be a second copy of spg.sv's mode, and the
+    // two could drift apart with nothing to notice - the loopback compares the
+    // write layout against the scanout layout, so it stays self-consistent at
+    // ANY geometry and would keep passing while silently testing the wrong one.
+    // That is the failure tb/spg_mode.h was written to eliminate. With defparam
+    // the ordinary build instantiates spg with no overrides at all, so it cannot
+    // disagree with the module about anything.
+    //
+    // The values arrive as -D from the Makefile's single STOCK_1080P_MODE list,
+    // which also produces the -G form. No mode literal is restated in this file.
+`ifdef SPG_LB_STOCK
+    defparam u_spg.H_ACTIVE = `SPG_LB_H_ACTIVE;
+    defparam u_spg.H_FP     = `SPG_LB_H_FP;
+    defparam u_spg.H_SYNC   = `SPG_LB_H_SYNC;
+    defparam u_spg.H_BP     = `SPG_LB_H_BP;
+    defparam u_spg.V_ACTIVE = `SPG_LB_V_ACTIVE;
+    defparam u_spg.V_FP     = `SPG_LB_V_FP;
+    defparam u_spg.V_SYNC   = `SPG_LB_V_SYNC;
+    defparam u_spg.V_BP     = `SPG_LB_V_BP;
+    defparam u_spg.SRC_W    = `SPG_LB_SRC_W;
+    defparam u_spg.SRC_H    = `SPG_LB_SRC_H;
+    defparam u_spg.SCALE    = `SPG_LB_SCALE;
+`endif
+
 endmodule

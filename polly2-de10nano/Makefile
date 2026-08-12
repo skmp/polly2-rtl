@@ -26,9 +26,17 @@ SPGFLAGS = --public-params
 # on SCALE; without this the SCALE=2 arm would only ever be verified by reading the
 # diff. Built into its own --Mdir: the parameters differ, so the generated model
 # cannot be shared with the default-mode build.
-STOCK_1080P = -GH_ACTIVE=1920 -GH_FP=88 -GH_SYNC=44 -GH_BP=148 \
-              -GV_ACTIVE=1080 -GV_FP=4  -GV_SYNC=5  -GV_BP=36  \
-              -GSRC_W=640 -GSRC_H=480 -GSCALE=2
+#
+# Written ONCE as name=value pairs and rendered two ways, because the override has to
+# reach spg through a different door depending on where spg sits in the hierarchy:
+#   -G  when spg IS the top module          (spg-sync/bands/depth-1080p)
+#   -D  when it is not, feeding the guarded defparam block in tb/spg_loopback_top.sv
+#       (spg-loopback-1080p) - -G only ever reaches the top, which there is the wrapper
+STOCK_1080P_MODE = H_ACTIVE=1920 H_FP=88 H_SYNC=44 H_BP=148 \
+                   V_ACTIVE=1080 V_FP=4  V_SYNC=5  V_BP=36  \
+                   SRC_W=640 SRC_H=480 SCALE=2
+STOCK_1080P   = $(addprefix -G,$(STOCK_1080P_MODE))
+STOCK_1080P_D = -DSPG_LB_STOCK $(addprefix -DSPG_LB_,$(STOCK_1080P_MODE))
 
 TSP_PKG = ../polly2-core/rtl/gen/tsp_pkg.sv
 # polly2-core video-out (framebuffer write master) instantiated by simplex_pvr_top
@@ -133,12 +141,13 @@ obj_dir/audio_i2s_tb: rtl/pvr_mmio.sv rtl/audio_i2s.sv tb/audio_tb_top.sv tb/aud
 obj_dir/spg_sync_tb: rtl/spg.sv tb/spg_sync_tb.cpp tb/spg_mode.h
 	$(VERILATOR) --cc --exe --build $(VFLAGS) $(SPGFLAGS) rtl/spg.sv tb/spg_sync_tb.cpp -o spg_sync_tb
 
-#   make spg-1080p - the three per-pixel/geometry spg testbenches re-run against a
-#                    STOCK 1080p instantiation (SCALE=2). spg.sv's SCALE=1 and SCALE=2
-#                    arms are written `(SCALE == 2) ? <stock> : <1:1>`; this is what
-#                    machine-checks the SCALE=2 arm rather than arguing from the diff
-#                    that it constant-folds back to stock.
-spg-1080p: spg-sync-1080p spg-bands-1080p spg-depth-1080p
+#   make spg-1080p - the spg testbenches re-run against a STOCK 1080p instantiation
+#                    (SCALE=2). spg.sv's SCALE=1 and SCALE=2 arms are written
+#                    `(SCALE == 2) ? <stock> : <1:1>`; this is what machine-checks the
+#                    SCALE=2 arm rather than arguing from the diff that it constant-folds
+#                    back to stock. sync/bands/depth cover geometry and the read formats;
+#                    loopback covers the fetch path and the post-reset toggle parity.
+spg-1080p: spg-sync-1080p spg-bands-1080p spg-depth-1080p spg-loopback-1080p
 
 spg-sync-1080p: obj_1080p/spg_sync_tb
 	./obj_1080p/spg_sync_tb
@@ -160,6 +169,25 @@ spg-depth-1080p: obj_1080p/spg_depth_tb
 obj_1080p/spg_depth_tb: rtl/spg.sv tb/spg_depth_tb.cpp tb/spg_mode.h
 	$(VERILATOR) --cc --exe --build $(VFLAGS) $(SPGFLAGS) --Mdir obj_1080p \
 	    $(STOCK_1080P) rtl/spg.sv tb/spg_depth_tb.cpp -o spg_depth_tb
+
+#   make spg-loopback-1080p - the write-layout vs scanout-layout cross-check and the
+#                    post-reset toggle-parity check, at stock 1920x1080/SCALE=2. The
+#                    fetch path is the one part of spg the other -1080p targets do not
+#                    reach: they instantiate spg alone, while this one needs the FB
+#                    write master beside it. That makes it the target that shows the
+#                    done_toggle reset fix holding in the configuration upstream ships,
+#                    not only at the retargeted 480p.
+spg-loopback-1080p: obj_1080p/spg_loopback_tb
+	./obj_1080p/spg_loopback_tb
+
+obj_1080p/spg_loopback_tb: rtl/simplex_pvr_top.sv $(VO_RTL) rtl/spg.sv tb/spg_loopback_top.sv tb/peel_core_stub.sv tb/spg_loopback_tb.cpp tb/spg_mode.h $(TSP_PKG)
+	$(VERILATOR) --cc --exe --build $(VFLAGS) $(SPGFLAGS) --Mdir obj_1080p \
+	    -Wno-UNUSEDPARAM -Wno-DECLFILENAME -Wno-PINMISSING \
+	    -I../polly2-core/rtl/gen \
+	    --top-module spg_loopback_top $(STOCK_1080P_D) \
+	    $(TSP_PKG) tb/peel_core_stub.sv rtl/simplex_pvr_top.sv $(VO_RTL) rtl/spg.sv \
+	    tb/spg_loopback_top.sv tb/spg_loopback_tb.cpp \
+	    -o spg_loopback_tb
 
 pvr-burst: obj_dir/pvr_burst_tb
 	./obj_dir/pvr_burst_tb
@@ -199,4 +227,4 @@ clean:
 
 .PHONY: all spg-sync pvr-burst spg-loopback spg-loopback-nobp audio-i2s spg-bands spg-depth \
         spg-240p fb-write render-irq spg-480p spg-1to1 \
-        spg-1080p spg-sync-1080p spg-bands-1080p spg-depth-1080p clean
+        spg-1080p spg-sync-1080p spg-bands-1080p spg-depth-1080p spg-loopback-1080p clean
