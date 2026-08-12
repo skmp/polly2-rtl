@@ -246,6 +246,8 @@ static void run_reset_parity(const char* name) {
             errors++;
         }
     }
+    // guarded: this line was printed unconditionally, so a failing run claimed a
+    // clean frame in the same breath as the FAIL above it
     if (errors == before)
         printf("[%s] clean frame after reset from both toggle parities\n", name);
 }
