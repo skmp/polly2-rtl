@@ -516,14 +516,18 @@ irq_stretch #(.CYCLES(64)) render_irq_stretch
 // FB is split-VRAM 16bpp RGB565: DC 32-bit-view word W at DDR byte W*8,
 // half selected by SOF bit 22.
 //
-// CLOCK MISMATCH - deliberate, temporary, and NOT buildable as it stands.
-// spg is retargeted to 720x480p, whose 858 x 525 totals want a 27 MHz pixel
-// clock; pll_hdmi below is still the stock 148.5 MHz part, which would run
-// that raster at ~330 Hz. The fix is a regenerated pll_hdmi (50 MHz ref,
-// N=1, M=13.5 -> VCO 1350 MHz, C0=25 -> 27.000 MHz exactly), and it needs
-// Quartus: the resolved counters in plls/pll_hdmi/pll_hdmi_0002.v are what
-// program the silicon, and the charge pump and loop filter are re-solved
-// with them, so the frequency cannot simply be text-edited here.
+// Clock: pll_hdmi emits 27.000 MHz, matching spg's 858 x 525 totals at
+// 720x480p (31.469 kHz / 59.940 Hz). Regenerated from the stock 148.5 MHz
+// part by Quartus' own IP solver (ip-generate reading this PLL's variation
+// file), so the resolved counters in plls/pll_hdmi/pll_hdmi_0002.v - which
+// are what actually program the silicon - were derived by the tool, not by
+// hand:
+//   50 MHz ref, N=1, M=8.1 (integer 8 + fractional 429496730/2^32),
+//   VCO 810 MHz -> 405 MHz after pll_vco_div=2, C0=15 -> 27.000 MHz exactly.
+// The charge pump (pll_cp_current=20) and loop filter (pll_bwctrl=4000) came
+// back UNCHANGED from the 148.5 MHz solve: Quartus picks the same loop
+// settings for both. That is the whole reason this retarget was safe - the
+// stability values were never ours to guess.
 //////////////////////////////////////////////////////////////////////////
 
 wire hdmi_clk_out;
