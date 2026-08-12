@@ -17,11 +17,25 @@ NJOBS := $(shell nproc 2>/dev/null || echo 4)
 VFLAGS = -Wno-WIDTH -Wno-UNUSEDSIGNAL -j $(NJOBS) --build-jobs $(NJOBS) \
          -CFLAGS "-O3"
 
+# spg testbenches read the module's parameters (and its derived window localparams)
+# out of the generated model instead of hardcoding a raster - see tb/spg_mode.h.
+SPGFLAGS = --public-params
+
+# The stock 1080p configuration, as a second instantiation of the SAME spg.sv.
+# spg.sv now carries the 480p mode as its defaults and gates its address generators
+# on SCALE; without this the SCALE=2 arm would only ever be verified by reading the
+# diff. Built into its own --Mdir: the parameters differ, so the generated model
+# cannot be shared with the default-mode build.
+STOCK_1080P = -GH_ACTIVE=1920 -GH_FP=88 -GH_SYNC=44 -GH_BP=148 \
+              -GV_ACTIVE=1080 -GV_FP=4  -GV_SYNC=5  -GV_BP=36  \
+              -GSRC_W=640 -GSRC_H=480 -GSCALE=2
+
 TSP_PKG = ../polly2-core/rtl/gen/tsp_pkg.sv
 # polly2-core video-out (framebuffer write master) instantiated by simplex_pvr_top
 VO_RTL  = ../polly2-core/rtl/vo.sv
 
-all: spg-sync pvr-burst spg-loopback audio-i2s spg-bands spg-depth spg-240p fb-write render-irq
+all: spg-sync pvr-burst spg-loopback audio-i2s spg-bands spg-depth spg-240p fb-write render-irq \
+     spg-480p spg-1to1 spg-1080p
 
 #   make fb-write - FB write master formats: every FB_W_CTRL packmode
 #                   (0555K/565/4444/1555/888/0888K/8888, refsw2 dither
@@ -47,8 +61,8 @@ obj_dir/fb_write_tb: rtl/simplex_pvr_top.sv $(VO_RTL) tb/peel_core_stub.sv tb/fb
 spg-depth: obj_dir/spg_depth_tb
 	./obj_dir/spg_depth_tb
 
-obj_dir/spg_depth_tb: rtl/spg.sv tb/spg_depth_tb.cpp
-	$(VERILATOR) --cc --exe --build $(VFLAGS) rtl/spg.sv tb/spg_depth_tb.cpp -o spg_depth_tb
+obj_dir/spg_depth_tb: rtl/spg.sv tb/spg_depth_tb.cpp tb/spg_mode.h
+	$(VERILATOR) --cc --exe --build $(VFLAGS) $(SPGFLAGS) rtl/spg.sv tb/spg_depth_tb.cpp -o spg_depth_tb
 
 #   make spg-240p  - 240p (line-doubled) display: a 640x240 source shown at
 #                    4x vertically (four output lines per source line, last
@@ -76,8 +90,8 @@ obj_dir/irq_stretch_tb: rtl/irq_stretch.sv tb/irq_stretch_tb.cpp
 spg-bands: obj_dir/spg_bands_tb
 	./obj_dir/spg_bands_tb
 
-obj_dir/spg_bands_tb: rtl/spg.sv tb/spg_bands_tb.cpp
-	$(VERILATOR) --cc --exe --build $(VFLAGS) rtl/spg.sv tb/spg_bands_tb.cpp -o spg_bands_tb
+obj_dir/spg_bands_tb: rtl/spg.sv tb/spg_bands_tb.cpp tb/spg_mode.h
+	$(VERILATOR) --cc --exe --build $(VFLAGS) $(SPGFLAGS) rtl/spg.sv tb/spg_bands_tb.cpp -o spg_bands_tb
 
 spg-sync: obj_dir/spg_sync_tb
 	./obj_dir/spg_sync_tb
@@ -116,8 +130,36 @@ obj_dir/audio_i2s_tb: rtl/pvr_mmio.sv rtl/audio_i2s.sv tb/audio_tb_top.sv tb/aud
 	    rtl/pvr_mmio.sv rtl/audio_i2s.sv tb/audio_tb_top.sv tb/audio_i2s_tb.cpp \
 	    -o audio_i2s_tb
 
-obj_dir/spg_sync_tb: rtl/spg.sv tb/spg_sync_tb.cpp
-	$(VERILATOR) --cc --exe --build $(VFLAGS) rtl/spg.sv tb/spg_sync_tb.cpp -o spg_sync_tb
+obj_dir/spg_sync_tb: rtl/spg.sv tb/spg_sync_tb.cpp tb/spg_mode.h
+	$(VERILATOR) --cc --exe --build $(VFLAGS) $(SPGFLAGS) rtl/spg.sv tb/spg_sync_tb.cpp -o spg_sync_tb
+
+#   make spg-1080p - the three per-pixel/geometry spg testbenches re-run against a
+#                    STOCK 1080p instantiation (SCALE=2). spg.sv's SCALE=1 and SCALE=2
+#                    arms are written `(SCALE == 2) ? <stock> : <1:1>`; this is what
+#                    machine-checks the SCALE=2 arm rather than arguing from the diff
+#                    that it constant-folds back to stock.
+spg-1080p: spg-sync-1080p spg-bands-1080p spg-depth-1080p
+
+spg-sync-1080p: obj_1080p/spg_sync_tb
+	./obj_1080p/spg_sync_tb
+
+obj_1080p/spg_sync_tb: rtl/spg.sv tb/spg_sync_tb.cpp tb/spg_mode.h
+	$(VERILATOR) --cc --exe --build $(VFLAGS) $(SPGFLAGS) --Mdir obj_1080p \
+	    $(STOCK_1080P) rtl/spg.sv tb/spg_sync_tb.cpp -o spg_sync_tb
+
+spg-bands-1080p: obj_1080p/spg_bands_tb
+	./obj_1080p/spg_bands_tb
+
+obj_1080p/spg_bands_tb: rtl/spg.sv tb/spg_bands_tb.cpp tb/spg_mode.h
+	$(VERILATOR) --cc --exe --build $(VFLAGS) $(SPGFLAGS) --Mdir obj_1080p \
+	    $(STOCK_1080P) rtl/spg.sv tb/spg_bands_tb.cpp -o spg_bands_tb
+
+spg-depth-1080p: obj_1080p/spg_depth_tb
+	./obj_1080p/spg_depth_tb
+
+obj_1080p/spg_depth_tb: rtl/spg.sv tb/spg_depth_tb.cpp tb/spg_mode.h
+	$(VERILATOR) --cc --exe --build $(VFLAGS) $(SPGFLAGS) --Mdir obj_1080p \
+	    $(STOCK_1080P) rtl/spg.sv tb/spg_depth_tb.cpp -o spg_depth_tb
 
 pvr-burst: obj_dir/pvr_burst_tb
 	./obj_dir/pvr_burst_tb
@@ -128,8 +170,15 @@ pvr-burst: obj_dir/pvr_burst_tb
 spg-loopback: obj_dir/spg_loopback_tb
 	./obj_dir/spg_loopback_tb
 
-obj_dir/spg_loopback_tb: rtl/simplex_pvr_top.sv $(VO_RTL) rtl/spg.sv tb/spg_loopback_top.sv tb/peel_core_stub.sv tb/spg_loopback_tb.cpp $(TSP_PKG)
-	$(VERILATOR) --cc --exe --build $(VFLAGS) \
+#   make spg-loopback-nobp - the same run with the DDR model's random backpressure
+#                       removed. Diagnostic only, not part of `all`: it separates a
+#                       fetch-BANDWIDTH margin problem (passes here, fails above)
+#                       from an address/layout bug (fails both ways).
+spg-loopback-nobp: obj_dir/spg_loopback_tb
+	./obj_dir/spg_loopback_tb -nobp
+
+obj_dir/spg_loopback_tb: rtl/simplex_pvr_top.sv $(VO_RTL) rtl/spg.sv tb/spg_loopback_top.sv tb/peel_core_stub.sv tb/spg_loopback_tb.cpp tb/spg_mode.h $(TSP_PKG)
+	$(VERILATOR) --cc --exe --build $(VFLAGS) $(SPGFLAGS) \
 	    -Wno-UNUSEDPARAM -Wno-DECLFILENAME -Wno-PINMISSING \
 	    -I../polly2-core/rtl/gen \
 	    --top-module spg_loopback_top \
@@ -146,6 +195,8 @@ obj_dir/pvr_burst_tb: rtl/simplex_pvr_top.sv $(VO_RTL) tb/peel_core_stub.sv tb/p
 	    -o pvr_burst_tb
 
 clean:
-	rm -rf obj_dir
+	rm -rf obj_dir obj_1080p
 
-.PHONY: all spg-sync pvr-burst spg-loopback audio-i2s spg-bands spg-depth spg-240p fb-write render-irq clean
+.PHONY: all spg-sync pvr-burst spg-loopback spg-loopback-nobp audio-i2s spg-bands spg-depth \
+        spg-240p fb-write render-irq spg-480p spg-1to1 \
+        spg-1080p spg-sync-1080p spg-bands-1080p spg-depth-1080p clean

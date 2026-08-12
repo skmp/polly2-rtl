@@ -1,22 +1,32 @@
 // Write-layout vs scanout-layout cross-check.
 //
-// The peel_core stub streams a full 640x480 frame of known pixels through
+// The peel_core stub streams a full SRC_W x SRC_H frame of known pixels through
 // simplex_pvr_top's FB write master IN TILE ORDER (the real writeback
 // pattern) into a modeled DDR byte array; spg then scans the array out and
-// every displayed pixel inside the 1280x960 window is compared against the
+// every displayed pixel inside the game window is compared against the
 // pixel that was streamed. Any bit-level mismatch between the two layouts -
 // pair order, split-VRAM half select, address arithmetic (incl. an odd
 // 64-bit start word), lane selection, 565->888 expansion - fails with exact
 // coordinates. Runs two configs: {half 0, even base} and {half 1, odd base}.
+//
+// The window and the raster come from spg.sv's own parameters (spg_mode.h) rather
+// than 1080p literals, so this follows the module's mode. It reads them through the
+// wrapper's hierarchy, since spg is instantiated as u_spg inside spg_loopback_top.
 #include "Vspg_loopback_top.h"
+#include "Vspg_loopback_top___024root.h"
 #include "verilated.h"
 #include <cstdio>
 #include <cstring>
 #include <vector>
 #include <cstdint>
 
+#define SPG_P(n) (Vspg_loopback_top___024root::spg_loopback_top__DOT__u_spg__DOT__##n)
+#include "spg_mode.h"
+using namespace spg_mode;
+
 static Vspg_loopback_top* dut;
 static int errors = 0;
+static bool g_nobp = false;   // -nobp: drop the random DDR backpressure (margin probe)
 
 static uint32_t lfsr = 0xACE1u;
 static int rnd() { lfsr = (lfsr >> 1) ^ (-(int)(lfsr & 1) & 0xB400u); return lfsr & 3; }
@@ -58,14 +68,13 @@ static long g_fetches  = 0;
 static int  g_idle     = 0;
 static bool g_saw_beat = false;
 static const int FETCH_IDLE_TICKS = 8;
-static const long FRAME_CLKS = 2200L * 1125L;           // stock 1080p: H_TOTAL * V_TOTAL
 
 static void read_port_tick() {
-    dut->avl_waitrequest = (rnd() == 0);
+    dut->avl_waitrequest = g_nobp ? 0 : (rnd() == 0);
     if (dut->avl_read && !dut->avl_waitrequest)
         rdq.push_back({dut->avl_address, dut->avl_burstcount});
     dut->avl_readdatavalid = 0;
-    if (!rdq.empty() && rnd() != 1) {
+    if (!rdq.empty() && (g_nobp || rnd() != 1)) {
         RdCmd& c = rdq.front();
         uint64_t byte0 = c.addr16 * 16;
         for (int w = 0; w < 4; w++) {
@@ -84,11 +93,19 @@ static void read_port_tick() {
     }
 }
 
+// underrun is sticky, so a bare end-of-run read cannot say WHICH line starved or
+// even whether it was the settling frame rather than the checked one. Record the
+// first rising edge instead.
+static long g_tick = 0;
+static long g_ur_tick = -1;
+
 static void tick() {
     dut->clk = 0; dut->eval();
     write_port_tick();
     read_port_tick();
     dut->clk = 1; dut->eval();
+    if (dut->underrun && g_ur_tick < 0) g_ur_tick = g_tick;
+    g_tick++;
 }
 
 static void regwrite(int addr, uint32_t data) {
@@ -125,7 +142,7 @@ static void run_config(uint32_t sof, uint16_t xorpat, const char* name) {
     // ---- phase 2: scan out one full frame and compare the window ----
     // sys_top: fb_disp_base = {vram_top,24'd0} + {sof[21:2],3'd0}
     dut->fb_base      = (uint32_t)((VRAM_TOP << 24) + (((sof >> 2) & 0xFFFFF) << 3));
-    dut->fb_stride    = 1280;
+    dut->fb_stride    = (uint32_t)(SRC_W * 2);   // 565, 2 bytes/px
     dut->fb_line_dbl  = 0;
     dut->fb_split     = 1;
     dut->fb_disp_half = (sof >> 22) & 1;
@@ -133,15 +150,18 @@ static void run_config(uint32_t sof, uint16_t xorpat, const char* name) {
     dut->fb_concat    = 0;
     dut->fb_enable    = 1;
     dut->spg_reset = 0;
+    g_ur_tick = -1;                       // spg_reset clears the sticky flag
 
     // let the raster free-run one frame to settle prefetch, then align to the
     // frame start: after vsync deasserts, the next de rise is display line 0
-    long total = 2200L * 1125L;
+    long total = FRAME_CLKS;
+    long t_settle = g_tick;
     for (long i = 0; i < total + 100; i++) tick();
     long guard = 0;
     while (!dut->vsync && ++guard < 2 * total) tick();   // vsync rise
     while (dut->vsync && ++guard < 3 * total) tick();    // vsync fall
     if (guard >= 3 * total) { printf("[%s] FAIL: no vsync\n", name); errors++; return; }
+    long t_scan = g_tick;
 
     int x = 0, y = -1;       // de-relative coordinates; y=0 at first de rise
     int prev_de = 0;
@@ -150,8 +170,8 @@ static void run_config(uint32_t sof, uint16_t xorpat, const char* name) {
         tick();
         if (dut->de && !prev_de) { x = 0; y++; }
         if (dut->de) {
-            if (y >= 60 && y < 1020 && x >= 320 && x < 1600) {
-                uint32_t sx = (uint32_t)(x - 320) / 2, sy = (uint32_t)(y - 60) / 2;
+            if (y >= Y0 && y < Y1 && x >= X0 && x < X1) {
+                uint32_t sx = (uint32_t)src_x(x), sy = (uint32_t)src_y(y);
                 uint32_t pix = (sy << 11) | sx;   // the stub's {py, px} hash key
                 uint8_t er, eg, eb;
                 expect_rgb(pix, xorpat, &er, &eg, &eb);
@@ -166,13 +186,21 @@ static void run_config(uint32_t sof, uint16_t xorpat, const char* name) {
             x++;
         }
         prev_de = dut->de;
-        if (y >= 1020) break;
+        if (y >= Y1) break;
     }
-    if (checked < 1280L * 960L / 2) {  // must have covered at least a full frame's worth
+    // must have covered at least a full frame's worth (half the window is a loose
+    // lower bound - the scan can start mid-frame)
+    if (checked < (X1 - X0) * (Y1 - Y0) / 2) {
         printf("[%s] FAIL: only %ld window pixels checked\n", name, checked);
         errors++;
     }
-    if (dut->underrun) { printf("[%s] FAIL: spg underrun\n", name); errors++; }
+    if (dut->underrun) {
+        long rel = g_ur_tick - (g_ur_tick >= t_scan ? t_scan : t_settle);
+        printf("[%s] FAIL: spg underrun, first at tick %ld (%s frame, ~line %ld col %ld)\n",
+               name, g_ur_tick, g_ur_tick >= t_scan ? "checked" : "settling",
+               rel / H_TOTAL, rel % H_TOTAL);
+        errors++;
+    }
     printf("[%s] %ld window pixels checked\n", name, checked);
 }
 
@@ -224,6 +252,9 @@ static void run_reset_parity(const char* name) {
 
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
+    for (int i = 1; i < argc; i++)
+        if (!strcmp(argv[i], "-nobp")) g_nobp = true;
+    print_mode("spg_loopback_tb");
     dut = new Vspg_loopback_top;
 
     // config A: half/bank 0 (pixels in LOW 32 bits, pvr_map32), even base word
