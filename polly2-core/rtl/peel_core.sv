@@ -1567,7 +1567,7 @@ module peel_core import tsp_pkg::*; #(
     // push and pop never target the same address in the same cycle (pop only fires when
     // !pq_empty -> head!=tail; push is blocked by out_ready=!pq_full when head==tail),
     // so no_rw_check is safe. Only the small head/tail/count control stays in logic.
-    localparam integer PQ_W = 569;   // 17*32 + 4*5 + 1 (is_pt) + 4 (tl)
+    localparam integer PQ_W = 570;   // 17*32 + 4*5 + 1 (is_pt) + 4 (tl) + 1 (mvskip)
     localparam integer QF_DX12=0,  QF_DX23=32,  QF_DX31=64,  QF_DX41=96;
     localparam integer QF_DY12=128,QF_DY23=160, QF_DY31=192, QF_DY41=224;
     localparam integer QF_C1=256,  QF_C2=288,   QF_C3=320,   QF_C4=352;
@@ -1576,6 +1576,17 @@ module peel_core import tsp_pkg::*; #(
     localparam integer QF_BX0=544, QF_BX1=549,  QF_BY0=554,  QF_BY1=559;   // 5b each
     localparam integer QF_PT=564;    // list-kind (PT) bit
     localparam integer QF_TL=565;    // 4b: per-edge IsTopLeft
+    // MODVOL SUMMARIZE MARKER. A volume's LAST polygon carries the VolumeMode that
+    // closes it, and refsw2 summarizes in RenderTriangle AFTER RasterizeTriangle has
+    // returned - so a polygon the CULL rejected still closes its volume. polly2 fires
+    // the summarize from RS_POP, which a setup-culled triangle would never reach, so
+    // such a terminator is pushed into pq ANYWAY with this bit set: it keeps its place
+    // in the stream (ordering is what makes per-volume parity correct) but issues no
+    // chunks. Without it, every volume whose terminator is back-facing merges into the
+    // next one and their flips XOR in the shared FLIP bit instead of OR-ing per volume
+    // - which silently deletes shadows wherever two volumes overlap (daytona_side has
+    // 5 of 6 terminators culled in one tile).
+    localparam integer QF_MVSKIP=569;   // 1 = summarize marker only, do not raster
     (* ramstyle = "M10K, no_rw_check" *) reg [PQ_W-1:0] pq_ram [0:PQ_N-1];
     reg [PQ_W-1:0] pq_rdw;            // registered read word (valid the cycle after pop)
     reg [3:0]  pq_head, pq_tail;
@@ -1599,6 +1610,8 @@ module peel_core import tsp_pkg::*; #(
     assign pq_wrw[QF_BX0  +:  5] = w_bx0;  assign pq_wrw[QF_BX1  +:  5] = w_bx1;
     assign pq_wrw[QF_BY0  +:  5] = w_by0;  assign pq_wrw[QF_BY1  +:  5] = w_by1;
     assign pq_wrw[QF_TL   +:  4] = w_tl;
+    // a culled volume terminator rides through as a marker (see QF_MVSKIP)
+    assign pq_wrw[QF_MVSKIP]     = isp_cull;
 
     // ---- PT alpha-fail bbox clip (consumed at RS_POP): intersect the popped
     // triangle's tile bbox with the active fail bbox; an empty intersection
@@ -3539,9 +3552,12 @@ module peel_core import tsp_pkg::*; #(
             // retire: on out_valid, push non-culled triangles into the plane FIFO.
             // pt_dead: the PT pass is moot (verdict arrived) - drop instead of push.
             if (su_out_valid) begin
-                if (isp_cull) begin
+                // A CULLED volume terminator is still pushed (QF_MVSKIP): it must close
+                // its volume in stream order even though it rasterizes nothing.
+                if (isp_cull && !(mv_phase && su_out_isp[31:29] != 3'd0)) begin
                     cull_count <= cull_count + 1;
                 end else if (!pt_dead) begin
+                    if (isp_cull) cull_count <= cull_count + 1;
                     pq_ram[pq_tail[2:0]] <= pq_wrw;   // one packed M10K word
                     pq_tail <= (pq_tail==PQ_N-1) ? 4'd0 : pq_tail+4'd1;
                     pq_push  = 1'b1;
@@ -3610,7 +3626,7 @@ module peel_core import tsp_pkg::*; #(
                 // (POP+CORNER+sweep). The absolute-coord raster pipe is 15 deep
                 // (was 6), so the old 4 slots no longer cover it - 8 do (8*3 = 24
                 // > 16 = the deepest an in-flight chunk can be).
-                if (!ptc_empty) begin
+                if (!ptc_empty && !pq_rdw[QF_MVSKIP]) begin
                     tri_qi <= tri_qi + 3'd1;
                     tq_tag  [tri_qi + 3'd1] <= pq_rdw[QF_TAG +:32];
                     tq_mode [tri_qi + 3'd1] <= pq_rdw[QF_ISP+29 +: 3];
@@ -3644,7 +3660,7 @@ module peel_core import tsp_pkg::*; #(
                 // PT fail-bbox clip: no overlap with any still-failing pixel ->
                 // skip the sweep (and the probe) entirely; chain straight to the
                 // next triangle.
-                if (ptc_empty) begin
+                if (ptc_empty || pq_rdw[QF_MVSKIP]) begin
                     cr_issue <= 1'b0;
                     if (ch_pop && !pq_empty && !mv_vlast) begin
                         pq_rdw  <= pq_ram[pq_head[2:0]];
