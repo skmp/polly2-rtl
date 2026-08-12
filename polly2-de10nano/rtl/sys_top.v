@@ -14,10 +14,10 @@
 //     reset window held around a switch.
 //   - peel_core (simplex_pvr_top): registers/GO/RESET/VRAM base via MMIO,
 //     render reads on ram1, framebuffer writes on ram2.
-//   - Display: pll_hdmi + SPG (720x480p raster, 640x480 split-VRAM FB shown
-//     1:1, vbuf port) -> TX register stage -> ADV7513. No OSD, no scaler, no
-//     analog output. pll_hdmi is still the stock fixed 148.5 MHz and the
-//     retargeted SPG wants 27 MHz - see the instantiation below.
+//   - Display: pll_hdmi (fixed 27.000 MHz) + SPG (720x480p raster, 640x480
+//     split-VRAM FB shown 1:1, vbuf port) -> TX register stage -> ADV7513.
+//     No OSD, no scaler, no analog output. Clock and raster now match - see
+//     the instantiation below for the PLL solve.
 //   - Audio: pll_audio (24.576 MHz) + audio_i2s: 2048-entry sample FIFO
 //     fed from the MMIO AUDIO_DATA register (blocking when full), drained
 //     at 48 kHz onto the ADV7513's I2S input (16-bit, standard I2S).
@@ -535,7 +535,7 @@ pll_hdmi pll_hdmi
 (
 	.refclk(FPGA_CLK1_50),
 	.rst(1'b0),
-	.reconfig_to_pll(64'd0),   // fixed 148.5 MHz (stock 1080p60), no runtime reconfig
+	.reconfig_to_pll(64'd0),   // fixed 27.000 MHz (stock part was 148.5), no runtime reconfig
 	.reconfig_from_pll(),
 	.outclk_0(hdmi_clk_out)
 );
