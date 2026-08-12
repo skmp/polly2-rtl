@@ -385,8 +385,6 @@ pll pll
 	.outclk_1(clk_90),
 	.outclk_2(clk_100),
 	.outclk_3(clk_112),
-	.reconfig_to_pll(64'd0),   // fixed outputs, no runtime reconfig
-	.reconfig_from_pll(),
 	.locked(pll_locked)
 );
 

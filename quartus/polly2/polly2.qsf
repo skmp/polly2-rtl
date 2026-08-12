@@ -24,6 +24,9 @@ set_global_assignment -name FINAL_PLACEMENT_OPTIMIZATION ALWAYS
 # The unpipelined TSP perspective dividers cannot meet the 20 MHz target.
 # Keep iteration fits bounded until those paths have register boundaries.
 set_global_assignment -name OPTIMIZATION_MODE "HIGH PERFORMANCE EFFORT"
+set_global_assignment -name PHYSICAL_SYNTHESIS_COMBO_LOGIC ON
+set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_RETIMING ON
+set_global_assignment -name SEED 15
 
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to ARDUINO_IO[*]
 set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to ARDUINO_IO[*]
