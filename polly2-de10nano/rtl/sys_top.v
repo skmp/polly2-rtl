@@ -14,9 +14,10 @@
 //     reset window held around a switch.
 //   - peel_core (simplex_pvr_top): registers/GO/RESET/VRAM base via MMIO,
 //     render reads on ram1, framebuffer writes on ram2.
-//   - Display: pll_hdmi (fixed 148.5 MHz) + SPG (1080p raster, 640x480
-//     split-VRAM FB doubled to 1280x960, vbuf port) -> TX register stage ->
-//     ADV7513. No OSD, no scaler, no analog output.
+//   - Display: pll_hdmi + SPG (720x480p raster, 640x480 split-VRAM FB shown
+//     1:1, vbuf port) -> TX register stage -> ADV7513. No OSD, no scaler, no
+//     analog output. pll_hdmi is still the stock fixed 148.5 MHz and the
+//     retargeted SPG wants 27 MHz - see the instantiation below.
 //   - Audio: pll_audio (24.576 MHz) + audio_i2s: 2048-entry sample FIFO
 //     fed from the MMIO AUDIO_DATA register (blocking when full), drained
 //     at 48 kHz onto the ADV7513's I2S input (16-bit, standard I2S).
@@ -511,9 +512,18 @@ irq_stretch #(.CYCLES(64)) render_irq_stretch
 );
 
 //////////////////////////////////////////////////////////////////////////
-// Display: pll_hdmi (fixed 148.5 MHz) + SPG -> TX register stage -> pins.
+// Display: pll_hdmi + SPG -> TX register stage -> pins.
 // FB is split-VRAM 16bpp RGB565: DC 32-bit-view word W at DDR byte W*8,
 // half selected by SOF bit 22.
+//
+// CLOCK MISMATCH - deliberate, temporary, and NOT buildable as it stands.
+// spg is retargeted to 720x480p, whose 858 x 525 totals want a 27 MHz pixel
+// clock; pll_hdmi below is still the stock 148.5 MHz part, which would run
+// that raster at ~330 Hz. The fix is a regenerated pll_hdmi (50 MHz ref,
+// N=1, M=13.5 -> VCO 1350 MHz, C0=25 -> 27.000 MHz exactly), and it needs
+// Quartus: the resolved counters in plls/pll_hdmi/pll_hdmi_0002.v are what
+// program the silicon, and the charge pump and loop filter are re-solved
+// with them, so the frequency cannot simply be text-edited here.
 //////////////////////////////////////////////////////////////////////////
 
 wire hdmi_clk_out;
@@ -521,7 +531,7 @@ pll_hdmi pll_hdmi
 (
 	.refclk(FPGA_CLK1_50),
 	.rst(1'b0),
-	.reconfig_to_pll(64'd0),   // fixed 148.5 MHz (1080p60), no runtime reconfig
+	.reconfig_to_pll(64'd0),   // fixed 148.5 MHz (stock 1080p60), no runtime reconfig
 	.reconfig_from_pll(),
 	.outclk_0(hdmi_clk_out)
 );

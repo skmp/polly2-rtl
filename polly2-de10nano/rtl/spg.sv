@@ -1,16 +1,23 @@
 // spg.sv - fixed-mode display controller, loosely modelled on the Dreamcast
-// (HOLLY) spg, but generating the FINAL 1080p raster directly at the HDMI
-// pixel clock. Replaces ascal on the HDMI path:
+// (HOLLY) spg, but generating the FINAL raster directly at the HDMI pixel
+// clock. Replaces ascal on the HDMI path:
 //
-//  - 1920x1080 CEA-861 timing (2200 x 1125 totals, both syncs positive).
-//    At a 148.352 MHz pixel clock this is 1080p59.94 (the DC VGA field
-//    rate); at 148.5 MHz it is exactly 60.000 Hz.
-//  - The 640-wide framebuffer in DDR3 is displayed pixel- and line-doubled
-//    (2x nearest) as a 1280x960 window centred in the frame (x 320..1599,
-//    y 60..1019 - the same window the stripped ascal used). fb_line_dbl
-//    displays a 640x240 source at 4x vertically instead (FB_R_CTRL
-//    fb_line_double / the 240p menu option); fb_pix_dbl a 320-wide source
-//    at 4x horizontally (VO_CONTROL pixel_double) - the two compose.
+//  - The raster is whatever the timing parameters below say. The default is
+//    720x480p CEA-861 VIC 2/3 (858 x 525 totals, both syncs positive); at a
+//    27 MHz pixel clock that is 31.469 kHz / 59.940 Hz, a rate a 31 kHz
+//    arcade CRT can lock. The stock configuration is 1920x1080 (2200 x 1125
+//    totals): at 148.352 MHz that is 1080p59.94 (the DC VGA field rate), at
+//    148.5 MHz exactly 60.000 Hz. It is still buildable by overriding the
+//    timing parameters together with SCALE=2 - the spg-*-1080p targets do
+//    exactly that, so the 1080p arm stays machine-checked.
+//  - The 640-wide framebuffer in DDR3 is displayed at SCALE (see below) as a
+//    SRC_W*SCALE x SRC_H*SCALE window centred in the frame: 1:1 by default
+//    (x 40..679, y 0..479), or pixel- and line-doubled (2x nearest) to a
+//    1280x960 window at 1080p (x 320..1599, y 60..1019 - the same window the
+//    stripped ascal used). fb_line_dbl displays a 640x240 source at twice
+//    that vertically instead (FB_R_CTRL fb_line_double / the 240p menu
+//    option); fb_pix_dbl a 320-wide source at twice that horizontally
+//    (VO_CONTROL pixel_double) - the two compose.
 //  - All four FB_R_CTRL fb_depth read formats, with refsw2 Present()
 //    semantics (fb_concat appended below the 5/6-bit channels):
 //      0: 0555 RGB, 2 bytes/px     1: 565 RGB, 2 bytes/px
@@ -36,13 +43,16 @@
 //    overfetch - still trivial bandwidth). fb_stride stays in FB-view
 //    bytes in both modes; the DDR advance doubles internally.
 //  - Two optional border bands: 640x30 RGB565 LINEAR framebuffers (stride
-//    fixed at 1280 bytes) displayed 2x-doubled as 1280x60, exactly filling
-//    the top (lines 0..59) and bottom (lines 1020..1079) borders,
-//    x-centred like the game window. Bands are host OSD surfaces: always
-//    565 with MSB-replicated expansion, independent of the game fb_depth.
-//    fb_top_base / fb_bot_base are DDR BYTE addresses, 128-byte aligned,
-//    sampled once per frame at the start of vertical blanking (line 1080);
-//    0 disables a band (black border).
+//    fixed at 1280 bytes) displayed line-doubled - always 2x, independent of
+//    SCALE - so they fill a 60-line margin above and below the game window,
+//    x-centred on it. That margin exists only where Y0 == 60, i.e. the 1080p
+//    configuration (lines 0..59 and 1020..1079). At the 480p default the
+//    source fills the raster, Y0 == 0, and the bands are structurally absent
+//    - see the UNSIGNED waiver at the localparam block. Bands are host OSD
+//    surfaces: always 565 with MSB-replicated expansion, independent of the
+//    game fb_depth. fb_top_base / fb_bot_base are DDR BYTE addresses,
+//    128-byte aligned, sampled once per frame at the start of vertical
+//    blanking (line V_ACTIVE); 0 disables a band (black border).
 //  - DDR access is a 128-bit Avalon read master, intended for the vbuf
 //    port on sysmem_lite that ascal used to own (16-byte word addresses).
 //    Fetches are beat-aligned: the FB base's low 4 bits (split: bit 3
@@ -53,10 +63,11 @@
 //    behaviour seen on hardware). A request landing mid-fetch (severe
 //    starvation) is queued, not lost.
 //  - Two line buffers ("current" / "next"): while one source line is
-//    displayed (two output lines), the next is burst-read into the other.
-//    Prefetch slack is two output lines (~29.7 us) per line; worst case
-//    (split 0888, misaligned) is 321 beats - still no DMA engine and no
-//    tight arbiter deadline. Storage is four 32-bit banks of 512: the
+//    displayed (SCALE output lines), the next is burst-read into the other.
+//    Prefetch slack is one source line's display time: ~31.8 us at the 480p
+//    default (one 858-px line at 27 MHz), ~29.7 us at 1080p (two 2200-px
+//    lines at 148.352 MHz). Worst case (split 0888, misaligned) is 321
+//    beats - still no DMA engine and no tight arbiter deadline. Storage is four 32-bit banks of 512: the
 //    line's raw FB-view bytes, beat-aligned (split-mode half-selection is
 //    the only write-side transformation), FB 32-bit word N -> bank N[1:0],
 //    address {buffer, N[9:2]}.
@@ -104,7 +115,8 @@ module spg
 	parameter SCALE    = 1
 )
 (
-	input  wire        clk,          // 1080p pixel clock (148.352 / 148.5 MHz)
+	input  wire        clk,          // pixel clock for the timings above:
+	                                 // 27 MHz at 480p, 148.352 / 148.5 at 1080p
 	input  wire        reset,        // video-domain reset
 
 	// Framebuffer location. fb_base/fb_disp_half are sampled once PER LINE
@@ -147,7 +159,7 @@ module spg
 	output reg  [7:0]  blue,
 	output reg         hsync,
 	output reg         vsync,
-	output reg         de,           // full 1920x1080 active area
+	output reg         de,           // full H_ACTIVE x V_ACTIVE active area
 	output reg         vblank,       // output-raster vertical blank (ascal o_vbl)
 	output reg         border,       // active raster but outside the image window (ascal o_brd)
 
