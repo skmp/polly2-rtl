@@ -13,17 +13,24 @@
 //   - fb_enable=0 blanks the game window;
 //   - VO_CONTROL.pixel_double: a 320-wide source displayed 4x horizontally
 //     (halved stride/fetch), bands unaffected;
-//   - border bands stay 565/MSB-replicate regardless of the game depth.
+//   - border bands stay 565/MSB-replicate regardless of the game depth (only when
+//     the mode leaves a margin for them - see spg_mode.h HAS_BANDS).
 // Every active pixel of checked frames is compared; no underrun allowed.
+//
+// Window geometry and the source-to-raster scaling come from spg.sv's parameters
+// (spg_mode.h) rather than 1080p literals, so this runs against whatever mode the
+// module was built for - `make spg-depth` at the 480p default, `make spg-depth-1080p`
+// against a stock SCALE=2 instantiation.
 #include "Vspg.h"
+#include "Vspg___024root.h"
 #include "verilated.h"
 #include <cstdio>
 #include <cstdint>
 #include <deque>
 
-static const int H_ACT = 1920, V_ACT = 1080;
-static const int X0 = 320, X1 = 1600, Y0 = 60, Y1 = 1020;
-static const int SRC_W = 640, SRC_H = 480;
+#define SPG_P(n) (Vspg___024root::spg__DOT__##n)
+#include "spg_mode.h"
+using namespace spg_mode;
 
 static const uint64_t TOP = 0x00600000, BOT = 0x00610000;  // band FBs (128B aligned)
 
@@ -62,7 +69,7 @@ static uint16_t fb16(uint64_t A, int half) {
 
 static int stride_bytes() {
     int bpp = g_depth == 2 ? 3 : g_depth == 3 ? 4 : 2;
-    return (g_pixdbl ? 320 : 640) * bpp;
+    return (int)((g_pixdbl ? SRC_W / 2 : SRC_W) * bpp);
 }
 
 // refsw2 Present() for one game pixel: source line s, source pixel n
@@ -102,13 +109,13 @@ static void game_rgb(int s, int n, uint8_t* r, uint8_t* g, uint8_t* b) {
 static void expect_px(int x, int y, uint8_t* r, uint8_t* g, uint8_t* b) {
     *r = *g = *b = 0;
     if (x < X0 || x >= X1) return;
-    int n = (x - X0) >> 1;
+    int n = (int)src_x(x);
     if (y < Y0 || y >= Y1) {
         bool top = y < Y0;
         if (top ? !g_top_en : !g_bot_en) return;
         uint64_t base = top ? TOP : BOT;
-        int sy = (top ? y : y - Y1) >> 1;
-        uint64_t a = base + (uint64_t)sy * 1280 + (uint64_t)n * 2;
+        int sy = (top ? y : y - (int)Y1) >> SHIFT;
+        uint64_t a = base + (uint64_t)sy * BAND_STRIDE + (uint64_t)n * 2;
         uint16_t p = (uint16_t)(pat(a) | (pat(a + 1) << 8));
         *r = (uint8_t)(((p >> 11) & 0x1F) << 3 | ((p >> 13) & 0x7));
         *g = (uint8_t)(((p >> 5) & 0x3F) << 2 | ((p >> 9) & 0x3));
@@ -116,7 +123,8 @@ static void expect_px(int x, int y, uint8_t* r, uint8_t* g, uint8_t* b) {
         return;
     }
     if (!g_enable) return;
-    game_rgb((y - Y0) >> 1, g_pixdbl ? (x - X0) >> 2 : n, r, g, b);
+    // pixel_double halves the source width, so it costs one extra shift on top of SCALE
+    game_rgb((int)src_y(y), g_pixdbl ? (int)((x - X0) >> (SHIFT + 1)) : n, r, g, b);
 }
 
 // ---- DDR burst server (light random backpressure, deterministic) ----
@@ -155,14 +163,14 @@ static int  cx = 0, cy = -1, prev_de = 0;
 template <typename PXCB, typename FLIPCB>
 static void run_frames(int n, bool check, const char* name, PXCB px_cb, FLIPCB flip_cb) {
     int seen = 0;
-    long guard = 2475000L * (n + 2);
+    long guard = FRAME_CLKS * (n + 2);
     while (seen < n && guard-- > 0) {
         tick();
         flip_cb(seen, cx, cy);
         if (dut->de) {
             if (!prev_de) {
                 cx = 0;
-                if (gap > 10000) cy = 0;
+                if (gap > VBLANK_GAP_MIN) cy = 0;
                 else cy++;
             }
             gap = 0;
@@ -170,7 +178,7 @@ static void run_frames(int n, bool check, const char* name, PXCB px_cb, FLIPCB f
             cx++;
         } else {
             gap++;
-            if (prev_de && cy == V_ACT - 1) seen++;
+            if (prev_de && cy == V_ACTIVE - 1) seen++;
         }
         prev_de = dut->de;
     }
@@ -245,11 +253,15 @@ int main(int argc, char** argv) {
     dut->fb_top_base = 0; dut->fb_bot_base = 0;
 
     // ---- per-line SOF change, linear: base page AND byte offset change ----
-    // Flip mid-frame while output line FLIP_Y displays; the request for
-    // source line s is issued at output line Y0-2+2s, so lines with
-    // Y0-2+2s >= FLIP_Y+1 must come from the new base - line-exactly.
+    // Flip mid-frame while output line FLIP_Y displays; the request for source line s
+    // is issued at output line request_line(s) = Y0 - LOOKAHEAD + SCALE*s, so lines
+    // with request_line(s) >= FLIP_Y+1 must come from the new base - line-exactly.
+    // LOOKAHEAD is 2 output lines at SCALE=2 but 1 at SCALE=1: at 1:1 a two-line
+    // lookahead would be two SOURCE lines and would land in the buffer being scanned
+    // out. That is why this is derived and not written as the old literal `Y0-2+2s`.
     if (!errors) {
-        const int FLIP_Y = 500;
+        const int FLIP_Y = (int)(Y0 + (Y1 - Y0) / 2);   // mid-window
+        const int FLIP_X = (int)(H_ACTIVE / 2);         // mid-line
         const uint64_t A = 0x00300000, B = 0x00310000 + 6;
         set_surface(1, 0, 0, A, 0, 1);
         g_top_en = g_bot_en = false;

@@ -86,9 +86,22 @@ module spg
 	parameter V_FP     = 9,
 	parameter V_SYNC   = 6,
 	parameter V_BP     = 30,    // V total 525  -> 31469/525 = 59.94 Hz
-	// source framebuffer (displayed 1:1 — see SCALE below)
+	// source framebuffer (displayed at SCALE — see below)
 	parameter SRC_W    = 640,
-	parameter SRC_H    = 480
+	parameter SRC_H    = 480,
+	// Display scale: how many raster pixels/lines each source pixel/line occupies.
+	// 1080p needed 2x to fill a 1920x1080 raster from a 640x480 source; 480p is a 1:1
+	// fit, so the game window is SRC_W x SRC_H placed directly. SCALE is honoured by
+	// the window placement below AND by the address generators: the horizontal shift
+	// (n_pre), the vertical shift (vshift), the prefetch lookahead (y_look_raw) and
+	// the underrun gate all derive from it. fb_pix_dbl / fb_line_dbl compose on top,
+	// so a 320-wide or 240-line source still fills the window at either scale.
+	//
+	// Deliberately a parameter and not a localparam: a testbench can then instantiate
+	// the stock 1080p configuration (SCALE=2 with the 1080p timings above) and
+	// machine-check that arm instead of arguing it by inspection. See the
+	// spg-*-1080p targets in the Makefile.
+	parameter SCALE    = 1
 )
 (
 	input  wire        clk,          // 1080p pixel clock (148.352 / 148.5 MHz)
@@ -156,14 +169,9 @@ localparam [10:0] VS_BEG   = V_ACTIVE + V_FP;
 localparam [10:0] VS_END   = V_ACTIVE + V_FP + V_SYNC;
 localparam [11:0] H_ACT    = H_ACTIVE;
 localparam [10:0] V_ACT    = V_ACTIVE;
-// Display scale. 1080p needed 2x to fill a 1920x1080 raster from a 640x480 source;
-// 480p is a 1:1 fit, so the game window is SRC_W x SRC_H placed directly.
-// SCALE is honoured by the window placement below AND by the address generators: the
-// horizontal shift (n_pre), the vertical shift (vshift), the prefetch lookahead
-// (y_look_raw) and the underrun gate all derive from it. fb_pix_dbl / fb_line_dbl
-// compose on top, so a 320-wide or 240-line source still fills the window at either
-// scale. spg-480p asserts the raster; spg-1to1 asserts the sampling.
-localparam        SCALE    = 1;
+// SCALE is a module parameter (see the port list). spg-480p asserts the raster,
+// spg-1to1 the 1:1 sampling, and the spg-*-1080p targets the SCALE=2 arm.
+//
 // At SCALE=1 the 480-line source exactly fills the 480-line raster, so Y0 == 0 and there is
 // NO vertical margin left for the top/bottom border bands. Every `vcnt < Y0` / `y_look < Y0`
 // comparison therefore folds to a constant, which Verilator flags as UNSIGNED. That folding
