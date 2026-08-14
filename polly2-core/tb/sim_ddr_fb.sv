@@ -43,14 +43,23 @@ module sim_ddr_fb import tsp_pkg::*; #(
     initial ddrvary = $test$plusargs("ddrvary");
     // command queue: up to CQ accepted bursts; per-slot latency counts down for ALL
     // queued commands each cycle (overlap), beats stream from the head in order.
-    localparam integer CQ = 4;
-    reg [19:0] q_word [0:CQ-1];
-    reg [7:0]  q_beats[0:CQ-1];
-    reg [7:0]  q_lat  [0:CQ-1];
-    reg [2:0]  q_wp, q_rp;
-    wire       q_empty = (q_wp == q_rp);
-    wire       q_full  = (q_wp[2] != q_rp[2]) && (q_wp[1:0] == q_rp[1:0]);
-    wire [1:0] q_h     = q_rp[1:0];
+    // CQ is the BACKEND's pending-read window - the thing that actually decides how much
+    // memory-level parallelism the core can get, since ddr_resp.busy = q_full is what
+    // gates acceptance. It was 4, which silently capped the whole channel below what the
+    // arbiter and the texel cache's fill queues can now use (4 demand + 4 prefetch + one
+    // per geometry client). On Avalon-MM this window is the SLAVE's
+    // maximumPendingReadTransactions; the HPS f2h SDRAM port's real value lives in the
+    // generated Qsys component. 16 here is "not the limiter" for the same reason DDR_OUT
+    // is 16 in peel_core.
+    localparam integer CQ  = 16;
+    localparam integer CQW = $clog2(CQ);
+    reg [19:0]  q_word [0:CQ-1];
+    reg [7:0]   q_beats[0:CQ-1];
+    reg [7:0]   q_lat  [0:CQ-1];
+    reg [CQW:0] q_wp, q_rp;
+    wire        q_empty = (q_wp == q_rp);
+    wire        q_full  = (q_wp[CQW] != q_rp[CQW]) && (q_wp[CQW-1:0] == q_rp[CQW-1:0]);
+    wire [CQW-1:0] q_h  = q_rp[CQW-1:0];
     reg [63:0] d_do; reg d_dv;
     integer qi;
     assign ddr_resp.busy   = q_full;
@@ -73,22 +82,22 @@ module sim_ddr_fb import tsp_pkg::*; #(
 
     always @(posedge clk) begin
         d_dv <= 1'b0;
-        if (reset) begin q_wp <= 3'd0; q_rp <= 3'd0; end
+        if (reset) begin q_wp <= '0; q_rp <= '0; end
         else begin
             if (ddr_req.rd && !q_full) begin
-                q_word [q_wp[1:0]] <= ddr_req.addr[19:0];
-                q_beats[q_wp[1:0]] <= ddr_req.burst;
-                q_lat  [q_wp[1:0]] <= RD_LAT[7:0] + (ddrvary ? {4'd0, ddr_req.addr[3:0]} : 8'd0);
-                q_wp <= q_wp + 3'd1;
+                q_word [q_wp[CQW-1:0]] <= ddr_req.addr[19:0];
+                q_beats[q_wp[CQW-1:0]] <= ddr_req.burst;
+                q_lat  [q_wp[CQW-1:0]] <= RD_LAT[7:0] + (ddrvary ? {4'd0, ddr_req.addr[3:0]} : 8'd0);
+                q_wp <= q_wp + 1'b1;
             end
             for (qi = 0; qi < CQ; qi = qi + 1)
-                if (q_lat[qi] != 8'd0 && !(ddr_req.rd && !q_full && qi == {30'd0,q_wp[1:0]}))
+                if (q_lat[qi] != 8'd0 && !(ddr_req.rd && !q_full && qi == int'({{(32-CQW){1'b0}}, q_wp[CQW-1:0]})))
                     q_lat[qi] <= q_lat[qi] - 8'd1;
             if (!q_empty && q_lat[q_h] == 8'd0) begin
                 d_do <= vram[q_word[q_h]]; d_dv <= 1'b1;
                 q_word[q_h]  <= q_word[q_h] + 20'd1;
                 q_beats[q_h] <= q_beats[q_h] - 8'd1;
-                if (q_beats[q_h] <= 8'd1) q_rp <= q_rp + 3'd1;
+                if (q_beats[q_h] <= 8'd1) q_rp <= q_rp + 1'b1;
             end
         end
     end
