@@ -8,14 +8,14 @@
 // caches), decoupled from the rest of peel_core. Structured like mister_top:
 //   * the HPS DDR3 bridge (sysmem_lite) supplies core clk/reset + one Avalon read
 //     port (ram1). ram2/vbuf are tied off (no framebuffer write, no vbuf).
-//   * the REAL peel_core DDR read arbiter is used verbatim (6 clients, priority
-//     high->low: tc, vq, ts, pr, ol, ra). Only the two texture clients (tc=0,
-//     vq=1) are live; the four unused clients (ts/pr/ol/ra) have their request
-//     structs tied to 0 so the arbiter never grants them - but the arbiter logic
-//     itself is unchanged, so its timing is representative.
-//   * two real tex_cache_4p_1c caches (data + VQ) back the 4 corner fetchers,
-//     exactly as peel_core wires u_tc4 / u_vq4. This preserves the
-//     UV-register -> tex_addr -> M10K-address paths you profile.
+//   * the texel path is ONE arbiter client now, so there is no local arbiter copy:
+//     tex_fill_engine does the tc/vq/scan muxing inside the texel path (which is the
+//     point of that change - keep it local, off the long haul to peel_core's arbiter),
+//     and every other client here was tied off anyway. Wiring the single client straight
+//     to the DDR master is what the shipping logic looks like.
+//   * two real tex_cache_4p_1c caches (data + VQ) plus their tex_fill_engine back the 4
+//     corner fetchers, exactly as tex_fetch4_ob wires u_tc4 / u_vq4 / u_fill. This
+//     preserves the UV-register -> tex_addr -> M10K-address paths you profile.
 //
 // To keep the pin count tiny (and stop the fitter optimizing the DUT away):
 //   * ALL tsp_shade_pp inputs are driven from a single free-running input register
@@ -146,8 +146,15 @@ module stage_all import tsp_pkg::*; #(
     // ==================================================================
     ddr_rd_req_t  ra_dreq, ol_dreq, pr_dreq, ts_dreq;
     ddr_rd_resp_t ra_dresp, ol_dresp, pr_dresp, ts_dresp;
-    ddr_rd_req_t  tex_dreq [0:1];      // [0]=tc data, [1]=vq codebook
-    ddr_rd_resp_t tex_dresp [0:1];
+    ddr_rd_req_t  tex_dreq;  ddr_rd_resp_t tex_dresp;
+    // ---- texel path: ONE client, wired straight to the DDR master ----
+    // The texel path used to present 2-3 clients here and this harness carried a private
+    // copy of peel_core's arbiter to mux them. tex_fill_engine now does that muxing INSIDE
+    // the texel path (which is the point of the change - keep it local, off the long haul
+    // to the arbiter), and every other client in this harness is tied off, so the local
+    // arbiter was pure overhead and would have misrepresented the logic under test.
+    assign ddr_req = tex_dreq;
+    assign tex_dresp = ddr_resp;
 
     // --- unused clients: no request (arbiter never grants) ---
     assign ra_dreq = '0;
@@ -155,78 +162,38 @@ module stage_all import tsp_pkg::*; #(
     assign pr_dreq = '0;
     assign ts_dreq = '0;
 
-    reg  [5:0]  pend;
-    reg  [28:0] pa [0:5]; reg [7:0] pb [0:5];
-    wire [5:0]  rd_pulse = { ra_dreq.rd, ol_dreq.rd, pr_dreq.rd, ts_dreq.rd,
-                             tex_dreq[1].rd, tex_dreq[0].rd };
-    wire [28:0] ca [0:5]; wire [7:0] cbv [0:5];
-    assign ca[0]=tex_dreq[0].addr; assign cbv[0]=tex_dreq[0].burst;
-    assign ca[1]=tex_dreq[1].addr; assign cbv[1]=tex_dreq[1].burst;
-    assign ca[2]=ts_dreq.addr;     assign cbv[2]=ts_dreq.burst;
-    assign ca[3]=pr_dreq.addr;     assign cbv[3]=pr_dreq.burst;
-    assign ca[4]=ol_dreq.addr;     assign cbv[4]=ol_dreq.burst;
-    assign ca[5]=ra_dreq.addr;     assign cbv[5]=ra_dreq.burst;
-
-    wire       any_pend = |pend;
-    wire [2:0] d_win = pend[0] ? 3'd0 : pend[1] ? 3'd1 : pend[2] ? 3'd2 :
-                       pend[3] ? 3'd3 : pend[4] ? 3'd4 : 3'd5;
-    reg        d_busy; reg [2:0] d_owner;
-    reg [7:0]  d_beats;
-    reg        d_issued;
-    integer di;
-
-    assign ddr_req.rd    = d_busy && !d_issued;
-    assign ddr_req.addr  = pa[d_owner];
-    assign ddr_req.burst = d_beats;
-
-    always @(posedge clk_100m) begin
-        if (reset_100m) begin d_busy <= 1'b0; pend <= 6'd0; d_issued <= 1'b0; end
-        else begin
-            for (di=0; di<6; di=di+1)
-                if (rd_pulse[di]) begin pend[di] <= 1'b1; pa[di] <= ca[di]; pb[di] <= cbv[di]; end
-            if (!d_busy) begin
-                if (any_pend) begin
-                    d_busy   <= 1'b1; d_owner <= d_win;
-                    d_beats  <= pb[d_win];
-                    d_issued <= 1'b0;
-                    pend[d_win] <= (rd_pulse[d_win]);
-                end
-            end else begin
-                if (ddr_req.rd && !ddr_resp.busy) d_issued <= 1'b1;
-                if (ddr_resp.dready) begin
-                    if (d_beats <= 8'd1) begin d_busy <= 1'b0; d_issued <= 1'b0; end
-                    d_beats <= d_beats - 8'd1;
-                end
-            end
-        end
-    end
-    assign tex_dresp[0].busy = d_busy || pend[0];
-    assign tex_dresp[1].busy = d_busy || pend[1];
-    assign ts_dresp.busy     = d_busy || pend[2];
-    assign pr_dresp.busy     = d_busy || pend[3];
-    assign ol_dresp.busy     = d_busy || pend[4];
-    assign ra_dresp.busy     = d_busy || pend[5];
-    assign tex_dresp[0].dout=ddr_resp.dout; assign tex_dresp[1].dout=ddr_resp.dout;
-    assign ts_dresp.dout=ddr_resp.dout; assign pr_dresp.dout=ddr_resp.dout;
-    assign ol_dresp.dout=ddr_resp.dout; assign ra_dresp.dout=ddr_resp.dout;
-    assign tex_dresp[0].dready = ddr_resp.dready && (d_owner==3'd0);
-    assign tex_dresp[1].dready = ddr_resp.dready && (d_owner==3'd1);
-    assign ts_dresp.dready     = ddr_resp.dready && (d_owner==3'd2);
-    assign pr_dresp.dready     = ddr_resp.dready && (d_owner==3'd3);
-    assign ol_dresp.dready     = ddr_resp.dready && (d_owner==3'd4);
-    assign ra_dresp.dready     = ddr_resp.dready && (d_owner==3'd5);
+    // (the local arbiter copy is gone with the multi-client texel interface)
 
     // ==================================================================
     // Two real texture caches backing the 4 corner fetchers (as peel_core does).
     // ==================================================================
     cache_req_t   pp_tc_req [0:3], pp_vq_req [0:3];
     cache_resp_t  pp_tc_resp[0:3], pp_vq_resp[0:3];
-    tex_cache_4p_1c u_tc4 (.clk(clk_100m),.reset(reset_100m),
+    wire         a_tcm_v, a_tcm_ack, a_tcf_req, a_tcf_gnt, a_tcd_done;
+    wire [26:0]  a_tcm_line, a_tcf_line;  wire [255:0] a_tcf_data;
+    wire         a_vqm_v, a_vqm_ack, a_vqf_req, a_vqf_gnt, a_vqd_done;
+    wire [26:0]  a_vqm_line, a_vqf_line;  wire [255:0] a_vqf_data;
+    tex_cache_4p_1c u_tc4 (.clk(clk_100m),.reset(reset_100m),.flush(1'b0),
         .creq(pp_tc_req),.cresp(pp_tc_resp),.pf_req(1'b0),.pf_waddr({(4*29){1'b0}}),
-        .dreq(tex_dreq[0]),.dresp(tex_dresp[0]));
-    tex_cache_4p_1c u_vq4 (.clk(clk_100m),.reset(reset_100m),
+        .pf_gnt(),.pf_ack(),.pf_hit(),.pf_busy(),
+        .miss_v(a_tcm_v),.miss_line(a_tcm_line),.miss_ack(a_tcm_ack),
+        .fill_req(a_tcf_req),.fill_line(a_tcf_line),.fill_data(a_tcf_data),
+        .fill_gnt(a_tcf_gnt),.demand_done(a_tcd_done));
+    tex_cache_4p_1c u_vq4 (.clk(clk_100m),.reset(reset_100m),.flush(1'b0),
         .creq(pp_vq_req),.cresp(pp_vq_resp),.pf_req(1'b0),.pf_waddr({(4*29){1'b0}}),
-        .dreq(tex_dreq[1]),.dresp(tex_dresp[1]));
+        .pf_gnt(),.pf_ack(),.pf_hit(),.pf_busy(),
+        .miss_v(a_vqm_v),.miss_line(a_vqm_line),.miss_ack(a_vqm_ack),
+        .fill_req(a_vqf_req),.fill_line(a_vqf_line),.fill_data(a_vqf_data),
+        .fill_gnt(a_vqf_gnt),.demand_done(a_vqd_done));
+    tex_fill_engine u_fill (.clk(clk_100m),.reset(reset_100m),.flush(1'b0),
+        .col_miss_v(a_tcm_v),.col_miss_line(a_tcm_line),.col_miss_ack(a_tcm_ack),
+        .scan_v(1'b0),.scan_line(27'd0),.scan_ack(),
+        .col_fill_req(a_tcf_req),.col_fill_line(a_tcf_line),.col_fill_data(a_tcf_data),
+        .col_fill_gnt(a_tcf_gnt),.col_demand_done(a_tcd_done),
+        .vq_miss_v(a_vqm_v),.vq_miss_line(a_vqm_line),.vq_miss_ack(a_vqm_ack),
+        .vq_fill_req(a_vqf_req),.vq_fill_line(a_vqf_line),.vq_fill_data(a_vqf_data),
+        .vq_fill_gnt(a_vqf_gnt),.vq_demand_done(a_vqd_done),
+        .dreq(tex_dreq),.dresp(tex_dresp));
 
     // ==================================================================
     // INPUT REGISTER BANK. The HPS writes 32-bit words at wr_addr; the DUT inputs

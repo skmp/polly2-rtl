@@ -55,15 +55,16 @@ module shade_drop_tb_top import tsp_pkg::*; (
             pal_data[gi] <= {pal_addr[gi], pal_addr[gi], pal_addr[gi], 2'b11};
     end endgenerate
 
-    ddr_rd_req_t  ddr_req  [0:2];
-    ddr_rd_resp_t ddr_resp [0:2];
-    assign rd0 = ddr_req[0].rd; assign addr0 = ddr_req[0].addr; assign burst0 = ddr_req[0].burst;
-    assign rd1 = ddr_req[1].rd; assign addr1 = ddr_req[1].addr; assign burst1 = ddr_req[1].burst;
-    assign rd2 = ddr_req[2].rd; assign addr2 = ddr_req[2].addr; assign burst2 = ddr_req[2].burst;
+    ddr_rd_req_t  ddr_req;
+    ddr_rd_resp_t ddr_resp;
+    // ONE texel-path DDR port now (tex_fill_engine merged tc/vq/prefetch); ports 1 and 2
+    // of the old 3-wide interface are gone. The 1/2 pins stay tied off so the C++ side
+    // does not have to change.
+    assign rd0 = ddr_req.rd; assign addr0 = ddr_req.addr; assign burst0 = ddr_req.burst;
+    assign rd1 = 1'b0; assign addr1 = 29'd0; assign burst1 = 8'd0;
+    assign rd2 = 1'b0; assign addr2 = 29'd0; assign burst2 = 8'd0;
     always_comb begin
-        ddr_resp[0].busy = busy0; ddr_resp[0].dout = dout0; ddr_resp[0].dready = dready0;
-        ddr_resp[1].busy = busy1; ddr_resp[1].dout = dout1; ddr_resp[1].dready = dready1;
-        ddr_resp[2].busy = busy2; ddr_resp[2].dout = dout2; ddr_resp[2].dready = dready2;
+        ddr_resp.busy = busy0; ddr_resp.dout = dout0; ddr_resp.dready = dready0;
     end
 
     tsp_shade_v2_pp #(.IDW(11)) u_sh (

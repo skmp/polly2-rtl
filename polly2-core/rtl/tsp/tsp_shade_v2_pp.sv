@@ -83,8 +83,8 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
     input      [31:0] pal_data [0:3],
 
     // ---- two DDR read ports to the parent arbiter ([0]=tc data, [1]=vq codebook) ----
-    output ddr_rd_req_t  ddr_req  [0:2],
-    input  ddr_rd_resp_t ddr_resp [0:2]
+    output ddr_rd_req_t  ddr_req,
+    input  ddr_rd_resp_t ddr_resp
 );
     genvar gi;
     integer s, k;
@@ -666,11 +666,9 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
                 $display("    (pl_room=0 & pl_pop stuck 0 => tu_ov never fires => result swallowed)");
                 $display("  --- back ---");
                 $display("  cc_ov=%b  out_valid=%b", cc_ov, out_valid);
-                $display("  --- DDR ports (tex_unit -> arbiter) ---");
-                $display("  tc: rd=%b addr=%h burst=%0d | busy=%b dready=%b",
-                         ddr_req[0].rd, ddr_req[0].addr, ddr_req[0].burst, ddr_resp[0].busy, ddr_resp[0].dready);
-                $display("  vq: rd=%b addr=%h burst=%0d | busy=%b dready=%b",
-                         ddr_req[1].rd, ddr_req[1].addr, ddr_req[1].burst, ddr_resp[1].busy, ddr_resp[1].dready);
+                $display("  --- DDR port (tex_unit -> arbiter, shared by both caches + scan) ---");
+                $display("  tex: rd=%b addr=%h burst=%0d | busy=%b dready=%b",
+                         ddr_req.rd, ddr_req.addr, ddr_req.burst, ddr_resp.busy, ddr_resp.dready);
                 $display("=========================================================");
             end
         end

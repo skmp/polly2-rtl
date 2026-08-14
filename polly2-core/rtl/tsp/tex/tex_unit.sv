@@ -59,8 +59,8 @@ module tex_unit import tsp_pkg::*; #(
     input      [31:0] pal_data [0:3],
 
     // ---- two DDR read ports to the parent arbiter ([0]=tc, [1]=vq) ----
-    output ddr_rd_req_t  ddr_req  [0:2],
-    input  ddr_rd_resp_t ddr_resp [0:2]
+    output ddr_rd_req_t  ddr_req,
+    input  ddr_rd_resp_t ddr_resp
 );
     genvar gi;
     integer d;
@@ -380,11 +380,10 @@ module tex_unit import tsp_pkg::*; #(
             // flight already means results have PAUSED. Trace continuously past 40 so we see
             // exactly where the valid chain (f_ov -> dec_ov -> filt_ov) dies.
             if (tw_inflight >= 40)
-                $display("  [tex_unit] t=%0t inflight=%0d | in_valid=%b(accept=%b) r_iss=%b f_ov=%b dec_ov0=%b filt_ov=%b out_valid=%b | fetch_ready=%b front_stall=%b | tc:rd=%b busy=%b dready=%b vq:rd=%b busy=%b dready=%b",
+                $display("  [tex_unit] t=%0t inflight=%0d | in_valid=%b(accept=%b) r_iss=%b f_ov=%b dec_ov0=%b filt_ov=%b out_valid=%b | fetch_ready=%b front_stall=%b | ddr:rd=%b busy=%b dready=%b",
                          $time, tw_inflight, in_valid, tu_accept_dbg, r_iss, f_ov, dec_ov[0], filt_ov, out_valid,
                          fetch_ready, front_stall,
-                         ddr_req[0].rd, ddr_resp[0].busy, ddr_resp[0].dready,
-                         ddr_req[1].rd, ddr_resp[1].busy, ddr_resp[1].dready);
+                         ddr_req.rd, ddr_resp.busy, ddr_resp.dready);
             if (tw_inflight > 60 && !tw_if_fired) begin
                 tw_if_fired <= 1'b1;
                 $display("  [tex_unit] RESULT PAUSE: %0d pixels accepted but not emitted (valid chain died - see trace above).", tw_inflight);

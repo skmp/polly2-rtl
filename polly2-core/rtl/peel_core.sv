@@ -69,31 +69,33 @@ module peel_core import tsp_pkg::*; #(
     // is busy elsewhere. The controller (faux or real Avalon) owns latency+burst.
     ddr_rd_req_t  ra_dreq, ol_dreq, pr_dreq, ts_dreq;
     ddr_rd_resp_t ra_dresp, ol_dresp, pr_dresp, ts_dresp;
-    ddr_rd_req_t  tex_dreq [0:2];      // [0]=tc data, [1]=vq codebook, [2]=tc PREFETCH
-    ddr_rd_resp_t tex_dresp [0:2];
+    ddr_rd_req_t  tex_dreq;            // the WHOLE texel path: both caches + the
+    ddr_rd_resp_t tex_dresp;            // speculative scanner, merged in tex_fill_engine
 
-    // 0=tc 1=vq 2=ts(record fetch: demand OR prefetch, muxed) 3=pr 4=ol 5=ra
+    // 0=tex 1=ts(record fetch: demand OR prefetch, muxed) 2=pr 3=ol 4=ra
     // (priority high->low). The demand fetcher and prefetcher SHARE the ts client:
     // the prefetch only runs when the demand fetcher is idle (mutually exclusive), so
     // one DDR port suffices (see the record_fetcher mux below).
-    // client 6 = the texel cache's PREFETCH fill port: LOWEST priority, so a
-    // speculative line never delays a demand fill or any geometry client.
-    reg  [6:0]  pend;
-    reg  [28:0] pa [0:6]; reg [7:0] pb [0:6];
-    wire [6:0]  rd_pulse = { tex_dreq[2].rd, ra_dreq.rd, ol_dreq.rd, pr_dreq.rd,
-                             ts_dreq.rd, tex_dreq[1].rd, tex_dreq[0].rd };
-    wire [28:0] ca [0:6]; wire [7:0] cbv [0:6];
-    assign ca[0]=tex_dreq[0].addr; assign cbv[0]=tex_dreq[0].burst;
-    assign ca[1]=tex_dreq[1].addr; assign cbv[1]=tex_dreq[1].burst;
-    assign ca[2]=ts_dreq.addr;     assign cbv[2]=ts_dreq.burst;
-    assign ca[3]=pr_dreq.addr;     assign cbv[3]=pr_dreq.burst;
-    assign ca[4]=ol_dreq.addr;     assign cbv[4]=ol_dreq.burst;
-    assign ca[5]=ra_dreq.addr;     assign cbv[5]=ra_dreq.burst;
-    assign ca[6]=tex_dreq[2].addr; assign cbv[6]=tex_dreq[2].burst;
+    // The texel path used to be THREE clients here (tc data, vq codebook, tc prefetch).
+    // They are now one: tex_fill_engine muxes them next to the caches it serves, which
+    // takes two request/response pairs and their share of this mux off the long haul up
+    // to this arbiter. Its internal VQ-over-COL priority replaces what client order used
+    // to express.
+    localparam integer NCL = 5;
+    reg  [NCL-1:0]  pend;
+    reg  [28:0] pa [0:NCL-1]; reg [7:0] pb [0:NCL-1];
+    wire [NCL-1:0]  rd_pulse = { ra_dreq.rd, ol_dreq.rd, pr_dreq.rd,
+                                 ts_dreq.rd, tex_dreq.rd };
+    wire [28:0] ca [0:NCL-1]; wire [7:0] cbv [0:NCL-1];
+    assign ca[0]=tex_dreq.addr; assign cbv[0]=tex_dreq.burst;
+    assign ca[1]=ts_dreq.addr;  assign cbv[1]=ts_dreq.burst;
+    assign ca[2]=pr_dreq.addr;  assign cbv[2]=pr_dreq.burst;
+    assign ca[3]=ol_dreq.addr;  assign cbv[3]=ol_dreq.burst;
+    assign ca[4]=ra_dreq.addr;  assign cbv[4]=ra_dreq.burst;
 
     wire       any_pend = |pend;
     wire [2:0] d_win = pend[0] ? 3'd0 : pend[1] ? 3'd1 : pend[2] ? 3'd2 :
-                       pend[3] ? 3'd3 : pend[4] ? 3'd4 : pend[5] ? 3'd5 : 3'd6;
+                       pend[3] ? 3'd3 : 3'd4;
 
     // ---- MULTI-OUTSTANDING (pipelined) channel: up to DDR_OUT bursts in flight ----
     // The backend (sim_ddr_fb / the Avalon DDRAM bridge) accepts a new command
@@ -116,22 +118,12 @@ module peel_core import tsp_pkg::*; #(
     localparam integer DDR_OUT = 16;
     localparam integer OFW     = $clog2(DDR_OUT);        // index width
     localparam integer OCW     = $clog2(DDR_OUT+1);      // per-client counter width
-    // The texel cache's DEMAND client (0) may hold several bursts: a bilinear group that
-    // misses on n distinct lines issues all n back to back and receives them in issue
-    // order (its own fill queue tracks which beats belong to which line), so an n-line
-    // group costs one round trip instead of n.
-    // Cap = the client's OWN queue depth; more is unreachable. A bilinear group has at
-    // most 4 distinct lines and a batch waits for all of them before retesting, so the
-    // demand path can never have more than tex_cache_4p_1c's FQD=4 bursts outstanding.
-    localparam [OCW-1:0] TC_OUT_MAX = OCW'(4);
-    // The texel cache's PREFETCH client (6) is multi-outstanding for the same reason: its
-    // receiver is a ring of speculative lines, and holding only one capped the whole
-    // prefetcher at one line per round trip (~23 cyc) - the walker is stalled on
-    // pf_fbusy, so it could never run ahead of the demand stream it is meant to cover.
-    // Capped LOWER than the demand client: it is lowest priority by design and must never
-    // be the reason a demand fill waits for the channel. TC+PF < DDR_OUT so speculative
-    // and demand texture traffic together can never fill the FIFO and lock out geometry.
-    localparam [OCW-1:0] PF_OUT_MAX = OCW'(4);   // = the receiver's PFQD ring depth
+    // The texel path (client 0) is deeply multi-outstanding: a bilinear group hands over
+    // all its distinct missing lines at once, and the scanner runs ahead of that with
+    // speculative lines. The cap is the engine's total budget (VQ_OUT + COL_OUT); the
+    // engine's own per-queue caps decide how that budget is split, which is what keeps a
+    // blocking VQ codebook fill from being starved by speculative COL traffic.
+    localparam [OCW-1:0] TEX_OUT_MAX = OCW'(16);
     reg [2:0]  of_owner [0:DDR_OUT-1];
     reg [7:0]  of_beats [0:DDR_OUT-1];
     reg [OFW:0] of_wp, of_rp;
@@ -155,14 +147,14 @@ module peel_core import tsp_pkg::*; #(
     wire       d_last  = d_beat && (of_beats[of_head] <= 8'd1);
 
     // per-client outstanding-burst counters (request accepted, beats not yet done)
-    reg [OCW-1:0] d_oc [0:6];
+    reg [OCW-1:0] d_oc [0:NCL-1];
 
     always @(posedge clk) begin
         if (reset) begin
-            pend <= 7'd0; of_wp <= '0; of_rp <= '0;
-            for (di=0; di<7; di=di+1) d_oc[di] <= '0;
+            pend <= '0; of_wp <= '0; of_rp <= '0;
+            for (di=0; di<NCL; di=di+1) d_oc[di] <= '0;
         end else begin
-            for (di=0; di<7; di=di+1)
+            for (di=0; di<NCL; di=di+1)
                 if (rd_pulse[di]) begin pend[di] <= 1'b1; pa[di] <= ca[di]; pb[di] <= cbv[di]; end
             if (d_accept) begin
                 of_owner[of_wp[OFW-1:0]] <= d_win;
@@ -174,7 +166,7 @@ module peel_core import tsp_pkg::*; #(
                 of_beats[of_head] <= of_beats[of_head] - 8'd1;
                 if (d_last) of_rp <= of_rp + 1'b1;
             end
-            for (di=0; di<7; di=di+1)
+            for (di=0; di<NCL; di=di+1)
                 d_oc[di] <= d_oc[di] + OCW'((d_accept && d_win == 3'(di)) ? 1 : 0)
                                      - OCW'((d_last   && d_owner == 3'(di)) ? 1 : 0);
 `ifndef SYNTHESIS
@@ -185,7 +177,7 @@ module peel_core import tsp_pkg::*; #(
             // address is overwritten, no burst is ever issued for it). Multi-outstanding
             // clients must gate their next request on busy, which covers pend. The
             // grant cycle is exempt - pend is re-armed from rd_pulse there by design.
-            for (di=0; di<7; di=di+1)
+            for (di=0; di<NCL; di=di+1)
                 if (rd_pulse[di] && pend[di] && !(d_accept && d_win == 3'(di)))
                     $error("peel_core DDR arbiter: client %0d overwrote an ungranted request (addr %07x lost)",
                            di, pa[di]);
@@ -194,30 +186,26 @@ module peel_core import tsp_pkg::*; #(
     end
     // a client is busy from its request pulse until its LAST beat has returned -
     // the old single-channel view per client, while different clients overlap.
-    // Client 0 (tc demand) is MULTI-OUTSTANDING: busy only means "can't take another
-    // request right now" - its previous request is still ungranted (pend would be
-    // overwritten and lost) or it is at its outstanding cap.
-    assign tex_dresp[0].busy = pend[0] || (d_oc[0] == TC_OUT_MAX);
-    assign tex_dresp[1].busy = pend[1] || (d_oc[1] != '0);
-    assign ts_dresp.busy     = pend[2] || (d_oc[2] != '0);
-    assign pr_dresp.busy     = pend[3] || (d_oc[3] != '0);
-    assign ol_dresp.busy     = pend[4] || (d_oc[4] != '0);
-    assign ra_dresp.busy     = pend[5] || (d_oc[5] != '0);
-    assign tex_dresp[2].busy = pend[6] || (d_oc[6] == PF_OUT_MAX);
-    assign tex_dresp[0].dout=ddr_resp.dout; assign tex_dresp[1].dout=ddr_resp.dout;
-    assign tex_dresp[2].dout=ddr_resp.dout;
+    // Client 0 (the whole texel path) is MULTI-OUTSTANDING: busy only means "can't take
+    // another request right now" - its previous request is still ungranted (pend would be
+    // overwritten and lost) or it is at its outstanding cap. The engine's own VQ/COL caps
+    // divide that budget; this is only the channel-level ceiling.
+    assign tex_dresp.busy = pend[0] || (d_oc[0] == TEX_OUT_MAX);
+    assign ts_dresp.busy  = pend[1] || (d_oc[1] != '0);
+    assign pr_dresp.busy  = pend[2] || (d_oc[2] != '0);
+    assign ol_dresp.busy  = pend[3] || (d_oc[3] != '0);
+    assign ra_dresp.busy  = pend[4] || (d_oc[4] != '0);
+    assign tex_dresp.dout=ddr_resp.dout;
     assign ts_dresp.dout=ddr_resp.dout; assign pr_dresp.dout=ddr_resp.dout;
     assign ol_dresp.dout=ddr_resp.dout; assign ra_dresp.dout=ddr_resp.dout;
     // fanout uses the QUALIFIED beat (d_beat, not raw dready): keeps every client's
     // beat count in lockstep with the arbiter's d_beats and never delivers a stray
     // beat to the stale d_owner after release.
-    assign tex_dresp[0].dready = d_beat && (d_owner==3'd0);
-    assign tex_dresp[1].dready = d_beat && (d_owner==3'd1);
-    assign ts_dresp.dready     = d_beat && (d_owner==3'd2);
-    assign pr_dresp.dready     = d_beat && (d_owner==3'd3);
-    assign ol_dresp.dready     = d_beat && (d_owner==3'd4);
-    assign ra_dresp.dready     = d_beat && (d_owner==3'd5);
-    assign tex_dresp[2].dready = d_beat && (d_owner==3'd6);
+    assign tex_dresp.dready = d_beat && (d_owner==3'd0);
+    assign ts_dresp.dready  = d_beat && (d_owner==3'd1);
+    assign pr_dresp.dready  = d_beat && (d_owner==3'd2);
+    assign ol_dresp.dready  = d_beat && (d_owner==3'd3);
+    assign ra_dresp.dready  = d_beat && (d_owner==3'd4);
 
     // -------------------- caches --------------------
     // Region parser, OL parser, ISP iterator AND TSP param fetch all read DDR
@@ -228,7 +216,7 @@ module peel_core import tsp_pkg::*; #(
     // tex_cache instances. Simultaneous same-line misses dedupe to one DDR read;
     // distinct-line misses serialize (the pipe stalls while any corner is busy).
     // The two texture caches (data + VQ) now live INSIDE tsp_shade_v2_pp's tex_unit; the
-    // shader drives tex_dreq[0]/tex_dreq[1] (this core's DDR arbiter tc/vq clients) directly
+    // shader drives tex_dreq (this core's single texel-path DDR client) directly
     // via its ddr_req/ddr_resp ports (wired at the shader instance below).
 
     // -------------------- parsers --------------------
@@ -3583,12 +3571,12 @@ module peel_core import tsp_pkg::*; #(
 
     // --- geometry front end ---
     wire [1:0] oc_region = ra_out.list_ready ? OC_O
-                         : (ra_busy && !(pend[5] || d_oc[5] != '0)) ? OC_B : OC_U;
+                         : (ra_busy && !(pend[4] || d_oc[4] != '0)) ? OC_B : OC_U;
     wire [1:0] oc_ol     = (ol_prim.entry_ready && eq_full) ? OC_O
-                         : ol_busy ? ((pend[4] || d_oc[4] != '0) ? OC_U : OC_B) : OC_U;
+                         : ol_busy ? ((pend[3] || d_oc[3] != '0) ? OC_U : OC_B) : OC_U;
     wire [1:0] oc_eq     = eq_full ? OC_O : eq_empty ? OC_U : OC_B;
     wire [1:0] oc_iter   = (it_trio.triangle_ready && fq_full) ? OC_O
-                         : it_pf_busy ? ((pend[3] || d_oc[3] != '0) ? OC_U : OC_B) : OC_U;
+                         : it_pf_busy ? ((pend[2] || d_oc[2] != '0) ? OC_U : OC_B) : OC_U;
     wire [1:0] oc_fq     = fq_full ? OC_O : (fq_empty && !fq_out_valid) ? OC_U : OC_B;
     wire [1:0] oc_sortc  = (it_chk_valid || sc_chk_vq) ? OC_B : OC_U;
     // --- ISP setup / raster ---
@@ -3621,7 +3609,7 @@ module peel_core import tsp_pkg::*; #(
                                          || u_spanner.emit_stall_span_ring) ? OC_O : OC_B)
                           : (spn == G_IDLE && ti_ready[tsp_tag] && md_full) ? OC_O
                           : (spn != G_IDLE) ? OC_B : OC_U;
-    wire [1:0] oc_sfetch  = u_spanner.fetch_busy ? ((d_oc[2] != '0) ? OC_B : OC_U) : OC_U;
+    wire [1:0] oc_sfetch  = u_spanner.fetch_busy ? ((d_oc[1] != '0) ? OC_B : OC_U) : OC_U;
     wire [1:0] oc_ssetup  = u_spanner.su_run ? OC_B : OC_U;
     wire [1:0] oc_mdq     = md_full ? OC_O : md_empty ? OC_U : OC_B;
     wire [1:0] oc_reader  = (tsp_st == R_RUN)  ? (pp_stall ? OC_O : OC_B)
@@ -3706,21 +3694,17 @@ module peel_core import tsp_pkg::*; #(
         endcase
     endfunction
 
-    // ==================== texture-cache EVENT tracks ====================
-    // Interval events sampled off the two tex caches' sim-only ev_* observation
-    // signals (see tex_cache_4p_1c). Each track is an independent {level, start,
-    // addr} triple; the sampler times the level and emits ONE X record per episode
-    // with its length, so a miss that stalled 400 cycles is one line, not 400.
+    // ==================== texture-path EVENT tracks ====================
+    // Interval events sampled off the caches' and the fill engine's sim-only ev_*
+    // observation signals. Each track is an independent {level, start, addr} triple; the
+    // sampler times the level and emits ONE X record per episode with its length, so a
+    // miss that stalled 400 cycles is one line, not 400.
     //
-    // Tracks: data cache misses / demand bursts / prefetch-receiver activity /
-    // hitchhike waits, and the VQ codebook cache's misses + bursts (it has no
-    // prefetcher - its probe and fill ports are tied off, so there is nothing to
-    // log for the prefetch kinds).
-    //
-    // MISS is the full stall; FETCH and PFWAIT are disjoint subsets of it (a miss
-    // either issues its own burst or rides a prefetch, never both for the same
-    // line). MISS - FETCH - PFWAIT is therefore the overhead: DDR arbiter wait in
-    // S_MISS plus the post-fill retest walk.
+    // Tracks: the data cache's miss stalls + its outstanding demand lines, the same pair
+    // for the VQ codebook cache, and the engine's two queues (COL covers demand AND the
+    // speculative scan; VQ is demand only). MISS is the full stall and FETCH is the
+    // subset of it with lines outstanding, so MISS - FETCH is the request/retest
+    // overhead. The engine tracks show how far the speculative side runs ahead.
     localparam integer OCC_NT = 6;
     wire            occ_ev_lv [0:OCC_NT-1];
     wire            occ_ev_go [0:OCC_NT-1];
@@ -3731,21 +3715,20 @@ module peel_core import tsp_pkg::*; #(
     assign occ_ev_go[0] = u_shade.u_tex.u_fetch.u_tc4.ev_miss_go;
     assign occ_ev_ad[0] = {u_shade.u_tex.u_fetch.u_tc4.t_line[
                            u_shade.u_tex.u_fetch.u_tc4.fm[1:0]], 2'b00};
-    // FETCH: the address is the line being ISSUED on the start pulse (a batch issues
-    // several, overlapping, so this is per-burst - not the queue head).
+    // FETCH: the address is the line being REQUESTED on the start pulse (a batch requests
+    // several and they are fetched concurrently, so this is per-line).
     assign occ_ev_lv[1] = u_shade.u_tex.u_fetch.u_tc4.ev_fetch;
     assign occ_ev_go[1] = u_shade.u_tex.u_fetch.u_tc4.ev_fetch_go;
     assign occ_ev_ad[1] = {u_shade.u_tex.u_fetch.u_tc4.ev_fetch_a, 2'b00};
-    // the COMBINATIONAL level, not the registered ev_pfw: the registered copy
-    // deasserts a cycle late, which made a dropped hitchhike (re-check found the
-    // line resident -> demand issues its own burst) overlap the FETCH that follows
-    // it by one cycle. The two are disjoint in hardware; sample them that way.
-    assign occ_ev_lv[2] = u_shade.u_tex.u_fetch.u_tc4.ev_pfw_lv;
-    assign occ_ev_go[2] = u_shade.u_tex.u_fetch.u_tc4.ev_pfw_go;
-    assign occ_ev_ad[2] = {u_shade.u_tex.u_fetch.u_tc4.ride_line, 2'b00};
-    assign occ_ev_lv[3] = u_shade.u_tex.u_fetch.u_tc4.ev_pf;
-    assign occ_ev_go[3] = u_shade.u_tex.u_fetch.u_tc4.ev_pf_go;
-    assign occ_ev_ad[3] = {u_shade.u_tex.u_fetch.u_tc4.pf_fline, 2'b00};
+    // the ENGINE's COL queue occupancy: demand + speculative lines in flight. Its start
+    // pulse is a scan enqueue, so the track shows the speculative side specifically.
+    assign occ_ev_lv[2] = u_shade.u_tex.u_fetch.u_fill.ev_col_busy;
+    assign occ_ev_go[2] = u_shade.u_tex.u_fetch.u_fill.cq_push
+                          && !u_shade.u_tex.u_fetch.u_fill.cand_dmd;
+    assign occ_ev_ad[2] = {u_shade.u_tex.u_fetch.u_fill.cand_line, 2'b00};
+    assign occ_ev_lv[3] = u_shade.u_tex.u_fetch.u_fill.ev_vq_busy;
+    assign occ_ev_go[3] = u_shade.u_tex.u_fetch.u_fill.vq_push;
+    assign occ_ev_ad[3] = {u_shade.u_tex.u_fetch.u_fill.vq_miss_line, 2'b00};
     assign occ_ev_lv[4] = u_shade.u_tex.u_fetch.u_vq4.ev_miss;
     assign occ_ev_go[4] = u_shade.u_tex.u_fetch.u_vq4.ev_miss_go;
     assign occ_ev_ad[4] = {u_shade.u_tex.u_fetch.u_vq4.t_line[
@@ -3791,19 +3774,19 @@ module peel_core import tsp_pkg::*; #(
             $fwrite(occ_fd, "E 0 0:IDLE,1:RA,2:STATE,4:OL_RUN,9:RA_ACK,10:DONE,11:DRAIN,28:PEEL_INIT,29:PEEL_BUF,32:OP_DONE,34:CLEAR_WR,35:PEEL_BUF_RUN,36:ZK_INV,39:PT_BUF,40:PT_INIT,41:PT_SWAP,42:PT_FIX,43:PT_WAIT,44:PT_NEXT\n");
             $fwrite(occ_fd, "E 5 0:IDLE,1:POP,2:RAS,3:DRAIN,4:CORNER\n");
             $fwrite(occ_fd, "E 13 0:IDLE,1:RUN,3:DRAIN,4:POST\n");
-            $fwrite(occ_fd, "E 17 0:TEX,1:VQ,2:SPN_FETCH,3:PARAM,4:OLWALK,5:REGION,6:TEX_PF\n");
+            $fwrite(occ_fd, "E 17 0:TEX,1:SPN_FETCH,2:PARAM,3:OLWALK,4:REGION\n");
             $fwrite(occ_fd, "E 22 0:IDLE,1:START,2:RUN\n");
             $fwrite(occ_fd, "E 23 0:IDLE,1:ACTIVE\n");
             // T <idx> <name> <kind>: event tracks. kind=stall means the episode
             // holds up the shade pipe (drawn hot); kind=info is overlap-friendly
             // background work (drawn cool).
             // ordered so the demand path reads top-to-bottom - MISS is the whole
-            // stall, FETCH and PFWAIT are the two disjoint ways it is spent, and
-            // PREFETCH (the speculative client) sits below them.
+            // stall, FETCH is the part of it with lines outstanding, and the engine's
+            // two queue tracks sit below them (COLQ's pulses are scan enqueues).
             $fwrite(occ_fd, "T 0 TC$MISS stall\n");
             $fwrite(occ_fd, "T 1 TC$FETCH stall\n");
-            $fwrite(occ_fd, "T 2 TC$PFWAIT stall\n");
-            $fwrite(occ_fd, "T 3 TC$PREFETCH info\n");
+            $fwrite(occ_fd, "T 2 COLQ info\n");
+            $fwrite(occ_fd, "T 3 VQQ info\n");
             $fwrite(occ_fd, "T 4 VQ$MISS stall\n");
             $fwrite(occ_fd, "T 5 VQ$FETCH stall\n");
         end

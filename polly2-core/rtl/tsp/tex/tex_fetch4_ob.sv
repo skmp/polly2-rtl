@@ -25,7 +25,10 @@
 // whichever stage it occupies (T0a and T0b both have capture registers - a tc ack can
 // land in either; a vq ack always lands in T2b because T2b drains unconditionally).
 //
-// Exposes THREE DDR read ports to the parent arbiter ([0]=tc, [1]=vq, [2]=tc PREFETCH).
+// Exposes ONE DDR read port to the parent arbiter. Both caches and the speculative
+// scanner share it through tex_fill_engine, which lives here beside them - the three
+// separate clients (tc demand, vq, tc prefetch) that used to run all the way up to
+// peel_core's arbiter are gone, and with them their share of that mux.
 //
 module tex_fetch4_ob import tsp_pkg::*; #(
     parameter integer PLW = 1              // decode payload bus width (rides with the pixel)
@@ -47,9 +50,9 @@ module tex_fetch4_ob import tsp_pkg::*; #(
     output     [63:0] texel [0:3],       // raw 64-bit memory words (undefined if !tex)
     output     [PLW-1:0] out_pl,          // in_pl carried to align with out_valid/texel
 
-    // three DDR read ports to the parent arbiter
-    output ddr_rd_req_t  ddr_req  [0:2],   // [0]=tc, [1]=vq, [2]=tc PREFETCH
-    input  ddr_rd_resp_t ddr_resp [0:2]
+    // the single DDR read port for the whole texel path
+    output ddr_rd_req_t  ddr_req,
+    input  ddr_rd_resp_t ddr_resp
 );
     // shared 4-read-port caches (data + VQ)
     cache_req_t   tc_req [0:3], vq_req [0:3];
@@ -57,27 +60,45 @@ module tex_fetch4_ob import tsp_pkg::*; #(
     // pf_* is the data cache's prefill probe port (tag-only residency test), driven by
     // the streaming prefetch walker below. The VQ cache's probe is tied off (codebook
     // lines are not prefetched - their addresses depend on fetched data).
-    wire tc_pf_gnt, tc_pf_ack, tc_pf_busy, vq_pf_ack, vq_pf_busy, tc_pf_fbusy;
+    wire tc_pf_gnt, tc_pf_ack, tc_pf_busy, vq_pf_ack, vq_pf_busy;
     wire [3:0] tc_pf_hit, vq_pf_hit;
-    // ---- PREFETCH WALKER (declared here, driven after the FIFO below) ----
+    // ---- SCANNER probe (declared here, driven after the FIFO below) ----
     wire            la_probe;
     wire [4*29-1:0] la_waddr;
-    wire            la_fill;
-    wire [28:0]     la_faddr;
+    // ---- fill engine <-> caches ----
+    wire         tc_miss_v, tc_miss_ack, tc_fill_req, tc_fill_gnt, tc_dmd_done;
+    wire [26:0]  tc_miss_line, tc_fill_line;
+    wire [255:0] tc_fill_data;
+    wire         vq_miss_v, vq_miss_ack, vq_fill_req, vq_fill_gnt, vq_dmd_done;
+    wire [26:0]  vq_miss_line, vq_fill_line;
+    wire [255:0] vq_fill_data;
+    wire         scan_v, scan_ack;
+    wire [26:0]  scan_line;
     tex_cache_4p_1c u_tc4 (.clk(clk),.reset(reset),.flush(flush),
         .creq(tc_req),.cresp(tc_resp),
         .pf_req(la_probe),.pf_waddr(la_waddr),.pf_gnt(tc_pf_gnt),
         .pf_ack(tc_pf_ack),.pf_hit(tc_pf_hit),.pf_busy(tc_pf_busy),
-        .pf_fill(la_fill),.pf_faddr(la_faddr),.pf_fbusy(tc_pf_fbusy),
-        .pfreq(ddr_req[2]),.pfresp(ddr_resp[2]),
-        .dreq(ddr_req[0]),.dresp(ddr_resp[0]));
+        .miss_v(tc_miss_v),.miss_line(tc_miss_line),.miss_ack(tc_miss_ack),
+        .fill_req(tc_fill_req),.fill_line(tc_fill_line),.fill_data(tc_fill_data),
+        .fill_gnt(tc_fill_gnt),.demand_done(tc_dmd_done));
     tex_cache_4p_1c u_vq4 (.clk(clk),.reset(reset),.flush(flush),
         .creq(vq_req),.cresp(vq_resp),
         .pf_req(1'b0),.pf_waddr({(4*29){1'b0}}),.pf_gnt(),
         .pf_ack(vq_pf_ack),.pf_hit(vq_pf_hit),.pf_busy(vq_pf_busy),
-        .pf_fill(1'b0),.pf_faddr(29'd0),.pf_fbusy(),
-        .pfreq(),.pfresp('0),
-        .dreq(ddr_req[1]),.dresp(ddr_resp[1]));
+        .miss_v(vq_miss_v),.miss_line(vq_miss_line),.miss_ack(vq_miss_ack),
+        .fill_req(vq_fill_req),.fill_line(vq_fill_line),.fill_data(vq_fill_data),
+        .fill_gnt(vq_fill_gnt),.demand_done(vq_dmd_done));
+    tex_fill_engine u_fill (.clk(clk),.reset(reset),.flush(flush),
+        .col_miss_v(tc_miss_v),.col_miss_line(tc_miss_line),.col_miss_ack(tc_miss_ack),
+        .scan_v(scan_v),.scan_line(scan_line),.scan_ack(scan_ack),
+        .col_fill_req(tc_fill_req),.col_fill_line(tc_fill_line),
+        .col_fill_data(tc_fill_data),.col_fill_gnt(tc_fill_gnt),
+        .col_demand_done(tc_dmd_done),
+        .vq_miss_v(vq_miss_v),.vq_miss_line(vq_miss_line),.vq_miss_ack(vq_miss_ack),
+        .vq_fill_req(vq_fill_req),.vq_fill_line(vq_fill_line),
+        .vq_fill_data(vq_fill_data),.vq_fill_gnt(vq_fill_gnt),
+        .vq_demand_done(vq_dmd_done),
+        .dreq(ddr_req),.dresp(ddr_resp));
 
     // per-corner data-cache word address + VQ byte lane (combinational off inputs)
     wire [28:0] tc_waddr [0:3];
@@ -159,55 +180,50 @@ module tex_fetch4_ob import tsp_pkg::*; #(
     end
 
     // ============================================================================
-    // PREFETCH WALKER (#6 + #17) - STREAMING, one queue entry per cycle
+    // SPECULATIVE SCANNER - one queue entry per cycle, RELATIVE depth pointer
     // ============================================================================
-    // While the texel cache is FROZEN filling (tc_pf_busy) its four demand read
-    // ports are idle, so we walk the queued requests ahead of the head and probe
-    // them 4 tags/cycle. The first line that misses is issued on the cache's own
-    // prefetch DDR client, so it fills BEHIND the demand line instead of waiting
-    // for it. The pointer PERSISTS across fill episodes (#17's continuous re-arm):
-    // successive probes resume ever deeper rather than re-examining the head.
+    // Whenever the data cache is not presenting a lookup its four read ports are idle, so
+    // we walk the requests QUEUED BEHIND the head and probe them 4 tags/cycle. A line that
+    // misses is handed to tex_fill_engine's COL queue as a speculative entry, where it
+    // shares the port with demand traffic (VQ and demand COL outrank it). The window is
+    // exactly the demand-miss stall - which is when running ahead is worth the most.
     //
-    // The probe reply is now PIPELINED (2 cycles after pf_gnt, registered compare in
-    // the cache - see tex_cache_4p_1c), so the walker streams: it presents an entry
-    // per cycle, tracks granted probes in a 2-deep address pipe, and matches acks to
-    // grants by order. Non-textured entries are consumed without a probe. When a
-    // probed entry misses, the first missing corner's line goes into a 2-deep FILL
-    // SKID; pf_fill is held as a LEVEL until the receiver is free (which either
-    // takes the line or drops a duplicate). Probing STALLS while any fill is
-    // pending/in flight (a prefetch takes a whole DDR burst anyway), so the skid
-    // never overflows: at most the 2 in-flight probes can still complete into it.
+    // The pointer is a RELATIVE DEPTH, not an absolute index: scan_d counts how far ahead
+    // of the FIFO head we have examined, and DECREMENTS on every pop, so the scan resumes
+    // from the same logical entry as the head advances underneath it instead of
+    // re-examining what just arrived. That replaces the old absolute pointer with its
+    // behind/clamp comparison against both FIFO pointers.
     //
-    // A probe raced by a concurrent commit can yield a duplicate prefetch of a
-    // just-filled line; the receiver's pf_dup drop and the harmless identical
-    // rewrite bound the damage to one wasted burst.
-    reg  [FQ_AW:0] la_p;                       // next entry to EXAMINE (>= fq_rp)
-    reg  [FQ_AW:0] la_pres_r;                  // address whose data is in fq_la_q
+    // The probe reply is PIPELINED (2 cycles after pf_gnt, registered compare in the
+    // cache), so the scanner streams: it presents an entry per cycle, tracks granted
+    // probes in a 2-deep address pipe, and matches acks to grants by order. Non-textured
+    // entries are consumed without a probe.
+    reg  [FQ_AW:0] scan_d;                     // depth ahead of the head, in entries
+    reg  [FQ_AW:0] la_pres_r;                  // depth whose data is in fq_la_q
     reg            la_q_v_r;                   // ...and it was a real entry
-    wire           la_behind = (la_p - fq_rp) > (fq_wp - fq_rp);   // consumed past us
-    wire [FQ_AW:0] la_pcl    = la_behind ? fq_rp : la_p;           // clamp to the head
-    wire           la_q_ok   = la_q_v_r && (la_pres_r == la_pcl);  // entry data valid
+    // The FIFO is FWFT: fq_hd is the head and the queued entries live in the RAM at
+    // [fq_rp, fq_wp). Depth d therefore reads absolute index fq_rp + d, and the head
+    // advancing is what makes d stale - hence the decrement.
+    wire           head_adv  = fq_head_free && (fq_ram_has || fq_push);
+    wire [FQ_AW:0] fq_rp_n   = fq_rp + (head_adv ? 1'b1 : 1'b0);
+    wire [FQ_AW:0] fq_wp_n   = fq_wp + (fq_push  ? 1'b1 : 1'b0);
+    wire [FQ_AW:0] fq_have   = fq_wp - fq_rp;  // entries in the RAM body right now
+    wire [FQ_AW:0] scan_dcl  = (scan_d > fq_have) ? fq_have : scan_d;   // clamp
+    wire           la_q_ok   = la_q_v_r && (la_pres_r == scan_dcl);
     // the looked-at entry's four addresses + its textured flag
     wire           la_tex   = fq_la_q[FQ_W-1];
     generate for (gf=0; gf<4; gf=gf+1) begin : law
         assign la_waddr[29*gf +: 29] = fq_la_q[PLW + (3-gf)*29 +: 29];
     end endgenerate
 
-    // ---- fill skid (4 deep; pf_fill level until the receiver consumes) ----
-    reg [28:0] flq [0:3];
-    reg [2:0]  flq_n;
-    assign la_fill  = (flq_n != 3'd0);
-    assign la_faddr = flq[0];
-    wire   flq_pop  = la_fill && !tc_pf_fbusy;   // receiver takes or dup-drops it now
-
-    // ---- probe reply -> fill CANDIDATE, in TWO register stages ----
-    // pf_hit_r feeds ONLY the first stage, and only 3 bits of it: cm_v (any miss)
-    // and cm_sel (which corner). Keeping the hit bits out of the grant/pointer cone
-    // matters (routed into wk_stall they re-created a register->every-RAM-address-
-    // port cone, ~-5.8ns), and keeping them out of the WIDE mux matters too: the
-    // 29-bit corner select done combinationally off pf_hit_r was the last failing
-    // family (~-1.3ns of routing from the cache's hit registers into 29 mux
-    // selects). Now the wide mux runs a cycle later with a REGISTERED 2-bit select.
+    // ---- probe reply -> candidate, in TWO register stages ----
+    // pf_hit_r feeds ONLY the first stage, and only 3 bits of it: cm_v (any miss) and
+    // cm_sel (which corner). Keeping the hit bits out of the grant/pointer cone matters
+    // (routed into the stall they re-created a register->every-RAM-address-port cone,
+    // ~-5.8ns), and keeping them out of the WIDE mux matters too: the 29-bit corner
+    // select done combinationally off pf_hit_r was the last failing family (~-1.3ns of
+    // routing from the cache's hit registers into 29 mux selects). The wide mux runs a
+    // cycle later with a REGISTERED 2-bit select. Do not collapse these stages.
     wire [3:0] la_miss  = ~tc_pf_hit;
     wire [1:0] la_sel   = la_miss[0] ? 2'd0 : la_miss[1] ? 2'd1
                         : la_miss[2] ? 2'd2 : 2'd3;
@@ -217,49 +233,62 @@ module tex_fetch4_ob import tsp_pkg::*; #(
     reg  [1:0]      cm_sel;                    // ...and which one (registered select)
     reg             cand_v;                    // stage 2: candidate address resolved
     reg  [28:0]     cand_a;
-    // dedup + push a cycle later, all off registers: drop a candidate whose LINE is
-    // already queued (two nearby entries missing the same line would otherwise burn
-    // two bursts on it)
+    // ---- candidate skid (4 deep) ----
+    // The stall below is computed from REGISTERED operands, so it reacts one cycle later
+    // than a combinational version: up to 3 more candidates can still arrive after it
+    // asserts (2 probes already granted into the cache's 2-cycle reply pipe + 1 candidate
+    // mid-stage). That is exactly why the skid is 4 deep - dropping it and offering
+    // cand_v straight to the engine overruns on the 3rd arrival.
+    reg [28:0] flq [0:3];
+    reg [2:0]  flq_n;
+    assign scan_v    = (flq_n != 3'd0);
+    assign scan_line = flq[0][28:2];
+    wire   flq_pop   = scan_v && scan_ack;
+    // drop a candidate whose LINE is already in the skid; the engine dedups against its
+    // own queue, this only stops the skid holding the same line twice
     wire   flq_dup  = (flq_n >= 3'd1 && flq[0][28:2] == cand_a[28:2])
                    || (flq_n >= 3'd2 && flq[1][28:2] == cand_a[28:2])
                    || (flq_n >= 3'd3 && flq[2][28:2] == cand_a[28:2])
                    || (flq_n >= 3'd4 && flq[3][28:2] == cand_a[28:2]);
     wire   flq_take = cand_v && !flq_dup && (flq_n != 3'd4 || flq_pop);
-    // stall = REGISTERED operands only (skid occupancy, candidate in flight at
-    // either stage, receiver busy). It reacts one cycle later than a comb version
-    // would, so up to 3 pushes can still arrive after it asserts (2 in-flight
-    // probes + 1 candidate) - that is exactly why the skid is 4 deep. cm_v asserts
-    // it at the same edge cand_v alone used to, so the lag analysis is unchanged.
-    wire   wk_stall = (flq_n != 3'd0) || cm_v || cand_v || tc_pf_fbusy;
+    wire   wk_stall = (flq_n != 3'd0) || cm_v || cand_v;
 
     assign la_probe = la_q_ok && la_tex && tc_pf_busy && !wk_stall;
     wire   la_gnt   = tc_pf_gnt;               // only ever high when la_probe is
     wire   la_cons  = la_q_ok && (!la_tex || la_gnt);
-    wire [FQ_AW:0] la_nxt = la_cons ? (la_pcl + 1'b1) : la_pcl;
-    assign fq_la_addr = la_nxt[FQ_AW-1:0];     // present next examine target
+    // advance on consume, RETREAT when the head advances (the entry we were looking at is
+    // now one closer, so the same logical entry is at depth-1). Both can land on one edge,
+    // netting zero - which is exactly "the scan resumes where it left off".
+    wire [FQ_AW:0] scan_adv = scan_dcl + (la_cons ? 1'b1 : 1'b0);
+    wire           scan_ret = head_adv && (scan_adv != '0);
+    wire [FQ_AW:0] scan_nxt = scan_adv - (scan_ret ? 1'b1 : 1'b0);
+    // present the next examine target: absolute = (next head base) + (next depth)
+    wire [FQ_AW:0] la_abs   = fq_rp_n + scan_nxt;
+    assign fq_la_addr = la_abs[FQ_AW-1:0];
 
     integer fj;
     always @(posedge clk) begin
         if (reset) begin
-            la_p <= '0; la_q_v_r <= 1'b0; wp1_v <= 1'b0; wp2_v <= 1'b0;
-            cand_v <= 1'b0; flq_n <= 3'd0;
+            scan_d <= '0; la_q_v_r <= 1'b0; wp1_v <= 1'b0; wp2_v <= 1'b0;
+            cand_v <= 1'b0; cm_v <= 1'b0; flq_n <= 3'd0;
         end else begin
-            la_p      <= la_nxt;
-            la_pres_r <= la_nxt;
-            la_q_v_r  <= (la_nxt != fq_wp);    // a real entry is being presented
+            scan_d    <= scan_nxt;
+            la_pres_r <= scan_nxt;
+            // a real entry is being presented next cycle: depth < entries that will be
+            // behind the head after this edge
+            la_q_v_r  <= (scan_nxt < (fq_wp_n - fq_rp_n));
             // granted-probe address pipe (matches the cache's 2-cycle probe reply)
             wp1_v <= la_gnt;  wp1_addr <= la_waddr;
             wp2_v <= wp1_v;   wp2_addr <= wp1_addr;
             wp3_addr <= wp2_addr;
-            // fill candidate stage 1: WHETHER a corner missed + WHICH (3 bits off
-            // pf_hit_r, nothing wider)
+            // candidate stage 1: WHETHER a corner missed + WHICH (3 bits off pf_hit_r)
             cm_v   <= tc_pf_ack && (la_miss != 4'd0);
             cm_sel <= la_sel;
-            // fill candidate stage 2: the wide corner mux, registered select
+            // candidate stage 2: the wide corner mux, registered select
             cand_v <= cm_v;
             cand_a <= wp3_addr[29*cm_sel +: 29];
-            // fill skid: shift down on pop, append the taken candidate (the append
-            // is written after the shift so it wins on the overlapping index)
+            // skid: shift down on pop, append the taken candidate (the append is written
+            // after the shift so it wins on the overlapping index)
             if (flq_pop)
                 for (fj=0; fj<3; fj=fj+1) flq[fj] <= flq[fj+1];
             if (flq_take)
@@ -267,12 +296,13 @@ module tex_fetch4_ob import tsp_pkg::*; #(
             flq_n <= flq_n + (flq_take ? 3'd1 : 3'd0) - (flq_pop ? 3'd1 : 3'd0);
 `ifndef SYNTHESIS
             if (tc_pf_ack != wp2_v)
-                $error("tex_fetch4_ob %m: walker probe pipe desynced from pf_ack");
+                $error("tex_fetch4_ob %m: scanner probe pipe desynced from pf_ack");
             if (flq_take && !flq_pop && flq_n == 3'd4)
-                $error("tex_fetch4_ob %m: fill skid overflow");
+                $error("tex_fetch4_ob %m: scanner candidate skid overflow");
 `endif
         end
     end
+
 
     // ============================================================================
     // Streaming pipeline, 4 corners lockstep. All corners share the accept/advance

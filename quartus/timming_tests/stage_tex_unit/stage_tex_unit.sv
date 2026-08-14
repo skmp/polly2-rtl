@@ -74,87 +74,15 @@ module stage_tex_unit import tsp_pkg::*; (
     //      up to DDR_OUT bursts in flight; an order FIFO routes returned beats. ----
     ddr_rd_req_t  ra_dreq, ol_dreq, pr_dreq, ts_dreq;
     ddr_rd_resp_t ra_dresp, ol_dresp, pr_dresp, ts_dresp;
-    ddr_rd_req_t  tex_dreq [0:2];      // [0]=tc data, [1]=vq codebook, [2]=tc PREFETCH
-    ddr_rd_resp_t tex_dresp [0:2];
-    assign ra_dreq='0; assign ol_dreq='0; assign pr_dreq='0; assign ts_dreq='0;
-
-    reg  [6:0]  pend;
-    reg  [28:0] pa [0:6]; reg [7:0] pb [0:6];
-    wire [6:0]  rd_pulse = { tex_dreq[2].rd, ra_dreq.rd, ol_dreq.rd, pr_dreq.rd,
-                             ts_dreq.rd, tex_dreq[1].rd, tex_dreq[0].rd };
-    wire [28:0] ca [0:6]; wire [7:0] cbv [0:6];
-    assign ca[0]=tex_dreq[0].addr; assign cbv[0]=tex_dreq[0].burst;
-    assign ca[1]=tex_dreq[1].addr; assign cbv[1]=tex_dreq[1].burst;
-    assign ca[2]=ts_dreq.addr;     assign cbv[2]=ts_dreq.burst;
-    assign ca[3]=pr_dreq.addr;     assign cbv[3]=pr_dreq.burst;
-    assign ca[4]=ol_dreq.addr;     assign cbv[4]=ol_dreq.burst;
-    assign ca[5]=ra_dreq.addr;     assign cbv[5]=ra_dreq.burst;
-    assign ca[6]=tex_dreq[2].addr; assign cbv[6]=tex_dreq[2].burst;
-
-    wire       any_pend = |pend;
-    wire [2:0] d_win = pend[0] ? 3'd0 : pend[1] ? 3'd1 : pend[2] ? 3'd2 :
-                       pend[3] ? 3'd3 : pend[4] ? 3'd4 : pend[5] ? 3'd5 : 3'd6;
-
-    localparam integer DDR_OUT = 4;
-    reg [2:0]  of_owner [0:DDR_OUT-1];
-    reg [7:0]  of_beats [0:DDR_OUT-1];
-    reg [2:0]  of_wp, of_rp;
-    wire       of_empty = (of_wp == of_rp);
-    wire       of_full  = (of_wp[2] != of_rp[2]) && (of_wp[1:0] == of_rp[1:0]);
-    wire [1:0] of_head  = of_rp[1:0];
-    integer di;
-
-    assign ddr_req.rd    = any_pend && !of_full;
-    assign ddr_req.addr  = pa[d_win];
-    assign ddr_req.burst = pb[d_win];
-    wire d_accept = ddr_req.rd && !ddr_resp.busy;
-
-    wire       d_beat  = ddr_resp.dready && !of_empty;
-    wire [2:0] d_owner = of_owner[of_head];
-    wire       d_last  = d_beat && (of_beats[of_head] <= 8'd1);
-
-    reg [1:0] d_oc [0:6];
-
-    always @(posedge clk_100m) begin
-        if (reset_100m) begin
-            pend <= 7'd0; of_wp <= 3'd0; of_rp <= 3'd0;
-            for (di=0; di<7; di=di+1) d_oc[di] <= 2'd0;
-        end else begin
-            for (di=0; di<7; di=di+1)
-                if (rd_pulse[di]) begin pend[di] <= 1'b1; pa[di] <= ca[di]; pb[di] <= cbv[di]; end
-            if (d_accept) begin
-                of_owner[of_wp[1:0]] <= d_win;
-                of_beats[of_wp[1:0]] <= pb[d_win];
-                of_wp <= of_wp + 3'd1;
-                pend[d_win] <= (rd_pulse[d_win]);
-            end
-            if (d_beat) begin
-                of_beats[of_head] <= of_beats[of_head] - 8'd1;
-                if (d_last) of_rp <= of_rp + 3'd1;
-            end
-            for (di=0; di<7; di=di+1)
-                d_oc[di] <= d_oc[di] + {1'd0, (d_accept && d_win == 3'(di))}
-                                     - {1'd0, (d_last   && d_owner == 3'(di))};
-        end
-    end
-    assign tex_dresp[0].busy = pend[0] || (d_oc[0] != 2'd0);
-    assign tex_dresp[1].busy = pend[1] || (d_oc[1] != 2'd0);
-    assign ts_dresp.busy     = pend[2] || (d_oc[2] != 2'd0);
-    assign pr_dresp.busy     = pend[3] || (d_oc[3] != 2'd0);
-    assign ol_dresp.busy     = pend[4] || (d_oc[4] != 2'd0);
-    assign ra_dresp.busy     = pend[5] || (d_oc[5] != 2'd0);
-    assign tex_dresp[2].busy = pend[6] || (d_oc[6] != 2'd0);
-    assign tex_dresp[0].dout=ddr_resp.dout; assign tex_dresp[1].dout=ddr_resp.dout;
-    assign tex_dresp[2].dout=ddr_resp.dout;
-    assign ts_dresp.dout=ddr_resp.dout; assign pr_dresp.dout=ddr_resp.dout;
-    assign ol_dresp.dout=ddr_resp.dout; assign ra_dresp.dout=ddr_resp.dout;
-    assign tex_dresp[0].dready = d_beat && (d_owner==3'd0);
-    assign tex_dresp[1].dready = d_beat && (d_owner==3'd1);
-    assign ts_dresp.dready     = d_beat && (d_owner==3'd2);
-    assign pr_dresp.dready     = d_beat && (d_owner==3'd3);
-    assign ol_dresp.dready     = d_beat && (d_owner==3'd4);
-    assign ra_dresp.dready     = d_beat && (d_owner==3'd5);
-    assign tex_dresp[2].dready = d_beat && (d_owner==3'd6);
+    ddr_rd_req_t  tex_dreq;  ddr_rd_resp_t tex_dresp;
+    // ---- texel path: ONE client, wired straight to the DDR master ----
+    // The texel path used to present 2-3 clients here and this harness carried a private
+    // copy of peel_core's arbiter to mux them. tex_fill_engine now does that muxing INSIDE
+    // the texel path (which is the point of the change - keep it local, off the long haul
+    // to the arbiter), and every other client in this harness is tied off, so the local
+    // arbiter was pure overhead and would have misrepresented the logic under test.
+    assign ddr_req = tex_dreq;
+    assign tex_dresp = ddr_resp;
 
     // ---- 4 injected palette RAMs (1024x32, 1-cycle registered read) ----
     wire [9:0]  pal_addr [0:3];
