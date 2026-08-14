@@ -35,7 +35,7 @@ VFLAGS    = -Wno-WIDTH -Wno-UNOPTFLAT -Wno-UNSIGNED -Wno-DECLFILENAME -Irtl/tsp/
 BUILD = build
 CWD  := $(shell pwd)
 
-.PHONY: shade-drop raster-topleft coord-f32 interp depth-cmp-lp texfetchpl clean test tex tex-addr tex-uv tex-decode tex-filter tex-combiner \
+.PHONY: shade-drop raster-topleft coord-f32 interp depth-cmp-lp texfetchpl texmlp clean test tex tex-addr tex-uv tex-decode tex-filter tex-combiner \
         oparse region regfile regen sortcache itquad itskip taginvw dense_span_buffer fog \
         frontendtsplp frontendtsplp-build golden-check spannerv2 mulc9 mul16sppro \
         add24sppro mulc9sppro add3sppro mul24sppro mul24c9sppro
@@ -75,6 +75,22 @@ texfetchpl: | $(BUILD)
 	  $(CWD)/tb/tex_fetch4_pl_tb.cpp \
 	  --Mdir $(BUILD)/obj_texfetchpl -o tb
 	./$(BUILD)/obj_texfetchpl/tb
+
+# ---- multi-outstanding demand fill (MLP) regression ----
+# tex_cache_4p_1c's four corner ports driven directly over a channel model that
+# mirrors peel_core's arbiter (ONE pending slot, order FIFO, per-client outstanding
+# cap, overlapped dead time, in-order beats): one burst per distinct missing line,
+# corner dedup, bursts actually concurrent (a 4-line batch must cost well under 4
+# serial round trips), alias/replay/flush correctness, the prefetch hitchhike, and
+# an $error if a client ever overwrites an ungranted request (the lost-burst
+# deadlock this tb was written after).
+texmlp: | $(BUILD)
+	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ -Wno-PINCONNECTEMPTY \
+	  --top-module tex_mlp_tb_top $(RTL_INC) \
+	  $(TSP_PKG) $(RTL_EXTRA) tb/tex_mlp_tb_top.sv \
+	  $(CWD)/tb/tex_mlp_tb.cpp \
+	  --Mdir $(BUILD)/obj_texmlp -o tb
+	./$(BUILD)/obj_texmlp/tb
 
 # ---- shade-pipe pixel-drop regression ----
 # tsp_shade_v2_pp standalone under adversarial DDR latency: strict 1-in-1-out
