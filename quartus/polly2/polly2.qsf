@@ -24,6 +24,9 @@ set_global_assignment -name FINAL_PLACEMENT_OPTIMIZATION ALWAYS
 # The unpipelined TSP perspective dividers cannot meet the 20 MHz target.
 # Keep iteration fits bounded until those paths have register boundaries.
 set_global_assignment -name OPTIMIZATION_MODE "HIGH PERFORMANCE EFFORT"
+set_global_assignment -name ALLOW_REGISTER_RETIMING ON
+set_global_assignment -name PHYSICAL_SYNTHESIS_COMBO_LOGIC ON
+set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_RETIMING ON
 
 set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to ARDUINO_IO[*]
 set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to ARDUINO_IO[*]
@@ -389,6 +392,73 @@ set_global_assignment -name PARTITION_COLOR 16764057 -section_id Top
 # RTL source list (peel_core closure + board wrapper). Regenerate rather than
 # hand-edit - see the header in polly2.qip.
 source polly2.qip
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/gen/tsp_pkg.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/fp/f2u8.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/fp/fp_add24.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/fp/fp_add24_spp_ro.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/fp/fp_add3_24_pp.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/fp/fp_add3_24_spp_ro.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/fp/fp_ge.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/fp/fp_mul16_pp.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/fp/fp_mul16_spp_ro.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/fp/fp_mul24_spp_ro.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/fp/fp_mul24_c9_spp_ro.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/fp/fp_mul_i5.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/fp/fp_mul_i5_pp.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/fp/fp_rcp_faster.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/buffers/reg_file.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/lists/region_array_parser.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/lists/object_list_parser.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/isp/isp_primitive_iterator_pf.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/setup/isp_setup_streamed.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/setup/tsp_setup_stream.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/isp/coord_f32.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/isp/isp_raster_line.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/isp/isp_depth_cmp.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/isp/isp_depth_cmp_lp.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/isp/tile_ram.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/buffers/bram_tdp.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/buffers/bram_sdp.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/buffers/peel_tile_buffer.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/buffers/taginvw_tile_buffer.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/buffers/color_tile_buffer.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/buffers/delay_ram.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/buffers/dense_span_buffer.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/buffers/triangle_setups.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/buffers/sort_cache.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/spanner/record_fetcher.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/spanner/spanner_v2.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/tsp/stage_interp.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/tsp/color_combiner.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/tsp/tsp_blend.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/tsp/fog_lut.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/tsp/fog_blend.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/tsp/tsp_shade_v2_pp.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/tsp/tex/tex_decode.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/tsp/tex/tex_uvmap.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/tsp/tex/tex_filter.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/tsp/tex/tex_base_addr.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/tsp/tex/tex_addroffsgen_ib.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/tsp/tex/tex_add_mip.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/tsp/tex/tsp_miplevel.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/tsp/tex/tex_cache_4p_1c.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/tsp/tex/tex_fetch4_ob.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/tsp/tex/tex_unit.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/peel_core.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-core/rtl/vo.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-de10nano/rtl/sys_top.v"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-de10nano/rtl/simplex_pvr_top.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-de10nano/rtl/spg.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-de10nano/rtl/pvr_mmio.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-de10nano/rtl/hps_lw_bridge.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-de10nano/rtl/audio_i2s.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-de10nano/rtl/clk_mux_gf.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE "../../polly2-de10nano/rtl/irq_stretch.sv"
+set_global_assignment -name SYSTEMVERILOG_FILE ../../mister/f2sdram_safe_terminator.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../mister/sysmem.sv
+set_global_assignment -name QIP_FILE "../../polly2-de10nano/plls/pll.qip"
+set_global_assignment -name QIP_FILE "../../polly2-de10nano/plls/pll_hdmi.qip"
+set_global_assignment -name QIP_FILE "../../polly2-de10nano/plls/pll_audio.qip"
 # Static JTAG chain-description for GUI/quartus_pgm programming (HPS + FPGA).
 # Formerly regenerated by mister/sys/build_id.tcl on every build; that pre-flow
 # also emitted an unused BUILD_DATE macro, so it was dropped. This file is
