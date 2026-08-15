@@ -61,15 +61,16 @@ module region_array_parser import tsp_pkg::*; (
     localparam F_IDLE=2'd0, F_MISS=2'd1, F_FILL=2'd2;
     reg [1:0]   fst;
     reg [21:0]  f_line; reg f_is_pf; reg [2:0] f_beat; reg [255:0] f_acc;
-    wire        f_bank    = f_line[17];
-    wire [19:0] f_wofs_b  = {f_line[16:0], 3'b000};
-    wire [28:0] f_base_wd = {9'b0, f_wofs_b};
-    wire [31:0] f_half    = f_bank ? dresp.dout[63:32] : dresp.dout[31:0];
+    // 32-bit-VIEW word address: bank = bit[20], wofs = bits[19:0]. The arbiter does the
+    // shuffle and the half select (dout32); this client just asks and reads.
+    wire [28:0] f_base_wd = {8'b0, f_line[17], f_line[16:0], 3'b000};
+    wire [31:0] f_half    = dresp.dout32;
 
     reg        dreq_rd_r; reg [28:0] dreq_addr_r; reg [7:0] dreq_burst_r;
     assign dreq.rd    = dreq_rd_r;
     assign dreq.addr  = dreq_addr_r;
     assign dreq.burst = dreq_burst_r;
+    assign dreq.w32   = 1'b1;   // 32-bit view: the arbiter shuffles + drops the half
 
     always @(posedge clk) begin
         rword_v   <= 1'b0;
@@ -98,7 +99,7 @@ module region_array_parser import tsp_pkg::*; (
         end
         F_MISS: if (!dresp.busy) begin
             dreq_rd_r    <= 1'b1;
-            dreq_addr_r  <= {4'b0011, f_base_wd[24:0]};
+            dreq_addr_r  <= f_base_wd;      // raw; the arbiter decorates
             dreq_burst_r <= 8'd8;                       // 8 words at a time
             fst          <= F_FILL;
         end

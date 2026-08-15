@@ -35,7 +35,8 @@
 //                            3 = render done raised on f2h IRQ1 (GIC ID
 //                            73; sys_top stretches pvr_done onto the
 //                            f2h line, forwarded to userspace by the
-//                            driver/polly2 kernel module).
+//                            driver/polly2 kernel module),
+//                            4 = VRAM_CFG (16 MB VRAM select).
 //                            Writes ignored.
 //   0xFF202020  FB_TOP       RW. DDR BYTE address of a 640x30 RGB565
 //                            linear framebuffer (stride 1280 bytes),
@@ -46,7 +47,11 @@
 //                            start of vertical blanking.
 //   0xFF202024  FB_BOT       RW. Same, for the bottom border
 //                            (lines 1020..1079).
-//   0xFF202028 - 0xFF20203C  reserved (read 0, writes ignored).
+//   0xFF202028  VRAM_CFG     RW. [0] VRAM_16MB: 0 = 8 MB of VRAM (the core mirrors
+//                            accesses at 8 MB, the Dreamcast default), 1 = this
+//                            board has 16 MB and no mirroring is applied. Other
+//                            bits reserved, write 0. Reset value 0.
+//   0xFF20202C - 0xFF20203C  reserved (read 0, writes ignored).
 //
 // Single clock domain (clk_sys). waitrequest is low except for AUDIO_DATA
 // writes with the FIFO full - every other access completes immediately;
@@ -90,7 +95,8 @@ module pvr_mmio
 
 	// SPG border band framebuffers (128-byte-aligned byte addr, 0 = off)
 	output reg  [31:0] fb_top    = 32'd0,
-	output reg  [31:0] fb_bot    = 32'd0
+	output reg  [31:0] fb_bot    = 32'd0,
+	output reg  [31:0] vram_cfg  = 32'd0     // [0] VRAM_16MB (0 = 8 MB + mirror)
 );
 
 // no size casts (Quartus Standard 17.0)
@@ -102,7 +108,7 @@ localparam [8:0] RSTC = RST_CYCLES;
 // 3 = render-done f2h IRQ1 (raised in sys_top, not here - see the
 // pvr_render_irq block there); 2 = border bands (FB_TOP/FB_BOT); 1 = audio
 // (AUDIO_DATA + REVISION added); 0 = anything older.
-localparam [31:0] REVISION = 32'd3;
+localparam [31:0] REVISION = 32'd4;
 
 wire wr32     = avs_write && (avs_byteenable == 4'b1111);
 wire sel_regs = (avs_address[20:13] == 8'd0);     // 0x0000-0x1FFF
@@ -163,6 +169,7 @@ always @(posedge clk) begin
 			end
 			4'd8: fb_top <= {avs_writedata[31:7], 7'd0};   // FB_TOP (128B aligned)
 			4'd9: fb_bot <= {avs_writedata[31:7], 7'd0};   // FB_BOT
+			4'd10: vram_cfg <= {31'd0, avs_writedata[0]};  // VRAM_CFG
 			default: ;                                     // STATUS/CYCLES/rsvd: RO
 		endcase
 	end
@@ -193,6 +200,7 @@ always @(posedge clk) begin
 			4'd7: avs_readdata <= REVISION;                // REVISION
 			4'd8: avs_readdata <= fb_top;                  // FB_TOP
 			4'd9: avs_readdata <= fb_bot;                  // FB_BOT
+			4'd10: avs_readdata <= vram_cfg;               // VRAM_CFG
 			default: ;
 		endcase
 	end

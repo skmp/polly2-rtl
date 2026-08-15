@@ -85,7 +85,7 @@ module record_fetcher import tsp_pkg::*; (
 
     // view word -> physical: bank = word[20] (half select), wofs = word[19:0]
     function automatic [28:0] vw_addr(input [24:0] vw);
-        vw_addr = {4'b0011, 5'b0, vw[19:0]};
+        vw_addr = {8'd0, vw[20:0]};       // 32-bit view word; arbiter shuffles
     endfunction
 
     // ---- burst engine ----
@@ -93,15 +93,16 @@ module record_fetcher import tsp_pkg::*; (
                B_DONE=3'd5;
     reg [2:0]  bst;
     reg [7:0]  beat;                          // beat counter within the burst
-    reg        v_bank;                        // burst-2 bank (word[20] of vb_w)
-    reg        h_bank;                        // burst-1 bank
-    wire [31:0] h_word = h_bank ? dresp.dout[63:32] : dresp.dout[31:0];
-    wire [31:0] v_word = v_bank ? dresp.dout[63:32] : dresp.dout[31:0];
+    // the two bursts can want different banks; the arbiter tracks the half PER BURST, so
+    // both just read dout32
+    wire [31:0] h_word = dresp.dout32;
+    wire [31:0] v_word = dresp.dout32;
 
     reg        ts_rd_r; reg [28:0] ts_addr_r; reg [7:0] ts_burst_r;
     assign dreq.rd    = ts_rd_r;
     assign dreq.addr  = ts_addr_r;
     assign dreq.burst = ts_burst_r;
+    assign dreq.w32   = 1'b1;   // 32-bit view: the arbiter shuffles + drops the half
 
     // ---- streaming vertex-field decode (combinational per arriving beat) ----
     // beat = word offset w within the vertex region; for each vertex v, r = w - v*stride.
@@ -139,7 +140,6 @@ module record_fetcher import tsp_pkg::*; (
                 ts_rd_r    <= 1'b1;
                 ts_addr_r  <= vw_addr(rec_w);
                 ts_burst_r <= 8'd3;
-                h_bank     <= rec_w[20];
                 beat       <= 8'd0;
                 bst        <= B_H_DATA;
             end
@@ -163,7 +163,6 @@ module record_fetcher import tsp_pkg::*; (
                 ts_rd_r    <= 1'b1;
                 ts_addr_r  <= vw_addr(vb_w_r);
                 ts_burst_r <= v_len_r;
-                v_bank     <= vb_w_r[20];
                 beat       <= 8'd0;
                 bst        <= B_V_DATA;
             end

@@ -40,6 +40,7 @@ module simplex_pvr_top import tsp_pkg::*; (
     // Debug: 0 = no texel fetches, shade with base (Gouraud-interpolated) colour
     // only (CONF_STR "Texel Reads" off). Pass-through to peel_core.
     input             tex_en,
+    input      [31:0] vram_cfg,     // [0] VRAM_16MB: 16 MB board, no 8 MB mirror
 
     // ---- framebuffer DDR word base ----
     // The FB write base and split-VRAM half come from the core's OWN FB_W_SOF1
@@ -89,7 +90,7 @@ module simplex_pvr_top import tsp_pkg::*; (
     peel_core u_core (
         .clk(clk), .reset(reset),
         .wr_en(wr_en), .wr_addr(wr_addr), .wr_data(wr_data),
-        .go(go), .done(done),
+        .go(go), .done(done), .vram_cfg(vram_cfg),
         //.tex_en(tex_en),
         .ddr_req(ddr_req), .ddr_resp(ddr_resp),
         .fbw_req(fbw_req), .fbw_resp(fbw_resp),
@@ -135,12 +136,16 @@ module simplex_pvr_top import tsp_pkg::*; (
     wire       rd_cap     = ({2'd0, rd_beats} + {4'd0, ddr_req.burst}) <= 12'(RD_MAX_BEATS);
     wire       rd_issue   = ddr_req.rd && !reset && !rd_flush && rd_cap;
     assign DDRAM_RD       = rd_issue;
-    // peel_core tags every read address as {4'b0011, word[24:0]} - the DC 64-bit
-    // VRAM CS region marker (region/objlist/param/tex caches). The physical 64-bit
-    // VRAM word offset is the low 25 bits; the host adds the DDR VRAM base. Strip
-    // the region tag so DDRAM_ADDR is the raw VRAM word offset (matches how the
-    // sim faux-DDR indexes vram[] by addr[19:0]).
-    assign DDRAM_ADDR     = {4'b0000, ddr_req.addr[24:0]};
+    // peel_core's arbiter emits a FULL 16 MB word offset (bits [20:0]) and deliberately
+    // does not mask or rebase. THIS is the level that knows the board: on an 8 MB board
+    // (VRAM_CFG[0]=0) bit [20] is the mirror and is masked off here; on a 16 MB board it
+    // is a real address bit and passes through. sys_top then adds the MMIO-configurable,
+    // 16 MB-aligned vram_word_base.
+    // (Clients used to tag the address {4'b0011, word[24:0]} and this master stripped the
+    // tag again, so the tag never actually reached DDR.)
+    wire [20:0] rd_word   = vram_cfg[0] ? ddr_req.addr[20:0]        // 16 MB board
+                                        : {1'b0, ddr_req.addr[19:0]}; // 8 MB: mirror
+    assign DDRAM_ADDR     = {8'd0, rd_word};
     assign DDRAM_BURSTCNT = ddr_req.burst;
 
     wire       rd_accept  = rd_issue && !DDRAM_BUSY;
