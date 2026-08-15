@@ -163,14 +163,19 @@ module peel_tile_buffer import tsp_pkg::*; #(
         .raddr(raddr), .rdata(rdata)
     );
 
-    // pack an AW-bit bank address {y[4:0], x[4:BANK_BITS]} onto all NB banks
-    // (same addr on every bank; the chunk spans one addr across all banks).
+    // pack an AW-bit bank address onto all NB banks (same addr on every bank;
+    // the chunk spans one addr across all banks). The address is the 10-bit
+    // pixel index {y,x} shifted past the bank bits - written as one slice, NOT
+    // as {y, x[4:BANK_BITS]}: at LANES=32 a chunk IS a whole row, so that inner
+    // slice goes zero-width while [9:BANK_BITS] stays well formed.
     function automatic [AW*NB-1:0] pack_addr(input [4:0] y, input [4:0] xchunk);
         integer b;
+        reg [9:0] pix;
         begin
             pack_addr = '0;
+            pix = {y, xchunk};
             for (b = 0; b < NB; b = b + 1)
-                pack_addr[AW*b +: AW] = {y, xchunk[4:BANK_BITS]};
+                pack_addr[AW*b +: AW] = pix[9:BANK_BITS];
         end
     endfunction
     // per-lane field extractors from a packed chunk word
@@ -252,7 +257,7 @@ module peel_tile_buffer import tsp_pkg::*; #(
     always @(*) begin
         raddr = '0;
         if (ras_a_valid)      raddr = pack_addr(ras_a_y, ras_a_x);
-        else if (sh_rd_valid) raddr = {NB{ {sh_rd_id[9:5], sh_rd_id[4:BANK_BITS]} }};
+        else if (sh_rd_valid) raddr = {NB{ sh_rd_id[9:BANK_BITS] }};
         else if (pb_rd_valid) raddr = {NB{pb_rd_addr}};
     end
 

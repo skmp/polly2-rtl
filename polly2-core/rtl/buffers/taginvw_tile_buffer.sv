@@ -99,21 +99,26 @@ module taginvw_tile_buffer import tsp_pkg::*; #(
         .raddr(raddr), .rdata(rdata)
     );
 
-    // pack an AW-bit bank address {y[4:0], x[4:BANK_BITS]} onto all NB banks
+    // pack an AW-bit bank address onto all NB banks. The address is the 10-bit
+    // pixel index {y,x} shifted past the bank bits - as ONE slice, not
+    // {y, x[4:BANK_BITS]}: at LANES=32 a chunk is a whole row and that inner
+    // slice goes zero-width.
     function automatic [AW*NB-1:0] pack_addr(input [4:0] y, input [4:0] xchunk);
         integer b;
+        reg [9:0] pix;
         begin
             pack_addr = '0;
+            pix = {y, xchunk};
             for (b = 0; b < NB; b = b + 1)
-                pack_addr[AW*b +: AW] = {y, xchunk[4:BANK_BITS]};
+                pack_addr[AW*b +: AW] = pix[9:BANK_BITS];
         end
     endfunction
 
     // -------------------- READ port (single-pixel OR 4-wide aligned group) --------------
     always @(*) begin
         raddr = '0;
-        if (rd4_valid)        raddr = {NB{ {rd4_group[9:5], rd4_group[4:BANK_BITS]} }};
-        else if (sh_rd_valid) raddr = {NB{ {sh_rd_id[9:5],  sh_rd_id[4:BANK_BITS]}  }};
+        if (rd4_valid)        raddr = {NB{ rd4_group[9:BANK_BITS] }};
+        else if (sh_rd_valid) raddr = {NB{ sh_rd_id [9:BANK_BITS] }};
     end
 
     // 4-wide group outputs: select the 4-bank slice holding the aligned group

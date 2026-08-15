@@ -526,6 +526,7 @@ module peel_core import tsp_pkg::*; #(
     endfunction
 
     wire [4:0] ras_ox, ras_oy;     // coords echoed with the result chunk
+    wire [9:0] ras_opix = {ras_oy, ras_ox};   // the chunk's 10-bit pixel index
     // probe (the "257th step"), reusing this pipeline's FP datapath:
     //   * cr_issue : a 1-cycle pulse into the pipe's in_valid (issue the probe once).
     //   * ras_probe: a LEVEL held for the whole RS_CORNER window -> selects the per-edge
@@ -636,14 +637,14 @@ module peel_core import tsp_pkg::*; #(
     //   blend  : presented with cb_valid/cb_id -> lands at CC with cb2_id
     localparam integer PR_AW = 10 - ZR_BB;      // 7: group-of-8 address
     wire [RAS_LANES-1:0] b_res_w, pb_res_w, pr_q_bl;
-    wire [7:0]  pr_grp;                          // blend group, write-forwarded
+    wire [RAS_LANES-1:0] pr_grp;                 // blend group, write-forwarded
     wire        pt_res_bit = pr_grp[cb2_id[ZR_BB-1:0]];
     wire        pr_set, pr_clr, pr_we;
     wire [PR_AW-1:0] pr_waddr;
-    wire [7:0]  pr_wdata;
+    wire [RAS_LANES-1:0] pr_wdata;
     bram_sdp #(.W(RAS_LANES), .D(1<<PR_AW)) u_ptres_ras (
         .clk(clk), .we(pr_we), .waddr(pr_waddr), .din(pr_wdata),
-        .re(1'b1), .raddr({ras_oy, ras_ox[4:ZR_BB]}), .q(b_res_w));
+        .re(1'b1), .raddr(ras_opix[9:ZR_BB]), .q(b_res_w));
     bram_sdp #(.W(RAS_LANES), .D(1<<PR_AW)) u_ptres_walk (
         .clk(clk), .we(pr_we), .waddr(pr_waddr), .din(pr_wdata),
         .re(1'b1), .raddr(pb_rd), .q(pb_res_w));
@@ -659,15 +660,21 @@ module peel_core import tsp_pkg::*; #(
     assign pr_set   = cb2_valid && cb2_ptres && !pt_res_bit && bl_at_pass;
     assign pr_we    = pr_clr || pr_set;
     assign pr_waddr = pr_clr ? pb_bufwr_addr : cb2_id[9:ZR_BB];
+    // The set bit is selected by the pixel's LANE index (0..RAS_LANES-1), so the
+    // shifted one must be RAS_LANES wide: as `8'd1 << lane` it evaluates at 8 bits
+    // and any lane >= 8 shifts the bit clean out, so no pixel in the upper lanes
+    // could ever record "resolved" - and the PT fix-up then restored the CLEAR
+    // background depth instead of the opaque Z, letting translucent fragments behind
+    // an opaque surface survive the peel compare. Silently correct at LANES <= 8 only.
     assign pr_wdata = pr_clr ? {RAS_LANES{1'b0}}
-                             : (pr_grp | (8'd1 << cb2_id[ZR_BB-1:0]));
+                             : (pr_grp | (RAS_LANES'(1) << cb2_id[ZR_BB-1:0]));
     // 1-deep write forwarding: consecutive blends land in the SAME group (a span
     // is a run of adjacent pixels), so read-during-write on this RAM is the common
     // case, not a corner. The bypass covers exactly it - a read presented in the
     // same cycle as a write to that group returns the value just written.
     reg              pr_fw_v;
     reg [PR_AW-1:0]  pr_fw_a;
-    reg [7:0]        pr_fw_d;
+    reg [RAS_LANES-1:0] pr_fw_d;
     always @(posedge clk) begin
         if (reset) pr_fw_v <= 1'b0;
         else begin pr_fw_v <= pr_we; pr_fw_a <= pr_waddr; pr_fw_d <= pr_wdata; end
@@ -683,7 +690,8 @@ module peel_core import tsp_pkg::*; #(
         .b_y(b_oy), .b_x(b_ox), .b_tag(b_tag), .b_mode(b_mode),
         .b_zwdis(b_zwdis), .b_peeling(b_peeling),
         .b_fwd(b_fwd), .b_res(b_res_w),
-        .b_pass_lp(b_pass_lp), .b_more(b_more), .b_oldtag(b_oldtag), .b_we(b_we),
+        .b_pass_lp(b_pass_lp), .b_more(b_more), .b_oldtag(b_oldtag),
+        .b_we(b_we),
         // forward PT-resolve walks (share the pb_rd/pb_wr cursors)
         .pb_ptinit(st == S_PT_INIT), .pb_ptswap(st == S_PT_SWAP),
         .pb_ptfix (st == S_PT_FIX),  .pb_res(pb_res_w), .pb_zres(zr_rdata),
@@ -1229,7 +1237,7 @@ module peel_core import tsp_pkg::*; #(
     generate
       for (gzr = 0; gzr < RAS_LANES; gzr = gzr + 1) begin : gzres
         assign zr_we   [gzr]              = zr_wr && (cb2_id[ZR_BB-1:0] == ZR_BB'(gzr));
-        assign zr_waddr[ZR_AW*gzr +: ZR_AW] = {cb2_id[9:5], cb2_id[4:ZR_BB]};
+        assign zr_waddr[ZR_AW*gzr +: ZR_AW] = cb2_id[9:ZR_BB];
         assign zr_wdata[31*gzr +: 31]     = cb2_invw;
         assign zr_raddr[ZR_AW*gzr +: ZR_AW] = pb_rd;   // PT_FIX read-ahead cursor
       end
