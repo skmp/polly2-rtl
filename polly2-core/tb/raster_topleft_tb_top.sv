@@ -28,8 +28,8 @@ module raster_topleft_tb_top (
     // ---- raster issue (uses the captured coefficients) ----
     input  wire        r_valid,
     input  wire        r_probe,
-    input  wire [10:0] r_y,          // ABSOLUTE screen row
-    input  wire [10:0] r_xb,         // ABSOLUTE screen col of lane 0
+    input  wire [4:0]  r_y,          // TILE-LOCAL row (0..31)
+    input  wire [4:0]  r_xb,         // TILE-LOCAL col of lane 0 (0..31, LANES-aligned)
     input  wire        r_half,       // pixel-centre select
     output wire        out_valid,
     output wire [7:0]  inside_mask,
@@ -55,7 +55,7 @@ module raster_topleft_tb_top (
         .isp_word(32'd0), .in_tag(32'd0), .in_pt(1'b0), .quad(s_quad),
         .x1(x1),.y1(y1),.z1(z1), .x2(x2),.y2(y2),.z2(z2), .x3(x3),.y3(y3),.z3(z3),
         .x4(x4),.y4(y4),
-        .xbase(xbase), .ybase(ybase),
+        .xbase(xbase), .ybase(ybase), .half(r_half),
         .busy(), .out_ready(1'b1), .out_valid(so_valid),
         .out_tag(), .out_pt(), .out_isp(), .sgn_neg(), .cull(w_cull),
         .dx12(w_dx12),.dx23(w_dx23),.dx31(w_dx31),.dx41(w_dx41),
@@ -90,7 +90,7 @@ module raster_topleft_tb_top (
 
     isp_raster_line #(.LANES(8)) u_ras (
         .clk(clk), .reset(reset),
-        .in_valid(r_valid), .y(r_y), .x_base(r_xb), .half(r_half),
+        .in_valid(r_valid), .y(r_y), .x_base(r_xb),
         .c1(rc1),.c2(rc2),.c3(rc3),.c4(rc4),
         .dx12(rdx12),.dx23(rdx23),.dx31(rdx31),.dx41(rdx41),
         .dy12(rdy12),.dy23(rdy23),.dy31(rdy31),.dy41(rdy41),

@@ -351,15 +351,16 @@ package tsp_pkg;
     // The probe VERDICT lands one cycle later still (at the module's output
     // register), which is what CR_LAT counts - hence isp_raster_probe_lat().
     //
-    // conv(1) + mul(2) + fused add3(4) + fixed-point align(1) + tree + result(1).
-    // The doubling tree covers two levels per pipeline stage, so its depth follows
-    // the lane count: ceil(log2(LANES)/2).
+    // input reg(1) + fixed-point align(1) + shift-add products(1) + base sum(1)
+    // + tree + result(1). There is no float multiply or float add on the path any
+    // more, which is where the old 2+4 went. The doubling tree covers two levels
+    // per pipeline stage, so its depth follows the lane count: ceil(log2(LANES)/2).
     function automatic int isp_raster_lat(input int lanes);
-        int head, nst;
+        int lb, nst;
         begin
-            head = $clog2(lanes);
-            nst  = (head + 1) / 2;
-            isp_raster_lat = 1 + 2 + 4 + 1 + nst + 1;
+            lb  = $clog2(lanes);
+            nst = (lb + 1) / 2;
+            isp_raster_lat = 1 + 1 + 1 + 1 + nst + 1;
         end
     endfunction
     function automatic int isp_raster_probe_lat(input int lanes);

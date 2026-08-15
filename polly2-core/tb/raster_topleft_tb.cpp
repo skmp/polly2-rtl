@@ -86,7 +86,10 @@ static void run_tile(const Tri& t, int tx, int ty, const char* name) {
     if (getenv("DBG_C2")) printf("[%s %d,%d] c2 = %08x\n", name, tx, ty, dut->c2_dbg);
 
     // ---- corner probe ----
-    dut->r_valid = 1; dut->r_probe = 1; dut->r_y = ty*32; dut->r_xb = tx*32;
+    // tile-local now: the probe derives the tile corners from the coordinate, which
+    // for a 0..31 input is the whole tile. The ANCHOR (xbase/ybase above) stays the
+    // absolute tile origin - that is what makes the constants tile-local.
+    dut->r_valid = 1; dut->r_probe = 1; dut->r_y = 0; dut->r_xb = 0;
     tick();
     dut->r_valid = 0; dut->r_probe = 0;
     guard = 0;
@@ -114,7 +117,7 @@ static void run_tile(const Tri& t, int tx, int ty, const char* name) {
     };
     for (int y = 0; y < 32; y++)
         for (int xb = 0; xb < 32; xb += 8) {
-            dut->r_valid = 1; dut->r_y = ty*32 + y; dut->r_xb = tx*32 + xb;
+            dut->r_valid = 1; dut->r_y = y; dut->r_xb = xb;
             tick();
             if (dut->out_valid) {
                 for (int l = 0; l < 8; l++) {
@@ -159,15 +162,16 @@ static void run_tile(const Tri& t, int tx, int ty, const char* name) {
     // truncated multiplies; invW is different - its full 31 bits become the depth and the
     // low 24 of the composite peel sort key, so a relative error here is a depth error.
     // The reference is the plane the RTL's own setup produced, evaluated in double at the
-    // same ABSOLUTE coordinate the raster sampled. ----
+    // same TILE-LOCAL coordinate the raster sampled - setup anchors the plane at the tile
+    // origin (its sel5..7 vertex subtract), so evaluating it at an absolute coordinate
+    // would add the tile offset twice. ----
     {
         double ddx = b2f(dut->ddx_dbg), ddy = b2f(dut->ddy_dbg), cw = b2f(dut->cw_dbg);
         double worst = 0.0; int wx = -1, wy = -1; double wgot = 0, wexp = 0;
         for (int y = 0; y < 32; y++)
             for (int x = 0; x < 32; x++) {
                 if (got[y][x] != 1) continue;             // only covered pixels matter
-                double ax = tx * 32 + x, ay = ty * 32 + y;
-                double exp = cw + ddx * ax + ddy * ay;    // absolute-coord plane
+                double exp = cw + ddx * x + ddy * y;      // tile-anchored plane
                 double g   = b2f(gotw[y][x]);
                 double rel = (exp != 0.0) ? fabs(g - exp) / fabs(exp) : fabs(g - exp);
                 if (rel > worst) { worst = rel; wx = x; wy = y; wgot = g; wexp = exp; }
@@ -219,7 +223,7 @@ static void sweep_rows(const Tri& t, int tx, int ty, int half, const char* name,
     };
     for (int y = 0; y < 32; y++)
         for (int xb = 0; xb < 32; xb += 8) {
-            dut->r_valid = 1; dut->r_y = ty*32 + y; dut->r_xb = tx*32 + xb;
+            dut->r_valid = 1; dut->r_y = y; dut->r_xb = xb;
             tick(); collect(); outstanding++;
         }
     dut->r_valid = 0;

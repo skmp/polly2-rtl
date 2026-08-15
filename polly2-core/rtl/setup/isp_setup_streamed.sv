@@ -101,13 +101,28 @@ module isp_setup_streamed (
     input      [31:0] x2, input [31:0] y2, input [31:0] z2,
     input      [31:0] x3, input [31:0] y3, input [31:0] z3,
     input      [31:0] x4, input [31:0] y4,
-    // ABSOLUTE-COORD REWORK: the tile origin is no longer subtracted from the
-    // vertices - the plane constants are anchored at the SCREEN origin and the
-    // raster samples absolute coordinates. The origin is still needed to turn the
-    // (absolute) vertex bbox into the tile-local sweep bounds, and for THAT it is
-    // wanted as an integer, so it arrives as one: the 32-aligned screen coordinate
-    // of the tile's top-left pixel. (Was a float; peel_core's i2f of tx*32 is gone.)
+    // TILE-LOCAL ANCHORING (re-enabled): the tile origin IS subtracted from the
+    // vertices again, so the edge constants C1..C4 and the invW plane constant come
+    // out anchored at the TILE origin and the raster samples tile-local 0..31.
+    // Under the absolute-coordinate form these constants were the edge value at the
+    // SCREEN origin, and every per-pixel evaluation was a near-total cancellation of
+    // two large numbers (C ~ screen scale against DX*y ~ screen scale) to land a
+    // tile-scale result - which is what the fp_mul16 products, 16-bit significands
+    // with 12 of them eaten by a 2047.5 coordinate, had to absorb. Tile-local, C is
+    // already the tile-scale answer and there is nothing to cancel.
+    // The origin arrives as an INTEGER (the 32-aligned screen coordinate of the
+    // tile's top-left pixel): it is wanted as one for the bbox fold below, and the
+    // float form the vertex subtract needs is made here (u_xbf/u_ybf) rather than
+    // costing peel_core an i2f.
     input      [10:0] xbase, input [10:0] ybase,
+    // HALF_OFFSET.fpu_pixel_half_offset. Baked into the plane constants HERE, by
+    // offsetting the ANCHOR half a pixel instead of the constants: C = DY*XL - DX*YT,
+    // so subtracting (origin + h) from the vertices gives DY*(XL-h) - DX*(YT-h) =
+    // C_tile + h*(DX - DY) - the value at the pixel CENTRE - with no extra arithmetic
+    // at all (coord_f32's half input already emits (2*coord + half)/2). Same for
+    // c_invw = aZ - ddx*aXL - ddy*aYT. The raster then samples INTEGER tile-local
+    // coordinates and has no half-pixel term anywhere.
+    input             half,
 
     output            busy,
     input             out_ready,
@@ -177,7 +192,8 @@ module isp_setup_streamed (
     // latched triangle (input-unbuffered: written only on latch)
     // ================================================================
     reg [31:0] X1,Y1,Z1, X2,Y2,Z2, X3,Y3,Z3, X4,Y4;
-    reg [10:0] XB,YB;              // integer tile origin (bbox only - see the port note)
+    reg [10:0] XB,YB;              // integer tile origin (bbox + the anchor subtract)
+    reg        HALFr;              // pixel-centre select, latched with the triangle
     reg [31:0] ISPW, TAGr;
     reg        PTr, Qr;
     reg        NFIN;               // any x/y coord inf/NaN -> unconditional cull
@@ -244,6 +260,16 @@ module isp_setup_streamed (
     reg        g0v_c,g1v_c,g2v_c;
     wire [31:0] Wx = Qr ? X4 : X1;
     wire [31:0] Wy = Qr ? Y4 : Y1;
+
+    // float form of the latched tile origin, for the sel5..7 vertex subtracts. XB/YB
+    // are latched with the triangle (cnt<=1) and coord_f32 is a 1-cycle registered
+    // convert, so XBf/YBf are stable from cnt==2 - three cycles before sel5 issues.
+    // The anchor carries the half-pixel (see the `half` port): coord_f32 emits
+    // (2*coord + half)/2, so this IS "tile origin + half a pixel" for free.
+    // USE_ROM=0 (the default) is the LZC+shift form - ~30 ALMs, no M10K.
+    wire [31:0] XBf, YBf;
+    coord_f32 u_xbf (.clk(clk), .en(1'b1), .coord(XB), .half(HALFr), .f(XBf));
+    coord_f32 u_ybf (.clk(clk), .en(1'b1), .coord(YB), .half(HALFr), .f(YBf));
     always @(*) begin
         g0a_c=X1; g0b_c=X3; g1a_c=Y2; g1b_c=Y3; g2a_c=Y1; g2b_c=Y3;
         g0v_c=1'b0; g1v_c=1'b0; g2v_c=1'b0;
@@ -252,15 +278,16 @@ module isp_setup_streamed (
             6'd2: begin g0a_c=X2;g0b_c=X3;g0v_c=1;  g1a_c=X1;g1b_c=X2;g1v_c=1;  g2a_c=Y1;g2b_c=Y2;g2v_c=1; end
             6'd3: begin g0a_c=Z2;g0b_c=Z1;g0v_c=1;  g1a_c=Z3;g1b_c=Z1;g1v_c=1;  g2a_c=X3;g2b_c=Wx;g2v_c=1; end
             6'd4: begin g0a_c=Y3;g0b_c=Wy;g0v_c=1;  g1a_c=X4;g1b_c=X1;g1v_c=1;  g2a_c=Y4;g2b_c=Y1;g2v_c=1; end
-            // sel5..7 used to be the ORIGIN SUBS (X1-XB, Y1-YB, ...) that made the edge
-            // anchors tile-local. In absolute coordinates the anchor IS the raw vertex,
-            // so the second operand is ZERO. The slots are deliberately KEPT (rather
-            // than deleted and the schedule compacted): every issue slot, bank write cnt
-            // and tail read cnt in this file is hand-derived, and `v - 0` costs nothing
-            // but preserves all of it. Reclaim them only with the schedule re-derived.
-            6'd5: begin g0a_c=X1;g0b_c=ZERO;g0v_c=1;  g1a_c=Y1;g1b_c=ZERO;g1v_c=1;  g2a_c=X2;g2b_c=ZERO;g2v_c=1; end
-            6'd6: begin g0a_c=Y2;g0b_c=ZERO;g0v_c=1;  g1a_c=X3;g1b_c=ZERO;g1v_c=1;  g2a_c=Y3;g2b_c=ZERO;g2v_c=1; end
-            6'd7: begin g0a_c=X4;g0b_c=ZERO;g0v_c=1;  g1a_c=Y4;g1b_c=ZERO;g1v_c=1; end
+            // sel5..7 are the ORIGIN SUBS (X1-XB, Y1-YB, ...) that make the edge anchors
+            // TILE-LOCAL. They were fed ZERO through the absolute-coordinate period -
+            // the slots were kept rather than deleted precisely so this could come back
+            // without re-deriving the hand-built schedule (every issue slot, bank write
+            // cnt and tail read cnt in this file depends on it). XL*/YT* feed both the
+            // edge constants AND, through aXL/aYT, the invW plane constant, so the two
+            // re-anchor together and cannot disagree.
+            6'd5: begin g0a_c=X1;g0b_c=XBf;g0v_c=1;  g1a_c=Y1;g1b_c=YBf;g1v_c=1;  g2a_c=X2;g2b_c=XBf;g2v_c=1; end
+            6'd6: begin g0a_c=Y2;g0b_c=YBf;g0v_c=1;  g1a_c=X3;g1b_c=XBf;g1v_c=1;  g2a_c=Y3;g2b_c=YBf;g2v_c=1; end
+            6'd7: begin g0a_c=X4;g0b_c=XBf;g0v_c=1;  g1a_c=Y4;g1b_c=YBf;g1v_c=1; end
             default: ;
         endcase
     end
@@ -321,7 +348,7 @@ module isp_setup_streamed (
                 // ---- latch a new triangle (flip the bank parity for it) ----
                 if (latch_now) begin
                     X1<=x1;Y1<=y1;Z1<=z1; X2<=x2;Y2<=y2;Z2<=z2; X3<=x3;Y3<=y3;Z3<=z3;
-                    X4<=x4;Y4<=y4; XB<=xbase;YB<=ybase;
+                    X4<=x4;Y4<=y4; XB<=xbase;YB<=ybase; HALFr<=half;
                     // non-finite screen coords (inf/NaN, e.g. SA2's fullscreen +-inf
                     // strip): in IEEE refsw the edge constants come out NaN and every
                     // Xhs>=0 compare fails, so the triangle NEVER rasters a pixel. Our

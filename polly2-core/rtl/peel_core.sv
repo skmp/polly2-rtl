@@ -486,6 +486,9 @@ module peel_core import tsp_pkg::*; #(
         .x3(fq_out[FF_X3 +:32]), .y3(fq_out[FF_Y3 +:32]), .z3(fq_out[FF_Z3 +:32]),
         .x4(fq_out[FF_X4 +:32]), .y4(fq_out[FF_Y4 +:32]),
         .xbase(t_xbase), .ybase(t_ybase),
+        // the ISP pixel-centre offset is baked into the plane constants here (the
+        // anchor subtract), not applied per-pixel in the raster
+        .half(regs.half_offset.fpu_pixel_half_offset),
         .busy(su_busy),
         .out_ready(!pq_full),
         .out_valid(su_out_valid), .out_tag(su_out_tag), .out_pt(su_out_pt), .out_isp(su_out_isp),
@@ -519,6 +522,18 @@ module peel_core import tsp_pkg::*; #(
     wire [32*RAS_LANES-1:0] ras_invw_flat;
     // strip the (always-0) sign bit from each raster lane's invW: everything past
     // stage B stores/carries 31-bit depths.
+`ifndef SYNTHESIS
+    // TEMP: does the raster ever emit a NEGATIVE invW? drop_sign takes the magnitude,
+    // which only makes sense if it never does.
+    integer pc_negw = 0;
+    always @(posedge clk) if (!reset && ras_out_valid) begin : negw
+        integer l;
+        for (l = 0; l < RAS_LANES; l = l + 1)
+            if (ras_inside[l] && ras_invw_flat[32*l+31]) pc_negw = pc_negw + 1;
+    end
+    final $display("=== NEGATIVE invW at covered pixels: %0d ===", pc_negw);
+`endif
+
     function [31*RAS_LANES-1:0] drop_sign(input [32*RAS_LANES-1:0] w);
         integer l;
         for (l = 0; l < RAS_LANES; l = l + 1)
@@ -552,11 +567,13 @@ module peel_core import tsp_pkg::*; #(
     reg  [4:0] cr_cnt;            // per-triangle verdict countdown (0 => idle/expired)
     isp_raster_line #(.LANES(RAS_LANES)) u_line (
         .clk(clk), .reset(reset),
-        // ABSOLUTE screen coordinates. The tile base is 32-aligned and ras_x/ras_y are
-        // the 5-bit tile offsets, so the screen coordinate is a CONCATENATION - no adder.
+        // TILE-LOCAL coordinates (0..31). isp_setup_streamed anchors the edge and invW
+        // constants at the tile origin again, so the raster samples the offset within
+        // the tile - which is also what keeps the fixed-point shared exponent tight.
+        // The port is still 11 bits: u_line derives the probe's tile corners as
+        // {y[10:5],5'd0} / {y[10:5],5'd31}, which for a 0..31 input is exactly 0 / 31.
         .in_valid(ras_in_valid || cr_issue),
-        .y({cur_ty, ras_y}), .x_base({cur_tx, ras_x}),
-        .half(regs.half_offset.fpu_pixel_half_offset),
+        .y(ras_y), .x_base(ras_x),
         .c1(isp_c1), .c2(isp_c2), .c3(isp_c3), .c4(isp_c4),
         .dx12(isp_dx12),.dx23(isp_dx23),.dx31(isp_dx31),.dx41(isp_dx41),
         .dy12(isp_dy12),.dy23(isp_dy23),.dy31(isp_dy31),.dy41(isp_dy41),
@@ -2316,11 +2333,11 @@ module peel_core import tsp_pkg::*; #(
             end
 
             S_STATE: begin
-                // tile origin (floats) for both isp_setup and tsp_setup
-                // ABSOLUTE-COORD REWORK: the tile origin is an INTEGER screen coord now
-                // (32-aligned), used only to fold the vertex bbox into the tile sweep
-                // bounds. The i2f() of tx*32 that fed the old float subtract is gone,
-                // along with the subtract itself (see isp_setup_streamed).
+                // tile origin for isp_setup (tsp_setup takes the spanner's, below).
+                // An INTEGER screen coord (32-aligned): it folds the vertex bbox into
+                // the tile sweep bounds AND, since the tile-local vertex subtract is
+                // re-enabled, anchors the ISP plane constants. isp_setup_streamed makes
+                // the float form it needs itself, so peel_core still owns no i2f here.
                 t_xbase <= {cur_tx, 5'd0};
                 t_ybase <= {cur_ty, 5'd0};
                 case (ra_out.state)
