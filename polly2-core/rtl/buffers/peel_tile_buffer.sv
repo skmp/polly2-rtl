@@ -262,133 +262,106 @@ module peel_tile_buffer import tsp_pkg::*; #(
     end
 
     // -------------------- WRITE port mux --------------------
+    // ONE per-bank transform with PER-FIELD selects, not five full-width datapaths
+    // behind a priority mux. At NB=32 that mux was PEEL_W*NB = 4800 bits wide with
+    // five inputs, and it was the largest single item in this module - while most of
+    // its width is fields that most sources simply KEEP. Written per field, each one
+    // sees only its own distinct candidates: `tag` has three (clear / stage-B / kept)
+    // rather than five, `zceil` three, `valid` three. Same idea the PT walks already
+    // used ("folding them into a single case keeps the write mux at ONE input instead
+    // of three"), applied across all of them.
+    //
+    // The source priority is unchanged and load-bearing: CLEAR > PT walk > z_keep >
+    // PeelBuffers > stage-B. Where a source wrote a don't-care ZERO before (CLEAR
+    // into depth2/refsort/zceil, which PeelBuffers sets before any read), it still
+    // writes zero - this is a restructure, not a semantic change, and the 42-scene
+    // sweep is expected to come back bit-identical.
+    wire w_clr = clr_valid;
+    wire w_pt  = !w_clr && pb_wr_valid &&  pb_ptwalk;
+    wire w_zk  = !w_clr && pb_wr_valid && !pb_ptwalk &&  pb_zkeep;
+    wire w_pb  = !w_clr && pb_wr_valid && !pb_ptwalk && !pb_zkeep;
+    wire w_ras = !w_clr && !pb_wr_valid && ras_b_valid;
+
     integer cw;
-    always @(*) begin
-        we    = '0;
-        waddr = '0;
+    always @(*) begin : wmux
+        reg [30:0] f_zb, f_zb2, f_zc;
+        reg [31:0] f_tg;
+        reg [23:0] f_rs;
+        reg        f_vl;
+
+        we    = w_ras ? b_we : ((w_clr || w_pt || w_zk || w_pb) ? {NB{1'b1}} : '0);
+        waddr = w_clr               ? {NB{clr_addr}}
+              : (w_pt || w_zk || w_pb) ? {NB{pb_wr_addr}}
+              : w_ras               ? pack_addr(b_y, b_x)
+                                    : '0;
         wdata = '0;
 
-        if (clr_valid) begin                       // CLEAR: {depth, tag} all banks
-            we    = {NB{1'b1}};
-            waddr = {NB{clr_addr}};
-            for (cw = 0; cw < NB; cw = cw + 1) begin
-                wdata[PEEL_W*cw + PW_DEPTH +: 31] = clr_depth;
-                wdata[PEEL_W*cw + PW_TAG   +: 32] = clr_tag;
-                // depth2/refsort/zceil/valid don't-care for OP; PeelBuffers sets them.
-            end
-        end else if (pb_wr_valid && pb_ptwalk) begin
-            // ---- PT phase walks, ONE transform ----
-            // init / swap / fix are all "read chunk, permute the depth planes, write
-            // back with valid=0 and tag kept". Folding them into a single case keeps
-            // the 1016-bit (PEEL_W x NB) write mux at ONE input instead of three -
-            // the per-field selects below are 8 x field-wide muxes, not three parallel
-            // full-width datapaths.
-            //   zb    : init/swap -> 0 (working seed); fix -> Zfinal (the blend's
-            //           resolved depth where the pixel locked, else the opaque Z
-            //           parked in zceil)
-            //   zb2   : init -> FLT_MAX (boundary = nearest); swap -> advance to zb
-            //           but ONLY where the pass staged (zb!=0), which also parks a
-            //           resolved lane's depth here forever; fix -> kept
-            //   refsort: init -> max (boundary nearer than everything); swap -> advance
-            //           to the staged tag alongside zb2 (SAME zb!=0 condition, so the
-            //           boundary KEY moves as one); fix -> kept. This is what lets a
-            //           coplanar group be stepped through one fragment at a time.
-            //   zceil : init -> the opaque depth (<- zb); swap/fix -> kept
-            we    = {NB{1'b1}};
-            waddr = {NB{pb_wr_addr}};
-            for (cw = 0; cw < NB; cw = cw + 1) begin
-                wdata[PEEL_W*cw + PW_DEPTH  +: 31] =
-                    pb_ptfix ? (pb_res[cw] ? pb_zres[31*cw +: 31]
-                                           : f_zceil(rdata, cw))
-                             : 31'h0;
-                wdata[PEEL_W*cw + PW_DEPTH2 +: 31] =
-                    pb_ptinit ? FLT_MAX
-                  : pb_ptswap ? ((f_depth(rdata, cw) == 31'h0) ? f_depth2(rdata, cw)
-                                                               : f_depth (rdata, cw))
-                              : f_depth2(rdata, cw);
-                wdata[PEEL_W*cw + PW_REFSORT +: 24] =
-                    pb_ptinit ? REFSORT_PT_INIT
-                  : pb_ptswap ? ((f_depth(rdata, cw) == 31'h0) ? f_refsort(rdata, cw)
-                                                               : f_tagsort(rdata, cw))
-                              : f_refsort(rdata, cw);
-                wdata[PEEL_W*cw + PW_ZCEIL  +: 31] =
-                    pb_ptinit ? f_depth(rdata, cw) : f_zceil(rdata, cw);
-                wdata[PEEL_W*cw + PW_TAG    +: 32] = f_tag(rdata, cw);
-                wdata[PEEL_W*cw + PW_VALID]        = 1'b0;
-            end
-        end else if (pb_wr_valid && pb_zkeep) begin // z_keep depth-restore RMW
-            // zb <- (zb==FLT_MAX ? zb2 : zb); keep tag/refsort/zceil/valid/depth2. Undoes the
-            // FLT_MAX sentinel a prior peel left in zb so a z_keep=1 OP entry depth-tests
-            // against the real last-drawn depth (else GREATER always fails vs FLT_MAX and
-            // the entry's OP - e.g. the THPS2 special bar - is wrongly occluded).
-            we    = {NB{1'b1}};
-            waddr = {NB{pb_wr_addr}};
-            for (cw = 0; cw < NB; cw = cw + 1) begin
-                wdata[PEEL_W*cw + PW_DEPTH  +: 31] =
-                    (f_depth(rdata, cw) == FLT_MAX) ? f_depth2(rdata, cw)
-                                                    : f_depth (rdata, cw);
-                wdata[PEEL_W*cw + PW_DEPTH2 +: 31] = f_depth2 (rdata, cw);
-                wdata[PEEL_W*cw + PW_TAG    +: 32] = f_tag    (rdata, cw);
-                wdata[PEEL_W*cw + PW_REFSORT+: 24] = f_refsort(rdata, cw);
-                wdata[PEEL_W*cw + PW_ZCEIL  +: 31] = f_zceil  (rdata, cw);
-                wdata[PEEL_W*cw + PW_VALID]        = f_valid  (rdata, cw);
-            end
-        end else if (pb_wr_valid) begin            // PeelBuffers RMW transform
-            we    = {NB{1'b1}};
-            waddr = {NB{pb_wr_addr}};
-            for (cw = 0; cw < NB; cw = cw + 1) begin
-                wdata[PEEL_W*cw + PW_DEPTH  +: 31] = FLT_MAX;
-                // reference (zb2) <- zb (old depth), EXCEPT when zb is the FLT_MAX sentinel
-                // (this pixel peeled NOTHING last pass): then KEEP the old zb2. Without this,
-                // an entry's FIRST PeelBuffers would swap the sentinel in and discard the
-                // carried reference - which for a z_keep=1 entry whose opaque list is EMPTY
-                // is the only surviving copy of the opaque Z. That refsw2 bug wrongly z-fails
-                // the entry's TR (e.g. the THPS2 OSD occluded by the frozen scene). Merging
-                // odepth into zb2 this way needs no extra buffer - just the right reload.
-                wdata[PEEL_W*cw + PW_DEPTH2 +: 31] =
-                    (f_depth(rdata, cw) == FLT_MAX) ? f_depth2(rdata, cw)
-                                                    : f_depth (rdata, cw);
-                wdata[PEEL_W*cw + PW_TAG    +: 32] = f_tag(rdata, cw);
-                // reference SORT field moves with the reference depth above: pass 1
-                // seeds the "nothing rendered yet" sentinel's sort value (0, at-or-
-                // below every real fragment), later passes take the staged tag.
-                wdata[PEEL_W*cw + PW_REFSORT+: 24] =
-                    pb_first ? REFSORT_TR_FIRST : f_tagsort(rdata, cw);
-                wdata[PEEL_W*cw + PW_ZCEIL  +: 31] = f_zceil(rdata, cw);
-                wdata[PEEL_W*cw + PW_VALID]        = 1'b0;
-            end
-        end else if (ras_b_valid) begin            // stage B: depth-cmp write-back
-            waddr = pack_addr(b_y, b_x);
-            for (cw = 0; cw < NB; cw = cw + 1) begin
-                if (b_inside[cw]) begin
-                    if (b_peeling || b_fwd) begin
-                        // peel accept AND forward accept write the same fields:
-                        // zb <- invW, pb <- tag, valid <- 1; boundary/Zceil kept.
-                        if (b_peeling ? ras_pass_lp[cw] : ras_pass_fwd[cw]) begin
-                            we[cw] = 1'b1;
-                            wdata[PEEL_W*cw + PW_DEPTH  +: 31] = b_invw[31*cw +: 31];
-                            wdata[PEEL_W*cw + PW_TAG    +: 32] = b_tag;
-                            wdata[PEEL_W*cw + PW_VALID]        = 1'b1;
-                            wdata[PEEL_W*cw + PW_DEPTH2 +: 31] = f_depth2 (rdata, cw);
-                            wdata[PEEL_W*cw + PW_REFSORT+: 24] = f_refsort(rdata, cw);
-                            wdata[PEEL_W*cw + PW_ZCEIL  +: 31] = f_zceil  (rdata, cw);
-                        end
-                    end else begin
-                        if (ras_pass_op[cw]) begin // opaque: tag<-tag, depth<-invW
-                            we[cw] = 1'b1;
-                            wdata[PEEL_W*cw + PW_DEPTH  +: 31] =
-                                b_zwdis ? f_depth(rdata, cw) : b_invw[31*cw +: 31];
-                            wdata[PEEL_W*cw + PW_TAG    +: 32] = b_tag;
-                            wdata[PEEL_W*cw + PW_DEPTH2 +: 31] = f_depth2 (rdata, cw);
-                            wdata[PEEL_W*cw + PW_REFSORT+: 24] = f_refsort(rdata, cw);
-                            wdata[PEEL_W*cw + PW_ZCEIL  +: 31] = f_zceil  (rdata, cw);
-                            wdata[PEEL_W*cw + PW_VALID]        = f_valid  (rdata, cw);
-                        end
-                    end
-                end
-            end
+        for (cw = 0; cw < NB; cw = cw + 1) begin
+            // the resident fields, read once per bank
+            f_zb  = f_depth  (rdata, cw);
+            f_zb2 = f_depth2 (rdata, cw);
+            f_tg  = f_tag    (rdata, cw);
+            f_rs  = f_refsort(rdata, cw);
+            f_zc  = f_zceil  (rdata, cw);
+            f_vl  = f_valid  (rdata, cw);
+
+            // zb: the working depth. PT fix restores Zfinal (the blend's resolved
+            // depth where the pixel locked, else the opaque Z parked in zceil);
+            // init/swap seed 0; PeelBuffers seeds the FLT_MAX sentinel; z_keep undoes
+            // a sentinel left by a prior peel so a z_keep=1 OP tests against the real
+            // last-drawn depth.
+            wdata[PEEL_W*cw + PW_DEPTH +: 31] =
+                  w_clr ? clr_depth
+                : w_pt  ? (pb_ptfix ? (pb_res[cw] ? pb_zres[31*cw +: 31] : f_zc)
+                                    : 31'h0)
+                : w_zk  ? ((f_zb == FLT_MAX) ? f_zb2 : f_zb)
+                : w_pb  ? FLT_MAX
+                : w_ras ? ((b_peeling || b_fwd) ? b_invw[31*cw +: 31]
+                                                : (b_zwdis ? f_zb : b_invw[31*cw +: 31]))
+                        : 31'h0;
+
+            // zb2: the TR reference / PT boundary. PeelBuffers advances it to the old
+            // zb EXCEPT when that is the FLT_MAX sentinel (this pixel peeled nothing
+            // last pass), which would otherwise discard the only surviving copy of the
+            // opaque Z for a z_keep entry with an empty opaque list. PT swap advances
+            // only where the pass staged (zb != 0), which also parks a resolved lane's
+            // depth here forever.
+            wdata[PEEL_W*cw + PW_DEPTH2 +: 31] =
+                  w_clr ? 31'h0
+                : w_pt  ? (pb_ptinit ? FLT_MAX
+                         : pb_ptswap ? ((f_zb == 31'h0) ? f_zb2 : f_zb)
+                                     : f_zb2)
+                : w_pb  ? ((f_zb == FLT_MAX) ? f_zb2 : f_zb)
+                        : f_zb2;                      // z_keep and stage-B keep it
+
+            wdata[PEEL_W*cw + PW_TAG +: 32] =
+                  w_clr ? clr_tag
+                : w_ras ? b_tag
+                        : f_tg;                       // every walk keeps the tag
+
+            // the reference SORT field moves with zb2 above, by the SAME condition, so
+            // the boundary KEY advances as one - that is what steps a coplanar group
+            // one fragment at a time.
+            wdata[PEEL_W*cw + PW_REFSORT +: 24] =
+                  w_clr ? 24'h0
+                : w_pt  ? (pb_ptinit ? REFSORT_PT_INIT
+                         : pb_ptswap ? ((f_zb == 31'h0) ? f_rs : f_tagsort(rdata, cw))
+                                     : f_rs)
+                : w_pb  ? (pb_first ? REFSORT_TR_FIRST : f_tagsort(rdata, cw))
+                        : f_rs;                       // z_keep and stage-B keep it
+
+            wdata[PEEL_W*cw + PW_ZCEIL +: 31] =
+                  w_clr ? 31'h0
+                : (w_pt && pb_ptinit) ? f_zb          // park the opaque Z for the PT phase
+                                      : f_zc;
+
+            wdata[PEEL_W*cw + PW_VALID] =
+                  w_zk  ? f_vl
+                : w_ras ? ((b_peeling || b_fwd) ? 1'b1 : f_vl)
+                        : 1'b0;                       // clear / PT walk / PeelBuffers
         end
     end
+
 
     // -------------------- SHADE single-pixel read output --------------------
     // 1-cycle latency: sh_rd_valid presented this cycle -> fields next cycle. The
