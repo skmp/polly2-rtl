@@ -282,7 +282,7 @@ module isp_raster_line import tsp_pkg::*; #(
     // generate: one sign bit per lane for each edge, and the full field per lane for
     // invW - so nothing outside has to know the widths differ.
     // ==================================================================
-    wire [LANES-1:0]      e_neg  [0:3];         // per-lane sign bit (1 = outside)
+    wire [LANES-1:0]      e_in   [0:3];         // per-lane coverage (1 = inside)
     wire signed [FXW-1:0] w_lane [0:LANES-1];   // invW lane values
     wire [7:0]            w_exp;                // invW shared exponent
 
@@ -344,53 +344,109 @@ module isp_raster_line import tsp_pkg::*; #(
             al_e2   <= pr_e;
         end
 
-        // ---- the doubling tree. Stage s covers levels 2s and 2s+1, so lanes
-        // 0 .. 4^(s+1)-1 are live after it; the shifts are hardwired. Only the lanes
-        // a stage actually produces are registered (the rest have no driver and
-        // disappear), which is why the cuts land where they do: registering all
-        // LANES at every level would cost thousands of flops for values that do not
-        // exist yet. ----
-        (* ramstyle = "logic" *) reg signed [W-1:0] tv   [0:NST-1][0:LANES-1];
-        (* ramstyle = "logic" *) reg signed [W-1:0] tstp [0:NST-1];
-        (* ramstyle = "logic" *) reg        [7:0]   tex  [0:NST-1];
-
-        for (gs = 0; gs < NST; gs = gs + 1) begin : tstage
-          localparam integer LV   = 2*gs;
-          localparam integer NIN  = ((1<<LV)     > LANES) ? LANES : (1<<LV);
-          localparam integer NMID = ((1<<(LV+1)) > LANES) ? LANES : (1<<(LV+1));
-          localparam integer NOUT = ((1<<(LV+2)) > LANES) ? LANES : (1<<(LV+2));
-          always @(posedge clk) begin : tree
-            reg signed [W-1:0] cur [0:LANES-1];
-            reg signed [W-1:0] mid [0:LANES-1];
-            reg signed [W-1:0] stp;
-            integer k;
-            stp = (gs == 0) ? al_step : tstp[gs-1];
-            for (k = 0; k < NIN; k = k + 1)
-                cur[k] = (gs == 0) ? al_base : tv[gs-1][k];
-            for (k = 0; k < NIN; k = k + 1) begin          // level LV
-                mid[k] = cur[k];
-                if (NIN + k < NMID) mid[NIN + k] = cur[k] + (stp <<< LV);
+        // ==============================================================
+        // invW: the doubling tree - it needs every lane's VALUE.
+        // Stage s covers levels 2s and 2s+1, so lanes 0 .. 4^(s+1)-1 are live after
+        // it; the shifts are hardwired. Only the lanes a stage actually produces are
+        // registered (the rest have no driver and disappear), which is why the cuts
+        // land where they do.
+        //
+        // EDGES: a tree here would be waste. V(lane) = base + step*lane is MONOTONIC
+        // in lane (step's sign is constant over the chunk), so an edge's inside set
+        // is a CONTIGUOUS RUN and all it needs is where that run starts or ends. A
+        // binary search on the lane index finds it in LB steps instead of LANES-1
+        // adds - and needs no divider, because carrying ACC = V(k) makes "try
+        // k + 2^b" exactly ACC + (step << b), ONE add. It also stops registering
+        // 32 lane values per stage, which was the larger half of the cost.
+        //   incr: find the LARGEST k with V(k) <  0  -> inside = lanes k+1..LANES-1
+        //   decr: find the LARGEST k with V(k) >= 0  -> inside = lanes 0..k
+        // Both are the mask `{LANES{1'b1}} << (k+1)`, complemented for decr.
+        // The two short-circuits are NOT optimizations: the search cannot express
+        // "the crossing is before lane 0", so V(0)'s own side has to be handled.
+        // The predicate is bit-for-bit the one the tree evaluated (>= 0, with the
+        // top-left -1 already folded into base), so coverage is unchanged.
+        // ==============================================================
+        if (gc == WCH) begin : g_tree
+            (* ramstyle = "logic" *) reg signed [W-1:0] tv   [0:NST-1][0:LANES-1];
+            (* ramstyle = "logic" *) reg signed [W-1:0] tstp [0:NST-1];
+            (* ramstyle = "logic" *) reg        [7:0]   tex  [0:NST-1];
+            for (gs = 0; gs < NST; gs = gs + 1) begin : tstage
+              localparam integer LV   = 2*gs;
+              localparam integer NIN  = ((1<<LV)     > LANES) ? LANES : (1<<LV);
+              localparam integer NMID = ((1<<(LV+1)) > LANES) ? LANES : (1<<(LV+1));
+              localparam integer NOUT = ((1<<(LV+2)) > LANES) ? LANES : (1<<(LV+2));
+              always @(posedge clk) begin : tree
+                reg signed [W-1:0] cur [0:LANES-1];
+                reg signed [W-1:0] mid [0:LANES-1];
+                reg signed [W-1:0] stp;
+                integer k;
+                stp = (gs == 0) ? al_step : tstp[gs-1];
+                for (k = 0; k < NIN; k = k + 1)
+                    cur[k] = (gs == 0) ? al_base : tv[gs-1][k];
+                for (k = 0; k < NIN; k = k + 1) begin          // level LV
+                    mid[k] = cur[k];
+                    if (NIN + k < NMID) mid[NIN + k] = cur[k] + (stp <<< LV);
+                end
+                for (k = 0; k < NMID; k = k + 1) begin         // level LV+1
+                    tv[gs][k] <= mid[k];
+                    if (NMID + k < NOUT) tv[gs][NMID + k] <= mid[k] + (stp <<< (LV+1));
+                end
+                tstp[gs] <= stp;
+                tex [gs] <= (gs == 0) ? al_e2 : tex[gs-1];
+              end
             end
-            for (k = 0; k < NMID; k = k + 1) begin         // level LV+1
-                tv[gs][k] <= mid[k];
-                if (NMID + k < NOUT) tv[gs][NMID + k] <= mid[k] + (stp <<< (LV+1));
-            end
-            tstp[gs] <= stp;
-            tex [gs] <= (gs == 0) ? al_e2 : tex[gs-1];
-          end
-        end
-
-        // ---- results out of the generate ----
-        if (gc == WCH) begin : g_w
             for (gl = 0; gl < LANES; gl = gl + 1) begin : lo
                 assign w_lane[gl] = tv[NST-1][gl];
             end
             assign w_exp = tex[NST-1];
-        end else begin : g_e
-            for (gl = 0; gl < LANES; gl = gl + 1) begin : lo
-                assign e_neg[gc][gl] = tv[NST-1][gl][W-1];
+        end else begin : g_search
+            // one search step per lane-index bit, TWO steps per pipeline stage -
+            // the same shape (and the same LAT) as the tree it replaces.
+            reg signed [W-1:0] s_acc [0:NST-1];
+            reg signed [W-1:0] s_stp [0:NST-1];
+            reg        [LB-1:0] s_k   [0:NST-1];
+            reg                 s_inc [0:NST-1], s_all [0:NST-1], s_non [0:NST-1];
+            for (gs = 0; gs < NST; gs = gs + 1) begin : sstage
+              localparam integer B0     = LB - 1 - 2*gs;   // this stage's first step
+              localparam integer HAS_B1 = (B0 >= 1);
+              localparam integer B1     = HAS_B1 ? B0 - 1 : B0;
+              always @(posedge clk) begin : search
+                reg signed [W-1:0] acc, t, stp;
+                reg [LB-1:0] k;
+                reg          inc;
+                stp = (gs == 0) ? al_step : s_stp[gs-1];
+                acc = (gs == 0) ? al_base : s_acc[gs-1];
+                k   = (gs == 0) ? {LB{1'b0}} : s_k[gs-1];
+                inc = (gs == 0) ? ~al_step[W-1] : s_inc[gs-1];
+                if (B0 >= 0) begin
+                    t = acc + (stp <<< B0);
+                    if (inc ? t[W-1] : ~t[W-1]) begin acc = t; k[B0] = 1'b1; end
+                end
+                if (HAS_B1) begin
+                    t = acc + (stp <<< B1);
+                    if (inc ? t[W-1] : ~t[W-1]) begin acc = t; k[B1] = 1'b1; end
+                end
+                s_acc[gs] <= acc;  s_k[gs] <= k;  s_stp[gs] <= stp;
+                s_inc[gs] <= inc;
+                // V(0)'s own side: incr with base >= 0 is entirely inside, decr with
+                // base < 0 entirely outside. Neither is reachable by the search.
+                s_all[gs] <= (gs == 0) ? ( ~al_step[W-1] && ~al_base[W-1])
+                                       : s_all[gs-1];
+                s_non[gs] <= (gs == 0) ? (  al_step[W-1] &&  al_base[W-1])
+                                       : s_non[gs-1];
+              end
             end
+            // k+1 must be computed ONE BIT WIDER: at k = LANES-1 a same-width
+            // increment wraps to 0 and turns "entirely outside" into "entirely
+            // inside". Widened, k+1 == LANES shifts the mask out to zero, which is
+            // exactly the wanted answer.
+            wire [LB:0]      kp1 = {1'b0, s_k[NST-1]} + 1'b1;
+            wire [LANES-1:0] sh  = {LANES{1'b1}} << kp1;
+            assign e_in[gc] = s_all[NST-1] ? {LANES{1'b1}}
+                            : s_non[NST-1] ? {LANES{1'b0}}
+                            : s_inc[NST-1] ? sh : ~sh;
         end
+
       end
     endgenerate
 
@@ -450,12 +506,12 @@ module isp_raster_line import tsp_pkg::*; #(
     integer j;
     always @(posedge clk) begin : result_stage
         for (j = 0; j < LANES; j = j + 1) begin
-            im0[j] <= ~(e_neg[0][j] | e_neg[1][j] | e_neg[2][j] | e_neg[3][j]);
+            im0[j] <= e_in[0][j] & e_in[1][j] & e_in[2][j] & e_in[3][j];
             iw0[32*j +: 32] <= fx_to_f32(w_lane[j][FXW-2:0], w_exp);
         end
         // PROBE: lane 0's value IS Xhs_n at that edge's max corner. Reject if ANY
         // edge's max corner is outside - the whole tile is then outside it.
-        pr_rej0 <= e_neg[0][0] | e_neg[1][0] | e_neg[2][0] | e_neg[3][0];
+        pr_rej0 <= ~(e_in[0][0] & e_in[1][0] & e_in[2][0] & e_in[3][0]);
     end
 
     // ---- valid / sideband pipe ----
