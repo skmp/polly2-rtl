@@ -345,4 +345,25 @@ package tsp_pkg;
         logic        done;
     } setup_resp_t;
 
+    // ---- isp_raster_line pipeline depth, as a function of the lane count ----
+    // Single source of truth for the raster pipe's issue -> result latency, so
+    // peel_core's corner-probe countdown cannot drift from the module it is timing.
+    // The probe VERDICT lands one cycle later still (at the module's output
+    // register), which is what CR_LAT counts - hence isp_raster_probe_lat().
+    //
+    // conv(1) + mul(2) + fused add3(4) + fixed-point align(1) + tree + result(1).
+    // The doubling tree covers two levels per pipeline stage, so its depth follows
+    // the lane count: ceil(log2(LANES)/2).
+    function automatic int isp_raster_lat(input int lanes);
+        int head, nst;
+        begin
+            head = $clog2(lanes);
+            nst  = (head + 1) / 2;
+            isp_raster_lat = 1 + 2 + 4 + 1 + nst + 1;
+        end
+    endfunction
+    function automatic int isp_raster_probe_lat(input int lanes);
+        isp_raster_probe_lat = isp_raster_lat(lanes) + 1;
+    endfunction
+
 endpackage

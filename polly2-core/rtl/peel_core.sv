@@ -19,7 +19,7 @@ module peel_core import tsp_pkg::*; #(
     // raster line, the sort cache and the bulk-op walks all scale with it; the
     // SPANNER does NOT - its taginvw read stays a fixed 4-wide aligned group
     // (see taginvw_tile_buffer's rd4 port for the 8-bank half-select).
-    parameter integer RAS_LANES = 8
+    parameter integer RAS_LANES = 32
 ) (
     input             clk,
     input             reset,
@@ -546,7 +546,9 @@ module peel_core import tsp_pkg::*; #(
     // (LAT=15 pipe: issue -> verdict valid 16 cycles later). Set in RS_CORNER, decremented each
     // RS_RAS cycle; read cr_cnt==1 on cyc7 after issue. A sweep that ends before then (tiny
     // bbox) simply never samples the (moot) verdict - correct, no stale-verdict leak.
-    localparam integer CR_LAT = 16;
+    // probe issue -> verdict, taken from the raster module itself (tsp_pkg) so it
+    // cannot drift when that pipe changes depth. Was a hardcoded 16.
+    localparam integer CR_LAT = isp_raster_probe_lat(RAS_LANES);
     reg  [4:0] cr_cnt;            // per-triangle verdict countdown (0 => idle/expired)
     isp_raster_line #(.LANES(RAS_LANES)) u_line (
         .clk(clk), .reset(reset),

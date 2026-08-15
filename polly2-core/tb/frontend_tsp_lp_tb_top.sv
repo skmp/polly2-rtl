@@ -6,7 +6,7 @@
 // (at u_sim.fb) after `done` to write the BMP.
 //
 module frontend_tsp_lp_tb_top import tsp_pkg::*; #(
-    parameter integer RAS_LANES = 8     // override with verilator -GRAS_LANES=4
+    parameter integer RAS_LANES = 32     // override with verilator -GRAS_LANES=4
 ) (
     input             clk,
     input             reset,
