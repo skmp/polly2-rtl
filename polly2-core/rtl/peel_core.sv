@@ -27,6 +27,7 @@ module peel_core import tsp_pkg::*; #(
     input             wr_en,
     input      [12:0] wr_addr,
     input      [31:0] wr_data,
+    input      [31:0] vram_cfg,   // [0] VRAM_16MB: 16 MB board, no 8 MB mirror
     input             go,             // 1-cycle: start rendering the region array
     output reg        done,           // 1-cycle: region array fully processed
 
@@ -79,17 +80,17 @@ module peel_core import tsp_pkg::*; #(
     // client 6 = the texel cache's PREFETCH fill port: LOWEST priority, so a
     // speculative line never delays a demand fill or any geometry client.
     reg  [6:0]  pend;
-    reg  [28:0] pa [0:6]; reg [7:0] pb [0:6];
+    reg  [28:0] pa [0:6]; reg [7:0] pb [0:6]; reg pw32 [0:6];
     wire [6:0]  rd_pulse = { tex_dreq[2].rd, ra_dreq.rd, ol_dreq.rd, pr_dreq.rd,
                              ts_dreq.rd, tex_dreq[1].rd, tex_dreq[0].rd };
-    wire [28:0] ca [0:6]; wire [7:0] cbv [0:6];
-    assign ca[0]=tex_dreq[0].addr; assign cbv[0]=tex_dreq[0].burst;
-    assign ca[1]=tex_dreq[1].addr; assign cbv[1]=tex_dreq[1].burst;
-    assign ca[2]=ts_dreq.addr;     assign cbv[2]=ts_dreq.burst;
-    assign ca[3]=pr_dreq.addr;     assign cbv[3]=pr_dreq.burst;
-    assign ca[4]=ol_dreq.addr;     assign cbv[4]=ol_dreq.burst;
-    assign ca[5]=ra_dreq.addr;     assign cbv[5]=ra_dreq.burst;
-    assign ca[6]=tex_dreq[2].addr; assign cbv[6]=tex_dreq[2].burst;
+    wire [28:0] ca [0:6]; wire [7:0] cbv [0:6]; wire cw32 [0:6];
+    assign ca[0]=tex_dreq[0].addr; assign cbv[0]=tex_dreq[0].burst; assign cw32[0]=tex_dreq[0].w32;
+    assign ca[1]=tex_dreq[1].addr; assign cbv[1]=tex_dreq[1].burst; assign cw32[1]=tex_dreq[1].w32;
+    assign ca[2]=ts_dreq.addr;     assign cbv[2]=ts_dreq.burst;     assign cw32[2]=ts_dreq.w32;
+    assign ca[3]=pr_dreq.addr;     assign cbv[3]=pr_dreq.burst;     assign cw32[3]=pr_dreq.w32;
+    assign ca[4]=ol_dreq.addr;     assign cbv[4]=ol_dreq.burst;     assign cw32[4]=ol_dreq.w32;
+    assign ca[5]=ra_dreq.addr;     assign cbv[5]=ra_dreq.burst;     assign cw32[5]=ra_dreq.w32;
+    assign ca[6]=tex_dreq[2].addr; assign cbv[6]=tex_dreq[2].burst; assign cw32[6]=tex_dreq[2].w32;
 
     wire       any_pend = |pend;
     wire [2:0] d_win = pend[0] ? 3'd0 : pend[1] ? 3'd1 : pend[2] ? 3'd2 :
@@ -134,6 +135,7 @@ module peel_core import tsp_pkg::*; #(
     localparam [OCW-1:0] PF_OUT_MAX = OCW'(4);   // = the receiver's PFQD ring depth
     reg [2:0]  of_owner [0:DDR_OUT-1];
     reg [7:0]  of_beats [0:DDR_OUT-1];
+    reg        of_half  [0:DDR_OUT-1];   // 32-bit clients: which half this burst wants
     reg [OFW:0] of_wp, of_rp;
     wire        of_empty = (of_wp == of_rp);
     wire        of_full  = (of_wp[OFW] != of_rp[OFW]) && (of_wp[OFW-1:0] == of_rp[OFW-1:0]);
@@ -143,7 +145,48 @@ module peel_core import tsp_pkg::*; #(
     // present the highest-priority pending request whenever the order FIFO has room;
     // hold until the backend accepts (!busy).
     assign ddr_req.rd    = any_pend && !of_full;
-    assign ddr_req.addr  = pa[d_win];
+    // ---- ADDRESS DECORATION: done HERE, once, for every client ----
+    // Clients present a RAW address, meaningful up to 16 MB. Bits [19:0] are ALWAYS the
+    // physical 64-bit word (1M words = the whole 8 MB of VRAM); bit [20] never reaches
+    // DDR - but it means two different things depending on the client:
+    //
+    //   64-BIT client (w32=0, the texel caches): addr is a 64-bit-word address, so bit
+    //     [20] is the 8 MB BIT. A texture base plus a mip/uv offset can carry past 8 MB
+    //     and the DC mirrors it back, which is exactly what masking it does.
+    //
+    //   32-BIT client (w32=1): addr is a 32-bit-VIEW word index, so bit [20] is
+    //     2^20 * 4 B = 4 MB - the BANK bit, not an 8 MB bit. VRAM's two 4 MB banks are
+    //     interleaved as the two halves of each 64-bit word (view word N -> word N low
+    //     half, view word N+1M -> word N high half), so bits [19:0] already span all
+    //     8 MB and bit [20] is the HALF SELECT, captured per burst into of_half below.
+    //
+    // Either way bit [20] must not reach the DDR address, and anything above it is out
+    // of range (watched by ddr_oor). So this is the single point that:
+    //   * takes bits [19:0] as the physical word, and
+    //   * ORs in the DDR window prefix that places VRAM at 0x30000000 in DDR
+    //     (word[28:25]=3 -> 3 * 32M words * 8 B = 768 MB).
+    // It used to be every client's job, and they did not agree: the texel cache's DEMAND
+    // path wrote {4'b0011, base[24:0]} (29 bits, correct) while its PREFETCH path wrote
+    // {4'b0011, base & 29'h1FFFFFF} - 33 bits truncated into a 29-bit reg, which silently
+    // DROPPED the prefix, so speculative bursts addressed a different DDR region than
+    // demand bursts for the same line. Invisible in sim (sim_ddr_fb only decodes
+    // addr[19:0]) and wrong on hardware. Centralising it makes that class impossible.
+    // VRAM SIZE is a board property, set through the polly2 MMIO VRAM_CFG register
+    // (pvr_mmio 0xFF202028 bit 0). 0 = 8 MB, the Dreamcast default, where the top word
+    // bit is a mirror; 1 = a 16 MB board, where it is a real address bit.
+    wire vram16 = vram_cfg[0];
+    // The arbiter emits a FULL 16 MB (2M x 64-bit) word address and does NOT mask or
+    // rebase - both belong to the level that knows where VRAM physically sits
+    // (simplex_pvr_top masks the 8 MB mirror, sys_top adds the MMIO-configurable,
+    // 16 MB-aligned vram_word_base).
+    //
+    // What it DOES do is the 32-bit view shuffle, because that is a data-path decision it
+    // has to make anyway to route the returned half: a 32-bit client's address carries
+    // the BANK bit at half the VRAM size (view bit [20] on an 8 MB board, [21] on a
+    // 16 MB one), which is not part of the physical word and must come out of it.
+    wire [20:0] d_word = pw32[d_win] ? (vram16 ? pa[d_win][20:0] : {1'b0, pa[d_win][19:0]})
+                                     : pa[d_win][20:0];
+    assign ddr_req.addr  = {8'd0, d_word};   // 21-bit word offset = 16 MB
     assign ddr_req.burst = pb[d_win];
     wire d_accept = ddr_req.rd && !ddr_resp.busy;
 
@@ -151,9 +194,21 @@ module peel_core import tsp_pkg::*; #(
     // outstanding is a stray and must never reach a client (an uncounted beat
     // permanently desyncs the exact-beat-count clients).
     wire       d_beat  = ddr_resp.dready && !of_empty;
+    // 32-bit clients' data drop: the half this burst asked for. Broadcast - each client
+    // uses it only if it set w32. Four clients used to carry their own copy of this
+    // select (region/objlist parsers, record fetcher, ISP iterator), and record_fetcher
+    // needed TWO of them because its two bursts can want different banks; per-burst
+    // tracking here retires all of that.
+    // legal raw-address bits: word bits, plus the bank bit for a 32-bit client
+    wire [28:0] ddr_legal = pw32[d_win] ? (vram16 ? 29'h3FFFFF : 29'h1FFFFF)
+                                        : (vram16 ? 29'h1FFFFF : 29'h0FFFFF);
+    wire [31:0] d_half = of_half[of_head] ? ddr_resp.dout[63:32] : ddr_resp.dout[31:0];
     wire [2:0] d_owner = of_owner[of_head];
     wire       d_last  = d_beat && (of_beats[of_head] <= 8'd1);
 
+`ifndef SYNTHESIS
+    integer ddr_oor = 0;    // requests whose raw address exceeded the 16 MB contract
+`endif
     // per-client outstanding-burst counters (request accepted, beats not yet done)
     reg [OCW-1:0] d_oc [0:6];
 
@@ -163,9 +218,17 @@ module peel_core import tsp_pkg::*; #(
             for (di=0; di<7; di=di+1) d_oc[di] <= '0;
         end else begin
             for (di=0; di<7; di=di+1)
-                if (rd_pulse[di]) begin pend[di] <= 1'b1; pa[di] <= ca[di]; pb[di] <= cbv[di]; end
+                if (rd_pulse[di]) begin
+                    pend[di] <= 1'b1; pa[di] <= ca[di]; pb[di] <= cbv[di];
+                    pw32[di] <= cw32[di];
+                end
             if (d_accept) begin
                 of_owner[of_wp[OFW-1:0]] <= d_win;
+                // 32-bit view: the bank bit is HALF the VRAM (4 MB -> view bit 20 on an
+                // 8 MB board, 8 MB -> view bit 21 on a 16 MB board), since the two banks
+                // are interleaved as the two halves of each 64-bit word.
+                of_half [of_wp[OFW-1:0]] <= pw32[d_win] &&
+                                            (vram16 ? pa[d_win][21] : pa[d_win][20]);
                 of_beats[of_wp[OFW-1:0]] <= pb[d_win];
                 of_wp <= of_wp + 1'b1;
                 pend[d_win] <= (rd_pulse[d_win]);  // clear grant (unless re-pulsed same cyc)
@@ -180,6 +243,16 @@ module peel_core import tsp_pkg::*; #(
 `ifndef SYNTHESIS
             if (ddr_resp.dready && of_empty)
                 $error("peel_core DDR arbiter: stray beat with no burst outstanding");
+            // Contract: clients present a raw word address inside 16 MB. Bits above [20]
+            // set means a client is out of range (or still decorating its own address).
+            // Counted, not fatal: a texture base + mip/uv offset legitimately carries into
+            // bit [20] and is mirrored, and only bits ABOVE that are a real error.
+            if (d_accept && ((pa[d_win] & ~ddr_legal) != 29'd0)) begin
+                ddr_oor <= ddr_oor + 1;
+                if (ddr_oor == 0)
+                    $display("[peel_core] DDR addr out of the 16 MB contract: client %0d addr %07x",
+                             d_win, pa[d_win]);
+            end
             // pa/pb are ONE slot per client: a client that re-pulses rd while its
             // previous request is still ungranted silently loses that request (the
             // address is overwritten, no burst is ever issued for it). Multi-outstanding
@@ -204,6 +277,9 @@ module peel_core import tsp_pkg::*; #(
     assign ol_dresp.busy     = pend[4] || (d_oc[4] != '0);
     assign ra_dresp.busy     = pend[5] || (d_oc[5] != '0);
     assign tex_dresp[2].busy = pend[6] || (d_oc[6] == PF_OUT_MAX);
+    assign tex_dresp[0].dout32=d_half; assign tex_dresp[1].dout32=d_half;
+    assign tex_dresp[2].dout32=d_half; assign ts_dresp.dout32=d_half;
+    assign pr_dresp.dout32=d_half; assign ol_dresp.dout32=d_half; assign ra_dresp.dout32=d_half;
     assign tex_dresp[0].dout=ddr_resp.dout; assign tex_dresp[1].dout=ddr_resp.dout;
     assign tex_dresp[2].dout=ddr_resp.dout;
     assign ts_dresp.dout=ddr_resp.dout; assign pr_dresp.dout=ddr_resp.dout;

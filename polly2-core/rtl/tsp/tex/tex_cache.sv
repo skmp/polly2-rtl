@@ -8,7 +8,7 @@
 //           + cresp.rdata (hit: soon; miss: after the DDR read completes).
 //
 // index = waddr[5:0], tag = waddr[28:6]. DDR word at 0x30000000
-// (dreq.addr = {4'b0011, waddr[24:0]}).
+// (dreq.addr is a RAW word address; the arbiter adds the window prefix and the 8 MB mask).
 //
 module tex_cache import tsp_pkg::*; (
     input                clk,
@@ -70,7 +70,7 @@ module tex_cache import tsp_pkg::*; (
             end
             S_MISS: if (!dresp.busy) begin
                 rd_r    <= 1'b1;
-                addr_r  <= {4'b0011, m_waddr[24:0]};
+                addr_r  <= m_waddr;               // raw; the arbiter decorates
                 burst_r <= 8'd1;
                 st      <= S_FILL;
             end

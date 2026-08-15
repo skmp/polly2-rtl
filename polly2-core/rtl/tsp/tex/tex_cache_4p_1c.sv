@@ -400,6 +400,7 @@ module tex_cache_4p_1c import tsp_pkg::*; (
     assign dreq.rd    = rd_r;
     assign dreq.addr  = addr_r;
     assign dreq.burst = burst_r;
+    assign dreq.w32   = 1'b0;   // texels are read as raw 64-bit words
 
 `ifndef SYNTHESIS
     integer stat_hit [0:4];
@@ -528,7 +529,7 @@ module tex_cache_4p_1c import tsp_pkg::*; (
 `endif
                 end else if (iss_go) begin
                     rd_r    <= 1'b1;
-                    addr_r  <= {4'b0011, iss_base[24:0]};
+                    addr_r  <= iss_base;              // raw; the arbiter decorates
                     burst_r <= 8'd4;
                     fq_line[fq_wp[1:0]] <= iss_line;
                     fq_v[fq_wp[1:0]]    <= 1'b1;
@@ -758,6 +759,7 @@ module tex_cache_4p_1c import tsp_pkg::*; (
     assign pfreq.rd    = p_rd;
     assign pfreq.addr  = p_addr;
     assign pfreq.burst = 8'd4;
+    assign pfreq.w32   = 1'b0;  // same raw 64-bit form as the demand path
     // !p_rd for the same reason as the demand path's iss_go: the arbiter's pending slot
     // is ONE address and registers our pulse on the edge ending the cycle we present it.
     wire p_iss_go = (pst == P_REQ) && !pq_full && !p_rd && !pfresp.busy;
@@ -784,7 +786,7 @@ module tex_cache_4p_1c import tsp_pkg::*; (
                     end
             P_REQ:  if (p_iss_go) begin
                         p_rd   <= 1'b1;
-                        p_addr <= {4'b0011, {p_cand, 2'b00} & 29'h1FFFFFF};
+                        p_addr <= {p_cand, 2'b00};        // raw; identical form to demand
                         pq_line[pq_wp[PPW-1:0]] <= p_cand;
                         pq_v   [pq_wp[PPW-1:0]] <= 1'b1;
                         pq_wp  <= pq_wp + 1'b1;

@@ -328,6 +328,7 @@ wire        pvr_mmio_wr, pvr_mmio_go, pvr_mmio_rst, pvr_done;
 wire [12:0] pvr_mmio_addr;
 wire [31:0] pvr_mmio_wdata;
 wire  [7:0] pvr_vram_top;
+wire [31:0] pvr_vram_cfg;   // [0] VRAM_16MB: 16 MB board, no 8 MB mirror
 wire  [1:0] mmio_clk_sel;
 
 wire        aud_fifo_wr, aud_fifo_full;
@@ -364,7 +365,8 @@ pvr_mmio pvr_mmio
 	.aud_level        (aud_fifo_level),
 
 	.fb_top           (fb_top_base),
-	.fb_bot           (fb_bot_base)
+	.fb_bot           (fb_bot_base),
+	.vram_cfg         (pvr_vram_cfg)
 );
 
 //////////////////////////////////////////////////////////////////////////
@@ -435,6 +437,7 @@ wire [28:0] spvr_fb_addr_raw;
 
 simplex_pvr_top simplex_pvr
 (
+	.vram_cfg        ( pvr_vram_cfg ),
 	.clk    ( clk_sys ),
 	.reset  ( pvr_reset ),
 

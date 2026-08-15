@@ -70,14 +70,25 @@ package tsp_pkg;
     // request: cache -> DDR arbiter
     typedef struct packed {
         logic        rd;        // read strobe (accepted when !resp.busy)
-        logic [28:0] addr;      // 64-bit-word address ({4'b0011, waddr[24:0]})
+        logic [28:0] addr;      // RAW VRAM address, to 16 MB. Bits [19:0] are the physical
+                                //  64-bit word either way; bit [20] is the 8 MB bit for a
+                                //  64-bit client (masked = the DC mirror) and the 4 MB BANK
+                                //  bit for a 32-bit client (consumed as the half select).
+                                //  The peel_core arbiter does both, plus the DDR window
+                                //  prefix - clients must NOT do any of it themselves.
         logic [7:0]  burst;     // burst count (1 for a single 64-bit line)
+        logic        w32;       // 1 = 32-BIT CLIENT: addr is a 32-bit-VIEW word address
+                                //  (bank = addr[20] selects the half, wofs = addr[19:0]
+                                //  is the 64-bit word). The arbiter does the shuffle and
+                                //  returns the selected half on dout32 - clients must NOT
+                                //  slice dout themselves.
     } ddr_rd_req_t;
     // response: DDR arbiter -> cache
     typedef struct packed {
         logic        busy;      // cannot accept a read this cycle
         logic [63:0] dout;      // read data
         logic        dready;    // dout valid this cycle
+        logic [31:0] dout32;    // 32-bit clients: the half selected by THIS burst's bank
     } ddr_rd_resp_t;
 
     // ---- framebuffer pixel WRITE port (injected DDR-controller dependency) ----
