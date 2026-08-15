@@ -21,7 +21,7 @@ TSP_PKG = ../polly2-core/rtl/gen/tsp_pkg.sv
 # polly2-core video-out (framebuffer write master) instantiated by simplex_pvr_top
 VO_RTL  = ../polly2-core/rtl/vo.sv
 
-all: spg-sync pvr-burst spg-loopback audio-i2s spg-bands spg-depth fb-write render-irq
+all: spg-sync pvr-burst spg-loopback audio-i2s spg-bands spg-depth spg-240p fb-write render-irq
 
 #   make fb-write - FB write master formats: every FB_W_CTRL packmode
 #                   (0555K/565/4444/1555/888/0888K/8888, refsw2 dither
@@ -49,6 +49,16 @@ spg-depth: obj_dir/spg_depth_tb
 
 obj_dir/spg_depth_tb: rtl/spg.sv tb/spg_depth_tb.cpp
 	$(VERILATOR) --cc --exe --build $(VFLAGS) rtl/spg.sv tb/spg_depth_tb.cpp -o spg_depth_tb
+
+#   make spg-240p  - 240p (line-doubled) display: a 640x240 source shown at
+#                    4x vertically (four output lines per source line, last
+#                    source line 239), every fb_depth, linear + split,
+#                    composed with pixel_double, bands still 2x
+spg-240p: obj_dir/spg_240p_tb
+	./obj_dir/spg_240p_tb
+
+obj_dir/spg_240p_tb: rtl/spg.sv tb/spg_240p_tb.cpp
+	$(VERILATOR) --cc --exe --build $(VFLAGS) rtl/spg.sv tb/spg_240p_tb.cpp -o spg_240p_tb
 
 #   make render-irq - irq_stretch (render-done -> f2h IRQ1): a done edge
 #                     gives exactly one 64-cycle pulse (a held level does
@@ -117,4 +127,4 @@ obj_dir/pvr_burst_tb: rtl/simplex_pvr_top.sv $(VO_RTL) tb/peel_core_stub.sv tb/p
 clean:
 	rm -rf obj_dir
 
-.PHONY: all spg-sync pvr-burst spg-loopback audio-i2s spg-bands spg-depth fb-write render-irq clean
+.PHONY: all spg-sync pvr-burst spg-loopback audio-i2s spg-bands spg-depth spg-240p fb-write render-irq clean

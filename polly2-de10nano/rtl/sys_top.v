@@ -425,7 +425,7 @@ wire [28:0] vram_word_base = {pvr_vram_top, 21'd0};
 wire pvr_reset = reset_req | clk_switch_reset | pvr_mmio_rst;
 
 wire [31:0] spvr_fb_r_sof1, spvr_fb_r_sof2, spvr_fb_w_sof1, spvr_fb_w_sof2;
-wire [31:0] spvr_fb_r_ctrl, spvr_vo_control;
+wire [31:0] spvr_fb_r_ctrl, spvr_vo_control, spvr_spg_control;
 
 // peel_core render DDR read channel (raw word offset; base added below)
 wire [28:0] spvr_rd_addr;
@@ -456,6 +456,7 @@ simplex_pvr_top simplex_pvr
 	.FB_R_SOF2  ( spvr_fb_r_sof2 ),
 	.FB_R_CTRL  ( spvr_fb_r_ctrl ),
 	.VO_CONTROL ( spvr_vo_control ),
+	.SPG_CONTROL( spvr_spg_control ),
 	.FB_W_SOF1  ( spvr_fb_w_sof1 ),
 	.FB_W_SOF2  ( spvr_fb_w_sof2 ),
 	.TEST_SELECT( ),
@@ -538,6 +539,16 @@ wire [31:0] fb_disp_base = {pvr_vram_top, 24'd0} + {9'd0, spvr_fb_r_sof1[21:2], 
 // pixel_double, 320) pixels x 2/2/3/4 bytes by fb_depth.
 wire  [1:0] fb_disp_depth  = spvr_fb_r_ctrl[3:2];
 wire        fb_disp_pixdbl = spvr_vo_control[8];
+
+// Line doubling (spg displays a half-height 640x240 source at 4x vertically):
+// either the game asks for it outright (FB_R_CTRL.fb_line_double), or the
+// DISPLAY MODE is 240p - a non-interlaced TV mode, i.e. no VGA pixel clock.
+// That second test is minicast's own resolution rule (spg.cpp CalculateSync:
+// non-interlaced with FB_R_CTRL.vclk_div renders full height, non-interlaced
+// without it renders half), so it matches the height the emulator produces.
+wire        fb_disp_vga    = spvr_fb_r_ctrl[23];    // FB_R_CTRL.vclk_div (27 MHz)
+wire        fb_disp_ilace  = spvr_spg_control[4];   // SPG_CONTROL.interlace (480i)
+wire        fb_disp_linedbl = spvr_fb_r_ctrl[1] || (!fb_disp_vga && !fb_disp_ilace);
 wire [13:0] fb_disp_str640 = (fb_disp_depth == 2'd2) ? 14'd1920
                            : (fb_disp_depth == 2'd3) ? 14'd2560
                                                      : 14'd1280;
@@ -555,7 +566,7 @@ spg spg
 
 	.fb_base     (fb_disp_base),
 	.fb_stride   (fb_disp_stride),
-	.fb_line_dbl (spvr_fb_r_ctrl[1]),    // FB_R_CTRL.fb_line_double (240p)
+	.fb_line_dbl (fb_disp_linedbl),      // 240p source: 4x vertical
 	.fb_pix_dbl  (fb_disp_pixdbl),       // VO_CONTROL.pixel_double (320-wide)
 	.fb_split    (1'b1),
 	.fb_disp_half(spvr_fb_r_sof1[22]),
