@@ -922,14 +922,26 @@ module spanner_v2 import tsp_pkg::*; #(
     // high-water stays well under the NEW RING_N-WINDOW, and cheap iff the dedup
     // hit-rate does not collapse (older reuse hits fall outside a smaller WINDOW and
     // re-setup instead).
-    integer st_alloc, st_emit, st_ringstall, st_tiles, st_ahead_hw;
+    integer st_alloc, st_emit, st_ringstall, st_tiles;
+    reg [SEQ_W-1:0] st_ahead_hw;
     integer st_tile_alloc, st_tile_hw, st_pass_hist [0:16];
     integer st_rd_hist [0:16], st_rd_max;
+    // span RING (dense_span_buffer slots): occupancy high-water, full-stalls, per-pass spans.
+    // The high-waters are UNSIGNED regs, not `integer`: occupancy is a SPAN_W+1-bit modular
+    // difference, and assigning it to a signed 32-bit integer sign-extends a full ring
+    // (0x800) to -2048. Same for ring_ahead (SEQ_W bits) - harmless while it stays under
+    // 2^(SEQ_W-1), but not something to leave load-bearing.
+    reg [SPAN_W:0] st_span_hw;
+    integer st_spanstall, st_pass_spans, st_pass_span_hw, st_sp_hist [0:16];
+    wire [SPAN_W:0] span_occ = span_head - span_tail;   // modular difference = occupancy
     integer sthi;
     initial begin
         st_alloc=0; st_emit=0; st_ringstall=0; st_tiles=0; st_ahead_hw=0;
         st_tile_alloc=0; st_tile_hw=0; st_rd_max=0;
-        for (sthi=0; sthi<=16; sthi=sthi+1) begin st_pass_hist[sthi]=0; st_rd_hist[sthi]=0; end
+        st_span_hw=0; st_spanstall=0; st_pass_spans=0; st_pass_span_hw=0;
+        for (sthi=0; sthi<=16; sthi=sthi+1) begin
+            st_pass_hist[sthi]=0; st_rd_hist[sthi]=0; st_sp_hist[sthi]=0;
+        end
     end
     // Periodic emit so a scene that is KILLED on a timeout (some dumps have
     // unterminated OPBs and render for hours) still leaves its high-water behind -
@@ -944,7 +956,7 @@ module spanner_v2 import tsp_pkg::*; #(
     end
 
     always @(posedge clk) if (!reset) begin
-        if (ring_ahead > SEQ_W'(st_ahead_hw)) st_ahead_hw <= ring_ahead;
+        if (ring_ahead > st_ahead_hw) st_ahead_hw <= ring_ahead;
         if (emit_stall_ring) st_ringstall <= st_ringstall + 1;
         if (dd_emit_we) begin                       // an ALLOC (dedup miss)
             st_alloc      <= st_alloc + 1;
@@ -958,9 +970,17 @@ module spanner_v2 import tsp_pkg::*; #(
               <= st_rd_hist[ ((alloc_seq - eff_seq) == 0) ? 0 : $clog2((alloc_seq - eff_seq) + 1) ] + 1;
             if ((alloc_seq - eff_seq) > SEQ_W'(st_rd_max)) st_rd_max <= alloc_seq - eff_seq;
         end
+        // span RING occupancy: head-tail on the wrap-extended pointers.
+        if (span_occ > st_span_hw) st_span_hw <= span_occ;
+        if (emit_stall_span_ring) st_spanstall <= st_spanstall + 1;
+        if (sp_we) st_pass_spans <= st_pass_spans + 1;
         if (start) begin                            // tile PASS boundary
             st_tiles <= st_tiles + 1;
             if (st_tile_alloc > st_tile_hw) st_tile_hw <= st_tile_alloc;
+            if (st_pass_spans > st_pass_span_hw) st_pass_span_hw <= st_pass_spans;
+            st_sp_hist[ (st_pass_spans == 0) ? 0 : $clog2(st_pass_spans+1) ]
+                <= st_sp_hist[ (st_pass_spans == 0) ? 0 : $clog2(st_pass_spans+1) ] + 1;
+            st_pass_spans <= 0;
             // log2 bucket of this pass's allocations
             st_pass_hist[ (st_tile_alloc == 0) ? 0 : $clog2(st_tile_alloc+1) ]
                 <= st_pass_hist[ (st_tile_alloc == 0) ? 0 : $clog2(st_tile_alloc+1) ] + 1;
@@ -980,6 +1000,12 @@ module spanner_v2 import tsp_pkg::*; #(
         $write("=== SPANRD %m: reuse-distance histogram (max=%0d):", st_rd_max);
         for (sthi=0; sthi<=12; sthi=sthi+1)
             if (st_rd_hist[sthi]) $write(" <=%0d:%0d", (1<<sthi)-1, st_rd_hist[sthi]);
+        $display(" ===");
+        $display("=== SPANSLOT %m: SPAN_NSLOT=%0d | span-ring occupancy HIGH-WATER=%0d | ring_full stall cycles=%0d | max spans in ONE pass=%0d ===",
+                 SPAN_NSLOT, st_span_hw, st_spanstall, st_pass_span_hw);
+        $write("=== SPANSLOTH %m: spans-per-pass log2 histogram:");
+        for (sthi=0; sthi<=13; sthi=sthi+1)
+            if (st_sp_hist[sthi]) $write(" <=%0d:%0d", (1<<sthi)-1, st_sp_hist[sthi]);
         $display(" ===");
     end
 `endif
