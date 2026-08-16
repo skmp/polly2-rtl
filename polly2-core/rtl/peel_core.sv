@@ -19,13 +19,13 @@ module peel_core import tsp_pkg::*; #(
     // raster line, the sort cache and the bulk-op walks all scale with it; the
     // SPANNER does NOT - its taginvw read stays a fixed 4-wide aligned group
     // (see taginvw_tile_buffer's rd4 port for the 8-bank half-select).
-    parameter integer RAS_LANES = 32,
+    parameter integer RAS_LANES = 8,
     // ISP->TSP handoff buffer OVERSIZE: how many independent tile images u_taginvw
     // holds (2 = the old ping-pong, 4 = quarters, 8, ...). Must be a power of two
     // >= 2. It bounds how many rastered-but-unshaded passes the ISP may queue: the
     // ISP stalls only when the copy it wants to write is still owned by the spanner,
     // so TI_COPIES-1 passes may be in flight ahead of the shade.
-    parameter integer TI_COPIES = 4
+    parameter integer TI_COPIES = 2
 ) (
     input             clk,
     input             reset,
