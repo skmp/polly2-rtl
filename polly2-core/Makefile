@@ -243,8 +243,8 @@ taginvw-copies: | $(BUILD)
 	  $(VERILATOR) --binary $(VFLAGS) -Wno-BLKSEQ --top-module taginvw_copies_selftest \
 	    -GLANES=$$L -GCOPIES=$$C \
 	    -Irtl/gen $(TSP_PKG) rtl/isp/tile_ram.sv rtl/buffers/taginvw_tile_buffer.sv \
-	    tb/taginvw_copies_selftest.sv --Mdir $(BUILD)/obj_taginvwcp_$$L_$$C -o taginvwcp; \
-	  ./$(BUILD)/obj_taginvwcp_$$L_$$C/taginvwcp; \
+	    tb/taginvw_copies_selftest.sv --Mdir $(BUILD)/obj_taginvwcp_$${L}_$${C} -o taginvwcp; \
+	  ./$(BUILD)/obj_taginvwcp_$${L}_$${C}/taginvwcp; \
 	done
 
 # iterator PRE-FETCH sort$ skip unit test: real isp_primitive_iterator_pf + real
