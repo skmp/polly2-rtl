@@ -1,4 +1,4 @@
-// self-checking test for taginvw_tile_buffer's 4-wide aligned read (rd4/g4), LANES=4.
+// self-checking test for taginvw_tile_buffer's 4-wide aligned read (rdg/gg), LANES=4.
 //
 // The raster writes ONE tag per write with a per-lane we mask, so 4 DISTINCT tags in an
 // aligned group take 4 writes. This exercises what peel_core's spanner actually needs:
@@ -17,10 +17,12 @@ module taginvw_selftest import tsp_pkg::*; ;
     reg               wr_pt;
     reg               clr_valid; reg [7:0] clr_addr; reg [30:0] clr_depth; reg [31:0] clr_tag;
     reg               pbc_valid; reg [7:0] pbc_addr;
-    reg               rd4_valid; reg [9:0] rd4_group;
-    wire [3:0]        g4_valid, g4_pt;
-    wire [31:0]       g4_tag [0:3];
-    wire [30:0]       g4_invw [0:3];
+    reg               rdg_valid; reg [9:0] rdg_group;
+    wire [3:0]        gg_valid, gg_pt;
+    wire [31:0]       gg_tag [0:3];
+    wire [30:0]       gg_invw [0:3];
+    wire [3:0]        gg_rs, gg_re;
+    wire [tsp_pkg::TI_HASHW-1:0] gg_hash [0:3];
 
     // COPIES=1: the degenerate single-image buffer (no copy-select address bits),
     // so this test stays exactly the single-buffer test it was. Multi-copy behavior
@@ -34,8 +36,9 @@ module taginvw_selftest import tsp_pkg::*; ;
         .pbc_valid(pbc_valid), .pbc_addr(pbc_addr),
         .sh_rd_valid(1'b0), .sh_rd_id(10'd0),
         .sh_valid(), .sh_tag(), .sh_depth(), .sh_pt(),
-        .rd4_valid(rd4_valid), .rd4_group(rd4_group),
-        .g4_valid(g4_valid), .g4_tag(g4_tag), .g4_invw(g4_invw), .g4_pt(g4_pt));
+        .rdg_valid(rdg_valid), .rdg_group(rdg_group),
+        .gg_valid(gg_valid), .gg_tag(gg_tag), .gg_invw(gg_invw), .gg_pt(gg_pt),
+        .gg_rs(gg_rs), .gg_re(gg_re), .gg_hash(gg_hash));
 
     integer errs=0;
 
@@ -58,32 +61,32 @@ module taginvw_selftest import tsp_pkg::*; ;
     // present a 4-wide read of the group containing pixel (y, xbase); sample NEXT cycle.
     task rd4(input [4:0] y, input [4:0] xbase);
         begin
-            rd4_valid = 1'b1;
-            rd4_group = {y, xbase} & ~10'd3;   // group base = pixel index & ~3
+            rdg_valid = 1'b1;
+            rdg_group = {y, xbase} & ~10'd3;   // group base = pixel index & ~3
             @(posedge clk); #1;                // registered read: g4 valid now
         end
     endtask
 
     task chk_tag(input [1:0] lane, input [31:0] want);
         begin
-            if (g4_tag[lane] !== want) begin
-                $display("FAIL lane %0d tag %08x != want %08x", lane, g4_tag[lane], want);
+            if (gg_tag[lane] !== want) begin
+                $display("FAIL lane %0d tag %08x != want %08x", lane, gg_tag[lane], want);
                 errs=errs+1;
             end
         end
     endtask
     task chk_invw(input [1:0] lane, input [30:0] want);
         begin
-            if (g4_invw[lane] !== want) begin
-                $display("FAIL lane %0d invw %08x != want %08x", lane, g4_invw[lane], want);
+            if (gg_invw[lane] !== want) begin
+                $display("FAIL lane %0d invw %08x != want %08x", lane, gg_invw[lane], want);
                 errs=errs+1;
             end
         end
     endtask
 
     initial begin
-        reset=1; wr_valid=0; wr_we=0; clr_valid=0; pbc_valid=0; rd4_valid=0;
-        wr_y=0; wr_x=0; wr_tag=0; wr_invw=0; wr_pt=0; clr_addr=0; clr_depth=0; clr_tag=0; pbc_addr=0; rd4_group=0;
+        reset=1; wr_valid=0; wr_we=0; clr_valid=0; pbc_valid=0; rdg_valid=0;
+        wr_y=0; wr_x=0; wr_tag=0; wr_invw=0; wr_pt=0; clr_addr=0; clr_depth=0; clr_tag=0; pbc_addr=0; rdg_group=0;
         repeat(3) @(posedge clk); #1 reset=0;
 
         // ---- group at (y=0, x=0): 4 DISTINCT tags, one per lane ----
@@ -108,7 +111,7 @@ module taginvw_selftest import tsp_pkg::*; ;
 
         // ---- read back group (0,0): expect the 4 distinct tags, one per lane ----
         rd4(5'd0, 5'd0);
-        if (g4_valid !== 4'b1111) begin $display("FAIL grp(0,0) g4_valid=%b != 1111", g4_valid); errs=errs+1; end
+        if (gg_valid !== 4'b1111) begin $display("FAIL grp(0,0) gg_valid=%b != 1111", gg_valid); errs=errs+1; end
         chk_tag(0,32'hAAAA0000); chk_tag(1,32'hBBBB0001); chk_tag(2,32'hCCCC0002); chk_tag(3,32'hDDDD0003);
         chk_invw(0,32'h1111_0000); chk_invw(1,32'h2222_0001); chk_invw(2,32'h3333_0002); chk_invw(3,32'h4444_0003);
 
@@ -120,34 +123,34 @@ module taginvw_selftest import tsp_pkg::*; ;
         rd4(5'd3, 5'd8);
         chk_tag(0,32'h30300000); chk_tag(1,32'h31310001); chk_tag(2,32'h32320002); chk_tag(3,32'h33330003);
 
-        // ---- STREAMING read: change rd4_group EVERY cycle (as the spanner does). The read
+        // ---- STREAMING read: change rdg_group EVERY cycle (as the spanner does). The read
         // is 1-cycle registered (rdata<=mem[ra]): g4 THIS cycle = data for the group presented
         // LAST cycle. Present g0,g4,g8 on consecutive edges; the g4 outputs lag by one, so we
         // check them one cycle behind. Catches a stuck/held read (data not tracking address).
-        // Registered read = rdata<=mem[ra] with ra combinational off rd4_group. So the
-        // output valid AFTER an edge reflects the rd4_group that was stable BEFORE that edge.
-        // Model the spanner: drive rd4_group, tick, THEN the data is valid (sample after tick).
-        rd4_valid = 1'b1;
-        rd4_group = 10'd0;  @(posedge clk); #1;   // data for g0 now valid
-        if (g4_tag[0]!==32'hAAAA0000) begin $display("FAIL stream g0 lane0=%08x != AAAA0000", g4_tag[0]); errs=errs+1; end
-        rd4_group = 10'd4;  @(posedge clk); #1;   // data for g4 now valid
-        if (g4_tag[0]!==32'hE0E00000) begin $display("FAIL stream g4 lane0=%08x != E0E00000", g4_tag[0]); errs=errs+1; end
-        rd4_group = 10'd8;  @(posedge clk); #1;   // data for g8 (empty)
-        if (g4_valid!==4'b0000) begin $display("FAIL stream g8 valid=%b != 0000", g4_valid); errs=errs+1; end
-        rd4_group = 10'd0;  @(posedge clk); #1;   // back to g0
-        if (g4_tag[2]!==32'hCCCC0002) begin $display("FAIL stream g0-return lane2=%08x != CCCC0002", g4_tag[2]); errs=errs+1; end
+        // Registered read = rdata<=mem[ra] with ra combinational off rdg_group. So the
+        // output valid AFTER an edge reflects the rdg_group that was stable BEFORE that edge.
+        // Model the spanner: drive rdg_group, tick, THEN the data is valid (sample after tick).
+        rdg_valid = 1'b1;
+        rdg_group = 10'd0;  @(posedge clk); #1;   // data for g0 now valid
+        if (gg_tag[0]!==32'hAAAA0000) begin $display("FAIL stream g0 lane0=%08x != AAAA0000", gg_tag[0]); errs=errs+1; end
+        rdg_group = 10'd4;  @(posedge clk); #1;   // data for g4 now valid
+        if (gg_tag[0]!==32'hE0E00000) begin $display("FAIL stream g4 lane0=%08x != E0E00000", gg_tag[0]); errs=errs+1; end
+        rdg_group = 10'd8;  @(posedge clk); #1;   // data for g8 (empty)
+        if (gg_valid!==4'b0000) begin $display("FAIL stream g8 valid=%b != 0000", gg_valid); errs=errs+1; end
+        rdg_group = 10'd0;  @(posedge clk); #1;   // back to g0
+        if (gg_tag[2]!==32'hCCCC0002) begin $display("FAIL stream g0-return lane2=%08x != CCCC0002", gg_tag[2]); errs=errs+1; end
 
         // ---- CONCURRENT write+read to DIFFERENT groups in the same cycle (peel_core does
         // this: ISP stage-B writes producer half while spanner reads consumer half; here one
         // instance, but exercises the shared raddr/waddr paths co-asserted). ----
-        rd4_group = 10'd0; rd4_valid = 1'b1;
+        rdg_group = 10'd0; rdg_valid = 1'b1;
         wr_valid = 1'b1; wr_we = 4'b0001; wr_y = 5'd10; wr_x = 5'd12; wr_tag = 32'h99990000;
         wr_invw = {4{31'h7777_0000}}; wr_pt = 1'b0;
         @(posedge clk); #1;                        // read g0 while writing (10,12) lane0
         wr_valid = 1'b0; wr_we = '0;
-        if (g4_tag[0]!==32'hAAAA0000) begin $display("FAIL concurrent r/w: g0 lane0=%08x != AAAA0000", g4_tag[0]); errs=errs+1; end
+        if (gg_tag[0]!==32'hAAAA0000) begin $display("FAIL concurrent r/w: g0 lane0=%08x != AAAA0000", gg_tag[0]); errs=errs+1; end
 
-        rd4_valid=0;
+        rdg_valid=0;
         if (errs==0) $display("taginvw_selftest: PASS");
         else         $display("taginvw_selftest: %0d ERRORS", errs);
         $finish;

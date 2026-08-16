@@ -36,7 +36,7 @@ BUILD = build
 CWD  := $(shell pwd)
 
 .PHONY: shade-drop raster-topleft coord-f32 interp depth-cmp-lp texfetchpl texmlp clean test tex tex-addr tex-uv tex-decode tex-filter tex-combiner \
-        oparse region regfile regen sortcache itquad itskip taginvw taginvw-copies dense_span_buffer fog \
+        oparse region regfile regen sortcache itquad itskip taginvw taginvw-copies spanedge dense_span_buffer fog \
         frontendtsplp frontendtsplp-build golden-check spannerv2 mulc9 mul16sppro \
         add24sppro mulc9sppro add3sppro mul24sppro mul24c9sppro
 
@@ -245,6 +245,22 @@ taginvw-copies: | $(BUILD)
 	    -Irtl/gen $(TSP_PKG) rtl/isp/tile_ram.sv rtl/buffers/taginvw_tile_buffer.sv \
 	    tb/taginvw_copies_selftest.sv --Mdir $(BUILD)/obj_taginvwcp_$$L_$$C -o taginvwcp; \
 	  ./$(BUILD)/obj_taginvwcp_$$L_$$C/taginvwcp; \
+	done
+
+# taginvw_tile_buffer STORED SPAN BOUNDARY (rs/re) + dedup HASH unit test: the fields
+# that replaced spanner_v2's cross-lane 32-bit tag comparators and took pc_slot out of
+# the RAM->address loop. Property-based - a software model of the tile is checked after
+# every write for "no boundary reported => same fragment" (soundness) AND "a boundary
+# reported exactly when the two pixels came from different writes" (no over-splitting).
+# Configs: the peel_core shape, 4-bank chunks (group == chunk), and the 8-wide group.
+spanedge: | $(BUILD)
+	@set -e; for cfg in 8:4:4 4:4:4 8:4:8 32:4:8; do \
+	  L=$${cfg%%:*}; R=$${cfg#*:}; C=$${R%%:*}; G=$${R##*:}; \
+	  $(VERILATOR) --binary $(VFLAGS) -Wno-BLKSEQ --top-module spanedge_selftest \
+	    -GLANES=$$L -GCOPIES=$$C -GGW=$$G \
+	    -Irtl/gen $(TSP_PKG) rtl/isp/tile_ram.sv rtl/buffers/taginvw_tile_buffer.sv \
+	    tb/spanedge_selftest.sv --Mdir $(BUILD)/obj_spanedge_$${L}_$${C}_$${G} -o spanedge; \
+	  ./$(BUILD)/obj_spanedge_$${L}_$${C}_$${G}/spanedge; \
 	done
 
 # iterator PRE-FETCH sort$ skip unit test: real isp_primitive_iterator_pf + real

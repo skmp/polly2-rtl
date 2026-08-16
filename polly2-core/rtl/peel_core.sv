@@ -811,15 +811,25 @@ module peel_core import tsp_pkg::*; #(
     reg [TI_AW-1:0] htile;               // ISP u_taginvw producer copy (per pass)
     reg [TI_AW-1:0] tsp_tag;             // TSP u_taginvw consumer copy (per pass)
     reg             tsp_col;             // TSP u_col blend half (per tile)
-    // spanner_v2 drives the 4-wide aligned read (declared here; driven in the spanner region)
+    // ---- SPANNER WALK WIDTH: how many aligned pixels the spanner sees per group read.
+    // 8 wherever the raster chunk can hold a group (a group must live in ONE chunk, and
+    // every chunk boundary must be a group boundary - see taginvw_tile_buffer's rs/re),
+    // so a -GRAS_LANES=4 build falls back to 4. This is NOT the span width: spans stay
+    // capped at 4 pixels (spanner_v2's REP_MAX) because widening them would cost 31 bits
+    // per step across dense_span_buffer's 2048 slots and the shade reader expands one
+    // pixel per clock regardless. ----
+    localparam integer SPAN_GW = (RAS_LANES < 8) ? RAS_LANES : 8;
+    // spanner_v2 drives the group-wide aligned read (declared here; driven in the spanner region)
     wire        spv_rd_valid;
     wire [9:0]  spv_rd_group;
-    // 4-wide aligned read outputs (already the CONSUMER copy - rd_buf selects it inside)
-    wire [3:0]  g4_valid_c;
-    wire [31:0] g4_tag_c   [0:3];
-    wire [30:0] g4_invw_c  [0:3];
-    wire [3:0]  g4_pt_c;
-    taginvw_tile_buffer #(.LANES(RAS_LANES), .COPIES(TI_COPIES)) u_taginvw (
+    // group read outputs (already the CONSUMER copy - rd_buf selects it inside)
+    wire [SPAN_GW-1:0]  gg_valid_c;
+    wire [31:0]         gg_tag_c   [0:SPAN_GW-1];
+    wire [30:0]         gg_invw_c  [0:SPAN_GW-1];
+    wire [SPAN_GW-1:0]  gg_pt_c;
+    wire [SPAN_GW-1:0]  gg_rs_c, gg_re_c;      // stored span boundaries (replace the tag compares)
+    wire [TI_HASHW-1:0] gg_hash_c  [0:SPAN_GW-1];
+    taginvw_tile_buffer #(.LANES(RAS_LANES), .COPIES(TI_COPIES), .GW(SPAN_GW)) u_taginvw (
         .clk(clk), .reset(reset),
         // producer/consumer copy select (top address bits of the write/read port)
         .wr_buf(htile), .rd_buf(tsp_tag),
@@ -836,10 +846,11 @@ module peel_core import tsp_pkg::*; #(
         // single-pixel shade read retired: spanner_v2 uses the 4-wide port
         .sh_rd_valid(1'b0), .sh_rd_id(10'd0),
         .sh_valid(), .sh_tag(), .sh_depth(), .sh_pt(),
-        // 4-wide aligned read (spanner_v2)
-        .rd4_valid(spv_rd_valid), .rd4_group(spv_rd_group),
-        .g4_valid(g4_valid_c), .g4_tag(g4_tag_c),
-        .g4_invw(g4_invw_c), .g4_pt(g4_pt_c)
+        // group-wide aligned read (spanner_v2)
+        .rdg_valid(spv_rd_valid), .rdg_group(spv_rd_group),
+        .gg_valid(gg_valid_c), .gg_tag(gg_tag_c),
+        .gg_invw(gg_invw_c), .gg_pt(gg_pt_c),
+        .gg_rs(gg_rs_c), .gg_re(gg_re_c), .gg_hash(gg_hash_c)
     );
 
     // ---- PING-PONG color buffer (2 halves): TSP blend fills the half of the tile it
@@ -992,7 +1003,7 @@ module peel_core import tsp_pkg::*; #(
     reg         spv_rd_done;          // 1-cyc: reader freed the oldest handed tile's ring range
     reg         spv_shade_mode;       // spn_xbase/ybase/tx/ty declared with the ISP origins
 
-    // ---- 4-wide taginvw read: g4_*_c come straight from u_taginvw above (its rd_buf
+    // ---- group-wide taginvw read: gg_*_c come straight from u_taginvw above (its rd_buf
     // is tsp_tag, so the read already targets the CONSUMER copy - no output mux, and
     // no cross-half select cone into the spanner's resolve path). spv_rd_valid/
     // spv_rd_group are driven by spanner_v2 below. ----
@@ -1008,7 +1019,8 @@ module peel_core import tsp_pkg::*; #(
     wire [SPAN_AW:0] spv_sp_range_base, spv_sp_range_cnt;  // this pass's span ring range
 
     spanner_v2 #(.NSLOT(TILE_W*TILE_H), .SLOTW(10),
-                 .SPAN_NSLOT(SPAN_NSLOT), .SPAN_W(SPAN_AW)) u_spanner (
+                 .SPAN_NSLOT(SPAN_NSLOT), .SPAN_W(SPAN_AW),
+                 .GW(SPAN_GW), .REP_MAX(4)) u_spanner (
         .clk(clk), .reset(reset),
         .start(spv_start), .ctx_inval(go), .busy(spv_busy), .shade_mode(spv_shade_mode),
         .span_head_live(spv_head_live), .sp_wm(spv_sp_wm),
@@ -1017,7 +1029,8 @@ module peel_core import tsp_pkg::*; #(
         .intensity_shadow(regs.fpu_shad_scale.intensity_shadow),
         .tsp_go(spv_tsp_go), .tsp_rd_done(spv_rd_done),
         .rd_valid(spv_rd_valid), .rd_group(spv_rd_group),
-        .ti_valid(g4_valid_c), .ti_tag(g4_tag_c), .ti_invw(g4_invw_c), .ti_pt(g4_pt_c),
+        .ti_valid(gg_valid_c), .ti_tag(gg_tag_c), .ti_invw(gg_invw_c), .ti_pt(gg_pt_c),
+        .ti_rs(gg_rs_c), .ti_re(gg_re_c), .ti_bkt(gg_hash_c),
         .ts_we(ts_we), .ts_id(ts_id), .ts_isp(ts_isp), .ts_tsp(ts_tsp), .ts_tcw(ts_tcw),
         .ts_ddx(ts_ddx), .ts_ddy(ts_ddy), .ts_c(ts_c),
         .sp_we(sp_we), .sp_slot(sp_slot),

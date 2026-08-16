@@ -13,7 +13,7 @@
 //   C) CLEAR isolation     - the CLEAR walk writes only its wr_buf copy.
 //   D) PeelBuffers walk    - the pbc valid-clear walk clears only its wr_buf copy.
 //   E) 4-wide group select - both halves of an 8-bank chunk read back correctly per copy
-//                            (the g4_half_r latch), and the single-pixel shade port
+//                            (the g_sel_r latch), and the single-pixel shade port
 //                            follows rd_buf too.
 //
 // Parameterized: the Makefile target runs LANES=8/COPIES=4 (the peel_core config),
@@ -44,11 +44,13 @@ module taginvw_copies_selftest import tsp_pkg::*; #(
     reg                 wr_pt;
     reg                 clr_valid; reg [TAW-1:0] clr_addr; reg [30:0] clr_depth; reg [31:0] clr_tag;
     reg                 pbc_valid; reg [TAW-1:0] pbc_addr;
-    reg                 rd4_valid; reg [9:0] rd4_group;
+    reg                 rdg_valid; reg [9:0] rdg_group;
     reg                 sh_rd_valid; reg [9:0] sh_rd_id;
-    wire [3:0]          g4_valid, g4_pt;
-    wire [31:0]         g4_tag  [0:3];
-    wire [30:0]         g4_invw [0:3];
+    wire [3:0]          gg_valid, gg_pt;
+    wire [31:0]         gg_tag  [0:3];
+    wire [30:0]         gg_invw [0:3];
+    wire [3:0]          gg_rs, gg_re;
+    wire [tsp_pkg::TI_HASHW-1:0] gg_hash [0:3];
     wire                sh_valid, sh_pt;
     wire [31:0]         sh_tag;
     wire [30:0]         sh_depth;
@@ -62,8 +64,9 @@ module taginvw_copies_selftest import tsp_pkg::*; #(
         .pbc_valid(pbc_valid), .pbc_addr(pbc_addr),
         .sh_rd_valid(sh_rd_valid), .sh_rd_id(sh_rd_id),
         .sh_valid(sh_valid), .sh_tag(sh_tag), .sh_depth(sh_depth), .sh_pt(sh_pt),
-        .rd4_valid(rd4_valid), .rd4_group(rd4_group),
-        .g4_valid(g4_valid), .g4_tag(g4_tag), .g4_invw(g4_invw), .g4_pt(g4_pt));
+        .rdg_valid(rdg_valid), .rdg_group(rdg_group),
+        .gg_valid(gg_valid), .gg_tag(gg_tag), .gg_invw(gg_invw), .gg_pt(gg_pt),
+        .gg_rs(gg_rs), .gg_re(gg_re), .gg_hash(gg_hash));
 
     integer errs = 0;
     integer c, cc, l, k;
@@ -91,13 +94,13 @@ module taginvw_copies_selftest import tsp_pkg::*; #(
     endtask
 
     // present a 4-wide aligned read of copy `cp` at the group holding pixel (y,x);
-    // g4_* are valid after the edge (registered read).
+    // gg_* are valid after the edge (registered read).
     task rd4(input integer cp, input [4:0] y, input [4:0] x);
         begin
             rd_buf    = cp[CBW-1:0];
-            rd4_valid = 1'b1;
-            rd4_group = {y, x} & ~10'd3;
-            @(posedge clk); #1 rd4_valid = 1'b0;
+            rdg_valid = 1'b1;
+            rdg_group = {y, x} & ~10'd3;
+            @(posedge clk); #1 rdg_valid = 1'b0;
         end
     endtask
 
@@ -117,16 +120,16 @@ module taginvw_copies_selftest import tsp_pkg::*; #(
                    input integer gx_off, input vld, input pt);
         begin
             for (l = 0; l < 4; l = l + 1) begin
-                if (g4_valid[l] !== vld)
-                    fail($sformatf("%s lane %0d valid %b != %b", ctx, l, g4_valid[l], vld));
+                if (gg_valid[l] !== vld)
+                    fail($sformatf("%s lane %0d valid %b != %b", ctx, l, gg_valid[l], vld));
                 if (vld) begin
-                    if (g4_tag[l] !== tag)
-                        fail($sformatf("%s lane %0d tag %08x != %08x", ctx, l, g4_tag[l], tag));
-                    if (g4_invw[l] !== iv0 + 31'(gx_off + l))
+                    if (gg_tag[l] !== tag)
+                        fail($sformatf("%s lane %0d tag %08x != %08x", ctx, l, gg_tag[l], tag));
+                    if (gg_invw[l] !== iv0 + 31'(gx_off + l))
                         fail($sformatf("%s lane %0d invw %0d != %0d", ctx, l,
-                                       g4_invw[l], iv0 + 31'(gx_off + l)));
-                    if (g4_pt[l] !== pt)
-                        fail($sformatf("%s lane %0d pt %b != %b", ctx, l, g4_pt[l], pt));
+                                       gg_invw[l], iv0 + 31'(gx_off + l)));
+                    if (gg_pt[l] !== pt)
+                        fail($sformatf("%s lane %0d pt %b != %b", ctx, l, gg_pt[l], pt));
                 end
             end
         end
@@ -141,7 +144,7 @@ module taginvw_copies_selftest import tsp_pkg::*; #(
         wr_valid=0; wr_we='0; wr_y=0; wr_x=0; wr_tag=0; wr_invw='0; wr_pt=0;
         clr_valid=0; clr_addr='0; clr_depth='0; clr_tag='0;
         pbc_valid=0; pbc_addr='0;
-        rd4_valid=0; rd4_group=0; sh_rd_valid=0; sh_rd_id=0;
+        rdg_valid=0; rdg_group=0; sh_rd_valid=0; sh_rd_id=0;
         wr_buf='0; rd_buf='0;
         repeat (4) @(posedge clk);
         #1 reset = 1'b0;
@@ -157,7 +160,7 @@ module taginvw_copies_selftest import tsp_pkg::*; #(
         for (c = 0; c < COPIES; c = c + 1) begin
             rd4(c, 5'd3, 5'd8);
             chk_group($sformatf("A copy %0d grp0", c), tag_of(c), invw_of(c), 0, 1'b1, c[0]);
-            // E) the OTHER 4-wide group of an 8-bank chunk (g4_half_r half-select)
+            // E) the OTHER 4-wide group of an 8-bank chunk (g_sel_r half-select)
             if (LANES > 4) begin
                 rd4(c, 5'd3, 5'd12);
                 chk_group($sformatf("A copy %0d grp1", c), tag_of(c), invw_of(c), 4, 1'b1, c[0]);
@@ -172,7 +175,7 @@ module taginvw_copies_selftest import tsp_pkg::*; #(
         for (c = 0; c < COPIES; c = c + 1) begin
             rd4(c, 5'd7, 5'd8);
             for (l = 0; l < 4; l = l + 1)
-                if (g4_tag[l] === tag_of(c))
+                if (gg_tag[l] === tag_of(c))
                     fail($sformatf("A copy %0d: tag leaked to untouched row", c));
         end
 
@@ -192,10 +195,10 @@ module taginvw_copies_selftest import tsp_pkg::*; #(
                 for (l = 0; l < LANES; l = l + 1)
                     wr_invw[31*l +: 31] = 31'd900 + 31'(k*LANES + l);
                 rd_buf    = '0;
-                rd4_valid = 1'b1;
-                rd4_group = {5'd3, 5'd8} & ~10'd3;
+                rdg_valid = 1'b1;
+                rdg_group = {5'd3, 5'd8} & ~10'd3;
                 @(posedge clk); #1;
-                wr_valid = 1'b0; wr_we = '0; rd4_valid = 1'b0;
+                wr_valid = 1'b0; wr_we = '0; rdg_valid = 1'b0;
                 chk_group($sformatf("B beat %0d", k), tag_of(0), invw_of(0), 0, 1'b1, 1'b0);
             end
             rd4(1, 5'd3, 5'd8);
@@ -217,9 +220,9 @@ module taginvw_copies_selftest import tsp_pkg::*; #(
 
         rd4(COPIES-1, 5'd3, 5'd8);
         for (l = 0; l < 4; l = l + 1) begin
-            if (g4_valid[l] !== 1'b0)  fail("C cleared copy: valid should be 0");
-            if (g4_tag[l] !== 32'h0BAD_F00D) fail("C cleared copy: bg tag not written");
-            if (g4_invw[l] !== 31'h7F7F_7F7F) fail("C cleared copy: bg depth not written");
+            if (gg_valid[l] !== 1'b0)  fail("C cleared copy: valid should be 0");
+            if (gg_tag[l] !== 32'h0BAD_F00D) fail("C cleared copy: bg tag not written");
+            if (gg_invw[l] !== 31'h7F7F_7F7F) fail("C cleared copy: bg depth not written");
         end
         for (c = 0; c < COPIES-1; c = c + 1) begin
             rd4(c, 5'd3, 5'd8);
@@ -241,7 +244,7 @@ module taginvw_copies_selftest import tsp_pkg::*; #(
 
         rd4(0, 5'd3, 5'd8);
         for (l = 0; l < 4; l = l + 1)
-            if (g4_valid[l] !== 1'b0) fail("D pbc copy0: valid should be 0");
+            if (gg_valid[l] !== 1'b0) fail("D pbc copy0: valid should be 0");
         for (c = 1; c < COPIES; c = c + 1) begin
             rd4(c, 5'd3, 5'd8);
             chk_group($sformatf("D copy %0d survives pbc", c), tag_of(c), invw_of(c), 0, 1'b1, 1'b1);

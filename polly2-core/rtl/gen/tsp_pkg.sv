@@ -367,4 +367,20 @@ package tsp_pkg;
         isp_raster_probe_lat = isp_raster_lat(lanes) + 1;
     endfunction
 
+    // ---- taginvw dedup-map bucket hash, shared by the WRITER and the READER ----
+    // spanner_v2 indexes its direct-mapped dedup map by this 10-bit hash of the
+    // fragment CoreTag. It is computed ONCE at the ISP write and STORED per pixel in
+    // taginvw_tile_buffer, so the spanner's RAM -> dedup-address loop muxes 10 bits
+    // instead of muxing 32 and then hashing - the hash left the critical loop entirely.
+    // The definition therefore has TWO users that must never drift, which is why it
+    // lives here; spanner_v2 asserts (sim) that every lane it reads back still
+    // satisfies hash == ti_hash(tag).
+    //
+    // tag = {skip[26:24], param_offs[23:3], tag_offset[2:0]}; strip triangles share
+    // param_offs, so the low 3 bits must survive into the bucket index.
+    localparam int TI_HASHW = 10;
+    function automatic [TI_HASHW-1:0] ti_hash(input [31:0] tag);
+        ti_hash = tag[12:3] ^ tag[22:13] ^ { {(TI_HASHW-3){1'b0}}, tag[2:0] };
+    endfunction
+
 endpackage

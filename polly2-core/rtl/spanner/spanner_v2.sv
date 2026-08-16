@@ -5,9 +5,9 @@
 // that run CONCURRENTLY, joined by a small setup FIFO, so the per-triangle setup cost
 // (~54cyc/tri) is hidden behind the shade stage (1px/clk, downstream, not in here):
 //
-//   FSM 1  SPANGEN  - walks the tile's tag buffer 4 ALIGNED pixels/clk, coalesces the
-//                     leading same-tag run within each aligned group into a SPAN, and
-//                     writes {id, repeat, invW[0:3]} to the OUT span buffer at the
+//   FSM 1  SPANGEN  - walks the tile's tag buffer GW ALIGNED pixels/clk, coalesces the
+//                     leading same-fragment run within each aligned group into a SPAN, and
+//                     writes {id, repeat, invW[0:REP_MAX-1]} to the OUT span buffer at the
 //                     run-start pixel index. A NEW (not-yet-seen) tag BUMP-ALLOCATES a
 //                     ring setup id (id = top_tag++) and pushes {id,tag} to the setup FIFO.
 //                     NEVER stalls on setup (that is downstream).
@@ -27,10 +27,23 @@
 // The triangle_setups RING + span buffer are EXTERNAL (module write ports); the ring
 // tail/reclaim handshake (tsp_go/tsp_rd_done) lets peel_core share ONE buffer with TSP.
 //
-// IN (tag buffer): a 4-wide ALIGNED read port. The module presents a group base
-// (rd_group = x & ~3) and receives the 4 lanes' {valid,tag,invW,pt} the NEXT cycle
-// (1-cyc registered read, same timing as taginvw_tile_buffer's single-pixel port; glue
-// widens that buffer to serve 4 aligned lanes). Lane l is pixel (group|l).
+// IN (tag buffer): a GW-wide ALIGNED read port. The module presents a group base
+// (rd_group = x & ~(GW-1)) and receives the GW lanes' {valid,tag,invW,pt} the NEXT cycle
+// (1-cyc registered read, same timing as taginvw_tile_buffer's single-pixel port). Lane l
+// is pixel (group|l).
+//
+// WHAT BOUNDS THE RUN: not a tag comparison. taginvw_tile_buffer stamps each pixel, at
+// the write that last touched it, with rs/re flags whose OR across a lane pair IS the
+// span boundary, and with the dedup hash of its tag. Both arrive with the group read, so
+// the loop this module closes in one cycle - RAM -> run length -> read address -> RAM,
+// historically the worst path in the design - carries a 2-input OR per lane pair and a
+// 10-bit mux, where it used to carry a 32-bit equality per lane pair and a hash. That is
+// also what makes GW=8 affordable: the per-lane cost of widening is now trivial.
+//
+// GW (walk width) and REP_MAX (largest run one span may describe) are SEPARATE. Widening
+// the walk speeds up advancing - above all the invalid-pixel skip of a sparse peel pass -
+// while widening a span would cost 31 bits x 2048 slots in dense_span_buffer and buy
+// nothing, since the shade reader expands one pixel per clock either way.
 //
 module spanner_v2 import tsp_pkg::*; #(
     parameter integer NSLOT = 1024,          // dedup-map depth (== tile pixels)
@@ -55,7 +68,19 @@ module spanner_v2 import tsp_pkg::*; #(
     // worst-case tiles, so a full 1024-span pass fits with room for a SECOND pass to be
     // written and in flight while the first drains. SPAN_W = clog2(SPAN_NSLOT) = 11.
     parameter integer SPAN_NSLOT = 2048,
-    parameter integer SPAN_W     = 11
+    parameter integer SPAN_W     = 11,
+    // ---- WALK WIDTH: how many aligned pixels COAL sees per group read ----
+    // Independent of REP_MAX below. Widening this speeds up the parts of the walk that
+    // ADVANCE without emitting - above all the invalid-pixel skip that dominates a sparse
+    // peel pass - and halves the group reads. It does NOT widen a span.
+    parameter integer GW      = 4,
+    // ---- EMIT WIDTH: the largest run a single span may describe ----
+    // Deliberately NOT tied to GW. A span carries REP_MAX invW values into
+    // dense_span_buffer, so raising this widens that ring by 31 bits per step (2048 slots
+    // -> ~8 M10K each) and buys nothing downstream: the shade reader expands a span at one
+    // pixel per clock regardless. A run longer than REP_MAX is simply emitted as
+    // consecutive spans, which the dedup map resolves to the same setup id.
+    parameter integer REP_MAX = 4
 ) (
     input                       clk,
     input                       reset,
@@ -86,13 +111,23 @@ module spanner_v2 import tsp_pkg::*; #(
     output     [SEQ_W-1:0]      setup_seq,   // setups written so far (alloc order)
     input      [SEQ_W-1:0]      cons_seq,    // reader: watermark fully consumed
 
-    // ---- IN: 4-wide ALIGNED tag-buffer read (present addr -> data NEXT cycle) ----
+    // ---- IN: GW-wide ALIGNED tag-buffer read (present addr -> data NEXT cycle) ----
     output reg                  rd_valid,    // present a group read this cycle
-    output reg [SLOTW-1:0]      rd_group,    // group base pixel index (x & ~3)
-    input      [3:0]            ti_valid,    // per-lane staged-this-pass bit
-    input      [31:0]           ti_tag  [0:3],
-    input      [30:0]           ti_invw [0:3],
-    input      [3:0]            ti_pt,       // per-lane PT alpha-test bit
+    output reg [SLOTW-1:0]      rd_group,    // group base pixel index (x & ~(GW-1))
+    input      [GW-1:0]         ti_valid,    // per-lane staged-this-pass bit
+    input      [31:0]           ti_tag  [0:GW-1],
+    input      [30:0]           ti_invw [0:GW-1],
+    input      [GW-1:0]         ti_pt,       // per-lane PT alpha-test bit
+    // ---- span boundaries and dedup bucket, PRECOMPUTED AT THE ISP WRITE ----
+    // ti_rs/ti_re are taginvw_tile_buffer's stored run-start / run-end flags; the
+    // boundary between adjacent lanes is ti_rs[l] | ti_re[l-1]. They replace what used to
+    // be a 32-bit tag equality per lane pair on the RAM -> run_rep -> read-address loop.
+    // ti_bkt is ti_hash(tag) stored per pixel, so the dedup-map address is a GW:1 mux of
+    // 10 bits instead of a GW:1 mux of 32 bits followed by the hash - the whole hash left
+    // the loop. Both are ASSERTED against the arithmetic they replaced below (sim).
+    input      [GW-1:0]         ti_rs,
+    input      [GW-1:0]         ti_re,
+    input      [TI_HASHW-1:0]   ti_bkt [0:GW-1],
 
     // ---- OUT: triangle_setups WRITE (SETUP engine) ----
     output reg                  ts_we,
@@ -117,8 +152,8 @@ module spanner_v2 import tsp_pkg::*; #(
     output reg [SPAN_W:0]       sp_range_cnt,
     output reg [SLOTW-1:0]      sp_start,    // run-start pixel index (y:x, 0..1023) [data]
     output reg [IDW-1:0]        sp_id,       // setup id (== triangle_setups slot)
-    output reg [2:0]            sp_rep,      // run length 1..4 (all covered pixels shaded)
-    output reg [30:0]           sp_invw [0:3], // per-covered-pixel invW (lanes 0..rep-1)
+    output reg [2:0]            sp_rep,      // run length 1..REP_MAX (all covered px shaded)
+    output reg [30:0]           sp_invw [0:REP_MAX-1], // per-covered-px invW (lanes 0..rep-1)
     output reg                  sp_at,       // PT alpha-test enable (run-start lane)
     input                       sp_ready,    // span consumer (expander) can accept this cycle
 
@@ -126,19 +161,25 @@ module spanner_v2 import tsp_pkg::*; #(
     output ddr_rd_req_t         dreq,
     input  ddr_rd_resp_t        dresp
 );
+    localparam integer GB = $clog2(GW);          // intra-group lane index width
+    generate
+      if (GW & (GW - 1))     $error("spanner_v2: GW must be a power of two");
+      if (REP_MAX > GW)      $error("spanner_v2: REP_MAX must not exceed GW");
+      if (REP_MAX > 4)       $error("spanner_v2: REP_MAX > 4 needs a wider sp_rep and dense_span_buffer");
+    endgenerate
     // ============================ dedup map + setup-id ring ============================
     // id = BUMP-ALLOCATED (top_tag), not the hash. The dedup MAP is a direct-mapped M10K
     // (indexed by pc_slot(tag)) that remembers, per hash bucket, {gen, tag, id} = which
     // ring id a tag was assigned. triangle_setups[id] is a RING (top_tag..tail) shared
     // with TSP; ids are dense (0..distinct-1 per tile) instead of scattered by the hash,
     // so the ring can be far smaller than 1024 and shared with TSP without ping-pong.
-    //   lookup:  h = pc_slot(tag); if map[h].gen==cur_gen && map[h].tag==tag -> HIT, id=map[h].id
+    //   lookup:  h = ti_hash(tag); if map[h].gen==cur_gen && map[h].tag==tag -> HIT, id=map[h].id
     //            else MISS -> id = top_tag++, map[h] = {cur_gen, tag, id}, push a setup.
-    // pc_slot spreads tags across the 1024 map buckets (10-bit hash). tag =
-    // {skip[26:24], param_offs[23:3], tag_offset[2:0]}; strip triangles share param_offs.
-    function automatic [SLOTW-1:0] pc_slot(input [31:0] tag);
-        pc_slot = tag[12:3] ^ tag[22:13] ^ { {(SLOTW-3){1'b0}}, tag[2:0] };
-    endfunction
+    // ti_hash spreads tags across the 1024 map buckets (10-bit hash) and lives in tsp_pkg
+    // because it now has TWO users: the ISP write side computes it once per fragment and
+    // stores it per pixel in taginvw_tile_buffer, and this module reads it back as ti_bkt[]
+    // instead of recomputing it. The function is still referenced here for the sim-only
+    // equivalence check on the read path.
 
     // dedup MAP: ONE M10K holding {gen, tag, id} per bucket, so tag+validity+id all live
     // in block RAM (no flop valid-vector, no bulk clear). A bucket is VALID this pass iff
@@ -256,42 +297,72 @@ module spanner_v2 import tsp_pkg::*; #(
     reg [SLOTW-1:0]  t_x;           // run-start pixel index
     reg [SLOTW-1:0]  t_h;           // pc_slot(run_tag) = dedup map bucket
     reg [31:0]       t_tag;
-    reg [2:0]        t_rep;
+    reg [GB:0]       t_rep;         // 1..GW; <= REP_MAX whenever t_ok (asserted)
     reg              t_ok;          // this run is SHADED (emit a span); else invalid (skip)
-    reg [30:0]       t_invw [0:3];
+    reg [30:0]       t_invw [0:REP_MAX-1];
     reg              t_at;
 
-    wire [1:0] sg_lane = sg_x[1:0];              // intra-group position of sg_x
+    wire [GB-1:0] sg_lane = sg_x[GB-1:0];        // intra-group position of sg_x
+
+    // ---- SPAN BOUNDARIES, read out of the buffer instead of recomputed ----
+    // taginvw_tile_buffer stamps every pixel, at the write that last touched it, with
+    // rs ("my run started here") and re ("my run ended here"). The boundary between two
+    // adjacent pixels is the OR of the two flags that meet there:
+    //
+    //     sg_edge[l] = ti_rs[l] | ti_re[l-1]
+    //
+    // If l-1 and l were last written by the same write, both are 0. If by different
+    // writes, the later one did not cover the other pixel, so it set its own flag. That
+    // makes this EXACTLY equivalent to the tag comparison it replaces (asserted below),
+    // for a 2-input OR per lane pair instead of a 32-bit equality - and the equality was
+    // on the RAM -> run_rep -> read-address loop, the worst path in the design.
+    //
+    // Lane 0 needs no predecessor: the walk never coalesces across a group boundary, so
+    // its edge is implicit and the buffer forces rs there anyway.
+    //
+    // The shade-eligibility transition the old comparison also tested (valid<->invalid)
+    // needs no separate term: `valid` is written uniformly by each write, so two pixels
+    // with no boundary between them necessarily came from one write and share it. That
+    // implication is asserted below rather than left as a comment.
+    wire [GW-1:1] sg_edge;
+    wire [GW-1:1] sg_ext;                        // lane l joins lane l-1
+    genvar gl;
+    generate for (gl = 1; gl < GW; gl = gl + 1) begin : sgedge
+        assign sg_edge[gl] = ti_rs[gl] | ti_re[gl-1];
+        assign sg_ext [gl] = ~sg_edge[gl];
+    end endgenerate
 
     // ---- leading-run coalesce (combinational off ti_*, the current group source) ----
-    // shade_ok(l) = shade_mode | ti_valid[l] : is lane l shaded this pass. run_ok0 = start
-    // lane shaded? Two run kinds, both advancing sg_x by run_rep, but only SHADED runs emit
-    // a span:
-    //   * SHADED start (run_ok0=1): extend while contiguous, shaded, and SAME tag. -> a real
-    //                  span (rep 1..4, all covered lanes shaded, same triangle).
-    //   * INVALID start(run_ok0=0): extend while contiguous invalid, IGNORING tag. -> emits
-    //                  NO span; just skips the invalid pixels (advance the walk).
-    // A shade transition (valid<->invalid) or a tag change breaks the run. No shade mask:
-    // every emitted span is uniformly shaded.
-    reg  [2:0] run_rep;                          // 1..4 (run length; advances sg_x)
-    reg  [31:0] run_tag;
-    reg        run_ok0;                          // start lane shaded? (span emitted iff 1)
+    // run_ok0 = is the START lane shaded this pass (shade_mode covers the OP case, where
+    // every pixel shades). Two run kinds, both advancing sg_x by run_rep, but only SHADED
+    // runs emit a span:
+    //   * SHADED start (run_ok0=1): extend while contiguous and same fragment, but no
+    //                  further than REP_MAX - one span carries only REP_MAX invW values.
+    //                  A longer run continues as the next COAL cycle's span.
+    //   * INVALID start(run_ok0=0): extend while contiguous, up to the whole group. This
+    //                  is where the wide walk pays: a sparse peel pass is mostly invalid
+    //                  pixels, and they are skipped GW at a time with nothing emitted.
+    reg  [GB:0] run_rep;                         // 1..GW (run length; advances sg_x)
+    reg         run_ok0;                         // start lane shaded? (span emitted iff 1)
     integer rl;
     always @(*) begin
-        run_tag    = ti_tag[sg_lane];
-        run_rep    = 3'd1;
-        run_ok0    = shade_mode | ti_valid[sg_lane];
-        for (rl = 0; rl < 4; rl = rl + 1) begin
-            // extend if in-group, contiguous, same shade-eligibility, and (if shaded) same tag.
-            if (rl > sg_lane && rl == sg_lane + run_rep
-                && ((shade_mode | ti_valid[rl]) == run_ok0)
-                && (run_ok0 ? (ti_tag[rl] == run_tag) : 1'b1)) begin
-                run_rep = run_rep + 3'd1;
-            end
+        run_rep = 1;
+        run_ok0 = shade_mode | ti_valid[sg_lane];
+        for (rl = 1; rl < GW; rl = rl + 1) begin
+            // extend if in-group, contiguous, no boundary, and not already at the emit cap
+            if (rl > sg_lane && rl == sg_lane + run_rep && sg_ext[rl]
+                && !(run_ok0 && run_rep == REP_MAX))
+                run_rep = run_rep + 1;
         end
     end
 
-    wire [SLOTW-1:0] run_id = pc_slot(run_tag);
+    // dedup bucket: the stored per-pixel hash of the run-start lane's tag. This is the
+    // address the RAM->RAM loop closes through, which is why it is a GW:1 mux of 10 bits
+    // and not pc_slot(a GW:1 mux of 32 bits).
+    wire [SLOTW-1:0] run_id  = SLOTW'(ti_bkt[sg_lane]);
+    // the full tag is still needed - but only at EMIT, off the t_tag REGISTER, so its mux
+    // sits on a register-to-register path rather than in the loop.
+    wire [31:0]      run_tag = ti_tag[sg_lane];
 
     // dedup test in EMIT, using the REGISTERED slot read (slot_tag_q/slot_valid_q) of
     // t_id, WITH forwarding. In the 1-span/cycle pipeline, EMIT retires a span every cycle
@@ -344,7 +415,7 @@ module spanner_v2 import tsp_pkg::*; #(
                          | emit_stall_span_ring;
 
     // ---- COAL advance: sg_x steps by run_rep; group exhausted when it crosses the group ----
-    wire [SLOTW-1:0] sg_x_next   = sg_x + { {(SLOTW-3){1'b0}}, run_rep };
+    wire [SLOTW-1:0] sg_x_next   = sg_x + { {(SLOTW-GB-1){1'b0}}, run_rep };
 
     // ---- GROUP-ONLY advance, for the taginvw read address ------------------------
     // rd_group below uses ONLY sg_x_next[SLOTW-1:2], so the low two bits of that add
@@ -358,45 +429,45 @@ module spanner_v2 import tsp_pkg::*; #(
     // lane 3 at the latest (the extend loop is confined to the group), so it crosses
     // the group boundary iff it extended through EVERY lane above sg_lane.
     //
-    // "Extended through lane l" is tested here as adjacency, ti_tag[l]==ti_tag[l-1],
-    // rather than against run_tag=ti_tag[sg_lane]. Equality is transitive and the
-    // shade-eligibility bits chain the same way, so a full adjacent chain from
-    // sg_lane+1 to 3 is the same predicate - but it drops the 4:1 run_tag mux out of
-    // the address path as well as the adder. sg_grp/sg_grp_p1 come straight off the
+    // "Extended through lane l" is a chain of the ADJACENT boundary bits, sg_ext[l],
+    // never a comparison against the run's own start lane - so the run_tag mux stays out
+    // of the address path as well as the adder. sg_grp/sg_grp_p1 come straight off the
     // sg_x REGISTER, so the increment is on a register-to-register path with a whole
     // cycle to itself; the RAM only has to drive the mux SELECT.
-    wire [3:0] sg_ok;                             // per-lane shade eligibility
-    genvar gl;
-    generate for (gl = 0; gl < 4; gl = gl + 1) begin : sgok
+    //
+    // With GW > REP_MAX the cap is a second way to NOT leave the group: a shaded run that
+    // would reach the end is truncated at REP_MAX and finishes mid-group, resuming next
+    // cycle. It can only reach the end when the lanes left in the group already fit,
+    // GW - sg_lane <= REP_MAX, which is a compare against a constant (at GW=8, REP_MAX=4
+    // it is just sg_lane[GB-1]). An INVALID run has no cap and can always leave - that is
+    // the fast skip the wide walk is for.
+    wire [GW-1:0] sg_ok;                          // per-lane shade eligibility (checks only)
+    generate for (gl = 0; gl < GW; gl = gl + 1) begin : sgok
         assign sg_ok[gl] = shade_mode | ti_valid[gl];
     end endgenerate
-    wire [3:1] sg_ext;                            // lane l joins lane l-1
-    generate for (gl = 1; gl < 4; gl = gl + 1) begin : sgext
-        assign sg_ext[gl] = (sg_ok[gl] == sg_ok[gl-1])
-                         && (sg_ok[gl] ? (ti_tag[gl] == ti_tag[gl-1]) : 1'b1);
-    end endgenerate
-    reg sg_carry;                                 // the run leaves this group
+    reg sg_thru;                                  // no boundary above sg_lane in this group
+    integer cl;
     always @(*) begin
-        case (sg_lane)
-            2'd0:    sg_carry = sg_ext[1] & sg_ext[2] & sg_ext[3];
-            2'd1:    sg_carry = sg_ext[2] & sg_ext[3];
-            2'd2:    sg_carry = sg_ext[3];
-            default: sg_carry = 1'b1;             // already at lane 3: any run leaves
-        endcase
+        sg_thru = 1'b1;
+        for (cl = 1; cl < GW; cl = cl + 1)
+            if (cl > sg_lane) sg_thru = sg_thru & sg_ext[cl];
     end
-    wire [SLOTW-3:0] sg_grp    = sg_x[SLOTW-1:2];
-    wire [SLOTW-3:0] sg_grp_p1 = sg_grp + 1'b1;   // off the register, not off the RAM
+    // capped: a shaded run cannot span the rest of the group because REP_MAX stops it first
+    wire sg_capped = run_ok0 && (GW - REP_MAX > 0) && (sg_lane < (GW - REP_MAX));
+    wire sg_carry  = sg_thru && !sg_capped;       // the run leaves this group
+    wire [SLOTW-GB-1:0] sg_grp    = sg_x[SLOTW-1:GB];
+    wire [SLOTW-GB-1:0] sg_grp_p1 = sg_grp + 1'b1;  // off the register, not off the RAM
     // walk_last: the walk wrapped past the last tile pixel. Written without the adder
     // for the same reason rd_group is - it was the OTHER consumer of sg_x_next on the
     // taginvw-RAM -> tag compare -> run_rep -> ... -> sg_active loop, so leaving it
     // arithmetic just moved that chain's endpoint from the read address to sg_active
     // (1,959 endpoints, -4.089) instead of removing it.
     //
-    // sg_x_next == 0 needs sg_x + run_rep == NSLOT exactly. run_rep is 1..4 and the
-    // extend loop never leaves the group, so sg_lane + run_rep <= 4 ALWAYS - meaning
-    // the low two bits can only reach zero when the run ends exactly on the group
+    // sg_x_next == 0 needs sg_x + run_rep == NSLOT exactly. run_rep is 1..GW and the
+    // extend loop never leaves the group, so sg_lane + run_rep <= GW ALWAYS - meaning
+    // the low GB bits can only reach zero when the run ends exactly on the group
     // boundary, which is precisely sg_carry. So the wrap is "last group, and the run
-    // finishes it", both already available off registers and the tag compare.
+    // finishes it", both already available off registers and the boundary bits.
     wire walk_last              = sg_carry && (&sg_grp);      // wrapped past pixel 1023
     // COAL produces a descriptor this cycle iff walking, the group read has landed
     // (g_ready), and the pipeline isn't frozen.
@@ -537,9 +608,9 @@ module spanner_v2 import tsp_pkg::*; #(
         sp_slot    = span_head[SPAN_W-1:0]; // ring write slot = span_head (wraps)
         sp_start   = t_x;                  // run-start pixel index (y:x) [data for the reader]
         sp_id      = emit_id;              // bump-allocated (or reused) ring id
-        sp_rep     = t_rep;
+        sp_rep     = t_rep[2:0];           // shaded runs are capped at REP_MAX (asserted)
         sp_at      = t_at;
-        for (k = 0; k < 4; k = k + 1) sp_invw[k] = t_invw[k];
+        for (k = 0; k < REP_MAX; k = k + 1) sp_invw[k] = t_invw[k];
         // span RING range of this pass (valid at busy->0). base = span_head at pass start,
         // cnt = span_head - base (wrap-safe via the extra MSB). cnt==0 => empty pass.
         sp_range_base = span_pass_base;
@@ -562,8 +633,8 @@ module spanner_v2 import tsp_pkg::*; #(
         // a 1-cycle bubble). rd_next_x already = sg_x while stalled (coal_fires=0), so keeping
         // rd_valid high just re-presents sg_x's group -> ti_* is always correct when COAL resumes.
         rd_valid  = sg_active;
-        // == { rd_next_x[SLOTW-1:2], 2'b00 }, without the adder (see sg_carry above).
-        rd_group  = { (coal_fires && sg_carry) ? sg_grp_p1 : sg_grp, 2'b00 };
+        // == { rd_next_x[SLOTW-1:GB], {GB{1'b0}} }, without the adder (see sg_carry above).
+        rd_group  = { (coal_fires && sg_carry) ? sg_grp_p1 : sg_grp, {GB{1'b0}} };
 
         // ----- SETUP -> triangle_setups write -----
         ts_we  = ts_pend;
@@ -584,10 +655,52 @@ module spanner_v2 import tsp_pkg::*; #(
     // span after it reads the wrong tile group.
     always @(posedge clk)
         if (!reset && sg_active && !$isunknown(rd_next_x) && !$isunknown(rd_group)
-            && rd_group != { rd_next_x[SLOTW-1:2], 2'b00 }) begin
+            && rd_group != { rd_next_x[SLOTW-1:GB], {GB{1'b0}} }) begin
             $display("[spanner_v2] RD_GROUP MISMATCH @t=%0t: fast=%0d arith=%0d  (sg_x=%0d lane=%0d run_rep=%0d carry=%b coal=%b ext=%b ok=%b)",
-                     $time, rd_group, { rd_next_x[SLOTW-1:2], 2'b00 },
+                     $time, rd_group, { rd_next_x[SLOTW-1:GB], {GB{1'b0}} },
                      sg_x, sg_lane, run_rep, sg_carry, coal_fires, sg_ext, sg_ok);
+            $fatal(1);
+        end
+
+    // The boundary bits are the OTHER algebraic substitution on that loop, so they get the
+    // same treatment: every cycle the group read is live, check the stored rs/re against
+    // the cross-lane tag comparison they replaced, and check the stored hash against the
+    // function that produced it. A silent divergence here (a write path that forgets to
+    // stamp a pixel, a tsp_pkg edit that changes the hash) would merge two triangles into
+    // one span or send a lookup to the wrong dedup bucket - both of which look like a
+    // texture bug several stages downstream.
+    genvar ck;
+    generate for (ck = 1; ck < GW; ck = ck + 1) begin : edgechk
+        always @(posedge clk)
+            if (!reset && sg_active && g_ready
+                && !$isunknown(ti_tag[ck]) && !$isunknown(ti_tag[ck-1])
+                && !$isunknown(sg_edge[ck])) begin
+                // SOUND: no boundary => the two lanes really are one fragment. This is the
+                // direction that matters; a spurious boundary only costs a split span.
+                if (!sg_edge[ck] && ((sg_ok[ck] != sg_ok[ck-1])
+                                     || (sg_ok[ck] && ti_tag[ck] != ti_tag[ck-1]))) begin
+                    $display("[spanner_v2] EDGE MISMATCH @t=%0t lane=%0d: no boundary but tag %08x/%08x ok %b/%b (sg_x=%0d rs=%b re=%b)",
+                             $time, ck, ti_tag[ck-1], ti_tag[ck], sg_ok[ck-1], sg_ok[ck],
+                             sg_x, ti_rs, ti_re);
+                    $fatal(1);
+                end
+            end
+    end endgenerate
+    generate for (ck = 0; ck < GW; ck = ck + 1) begin : hashchk
+        always @(posedge clk)
+            if (!reset && sg_active && g_ready && !$isunknown(ti_tag[ck])
+                && !$isunknown(ti_bkt[ck]) && ti_bkt[ck] != ti_hash(ti_tag[ck])) begin
+                $display("[spanner_v2] HASH MISMATCH @t=%0t lane=%0d: stored %03x != ti_hash(%08x)=%03x",
+                         $time, ck, ti_bkt[ck], ti_tag[ck], ti_hash(ti_tag[ck]));
+                $fatal(1);
+            end
+    end endgenerate
+
+    // A shaded run must never exceed REP_MAX - sp_rep is 3 bits and dense_span_buffer
+    // carries REP_MAX invW values, so an over-long span would silently drop pixels.
+    always @(posedge clk)
+        if (!reset && run_shaded && !$isunknown(t_rep) && t_rep > REP_MAX) begin
+            $display("[spanner_v2] REP OVERFLOW @t=%0t: t_rep=%0d > REP_MAX=%0d", $time, t_rep, REP_MAX);
             $fatal(1);
         end
 
@@ -748,8 +861,12 @@ module spanner_v2 import tsp_pkg::*; #(
                     t_rep    <= run_rep;
                     t_ok     <= run_ok0;           // shaded run -> emit a span; else skip
                     t_at     <= ti_pt[sg_lane];
-                    for (q = 0; q < 4; q = q + 1)
-                        t_invw[q] <= (q < run_rep) ? ti_invw[sg_lane + q[1:0]] : 31'd0;
+                    // lanes sg_lane .. sg_lane+rep-1. The index is masked to GB bits so it
+                    // stays in range for the q >= run_rep entries the select discards
+                    // (run_rep never carries the run past the group, so the LIVE entries
+                    // never wrap).
+                    for (q = 0; q < REP_MAX; q = q + 1)
+                        t_invw[q] <= (q < run_rep) ? ti_invw[GB'(sg_lane + q[GB-1:0])] : 31'd0;
                     // the dedup read for THIS descriptor is presented by the dedicated M10K
                     // block above (dd_re == coal_fires, dd_raddr == run_id); dd_rd_q resolves
                     // next cycle in EMIT. run_id/coal_fires are stable this cycle.

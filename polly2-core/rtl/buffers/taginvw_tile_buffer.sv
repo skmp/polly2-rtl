@@ -11,11 +11,18 @@
 // this module is told directly which lanes to write and what to write - it is a
 // pure banked store, not a compare.
 //
-// Storage: ONE simple-dual-port tile_ram, WIDTH = 65 bits/lane {pt, valid, tag[31:0],
-// invW[30:0]}, NBANKS = LANES. invW is a 31-bit SIGN-STRIPPED float (depths are
-// always positive non-zero). Same banking as peel_tile_buffer: bank = x[BW-1:0],
-// addr = {buf, y[4:0], x[4:BW]}. One read port (shade single-pixel | spanner group)
-// + one write port (raster stage-B duplicate | CLEAR | PeelBuffers walk).
+// Storage: ONE simple-dual-port tile_ram, WIDTH = 77 bits/lane {hash[9:0], re, rs, pt,
+// valid, tag[31:0], invW[30:0]}, NBANKS = LANES. invW is a 31-bit SIGN-STRIPPED float
+// (depths are always positive non-zero). Same banking as peel_tile_buffer: bank =
+// x[BW-1:0], addr = {buf, y[4:0], x[4:BW]}. One read port (shade single-pixel | spanner
+// group) + one write port (raster stage-B duplicate | CLEAR | PeelBuffers walk).
+//
+// SPAN BOUNDARIES (rs/re) and the dedup HASH are derived at the WRITE and stored per
+// pixel so the spanner does not have to rediscover them by comparing 32-bit tags across
+// lanes - see the block comment at the write mux. All three ride the EXISTING per-lane
+// write mask, so this costs no extra port, no read-modify-write, and (because an M10K
+// port is 40 bits wide regardless) no extra block: 65 and 77 bits both round up to two
+// M10Ks per bank at the configs peel_core builds.
 //
 // COPIES = the OVERSIZE factor: this ONE buffer holds COPIES independent tile
 // images ("quarters" at COPIES=4), selected by the TOP address bits - wr_buf for
@@ -35,7 +42,13 @@
 //
 module taginvw_tile_buffer import tsp_pkg::*; #(
     parameter integer LANES  = 8,
-    parameter integer COPIES = 1                 // 1, 2, 4, 8, ... tile images
+    parameter integer COPIES = 1,                // 1, 2, 4, 8, ... tile images
+    // SPANNER GROUP WIDTH: how many aligned pixels the rdg_* port returns per read.
+    // Must be a power of two that DIVIDES LANES - the whole group has to live inside one
+    // LANES-pixel chunk (one RAM address) and, critically, every chunk boundary must also
+    // be a group boundary, which is what lets rs[0]/re[LANES-1] be forced without loss
+    // (see the write mux). The spanner never coalesces across a group boundary.
+    parameter integer GW     = 4
 ) (
     input                       clk,
     input                       reset,
@@ -84,33 +97,46 @@ module taginvw_tile_buffer import tsp_pkg::*; #(
     output reg [30:0]           sh_depth,       // depthBufferA (invW)   (1-cyc latency)
     output reg                  sh_pt,          // PT-list-won bit       (1-cyc latency)
 
-    // ---- SPANNER: 4-wide ALIGNED read (group = x & ~3). FIXED 4-wide regardless of
-    // LANES (the spanner is not lane-count-parameterized): the aligned pixels {g..g+3}
-    // occupy 4 CONSECUTIVE banks starting at bank (g[BANK_BITS-1:0] & ~3) - all of the
-    // chunk when LANES==4, the g[2]-selected half of the 8-bank chunk when LANES==8 -
-    // so one read of all banks at addr {g[9:5], g[4:BANK_BITS]} returns the whole
+    // ---- SPANNER: GW-wide ALIGNED read (group = x & ~(GW-1)). The aligned pixels
+    // {g..g+GW-1} occupy GW CONSECUTIVE banks starting at bank (g[BANK_BITS-1:0] & ~(GW-1))
+    // - all of the chunk when LANES==GW, a g[GB +: ...]-selected slice of it when the chunk
+    // is wider - so one read of all banks at addr {g[9:5], g[4:BANK_BITS]} returns the whole
     // group. Lane l = pixel (g|l). 1-cyc latency.
-    input                       rd4_valid,
-    input      [9:0]            rd4_group,
-    output     [3:0]            g4_valid,
-    output     [31:0]           g4_tag  [0:3],
-    output     [30:0]           g4_invw [0:3],
-    output     [3:0]            g4_pt
+    input                       rdg_valid,
+    input      [9:0]            rdg_group,
+    output     [GW-1:0]         gg_valid,
+    output     [31:0]           gg_tag  [0:GW-1],
+    output     [30:0]           gg_invw [0:GW-1],
+    output     [GW-1:0]         gg_pt,
+    // ---- span-boundary bits and dedup hash (see the write mux) ----
+    // The consumer recovers "pixel l starts a new span" as gg_rs[l] | gg_re[l-1]; lane 0
+    // needs no predecessor because a group boundary is always a span boundary.
+    output     [GW-1:0]         gg_rs,       // this pixel's last write STARTED its run here
+    output     [GW-1:0]         gg_re,       // this pixel's last write ENDED its run here
+    output     [TI_HASHW-1:0]   gg_hash [0:GW-1]
 );
     localparam integer NB        = LANES;
     localparam integer BANK_BITS = $clog2(LANES);   // 3 for 8, 2 for 4
     localparam integer TAW       = 10 - BANK_BITS;   // in-tile addr width (7 / 8)
     localparam integer CB        = (COPIES > 1) ? $clog2(COPIES) : 0;  // copy-select bits
     localparam integer AW        = CB + TAW;         // per-bank addr width
+    localparam integer GB        = $clog2(GW);       // group-lane index width
     generate
       if (COPIES & (COPIES - 1))
           $error("taginvw_tile_buffer: COPIES must be a power of two");
+      if (GW & (GW - 1))
+          $error("taginvw_tile_buffer: GW must be a power of two");
+      if (GW > LANES)
+          $error("taginvw_tile_buffer: GW must not exceed LANES (a group lives in one chunk)");
     endgenerate
     localparam integer TW_INVW   = 0;    // [30:0] depthBufferA (invW, sign-stripped)
     localparam integer TW_TAG    = 31;   // [31:0] tagBufferA
     localparam integer TW_VALID  = 63;   // [0]    tagStatus.valid
     localparam integer TW_PT     = 64;   // [0]    PT-list-won (blend alpha-test enable)
-    localparam integer TI_W      = 65;
+    localparam integer TW_RS     = 65;   // [0]    last write started its run at this pixel
+    localparam integer TW_RE     = 66;   // [0]    last write ended   its run at this pixel
+    localparam integer TW_HASH   = 67;   // [9:0]  ti_hash(tag), for the spanner dedup map
+    localparam integer TI_W      = TW_HASH + TI_HASHW;   // 77
 
     reg  [NB-1:0]        we;
     reg  [AW*NB-1:0]     waddr;
@@ -151,46 +177,83 @@ module taginvw_tile_buffer import tsp_pkg::*; #(
     // -------------------- READ port (single-pixel OR 4-wide aligned group) --------------
     always @(*) begin
         raddr = '0;
-        if (rd4_valid)        raddr = bcast_addr(rbase | AW'(rd4_group[9:BANK_BITS]));
+        if (rdg_valid)        raddr = bcast_addr(rbase | AW'(rdg_group[9:BANK_BITS]));
         else if (sh_rd_valid) raddr = bcast_addr(rbase | AW'(sh_rd_id [9:BANK_BITS]));
     end
 
-    // 4-wide group outputs: select the 4-bank slice holding the aligned group
-    // (combinational off the registered read rdata, 1-cyc after rd4_group presented).
+    // GW-wide group outputs: select the GW-bank slice holding the aligned group
+    // (combinational off the registered read rdata, 1-cyc after rdg_group presented).
     // The slice base is the group's position within the LANES-bank chunk - constant 0
-    // when LANES==4, the latched g[2] half-select when LANES==8 (latched at the read,
-    // like sh_lane_r, so it tracks the registered rdata). G4B stays 1 bit when
-    // LANES==4 so the declarations elaborate; the base is then forced to 0.
-    localparam integer G4B = (BANK_BITS > 2) ? BANK_BITS - 2 : 1;
-    reg [G4B-1:0] g4_half_r;
+    // when LANES==GW, else the latched g[GB +: GSELB] select (latched at the read, like
+    // sh_lane_r, so it tracks the registered rdata). GSELB stays 1 bit when LANES==GW so
+    // the declarations elaborate; the base is then forced to 0.
+    localparam integer GSELB = (BANK_BITS > GB) ? BANK_BITS - GB : 1;
+    reg [GSELB-1:0] g_sel_r;
     always @(posedge clk) begin
-        if (reset) g4_half_r <= '0;
-        else if (rd4_valid) g4_half_r <= (BANK_BITS > 2) ? rd4_group[2 +: G4B] : '0;
+        if (reset) g_sel_r <= '0;
+        else if (rdg_valid) g_sel_r <= (BANK_BITS > GB) ? rdg_group[GB +: GSELB] : '0;
     end
     genvar gl;
     generate
-      for (gl = 0; gl < 4; gl = gl + 1) begin : g4lane
-        wire [TI_W-1:0] lw = rdata[TI_W*(4*g4_half_r + gl) +: TI_W];
-        assign g4_valid[gl] = lw[TW_VALID];
-        assign g4_pt   [gl] = lw[TW_PT];
-        assign g4_tag  [gl] = lw[TW_TAG  +: 32];
-        assign g4_invw [gl] = lw[TW_INVW +: 31];
+      for (gl = 0; gl < GW; gl = gl + 1) begin : gglane
+        wire [TI_W-1:0] lw = rdata[TI_W*(GW*g_sel_r + gl) +: TI_W];
+        assign gg_valid[gl] = lw[TW_VALID];
+        assign gg_pt   [gl] = lw[TW_PT];
+        assign gg_rs   [gl] = lw[TW_RS];
+        assign gg_re   [gl] = lw[TW_RE];
+        assign gg_tag  [gl] = lw[TW_TAG  +: 32];
+        assign gg_invw [gl] = lw[TW_INVW +: 31];
+        assign gg_hash [gl] = lw[TW_HASH +: TI_HASHW];
       end
     endgenerate
 
     // -------------------- WRITE port mux --------------------
+    // EFFECTIVE per-lane mask, hoisted out of the client mux because every client writes
+    // WHOLE lane words - which is exactly what lets the span-boundary bits below be
+    // derived once, uniformly, for all three.
+    reg [NB-1:0] wmask;
+    always @(*) begin
+        if (clr_valid || pbc_valid) wmask = {NB{1'b1}};
+        else if (wr_valid)          wmask = wr_we;
+        else                        wmask = '0;
+    end
+
+    // ---- SPAN-BOUNDARY bits: what replaces the spanner's cross-lane tag comparators ----
+    // Per lane, on EXACTLY the lanes this cycle writes (the same mask as tag):
+    //   rs[l] = this write STARTS a run at l  (l written, l-1 not written by THIS write)
+    //   re[l] = this write ENDS   a run at l  (l written, l+1 not written by THIS write)
+    // The reader recovers the boundary between adjacent pixels as
+    //   edge[l] = rs[l] | re[l-1]
+    // and that is EXACT, not conservative. If l-1 and l were last written by the SAME
+    // write, both bits are 0 -> no boundary. If by DIFFERENT writes, the LATER of the two
+    // did not cover the other pixel, so it set its own bit to 1 -> boundary. (Whatever the
+    // earlier write left in its bit is irrelevant, since the two are OR-ed.)
+    //
+    // WHY A PAIR AND NOT ONE `edge` BIT: a single "differs from my left neighbour" bit
+    // would have to be written on the first lane AFTER a run - a lane this write is NOT
+    // enabling - and this port cannot touch it without clobbering that lane's tag/invW
+    // (write-enable is per BANK and the lane word is atomic). Splitting the boundary
+    // across the two pixels that share it puts every bit back inside the write mask, so
+    // no second port, no side RAM, and no read-modify-write.
+    //
+    // Lane 0's rs and lane NB-1's re are forced 1: their neighbour is in the next chunk,
+    // which this write cannot see. That costs nothing - GW divides LANES, so a chunk
+    // boundary is always a group boundary, and the spanner never coalesces across one.
+    wire [NB-1:0] w_rs = wmask & ~{wmask[NB-2:0], 1'b0};
+    wire [NB-1:0] w_re = wmask & ~{1'b0, wmask[NB-1:1]};
+
     integer cw;
     always @(*) begin
-        we    = '0;
+        we    = wmask;
         waddr = '0;
         wdata = '0;
 
         if (clr_valid) begin                       // CLEAR: {valid=0,tag,invW} all banks
-            we    = {NB{1'b1}};
             waddr = bcast_addr(wbase | AW'(clr_addr));
             for (cw = 0; cw < NB; cw = cw + 1) begin
                 wdata[TI_W*cw + TW_INVW +: 31] = clr_depth;
                 wdata[TI_W*cw + TW_TAG  +: 32] = clr_tag;
+                wdata[TI_W*cw + TW_HASH +: TI_HASHW] = ti_hash(clr_tag);
                 // valid<-0, MATCHING the old u_peel CLEAR (it left PW_VALID at the
                 // wdata='0 default). OP shade ignores valid (shades every pixel); the
                 // PEEL passes gate on valid, so a CLEAR-set valid=1 would make peel
@@ -201,18 +264,28 @@ module taginvw_tile_buffer import tsp_pkg::*; #(
         end else if (pbc_valid) begin              // PeelBuffers valid-clear walk
             // Blind-write valid=0 (tag/invW become 0 but are never read while valid=0;
             // the next peel pass's raster accept overwrites all three before any read).
-            we    = {NB{1'b1}};
             waddr = bcast_addr(wbase | AW'(pbc_addr));
-            // wdata already all-zero from the reset above -> valid=0, tag=0, invW=0.
+            // wdata already all-zero from the reset above -> valid=0, tag=0, invW=0,
+            // and hash=0 == ti_hash(0), so the stored hash stays consistent with the
+            // stored tag even for these blind-cleared pixels.
         end else if (wr_valid) begin               // stage-B accept duplicate
             waddr = pack_addr(wr_y, wr_x);
             for (cw = 0; cw < NB; cw = cw + 1) begin
-                we[cw] = wr_we[cw];
                 wdata[TI_W*cw + TW_INVW +: 31] = wr_invw[31*cw +: 31];
                 wdata[TI_W*cw + TW_TAG  +: 32] = wr_tag;
+                wdata[TI_W*cw + TW_HASH +: TI_HASHW] = ti_hash(wr_tag);
                 wdata[TI_W*cw + TW_VALID]      = 1'b1;
                 wdata[TI_W*cw + TW_PT]         = wr_pt;   // PT-list-won (same for all lanes)
             end
+        end
+
+        // rs/re ride on EVERY client's write with that client's own mask, so they are
+        // set once here rather than per-branch. For CLEAR/pbc (full mask) this reduces
+        // to rs at lane 0 and re at lane NB-1 - the chunk edges - which is correct: a
+        // whole-chunk write is one run.
+        for (cw = 0; cw < NB; cw = cw + 1) begin
+            wdata[TI_W*cw + TW_RS] = w_rs[cw];
+            wdata[TI_W*cw + TW_RE] = w_re[cw];
         end
     end
 
