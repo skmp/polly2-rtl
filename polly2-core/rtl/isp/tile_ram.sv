@@ -18,21 +18,28 @@
 // just-written value must forward it (the raster consumer does, for the rare
 // same-word back-to-back chunk).
 //
+// COPIES > 1 stacks that many INDEPENDENT tile images in the same banks, selected
+// by the TOP bits of the address: addr = {copy, y[4:0], x[4:BW]}. Because each bank
+// is simple-dual-port, one copy can be written while a DIFFERENT copy is read in the
+// same cycle - which is what lets the ISP->TSP handoff buffer live in ONE tile_ram
+// instead of one instance per ping-pong half (see taginvw_tile_buffer).
+//
 module tile_ram #(
     parameter integer WIDTH  = 56,
-    parameter integer NBANKS = 8
+    parameter integer NBANKS = 8,
+    parameter integer COPIES = 1                // power-of-two tile images per bank
 ) (
     input                         clk,
     // WRITE port (lane i drives bank i)
     input      [NBANKS-1:0]       we,          // write-enable per bank
-    input      [$clog2(1024/NBANKS)*NBANKS-1:0] waddr,  // AW-bit write addr/bank
+    input      [$clog2(COPIES*1024/NBANKS)*NBANKS-1:0] waddr,  // AW-bit write addr/bank
     input      [WIDTH*NBANKS-1:0] wdata,       // write data per bank (packed)
     // READ port (lane i drives bank i)
-    input      [$clog2(1024/NBANKS)*NBANKS-1:0] raddr,  // AW-bit read addr/bank
+    input      [$clog2(COPIES*1024/NBANKS)*NBANKS-1:0] raddr,  // AW-bit read addr/bank
     output reg [WIDTH*NBANKS-1:0] rdata        // read data per bank (packed, 1-cyc)
 );
-    localparam integer DEPTH = 1024 / NBANKS;  // 128 for 8 banks, 256 for 4
-    localparam integer AW    = $clog2(1024 / NBANKS);   // 7 for 8 banks, 8 for 4
+    localparam integer DEPTH = COPIES * 1024 / NBANKS;  // 128 for 8 banks x1 copy
+    localparam integer AW    = $clog2(COPIES * 1024 / NBANKS);  // 7 for 8 banks x1
 
     genvar b;
     generate

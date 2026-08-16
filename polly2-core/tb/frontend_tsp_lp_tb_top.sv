@@ -6,7 +6,8 @@
 // (at u_sim.fb) after `done` to write the BMP.
 //
 module frontend_tsp_lp_tb_top import tsp_pkg::*; #(
-    parameter integer RAS_LANES = 32     // override with verilator -GRAS_LANES=4
+    parameter integer RAS_LANES = 32,   // override with verilator -GRAS_LANES=4
+    parameter integer TI_COPIES = 4     // override with verilator -GTI_COPIES=2
 ) (
     input             clk,
     input             reset,
@@ -29,7 +30,7 @@ module frontend_tsp_lp_tb_top import tsp_pkg::*; #(
     );
 
     // the render core
-    peel_core #(.RAS_LANES(RAS_LANES)) u_core (
+    peel_core #(.RAS_LANES(RAS_LANES), .TI_COPIES(TI_COPIES)) u_core (
         .clk(clk), .reset(reset),
         .wr_en(wr_en), .wr_addr(wr_addr), .wr_data(wr_data),
         .go(go), .done(done), .vram_cfg(32'd0),  // 8 MB VRAM (dumps are 8 MB)
