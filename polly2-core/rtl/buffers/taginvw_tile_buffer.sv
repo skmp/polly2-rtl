@@ -102,10 +102,22 @@ module taginvw_tile_buffer import tsp_pkg::*; #(
     localparam integer TAW       = 10 - BANK_BITS;   // in-tile addr width (7 / 8)
     localparam integer CB        = (COPIES > 1) ? $clog2(COPIES) : 0;  // copy-select bits
     localparam integer AW        = CB + TAW;         // per-bank addr width
-    generate
-      if (COPIES & (COPIES - 1))
-          $error("taginvw_tile_buffer: COPIES must be a power of two");
-    endgenerate
+    localparam integer GB        = $clog2(GW);       // group-lane index width
+    // Parameter sanity. Written as a time-0 procedural check under `ifndef SYNTHESIS`
+    // rather than as elaboration-time $error inside a generate: Quartus does not accept
+    // SystemVerilog elaboration system tasks there (10170), and every parameter
+    // combination peel_core can instantiate is covered by a tb that runs this at time 0.
+`ifndef SYNTHESIS
+    initial begin
+        if (COPIES & (COPIES - 1))
+            $error("taginvw_tile_buffer: COPIES must be a power of two (got %0d)", COPIES);
+        if (GW & (GW - 1))
+            $error("taginvw_tile_buffer: GW must be a power of two (got %0d)", GW);
+        if (GW > LANES)
+            $error("taginvw_tile_buffer: GW (%0d) must not exceed LANES (%0d) - a group lives in one chunk",
+                   GW, LANES);
+    end
+`endif
     localparam integer TW_INVW   = 0;    // [30:0] depthBufferA (invW, sign-stripped)
     localparam integer TW_TAG    = 31;   // [31:0] tagBufferA
     localparam integer TW_VALID  = 63;   // [0]    tagStatus.valid
