@@ -231,6 +231,7 @@ module isp_setup_streamed (
     reg [31:0] XL1,YT1,XL2;                // @10
     reg [31:0] YT2,XL3,YT3;                // @11
     reg [31:0] XL4,YT4;                    // @12
+    reg [7:0]  m1,m2,m3,m4;                // @12: amag(XLn,YTn) precomputed, read @13
     reg [31:0] e1XL,e1YT, e2XL,e2YT, e3XL,e3YT, e4XL,e4YT;   // @13, read <= @16
     reg [31:0] aZ,aXL,aYT;                 // @13, read <= @25
     reg        tl1,tl2,tl3,tl4;            // @15, read <= @26
@@ -385,7 +386,21 @@ module isp_setup_streamed (
                     if (cnt==6'd9)  begin dY3W<=a0_y; dX41d<=a1_y; dY41d<=a2_y; end
                     if (cnt==6'd10) begin XL1<=a0_y; YT1<=a1_y; XL2<=a2_y; end
                     if (cnt==6'd11) begin YT2<=a0_y; XL3<=a1_y; YT3<=a2_y; end
-                    if (cnt==6'd12) begin XL4<=a0_y; YT4<=a1_y; end
+                    if (cnt==6'd12) begin
+                        XL4<=a0_y; YT4<=a1_y;
+                        // Precompute the four anchor magnitudes ONE CYCLE EARLY. amag() is
+                        // max(xl_exp, yt_exp) - a compare plus a mux - and evaluating it
+                        // inside the @13 compares made that stage
+                        // compare -> mux -> compare -> AND -> 32-bit 3-way mux (~11 LUT
+                        // levels, 11.877 ns: the YT3 -> aZ path was the #2 critical path in
+                        // the 2026-08-15 fit). Registering it here leaves @13 as compares
+                        // and a mux. Bit-exact: amag is pure, and every input is already
+                        // valid in cycle 12 - XL1/YT1/XL2 land @10, YT2/XL3/YT3 @11.
+                        m1<=amag(XL1,YT1); m2<=amag(XL2,YT2); m3<=amag(XL3,YT3);
+                        // XL4/YT4 only land at the END of this cycle, so m4 comes off the
+                        // live bus - a0_y/a1_y ARE XL4/YT4 right now.
+                        m4<=amag(a0_y,a1_y);
+                    end
 
                     // ---- payload bank (rel 2: latch regs -> bank, survives re-latch) ----
                     if (cnt==6'd2) begin
@@ -426,23 +441,23 @@ module isp_setup_streamed (
                     // ---- anchors @13 (all XL/YT visible; Z1..Z3 still this triangle's) ----
                     if (cnt==6'd13) begin
                         // per-edge min-mag anchor: smaller max(|XL|,|YT|) of the edge's ends
-                        if (amag(XL2,YT2)<amag(XL1,YT1)) begin e1XL<=XL2;e1YT<=YT2; end
-                        else                             begin e1XL<=XL1;e1YT<=YT1; end
-                        if (amag(XL3,YT3)<amag(XL2,YT2)) begin e2XL<=XL3;e2YT<=YT3; end
-                        else                             begin e2XL<=XL2;e2YT<=YT2; end
+                        if (m2<m1) begin e1XL<=XL2;e1YT<=YT2; end
+                        else       begin e1XL<=XL1;e1YT<=YT1; end
+                        if (m3<m2) begin e2XL<=XL3;e2YT<=YT3; end
+                        else       begin e2XL<=XL2;e2YT<=YT2; end
                         if (Qr) begin   // edge3 = v3..v4 for quads, v3..v1 for tris
-                            if (amag(XL4,YT4)<amag(XL3,YT3)) begin e3XL<=XL4;e3YT<=YT4; end
-                            else                             begin e3XL<=XL3;e3YT<=YT3; end
+                            if (m4<m3) begin e3XL<=XL4;e3YT<=YT4; end
+                            else       begin e3XL<=XL3;e3YT<=YT3; end
                         end else begin
-                            if (amag(XL1,YT1)<amag(XL3,YT3)) begin e3XL<=XL1;e3YT<=YT1; end
-                            else                             begin e3XL<=XL3;e3YT<=YT3; end
+                            if (m1<m3) begin e3XL<=XL1;e3YT<=YT1; end
+                            else       begin e3XL<=XL3;e3YT<=YT3; end
                         end
-                        if (amag(XL1,YT1)<amag(XL4,YT4)) begin e4XL<=XL1;e4YT<=YT1; end
-                        else                             begin e4XL<=XL4;e4YT<=YT4; end
+                        if (m1<m4) begin e4XL<=XL1;e4YT<=YT1; end
+                        else       begin e4XL<=XL4;e4YT<=YT4; end
                         // invW plane anchor: min over v1/v2/v3 (same priority as setup_min)
-                        if (amag(XL2,YT2)<amag(XL1,YT1) && amag(XL2,YT2)<=amag(XL3,YT3)) begin
+                        if (m2<m1 && m2<=m3) begin
                             aZ<=Z2; aXL<=XL2; aYT<=YT2;
-                        end else if (amag(XL3,YT3)<amag(XL1,YT1)) begin
+                        end else if (m3<m1) begin
                             aZ<=Z3; aXL<=XL3; aYT<=YT3;
                         end else begin
                             aZ<=Z1; aXL<=XL1; aYT<=YT1;
