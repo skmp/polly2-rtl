@@ -473,7 +473,7 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
     // 1-deep write forwarding (see the read-during-write note above)
     reg  [PLW-1:0] pl_pw_d; reg [PLAW:0] pl_pw_a; reg pl_pw_v;
     wire [PLW-1:0] pl_src = (pl_pw_v && (pl_pw_a == pl_rp)) ? pl_pw_d : pl_q;
-    bram_sdp #(.W(PLW), .D(PLD)) u_plf (
+    bram_sdp #(.W(PLW), .D(PLD), .STYLE("MLAB, no_rw_check")) u_plf (
         .clk(clk), .we(pl_push), .waddr(pl_wp[PLAW-1:0]), .din(pl_in),
         .re(1'b1),  .raddr(pl_rp_nxt[PLAW-1:0]), .q(pl_q));
     wire [PLW-1:0] pl_out = pl_hd;

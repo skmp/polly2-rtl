@@ -121,13 +121,13 @@ module tex_fetch4_ob import tsp_pkg::*; #(
     wire [FQ_AW:0] fq_rp_nxt = (fq_head_free && fq_ram_has) ? fq_rp + 1'b1 : fq_rp;
     reg  [FQ_W-1:0] fq_pw_d; reg [FQ_AW:0] fq_pw_a; reg fq_pw_v;
     wire [FQ_W-1:0] fq_src = (fq_pw_v && (fq_pw_a == fq_rp)) ? fq_pw_d : fq_qa;
-    bram_sdp #(.W(FQ_W), .D(FQ_D)) u_fq_a (            // head-refill copy
+    bram_sdp #(.W(FQ_W), .D(FQ_D), .STYLE("MLAB, no_rw_check")) u_fq_a (            // head-refill copy
         .clk(clk), .we(fq_push), .waddr(fq_wp[FQ_AW-1:0]), .din(fq_in),
         .re(1'b1), .raddr(fq_rp_nxt[FQ_AW-1:0]), .q(fq_qa));
     // walker lookahead copy: same write, independent read
     wire [FQ_AW-1:0] fq_la_addr;   // driven by the prefetch walker below
     wire [FQ_W-1:0]  fq_la_q;
-    bram_sdp #(.W(FQ_W), .D(FQ_D)) u_fq_b (
+    bram_sdp #(.W(FQ_W), .D(FQ_D), .STYLE("MLAB, no_rw_check")) u_fq_b (
         .clk(clk), .we(fq_push), .waddr(fq_wp[FQ_AW-1:0]), .din(fq_in),
         .re(1'b1), .raddr(fq_la_addr), .q(fq_la_q));
     // FWFT head field unpack (these replace the raw module inputs downstream)

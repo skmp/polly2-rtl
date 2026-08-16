@@ -1557,7 +1557,11 @@ module peel_core import tsp_pkg::*; #(
                        FF_PT=352,    // list-kind (PT) bit
                        FF_X4=353, FF_Y4=385,   // QUAD 4th vertex (X/Y only, no Z)
                        FF_QUAD=417;  // 1 = quad record (v4/edge-41 path active)
-    (* ramstyle = "M10K, no_rw_check" *) reg [FQ_W-1:0] fq_ram [0:FIFO_N-1];
+    // MLAB, not M10K: 418 bits x 8 = 3,344 bits, but an M10K caps port width at 40, so
+    // this cost TEN blocks (102,400 bits) at 3.3% utilisation. As MLABs it is
+    // ceil(418/20) = 21 cells (~210 ALMs). NOTE this is still a RAM, not logic - the
+    // fq_ram_q / fq_byp_d split above is what keeps it out of flops, and it stays.
+    (* ramstyle = "MLAB, no_rw_check" *) reg [FQ_W-1:0] fq_ram [0:FIFO_N-1];
     reg [FQ_W-1:0] fq_ram_q;       // M10K OUTPUT REGISTER - assigned from fq_ram only
     reg [FQ_W-1:0] fq_byp_d;       // write word bypassed around the RAM (empty refill)
     reg            fq_byp_sel;     // 1 = the head word is fq_byp_d, not fq_ram_q
@@ -1618,7 +1622,17 @@ module peel_core import tsp_pkg::*; #(
     localparam integer QF_BX0=544, QF_BX1=549,  QF_BY0=554,  QF_BY1=559;   // 5b each
     localparam integer QF_PT=564;    // list-kind (PT) bit
     localparam integer QF_TL=565;    // 4b: per-edge IsTopLeft
-    (* ramstyle = "M10K, no_rw_check" *) reg [PQ_W-1:0] pq_ram [0:PQ_N-1];
+    // MLAB, and it needs the SINGLE READ PORT below to be legal. 569 bits x 8 = 4,552
+    // bits: an M10K caps port width at 40, so this cost 28 blocks per copy - and it had
+    // TWO copies, because four read sites in four case branches made Quartus infer a
+    // multi-read RAM and replicate (pq_ram_rtl_0/_1). 56 M10K, 11% of the device's 553,
+    // at 1.6% utilisation. Asking for MLAB in that shape CRASHED quartus_map 17.0:
+    //   Internal Error: Sub-system: VRFX, .../verific/database/operators.cpp, Line 2349
+    //   "p && n"  at  SplitDualReadRams -> TrueDualPortRam -> ConnectReadArrayPort
+    // The single-read hoist (search "THE SINGLE READ PORT") removes the replication and
+    // the crash together; ceil(569/20) = 29 MLAB cells (~290 ALMs), one copy.
+    // If this ever goes back to multi-read, it will silently cost 56 blocks again.
+    (* ramstyle = "MLAB, no_rw_check" *) reg [PQ_W-1:0] pq_ram [0:PQ_N-1];
     reg [PQ_W-1:0] pq_rdw;            // registered read word (valid the cycle after pop)
     reg [3:0]  pq_head, pq_tail;
     reg [4:0]  pq_count;
@@ -3441,8 +3455,6 @@ module peel_core import tsp_pkg::*; #(
                                         || st == S_PT_INIT || st == S_PT_SWAP
                                         || st == S_PT_FIX)) begin
                 // issue the M10K read; head advances now, data lands in pq_rdw next cyc
-                pq_rdw <= pq_ram[pq_head[2:0]];
-                pq_head <= (pq_head==PQ_N-1) ? 4'd0 : pq_head+4'd1;
                 pq_pop  = 1'b1;
                 rs_st   <= RS_POP;
             end
@@ -3504,8 +3516,6 @@ module peel_core import tsp_pkg::*; #(
                 if (ptc_empty) begin
                     cr_issue <= 1'b0;
                     if (ch_pop && !pq_empty) begin
-                        pq_rdw  <= pq_ram[pq_head[2:0]];
-                        pq_head <= (pq_head==PQ_N-1) ? 4'd0 : pq_head+4'd1;
                         pq_pop   = 1'b1;
                         rs_st   <= RS_POP;
                     end else
@@ -3550,8 +3560,6 @@ module peel_core import tsp_pkg::*; #(
                         // no-ops (no coverage -> no writes). CHAIN to the next
                         // same-pass triangle if one is queued (see RS_POP note).
                         if (ch_abort && !pq_empty) begin
-                            pq_rdw  <= pq_ram[pq_head[2:0]];
-                            pq_head <= (pq_head==PQ_N-1) ? 4'd0 : pq_head+4'd1;
                             pq_pop   = 1'b1;
                             rs_st   <= RS_POP;
                         end else rs_st <= RS_DRAIN;
@@ -3565,8 +3573,6 @@ module peel_core import tsp_pkg::*; #(
                             // drain: only the pass-end (empty pq) needs RS_DRAIN,
                             // for the barrier + last write-back.
                             if (ch_row && !pq_empty) begin
-                                pq_rdw  <= pq_ram[pq_head[2:0]];
-                                pq_head <= (pq_head==PQ_N-1) ? 4'd0 : pq_head+4'd1;
                                 pq_pop   = 1'b1;
                                 rs_st   <= RS_POP;
                             end else rs_st <= RS_DRAIN;
@@ -3583,6 +3589,22 @@ module peel_core import tsp_pkg::*; #(
             RS_DRAIN: if (ras_inflight==0 && !ras_in_valid && !ras_out_valid
                           && !b_valid) rs_st<=RS_IDLE;
             endcase
+
+            // ---- pq_ram: THE SINGLE READ PORT ----
+            // Every pop site (RS_IDLE, and the three RS_RAS chain paths) used to carry its
+            // own `pq_rdw <= pq_ram[pq_head[2:0]]` + head advance. All four read the SAME
+            // address, but sitting in different case branches made Quartus infer a
+            // multi-read RAM: it REPLICATED the array into pq_ram_rtl_0/_1 at 28 M10K each
+            // (56 blocks, 11% of the device, for 4,552 bits) and then crashed outright when
+            // asked for MLAB (SplitDualReadRams -> TrueDualPortRam internal error).
+            // `pq_pop` is already exactly the read enable - defaulted 0 before the case and
+            // set at those four sites and nowhere else - so hoisting the read here is
+            // behaviourally identical: pq_head is non-blocking, so it still holds the OLD
+            // value when the address is sampled, same as when the read lived in the branch.
+            if (pq_pop) begin
+                pq_rdw  <= pq_ram[pq_head[2:0]];
+                pq_head <= (pq_head==PQ_N-1) ? 4'd0 : pq_head+4'd1;
+            end
 
             // ---- FIFO count maintenance (single update; push/pop may coincide) ----
             fq_count <= fq_count + (fifo_push ? 5'd1 : 5'd0) - (fifo_pop ? 5'd1 : 5'd0);

@@ -24,9 +24,18 @@
 // registers regardless of the ramstyle hint. This module is intended for the
 // wide, DELAY>=3 alignment lines.
 //
+// STYLE: MLAB, NOT M10K. These lines are WIDE and SHALLOW - the three instances in
+// tsp_shade_v2_pp are 320 bits x 8 deep, i.e. 2,560 bits each. An M10K gives at most
+// 40 bits of port width, so 320 bits forces EIGHT blocks (81,920 bits) to hold 2,560 -
+// 3.1% utilisation, 24 blocks across the three. In MLABs (32x20, ~10 ALMs each) the
+// same line is ceil(320/20) = 16 cells ~ 160 ALMs. The original "RAM frees the fabric"
+// trade was written when M10K was plentiful; with block RAM at 92% and ALMs at 81% it
+// points the other way. Still far cheaper than flops (DELAY*WIDTH = 2,560 per line).
+//
 module delay_ram #(
     parameter integer WIDTH = 32,
-    parameter integer DELAY = 3            // >= 1
+    parameter integer DELAY = 3,           // >= 1
+    parameter         STYLE = "MLAB, no_rw_check"
 ) (
     input                    clk,
     input                    reset,
@@ -40,7 +49,7 @@ module delay_ram #(
     localparam integer AW    = (NEED <= 1) ? 1 : $clog2(NEED);
     localparam integer DEPTH = 1 << AW;
 
-    (* ramstyle = "M10K, no_rw_check" *) reg [WIDTH-1:0] mem [0:DEPTH-1];
+    (* ramstyle = STYLE *) reg [WIDTH-1:0] mem [0:DEPTH-1];
 
     reg  [AW-1:0] wptr;                    // next write slot
     // read address trails by DELAY-1; the RAM's registered read adds the last
