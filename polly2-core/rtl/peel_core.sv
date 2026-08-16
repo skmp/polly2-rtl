@@ -19,7 +19,13 @@ module peel_core import tsp_pkg::*; #(
     // raster line, the sort cache and the bulk-op walks all scale with it; the
     // SPANNER does NOT - its taginvw read stays a fixed 4-wide aligned group
     // (see taginvw_tile_buffer's rd4 port for the 8-bank half-select).
-    parameter integer RAS_LANES = 8
+    parameter integer RAS_LANES = 8,
+    // ISP->TSP handoff buffer OVERSIZE: how many independent tile images u_taginvw
+    // holds (2 = the old ping-pong, 4 = quarters, 8, ...). Must be a power of two
+    // >= 2. It bounds how many rastered-but-unshaded passes the ISP may queue: the
+    // ISP stalls only when the copy it wants to write is still owned by the spanner,
+    // so TI_COPIES-1 passes may be in flight ahead of the shade.
+    parameter integer TI_COPIES = 4
 ) (
     input             clk,
     input             reset,
@@ -752,59 +758,62 @@ module peel_core import tsp_pkg::*; #(
         .chk_valid_q(sc_chk_vq),  .chk_done(sc_chk_done)
     );
 
-    // ---- PING-PONG ISP->TSP handoff buffer (u_taginvw): the {valid,tag,invW} slice
-    // TSP shade reads, split out of u_peel so it can be double-buffered. ISP stage-B
-    // writes a DUPLICATE of its u_peel accept into the PRODUCER half (tag_prod); TSP
-    // shade reads the CONSUMER half (tag_cons). With tag_prod==tag_cons this is exactly
-    // today's single-buffer behavior; advancing the toggles at tile handoff (Milestone
-    // 2) lets ISP rasterize tile N+1 into the other half while TSP shades tile N. ----
-    // TWO independent ping-pong indices:
-    //  * u_taginvw {tag,invW} is PER-PASS: htile = the half ISP rasters/CLEARs a shade-
-    //    input into (flips each raster pass); tsp_tag = the half TSP reads. Per-pass so
-    //    raster pass P+1 fills one half while TSP shades pass P from the other.
+    // ---- MULTI-BUFFERED ISP->TSP handoff buffer (u_taginvw): the {valid,tag,invW}
+    // slice TSP shade reads, split out of u_peel so it can be multi-buffered. ONE
+    // instance now holds TI_COPIES independent tile images inside a single
+    // simple-dual-port tile_ram: the copy index is the TOP bits of the bank address,
+    // wr_buf on the write port (ISP: raster duplicate / CLEAR / pbc walk) and rd_buf
+    // on the read port (spanner 4-wide group). Since the RAM is SDP, ISP writes copy
+    // htile while the spanner reads copy tsp_tag in the SAME cycle - the old
+    // one-instance-per-half ping-pong existed only to get those two ports, and it
+    // capped run-ahead at one pass. ----
+    // TWO independent buffer indices:
+    //  * u_taginvw {tag,invW} is PER-PASS: htile = the copy ISP rasters/CLEARs a shade-
+    //    input into (advances each raster pass); tsp_tag = the copy TSP reads. Per-pass
+    //    so raster pass P+1..P+TI_COPIES-1 fill other copies while TSP shades pass P.
     //  * u_col is PER-TILE and ping-pongs only TSP<->VO: tsp_col = the half TSP blends a
     //    whole tile's passes into (flips only when TSP posts a finished tile), col_vo =
     //    the half VO drains.
-    reg          htile;                  // ISP u_taginvw producer half (per pass)
-    reg          tsp_tag;                // TSP u_taginvw consumer half (per pass)
-    reg          tsp_col;               // TSP u_col blend half (per tile)
-    wire         tag_prod = htile;       // half ISP raster/CLEAR writes
-    wire         tag_cons = tsp_tag;     // half TSP shade reads
+    localparam integer TI_AW = $clog2(TI_COPIES);   // copy-index width (2 for 4 copies)
+    // htile/tsp_tag advance by plain +1 and rely on the binary wrap, so the count
+    // must be a power of two (and at least 2, or producer and consumer would alias).
+    generate
+      if ((TI_COPIES < 2) || (TI_COPIES & (TI_COPIES - 1)))
+          $error("peel_core: TI_COPIES must be a power of two >= 2");
+    endgenerate
+    reg [TI_AW-1:0] htile;               // ISP u_taginvw producer copy (per pass)
+    reg [TI_AW-1:0] tsp_tag;             // TSP u_taginvw consumer copy (per pass)
+    reg             tsp_col;             // TSP u_col blend half (per tile)
     // spanner_v2 drives the 4-wide aligned read (declared here; driven in the spanner region)
     wire        spv_rd_valid;
     wire [9:0]  spv_rd_group;
-    // per-half 4-wide aligned read outputs; the spanner consumes the CONSUMER half (tsp_tag)
-    wire [3:0]  g4_valid_h [0:1];
-    wire [31:0] g4_tag_h   [0:1][0:3];
-    wire [30:0] g4_invw_h  [0:1][0:3];
-    wire [3:0]  g4_pt_h    [0:1];
-    genvar gti;
-    generate
-      for (gti = 0; gti < 2; gti = gti + 1) begin : gtibuf
-        wire ti_prod = (tag_prod == gti[0]);
-        wire ti_cons = (tag_cons == gti[0]);
-        taginvw_tile_buffer #(.LANES(RAS_LANES)) u_taginvw (
-            .clk(clk), .reset(reset),
-            // stage-B accept duplicate (producer half only)
-            .wr_valid(ti_prod && b_valid), .wr_we(b_we),
-            .wr_y(b_oy), .wr_x(b_ox), .wr_tag(b_tag), .wr_invw(b_invw),
-            .wr_pt(b_peeling && b_which || b_fwd),  // PT alpha-test enable (peel+PT list, or
-                                                    // any forward PT-resolve fragment)
-            // CLEAR (producer half only)
-            .clr_valid(ti_prod && pb_clr_valid), .clr_addr(pb_clr_addr),
-            .clr_depth(regs.isp_backgnd_d[30:0]), .clr_tag(regs.isp_backgnd_t),
-            // PeelBuffers valid-clear walk (producer half; mirrors u_peel's pb write)
-            .pbc_valid(ti_prod && pb_bufwr_valid), .pbc_addr(pb_bufwr_addr),
-            // single-pixel shade read retired: spanner_v2 uses the 4-wide port
-            .sh_rd_valid(1'b0), .sh_rd_id(10'd0),
-            .sh_valid(), .sh_tag(), .sh_depth(), .sh_pt(),
-            // 4-wide aligned read (spanner_v2), driven on the CONSUMER half only
-            .rd4_valid(ti_cons && spv_rd_valid), .rd4_group(spv_rd_group),
-            .g4_valid(g4_valid_h[gti]), .g4_tag(g4_tag_h[gti]),
-            .g4_invw(g4_invw_h[gti]), .g4_pt(g4_pt_h[gti])
-        );
-      end
-    endgenerate
+    // 4-wide aligned read outputs (already the CONSUMER copy - rd_buf selects it inside)
+    wire [3:0]  g4_valid_c;
+    wire [31:0] g4_tag_c   [0:3];
+    wire [30:0] g4_invw_c  [0:3];
+    wire [3:0]  g4_pt_c;
+    taginvw_tile_buffer #(.LANES(RAS_LANES), .COPIES(TI_COPIES)) u_taginvw (
+        .clk(clk), .reset(reset),
+        // producer/consumer copy select (top address bits of the write/read port)
+        .wr_buf(htile), .rd_buf(tsp_tag),
+        // stage-B accept duplicate
+        .wr_valid(b_valid), .wr_we(b_we),
+        .wr_y(b_oy), .wr_x(b_ox), .wr_tag(b_tag), .wr_invw(b_invw),
+        .wr_pt(b_peeling && b_which || b_fwd),  // PT alpha-test enable (peel+PT list, or
+                                                // any forward PT-resolve fragment)
+        // CLEAR
+        .clr_valid(pb_clr_valid), .clr_addr(pb_clr_addr),
+        .clr_depth(regs.isp_backgnd_d[30:0]), .clr_tag(regs.isp_backgnd_t),
+        // PeelBuffers valid-clear walk (mirrors u_peel's pb write)
+        .pbc_valid(pb_bufwr_valid), .pbc_addr(pb_bufwr_addr),
+        // single-pixel shade read retired: spanner_v2 uses the 4-wide port
+        .sh_rd_valid(1'b0), .sh_rd_id(10'd0),
+        .sh_valid(), .sh_tag(), .sh_depth(), .sh_pt(),
+        // 4-wide aligned read (spanner_v2)
+        .rd4_valid(spv_rd_valid), .rd4_group(spv_rd_group),
+        .g4_valid(g4_valid_c), .g4_tag(g4_tag_c),
+        .g4_invw(g4_invw_c), .g4_pt(g4_pt_c)
+    );
 
     // ---- PING-PONG color buffer (2 halves): TSP blend fills the half of the tile it
     // is shading (col_prod = tsp_half); the decoupled video-out engine drains col_vo.
@@ -956,19 +965,10 @@ module peel_core import tsp_pkg::*; #(
     reg         spv_rd_done;          // 1-cyc: reader freed the oldest handed tile's ring range
     reg         spv_shade_mode;       // spn_xbase/ybase/tx/ty declared with the ISP origins
 
-    // ---- 4-wide taginvw read muxed to the CONSUMER half (tsp_tag). g4_*_h come from the
-    // taginvw generate above; spv_rd_valid/spv_rd_group are driven by spanner_v2 below. ----
-    wire [31:0] g4_tag_c  [0:3];
-    wire [30:0] g4_invw_c [0:3];
-    wire [3:0]  g4_valid_c = g4_valid_h[tsp_tag];
-    wire [3:0]  g4_pt_c    = g4_pt_h[tsp_tag];
-    genvar gm;
-    generate
-      for (gm = 0; gm < 4; gm = gm + 1) begin : g4mux
-        assign g4_tag_c [gm] = g4_tag_h [tsp_tag][gm];
-        assign g4_invw_c[gm] = g4_invw_h[tsp_tag][gm];
-      end
-    endgenerate
+    // ---- 4-wide taginvw read: g4_*_c come straight from u_taginvw above (its rd_buf
+    // is tsp_tag, so the read already targets the CONSUMER copy - no output mux, and
+    // no cross-half select cone into the spanner's resolve path). spv_rd_valid/
+    // spv_rd_group are driven by spanner_v2 below. ----
 
     // ---- spanner_v2 -> triangle_setups (SETUP write) + dense_span_buffer (SPANGEN spans) ----
     // sp_* dense span write bus is declared with the dense_span_buffer above. The span-count
@@ -1345,7 +1345,7 @@ module peel_core import tsp_pkg::*; #(
     reg [4:0]    pt_bb_x0,  pt_bb_x1,  pt_bb_y0,  pt_bb_y1;   // active clip
     reg          pt_bb_v;         // active clip valid (a pass has completed)
     reg          cb_ptres;        // CB stage: blend belongs to a PT-resolve pass
-    reg          ti_ptres [0:1];  // per-half: handed pass is a PT-resolve pass
+    reg          ti_ptres [0:TI_COPIES-1];  // per-copy: handed pass is a PT-resolve pass
     reg          md_ptres [0:MD_N-1];  // per-queued-pass PT-resolve flag
     localparam integer PEEL_MAX_PASS = 64;
     // ---- EMPTY-PASS shade skip: did the CURRENT raster pass stage anything? ----
@@ -1390,15 +1390,18 @@ module peel_core import tsp_pkg::*; #(
     // CLEAR + OP/peel raster into the OTHER u_taginvw/u_col half) while the TSP FSM
     // still shades tile N. Cross-FSM handshake (all regs written only in this one block,
     // so no multi-driver):
-    // PER-HALF READY CREDIT (ping-pong producer/consumer, like ISP->TSP and TSP->VO):
-    //   ti_ready[h] : ISP has finished rastering a shade-input into u_taginvw half h;
+    // PER-COPY READY CREDIT (producer/consumer ring over u_taginvw's TI_COPIES images):
+    //   ti_ready[h] : ISP has finished rastering a shade-input into u_taginvw copy h;
     //                 TSP may shade it. Set by ISP when a raster pass/OP completes,
-    //                 CLEARED by TSP when it finishes shading h. Per-half metadata:
+    //                 CLEARED by TSP when it finishes shading h. Per-copy metadata:
     //                 ti_mode (OP/PEEL), ti_last (final shade of the tile -> post color
     //                 to VO on drain), ti_tx/ti_ty (tile coords for the post).
-    // ISP toggles htile per raster PASS (not just per tile): shade pass P reads half A
-    // while raster pass P+1 writes half B -> raster P+1 OVERLAPS shade P. ISP stalls
-    // before rastering into a half that is still ti_ready (TSP hasn't consumed it).
+    // ISP advances htile per raster PASS (not just per tile): shade pass P reads copy k
+    // while raster pass P+1 writes copy k+1 -> raster P+1 OVERLAPS shade P. ISP stalls
+    // before rastering into a copy that is still ti_ready (TSP hasn't consumed it) -
+    // i.e. ONLY when it wraps onto the copy the spanner still owns, so it may run up to
+    // TI_COPIES-1 passes ahead. Both indices advance in the same direction and neither
+    // passes the other, so producer copy != consumer copy whenever ISP is unstalled.
     // ---- SPANNER_v2 GLUE FSM (spn) ----
     // Starts spanner_v2 on a ready input half, waits its busy->0 (all spans emitted + all
     // setups written into the shared triangle_setups ring), then hands the span_buffer_v2
@@ -1467,12 +1470,12 @@ module peel_core import tsp_pkg::*; #(
     initial stream_en = 1'b1;
 `endif
 
-    reg  [1:0] ti_ready;      // per-half: rastered, awaiting shade
-    reg        ti_mode [0:1]; // per-half OP(0)/PEEL(1)
-    reg        ti_last [0:1]; // per-half: this is the tile's final shade -> post color
-    reg        ti_postonly[0:1]; // per-half: no shade, just post u_col to VO (OP-only
+    reg  [TI_COPIES-1:0] ti_ready;      // per-copy: rastered, awaiting shade
+    reg        ti_mode [0:TI_COPIES-1]; // per-copy OP(0)/PEEL(1)
+    reg        ti_last [0:TI_COPIES-1]; // per-copy: this is the tile's final shade -> post color
+    reg        ti_postonly[0:TI_COPIES-1]; // per-copy: no shade, just post u_col to VO (OP-only
                                  // tile's FLUSH: color already accumulated by the OP shade)
-    reg  [5:0] ti_tx [0:1], ti_ty [0:1];  // per-half tile coords (for the VO post)
+    reg  [5:0] ti_tx [0:TI_COPIES-1], ti_ty [0:TI_COPIES-1];  // per-copy tile coords (VO post)
 
     // ---- entry FIFO (object_list_parser -> iterator), depth 8 ----
     localparam integer EQ_N = 8;
@@ -1673,6 +1676,7 @@ module peel_core import tsp_pkg::*; #(
     integer tri_count, cull_count, miss_count, hit_count, tri_seen;
     reg [5:0] cur_tx, cur_ty;      // latched tile coords (stable during lists)
     integer i, l, j;
+    integer ti_i;                  // loop var: per-copy u_taginvw credit arrays
 
 `ifndef SYNTHESIS
     // ---------------- performance counters (sim only) ----------------
@@ -1958,7 +1962,7 @@ module peel_core import tsp_pkg::*; #(
             pt_phase<=1'b0; pt_pass<=8'd0; pt_sh_pend<=3'd0; pt_more<=11'd0;
             pt_hand_p<=1'b0; pt_free_p<=1'b0; pt_stop<=1'b0;
             cb_ptres<=1'b0; cb2_ptres<=1'b0;
-            ti_ptres[0]<=1'b0; ti_ptres[1]<=1'b0;
+            for (ti_i=0; ti_i<TI_COPIES; ti_i=ti_i+1) ti_ptres[ti_i]<=1'b0;
             b_fwd<=1'b0;
             has_pt<=1'b0; has_tr<=1'b0; peel_which<=1'b0; wo_l<=1'b0;
             zk_l<=1'b0; zk_entry<=1'b0;
@@ -1979,10 +1983,10 @@ module peel_core import tsp_pkg::*; #(
 `ifndef SYNTHESIS
             spans_inflight<=0;
 `endif
-            ti_ready<=2'b00; tsp_tag<=1'b0; tsp_col<=1'b0;
-            ti_postonly[0]<=1'b0; ti_postonly[1]<=1'b0;
-            // htile = ISP u_taginvw producer half (per pass); tsp_tag/tsp_col above.
-            htile<=1'b0;
+            ti_ready<='0; tsp_tag<='0; tsp_col<=1'b0;
+            for (ti_i=0; ti_i<TI_COPIES; ti_i=ti_i+1) ti_postonly[ti_i]<=1'b0;
+            // htile = ISP u_taginvw producer copy (per pass); tsp_tag/tsp_col above.
+            htile<='0;
             pass_drew<=1'b0;
         end else begin
 `ifndef SYNTHESIS
@@ -2293,7 +2297,7 @@ module peel_core import tsp_pkg::*; #(
                     // idle with no pending u_col halves. Missing !col_post here dropped
                     // the FINAL tile's writeout (last-tile-black bug).
                     if (spn==G_IDLE && !spv_busy && tsp_st==R_IDLE &&
-                        ti_ready==2'b00 && md_empty &&
+                        ti_ready=='0 && md_empty &&
                         !col_post && vst==VO_IDLE && col_full==2'b00) begin
                         ra_done_l <= 1'b0;
                         st<=S_DONE;
@@ -2405,7 +2409,7 @@ module peel_core import tsp_pkg::*; #(
                             ti_postonly[htile] <= 1'b0;
                             ti_ptres[htile] <= 1'b0;
                             ti_tx[htile] <= cur_tx; ti_ty[htile] <= cur_ty;
-                            htile <= ~htile;
+                            htile <= htile + 1'b1;
 `ifndef SYNTHESIS
                             pc_hand <= pc_hand + 1;
 `endif
@@ -2452,7 +2456,7 @@ module peel_core import tsp_pkg::*; #(
                         ti_ptres[htile] <= 1'b0;
                         ti_postonly[htile] <= 1'b0;
                         ti_tx[htile] <= cur_tx; ti_ty[htile] <= cur_ty;
-                        htile <= ~htile;
+                        htile <= htile + 1'b1;
 `ifndef SYNTHESIS
                         pc_hand <= pc_hand + 1;
 `endif
@@ -2466,7 +2470,7 @@ module peel_core import tsp_pkg::*; #(
                         ti_last [htile] <= 1'b1;
                         ti_ptres[htile] <= 1'b0;
                         ti_tx[htile] <= cur_tx; ti_ty[htile] <= cur_ty;
-                        htile <= ~htile;
+                        htile <= htile + 1'b1;
 `ifndef SYNTHESIS
                         pc_hand <= pc_hand + 1;
 `endif
@@ -2566,7 +2570,7 @@ module peel_core import tsp_pkg::*; #(
                             ti_last [htile] <= 1'b1;
                             ti_ptres[htile] <= 1'b0;
                             ti_tx[htile] <= cur_tx; ti_ty[htile] <= cur_ty;
-                            htile <= ~htile;
+                            htile <= htile + 1'b1;
 `ifndef SYNTHESIS
                             pc_hand <= pc_hand + 1;
 `endif
@@ -2624,7 +2628,7 @@ module peel_core import tsp_pkg::*; #(
                     ti_postonly[htile] <= 1'b0;
                     ti_ptres[htile] <= 1'b1;
                     ti_tx[htile] <= cur_tx; ti_ty[htile] <= cur_ty;
-                    htile <= ~htile;
+                    htile <= htile + 1'b1;
                     pt_hand_p <= 1'b1;
 `ifndef SYNTHESIS
                     pc_hand    <= pc_hand + 1;
@@ -2656,7 +2660,7 @@ module peel_core import tsp_pkg::*; #(
                                                       // (must clear a stale post-only left by a
                                                       // prior tile's writeout on this half)
                         ti_tx   [htile] <= cur_tx; ti_ty[htile] <= cur_ty;
-                        htile <= ~htile;
+                        htile <= htile + 1'b1;
 `ifndef SYNTHESIS
                         pc_hand <= pc_hand + 1;
 `endif
@@ -2670,7 +2674,7 @@ module peel_core import tsp_pkg::*; #(
                             ti_last [htile] <= 1'b1;
                             ti_ptres[htile] <= 1'b0;
                             ti_tx[htile] <= cur_tx; ti_ty[htile] <= cur_ty;
-                            htile <= ~htile;
+                            htile <= htile + 1'b1;
 `ifndef SYNTHESIS
                             pc_hand <= pc_hand + 1;
 `endif
@@ -2730,7 +2734,7 @@ module peel_core import tsp_pkg::*; #(
                     ti_ptres[htile] <= 1'b0;
                     ti_postonly[htile] <= 1'b0;   // real shade, NOT a post-only (clear stale)
                     ti_tx   [htile] <= cur_tx; ti_ty[htile] <= cur_ty;
-                    htile <= ~htile;
+                    htile <= htile + 1'b1;
 `ifndef SYNTHESIS
                     pc_op_ff <= pc_op_ff + 1;
                     pc_hand  <= pc_hand + 1;
@@ -2936,7 +2940,7 @@ module peel_core import tsp_pkg::*; #(
                     md_ty  [md_wp[MD_AW-1:0]] <= ti_ty[tsp_tag];
                     md_wp <= md_wp + 1'b1;
                     ti_ready[tsp_tag]  <= 1'b0;
-                    tsp_tag  <= ~tsp_tag;
+                    tsp_tag  <= tsp_tag + 1'b1;
 `ifndef SYNTHESIS
                     pc_span <= pc_span + 1;
                     md_cnt_dbg[md_wp[MD_AW-1:0]] <= '0;  // post-only: 0 spans (never R_DRAIN-subtracted)
@@ -3010,7 +3014,7 @@ module peel_core import tsp_pkg::*; #(
                 md_cnt[mdp_idx] <= spv_sp_range_cnt;
                 md_fin[mdp_idx] <= 1'b1;
                 ti_ready[tsp_tag]  <= 1'b0;         // free the input half for ISP
-                tsp_tag  <= ~tsp_tag;
+                tsp_tag  <= tsp_tag + 1'b1;
 `ifndef SYNTHESIS
                 pc_span <= pc_span + 1;
                 // running "spans behind" counter: this pass adds its span count. Record the
@@ -3763,6 +3767,8 @@ module peel_core import tsp_pkg::*; #(
             16: occ_val = int'(of_wp - of_rp) & 7;    // wrapping 3-bit ptrs: mask (full = 4, not -4)
             17: occ_val = int'(d_owner);
             18: occ_val = int'(u_shade.pl_cnt);
+            // {col_vo, tsp_col, tsp_tag, htile} - the taginvw indices are TI_AW bits
+            // each now (2 at TI_COPIES=4), so this field is 2+2*TI_AW bits wide.
             19: occ_val = int'({col_vo, tsp_col, tsp_tag, htile});
             20: occ_val = int'(ti_ready);
             21: occ_val = int'(col_full);

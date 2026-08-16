@@ -36,7 +36,7 @@ BUILD = build
 CWD  := $(shell pwd)
 
 .PHONY: shade-drop raster-topleft coord-f32 interp depth-cmp-lp texfetchpl texmlp clean test tex tex-addr tex-uv tex-decode tex-filter tex-combiner \
-        oparse region regfile regen sortcache itquad itskip taginvw dense_span_buffer fog \
+        oparse region regfile regen sortcache itquad itskip taginvw taginvw-copies dense_span_buffer fog \
         frontendtsplp frontendtsplp-build golden-check spannerv2 mulc9 mul16sppro \
         add24sppro mulc9sppro add3sppro mul24sppro mul24c9sppro
 
@@ -231,6 +231,22 @@ taginvw: | $(BUILD)
 	  tb/taginvw_selftest.sv --Mdir $(BUILD)/obj_taginvw -o taginvw
 	./$(BUILD)/obj_taginvw/taginvw
 
+# taginvw_tile_buffer MULTI-COPY (oversize) unit test: the merged single-instance
+# buffer that replaced the two ping-pong halves - COPIES tile images in ONE SDP
+# tile_ram, selected by the top address bits (wr_buf / rd_buf). Checks per-copy
+# isolation, same-cycle write-copy-A / read-copy-B, CLEAR + PeelBuffers-walk copy
+# scoping, and the 8-bank group half-select. Run in three configs: the peel_core
+# shape (LANES=8, COPIES=4), 4-bank chunks, and the old 2-deep ping-pong depth.
+taginvw-copies: | $(BUILD)
+	@set -e; for cfg in 8:4 4:4 8:2; do \
+	  L=$${cfg%%:*}; C=$${cfg##*:}; \
+	  $(VERILATOR) --binary $(VFLAGS) -Wno-BLKSEQ --top-module taginvw_copies_selftest \
+	    -GLANES=$$L -GCOPIES=$$C \
+	    -Irtl/gen $(TSP_PKG) rtl/isp/tile_ram.sv rtl/buffers/taginvw_tile_buffer.sv \
+	    tb/taginvw_copies_selftest.sv --Mdir $(BUILD)/obj_taginvwcp_$$L_$$C -o taginvwcp; \
+	  ./$(BUILD)/obj_taginvwcp_$$L_$$C/taginvwcp; \
+	done
+
 # iterator PRE-FETCH sort$ skip unit test: real isp_primitive_iterator_pf + real
 # sort_cache (check port cross-wired as in peel_core) + behavioral burst DDR.
 # Verifies fully-rendered records skip their DDR burst, partially-done strips
@@ -258,6 +274,7 @@ frontendtsplp-build: | $(BUILD)
 	+$(VERILATOR) --cc --exe --build $(VFLAGS) -Wno-BLKSEQ --public-flat-rw \
 	  --top-module frontend_tsp_lp_tb_top $(RTL_INC) \
 	  $(if $(RASLANES),-GRAS_LANES=$(RASLANES),) \
+	  $(if $(TICOPIES),-GTI_COPIES=$(TICOPIES),) \
 	  $(TSP_PKG) $(RTL_EXTRA) tb/frontend_tsp_lp_tb_top.sv tb/sim_ddr_fb.sv \
 	  $(CWD)/tb/frontend_tsp_lp_tb.cpp --Mdir $(BUILD)/obj_frontendtsplp -o tb
 

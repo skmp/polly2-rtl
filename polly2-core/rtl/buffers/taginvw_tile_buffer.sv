@@ -1,6 +1,6 @@
 //
 // taginvw_tile_buffer - the ISP->TSP handoff buffer: the TSP-facing SLICE of the
-// peel depth/tag buffer, split out so it can be PING-PONGED independently of the
+// peel depth/tag buffer, split out so it can be MULTI-BUFFERED independently of the
 // ISP-private u_peel scratch (depth/depth2/tag2 + compare + PeelBuffers RMW).
 //
 // It holds only the three fields TSP shade actually reads - {valid, tag, invW} -
@@ -14,20 +14,37 @@
 // Storage: ONE simple-dual-port tile_ram, WIDTH = 65 bits/lane {pt, valid, tag[31:0],
 // invW[30:0]}, NBANKS = LANES. invW is a 31-bit SIGN-STRIPPED float (depths are
 // always positive non-zero). Same banking as peel_tile_buffer: bank = x[BW-1:0],
-// addr = {y[4:0], x[4:BW]}. One read port (shade single-pixel) + one write port
-// (raster stage-B duplicate | CLEAR).
+// addr = {buf, y[4:0], x[4:BW]}. One read port (shade single-pixel | spanner group)
+// + one write port (raster stage-B duplicate | CLEAR | PeelBuffers walk).
 //
-// Read clients  (at most one/cycle): shade single-pixel read.
-// Write clients (at most one/cycle): raster stage-B duplicate | CLEAR.
-// The peel_core credit handshake serializes producers/consumers per ping-pong
-// half, so at most one read and one write client is asserted per cycle; the module
-// asserts this (sim).
+// COPIES = the OVERSIZE factor: this ONE buffer holds COPIES independent tile
+// images ("quarters" at COPIES=4), selected by the TOP address bits - wr_buf for
+// every write client, rd_buf for every read client. Because the underlying bank is
+// simple-dual-port, the producer (ISP) writes copy wr_buf while the consumer
+// (spanner) reads copy rd_buf in the SAME cycle. This REPLACES the old two-instance
+// ping-pong: peel_core keeps one ready-credit bit per copy and only stalls the ISP
+// when the copy it wants to write is still owned by a reader, so with COPIES=4 the
+// ISP may run three passes ahead instead of one.
+//
+// The two ports are independent, but each port still has at most ONE client per
+// cycle (the peel_core credit handshake serializes them); the module asserts this
+// for the write port (sim). wr_buf/rd_buf may be equal only when peel_core knows
+// no reader is live on that copy (e.g. COPIES==1 degenerates to the old single
+// buffer); the RAM is read-first, so a same-address collision would return stale
+// data rather than corrupt state.
 //
 module taginvw_tile_buffer import tsp_pkg::*; #(
-    parameter integer LANES = 8
+    parameter integer LANES  = 8,
+    parameter integer COPIES = 1                 // 1, 2, 4, 8, ... tile images
 ) (
     input                       clk,
     input                       reset,
+
+    // ---- copy (buffer image) select: TOP bits of the RAM address ----
+    // wr_buf applies to ALL write clients (raster duplicate / CLEAR / pbc walk),
+    // rd_buf to ALL read clients (shade single-pixel / spanner 4-wide group).
+    input      [(COPIES>1 ? $clog2(COPIES) : 1)-1:0] wr_buf,
+    input      [(COPIES>1 ? $clog2(COPIES) : 1)-1:0] rd_buf,
 
     // ---- RASTER stage-B duplicate: write {valid,tag,invW} for the passing lanes ----
     // wr_we[l] is peel_tile_buffer's per-lane accept for lane l (already masked by
@@ -82,7 +99,13 @@ module taginvw_tile_buffer import tsp_pkg::*; #(
 );
     localparam integer NB        = LANES;
     localparam integer BANK_BITS = $clog2(LANES);   // 3 for 8, 2 for 4
-    localparam integer AW        = 10 - BANK_BITS;   // per-bank addr width (7 / 8)
+    localparam integer TAW       = 10 - BANK_BITS;   // in-tile addr width (7 / 8)
+    localparam integer CB        = (COPIES > 1) ? $clog2(COPIES) : 0;  // copy-select bits
+    localparam integer AW        = CB + TAW;         // per-bank addr width
+    generate
+      if (COPIES & (COPIES - 1))
+          $error("taginvw_tile_buffer: COPIES must be a power of two");
+    endgenerate
     localparam integer TW_INVW   = 0;    // [30:0] depthBufferA (invW, sign-stripped)
     localparam integer TW_TAG    = 31;   // [31:0] tagBufferA
     localparam integer TW_VALID  = 63;   // [0]    tagStatus.valid
@@ -94,26 +117,37 @@ module taginvw_tile_buffer import tsp_pkg::*; #(
     reg  [AW*NB-1:0]     raddr;
     reg  [TI_W*NB-1:0]   wdata;
     wire [TI_W*NB-1:0]   rdata;
-    tile_ram #(.WIDTH(TI_W), .NBANKS(NB)) u_ram (
+    tile_ram #(.WIDTH(TI_W), .NBANKS(NB), .COPIES(COPIES)) u_ram (
         .clk(clk), .we(we), .waddr(waddr), .wdata(wdata),
         .raddr(raddr), .rdata(rdata)
     );
 
-    // pack an AW-bit bank address {y[4:0], x[4:BANK_BITS]} onto all NB banks
-    function automatic [AW*NB-1:0] pack_addr(input [4:0] y, input [4:0] xchunk);
+    // copy-select as an address OFFSET (copy << TAW), i.e. the TOP CB bits of the
+    // bank address. Written as a shift rather than a concatenation so it degenerates
+    // cleanly to a constant 0 when COPIES==1 (CB==0, no copy bits at all).
+    wire [AW-1:0] wbase = (COPIES > 1) ? (AW'(wr_buf) << TAW) : {AW{1'b0}};
+    wire [AW-1:0] rbase = (COPIES > 1) ? (AW'(rd_buf) << TAW) : {AW{1'b0}};
+
+    // broadcast one AW-bit bank address {copy, in-tile addr} onto all NB banks
+    function automatic [AW*NB-1:0] bcast_addr(input [AW-1:0] a);
         integer b;
         begin
-            pack_addr = '0;
-            for (b = 0; b < NB; b = b + 1)
-                pack_addr[AW*b +: AW] = {y, xchunk[4:BANK_BITS]};
+            bcast_addr = '0;
+            for (b = 0; b < NB; b = b + 1) bcast_addr[AW*b +: AW] = a;
+        end
+    endfunction
+    // ... for a raster chunk: {wr_buf, y[4:0], x[4:BANK_BITS]}
+    function automatic [AW*NB-1:0] pack_addr(input [4:0] y, input [4:0] xchunk);
+        begin
+            pack_addr = bcast_addr(wbase | AW'({y, xchunk[4:BANK_BITS]}));
         end
     endfunction
 
     // -------------------- READ port (single-pixel OR 4-wide aligned group) --------------
     always @(*) begin
         raddr = '0;
-        if (rd4_valid)        raddr = {NB{ {rd4_group[9:5], rd4_group[4:BANK_BITS]} }};
-        else if (sh_rd_valid) raddr = {NB{ {sh_rd_id[9:5],  sh_rd_id[4:BANK_BITS]}  }};
+        if (rd4_valid)        raddr = bcast_addr(rbase | AW'({rd4_group[9:5], rd4_group[4:BANK_BITS]}));
+        else if (sh_rd_valid) raddr = bcast_addr(rbase | AW'({sh_rd_id[9:5],  sh_rd_id[4:BANK_BITS]}));
     end
 
     // 4-wide group outputs: select the 4-bank slice holding the aligned group
@@ -148,7 +182,7 @@ module taginvw_tile_buffer import tsp_pkg::*; #(
 
         if (clr_valid) begin                       // CLEAR: {valid=0,tag,invW} all banks
             we    = {NB{1'b1}};
-            waddr = {NB{clr_addr}};
+            waddr = bcast_addr(wbase | AW'(clr_addr));
             for (cw = 0; cw < NB; cw = cw + 1) begin
                 wdata[TI_W*cw + TW_INVW +: 31] = clr_depth;
                 wdata[TI_W*cw + TW_TAG  +: 32] = clr_tag;
@@ -163,7 +197,7 @@ module taginvw_tile_buffer import tsp_pkg::*; #(
             // Blind-write valid=0 (tag/invW become 0 but are never read while valid=0;
             // the next peel pass's raster accept overwrites all three before any read).
             we    = {NB{1'b1}};
-            waddr = {NB{pbc_addr}};
+            waddr = bcast_addr(wbase | AW'(pbc_addr));
             // wdata already all-zero from the reset above -> valid=0, tag=0, invW=0.
         end else if (wr_valid) begin               // stage-B accept duplicate
             waddr = pack_addr(wr_y, wr_x);
