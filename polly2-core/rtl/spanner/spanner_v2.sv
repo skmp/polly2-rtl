@@ -912,5 +912,75 @@ module spanner_v2 import tsp_pkg::*; #(
         if ((alloc_seq - ts_seq) > SEQ_W'(64))
             $error("spanner_v2: setup engine impossibly far behind (%0d)", alloc_seq - ts_seq);
     end
+
+    // ---- RING SIZING STATS (final-block, always on; cheap counters) --------------
+    // Answers "is RING_N=1024 over-provisioned?". The binding number is NOT setups
+    // per tile pass - it is how far alloc runs AHEAD of the reader (ring_ahead),
+    // because the ring is a streaming window, not a per-pass array. RING_N only has
+    // to cover the run-ahead plus the WINDOW lookback, and the capacity gate already
+    // clamps run-ahead at RING_N-WINDOW. So a shrink is safe iff the observed
+    // high-water stays well under the NEW RING_N-WINDOW, and cheap iff the dedup
+    // hit-rate does not collapse (older reuse hits fall outside a smaller WINDOW and
+    // re-setup instead).
+    integer st_alloc, st_emit, st_ringstall, st_tiles, st_ahead_hw;
+    integer st_tile_alloc, st_tile_hw, st_pass_hist [0:16];
+    integer st_rd_hist [0:16], st_rd_max;
+    integer sthi;
+    initial begin
+        st_alloc=0; st_emit=0; st_ringstall=0; st_tiles=0; st_ahead_hw=0;
+        st_tile_alloc=0; st_tile_hw=0; st_rd_max=0;
+        for (sthi=0; sthi<=16; sthi=sthi+1) begin st_pass_hist[sthi]=0; st_rd_hist[sthi]=0; end
+    end
+    // Periodic emit so a scene that is KILLED on a timeout (some dumps have
+    // unterminated OPBs and render for hours) still leaves its high-water behind -
+    // the stats are monotonic, so a partial line is a valid LOWER BOUND.
+    integer st_cyc;
+    initial st_cyc = 0;
+    always @(posedge clk) if (!reset) begin
+        st_cyc <= st_cyc + 1;
+        if (st_cyc != 0 && st_cyc % 20000000 == 0)
+            $display("=== SPANRINGP %m: cyc=%0d passes=%0d allocs=%0d spans=%0d ahead_hw=%0d stall=%0d maxpass=%0d ===",
+                     st_cyc, st_tiles, st_alloc, st_emit, st_ahead_hw, st_ringstall, st_tile_hw);
+    end
+
+    always @(posedge clk) if (!reset) begin
+        if (ring_ahead > SEQ_W'(st_ahead_hw)) st_ahead_hw <= ring_ahead;
+        if (emit_stall_ring) st_ringstall <= st_ringstall + 1;
+        if (dd_emit_we) begin                       // an ALLOC (dedup miss)
+            st_alloc      <= st_alloc + 1;
+            st_tile_alloc <= st_tile_alloc + 1;
+        end
+        if (sp_we) st_emit <= st_emit + 1;          // spans emitted (alloc + dedup hit)
+        // REUSE DISTANCE: how far back the dedup hit reached. This is what sets the
+        // WINDOW floor - a smaller WINDOW turns every hit beyond it into a re-setup.
+        if (is_dedup_hit && sp_we) begin
+            st_rd_hist[ ((alloc_seq - eff_seq) == 0) ? 0 : $clog2((alloc_seq - eff_seq) + 1) ]
+              <= st_rd_hist[ ((alloc_seq - eff_seq) == 0) ? 0 : $clog2((alloc_seq - eff_seq) + 1) ] + 1;
+            if ((alloc_seq - eff_seq) > SEQ_W'(st_rd_max)) st_rd_max <= alloc_seq - eff_seq;
+        end
+        if (start) begin                            // tile PASS boundary
+            st_tiles <= st_tiles + 1;
+            if (st_tile_alloc > st_tile_hw) st_tile_hw <= st_tile_alloc;
+            // log2 bucket of this pass's allocations
+            st_pass_hist[ (st_tile_alloc == 0) ? 0 : $clog2(st_tile_alloc+1) ]
+                <= st_pass_hist[ (st_tile_alloc == 0) ? 0 : $clog2(st_tile_alloc+1) ] + 1;
+            st_tile_alloc <= 0;
+        end
+    end
+    final begin
+        $display("=== SPANRING %m: RING_N=%0d WINDOW=%0d cap=%0d | passes=%0d allocs=%0d spans=%0d dedup_hit=%0d (%.1f%%) ===",
+                 RING_N, WINDOW, RING_N-WINDOW, st_tiles, st_alloc, st_emit,
+                 st_emit-st_alloc, st_emit ? 100.0*real'(st_emit-st_alloc)/real'(st_emit) : 0.0);
+        $display("=== SPANRING %m: ring_ahead HIGH-WATER=%0d (cap %0d) | ring_full stall cycles=%0d | max allocs in ONE pass=%0d ===",
+                 st_ahead_hw, RING_N-WINDOW, st_ringstall, st_tile_hw);
+        $write("=== SPANRING %m: allocs-per-pass log2 histogram:");
+        for (sthi=0; sthi<=12; sthi=sthi+1)
+            if (st_pass_hist[sthi]) $write(" <=%0d:%0d", (1<<sthi)-1, st_pass_hist[sthi]);
+        $display(" ===");
+        $write("=== SPANRD %m: reuse-distance histogram (max=%0d):", st_rd_max);
+        for (sthi=0; sthi<=12; sthi=sthi+1)
+            if (st_rd_hist[sthi]) $write(" <=%0d:%0d", (1<<sthi)-1, st_rd_hist[sthi]);
+        $display(" ===");
+    end
 `endif
 endmodule
