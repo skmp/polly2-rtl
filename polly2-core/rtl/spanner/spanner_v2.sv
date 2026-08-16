@@ -162,11 +162,19 @@ module spanner_v2 import tsp_pkg::*; #(
     input  ddr_rd_resp_t        dresp
 );
     localparam integer GB = $clog2(GW);          // intra-group lane index width
-    generate
-      if (GW & (GW - 1))     $error("spanner_v2: GW must be a power of two");
-      if (REP_MAX > GW)      $error("spanner_v2: REP_MAX must not exceed GW");
-      if (REP_MAX > 4)       $error("spanner_v2: REP_MAX > 4 needs a wider sp_rep and dense_span_buffer");
-    endgenerate
+    // Parameter sanity - time-0 procedural, not elaboration-time inside a generate:
+    // Quartus rejects SystemVerilog elaboration system tasks there (10170).
+`ifndef SYNTHESIS
+    initial begin
+        if (GW & (GW - 1))
+            $error("spanner_v2: GW must be a power of two (got %0d)", GW);
+        if (REP_MAX > GW)
+            $error("spanner_v2: REP_MAX (%0d) must not exceed GW (%0d)", REP_MAX, GW);
+        if (REP_MAX > 4)
+            $error("spanner_v2: REP_MAX=%0d > 4 needs a wider sp_rep and dense_span_buffer",
+                   REP_MAX);
+    end
+`endif
     // ============================ dedup map + setup-id ring ============================
     // id = BUMP-ALLOCATED (top_tag), not the hash. The dedup MAP is a direct-mapped M10K
     // (indexed by pc_slot(tag)) that remembers, per hash bucket, {gen, tag, id} = which
