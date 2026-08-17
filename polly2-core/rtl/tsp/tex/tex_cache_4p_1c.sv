@@ -320,14 +320,22 @@ module tex_cache_4p_1c import tsp_pkg::*; (
     wire [255:0] rdat0, rdat1, rdat2, rdat3;
     wire [MW-1:0] rmeta0, rmeta1, rmeta2, rmeta3;
 
+    // PER-ARRAY `keep` COPIES OF THE WRITE ENABLE. data_we/meta_we each drive a
+    // 256-bit-wide array's worth of M10K write-enable pins AND the address mux in front
+    // of it; as one shared node `fill_we` reached fanout 292 and sat on the worst
+    // texture-cache path (bridge -> d_beat -> fill_we -> wdata -> M10K, four long hops).
+    // One copy per array lets the fitter put each next to the M10Ks it enables. Same
+    // expression, same value - `keep` only stops synthesis re-merging them.
+    (* keep = 1 *) wire data_we_a = data_we;
+    (* keep = 1 *) wire data_we_b = data_we;
     bram_tdp #(.W(256), .D(NLINE)) u_data_a (
         .clk(clk),
-        .a_en(rd_en), .a_we(data_we), .a_addr(data_we ? wa : rd_ix[0]),
+        .a_en(rd_en), .a_we(data_we_a), .a_addr(data_we_a ? wa : rd_ix[0]),
         .a_din(wdata), .a_q(rdat0),
         .b_en(rd_en), .b_addr(rd_ix[1]), .b_q(rdat1));
     bram_tdp #(.W(256), .D(NLINE)) u_data_b (
         .clk(clk),
-        .a_en(rd_en), .a_we(data_we), .a_addr(data_we ? wa : rd_ix[2]),
+        .a_en(rd_en), .a_we(data_we_b), .a_addr(data_we_b ? wa : rd_ix[2]),
         .a_din(wdata), .a_q(rdat2),
         .b_en(rd_en), .b_addr(rd_ix[3]), .b_q(rdat3));
     // ---- PROBE: 4 tags/cycle off the IDLE demand meta ports ----
@@ -358,14 +366,16 @@ module tex_cache_4p_1c import tsp_pkg::*; (
     wire [IXW-1:0] ma_b =                 probe_go ? pf_ix[1] : rd_ix[1];
     wire [IXW-1:0] mb_a = meta_we ? wa : (probe_go ? pf_ix[2] : rd_ix[2]);
     wire [IXW-1:0] mb_b =                 probe_go ? pf_ix[3] : rd_ix[3];
+    (* keep = 1 *) wire meta_we_a = meta_we;
+    (* keep = 1 *) wire meta_we_b = meta_we;
     bram_tdp #(.W(MW), .D(NLINE)) u_meta_a (
         .clk(clk),
-        .a_en(rd_en || probe_go || pchk_go), .a_we(meta_we), .a_addr(ma_a),
+        .a_en(rd_en || probe_go || pchk_go), .a_we(meta_we_a), .a_addr(ma_a),
         .a_din(wmeta), .a_q(rmeta0),
         .b_en(rd_en || probe_go), .b_addr(ma_b), .b_q(rmeta1));
     bram_tdp #(.W(MW), .D(NLINE)) u_meta_b (
         .clk(clk),
-        .a_en(rd_en || probe_go), .a_we(meta_we), .a_addr(mb_a),
+        .a_en(rd_en || probe_go), .a_we(meta_we_b), .a_addr(mb_a),
         .a_din(wmeta), .a_q(rmeta2),
         .b_en(rd_en || probe_go), .b_addr(mb_b), .b_q(rmeta3));
 

@@ -388,8 +388,15 @@ module tex_fetch4_ob import tsp_pkg::*; #(
     // vq_resp.rdata for that drain cycle (the cache's rdata is itself registered, so
     // this is register -> mux -> pin). Without this the codebook lookup is skipped
     // and VQ textures fetch the raw index word.
+    // ONE `keep` COPY OF THE SELECT PER CORNER. As a single shared term this drove all
+    // 4x64 = 256 mux LUTs (`texel~0`, fanout 256) and the hop out of it cost 1.399 ns of
+    // route on the way into tex_decode. The four corners sit in different LABs, so one
+    // driver cannot be near all of them; `keep` stops synthesis re-merging the copies
+    // and lets the fitter place each next to the 64 muxes it feeds. Same logic, same
+    // value - fanout only.
     generate for (gi=0; gi<4; gi=gi+1) begin : out
-        assign texel[gi] = (t2b_v && t2b_vq && !t2b_dv) ? vq_resp[gi].rdata : t2b_word[gi];
+        (* keep = 1 *) wire vq_bypass = t2b_v && t2b_vq && !t2b_dv;
+        assign texel[gi] = vq_bypass ? vq_resp[gi].rdata : t2b_word[gi];
     end endgenerate
     assign out_pl = t2b_pl;    // payload rode every stage in lockstep with the texels
     // out_valid is the DRAIN PULSE (t2b_adv), NOT the T2b-occupied level. A VQ pixel

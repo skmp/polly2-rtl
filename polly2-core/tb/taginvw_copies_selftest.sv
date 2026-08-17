@@ -87,7 +87,23 @@ module taginvw_copies_selftest import tsp_pkg::*; #(
             for (k = 0; k < LANES; k = k + 1)
                 wr_invw[31*k +: 31] = iv0 + 31'(k);
             @(posedge clk); #1 wr_valid = 1'b0; wr_we = '0;
+            // SETTLE CYCLE for the REG_WRITE=1 write pipeline. The write port is now
+            // registered (see taginvw_tile_buffer's WRITE PORT PIPELINE comment), so a
+            // write presented on cycle T lands on T+1; a read presented on T+1 would hit
+            // the read-first RAM on the same edge and return stale data. Reading a copy
+            // one cycle after writing it is NOT something peel_core can do - the ti_ready
+            // credit only goes up from states gated on `consumer_idle && fq_empty`, many
+            // cycles after the last accept - so this models the real contract rather than
+            // relaxing it. Harmless under REG_WRITE=0 (just one idle cycle).
+            @(posedge clk); #1;
         end
+    endtask
+
+    // one idle cycle, letting a registered (REG_WRITE=1) write land before the next
+    // read is presented - see the note in wr_chunk. Used after the raw inline writes
+    // (the concurrent-write loop, CLEAR, pbc) that do not go through wr_chunk.
+    task settle;
+        begin @(posedge clk); #1; end
     endtask
 
     // present a 4-wide aligned read of copy `cp` at the group holding pixel (y,x);
@@ -198,6 +214,7 @@ module taginvw_copies_selftest import tsp_pkg::*; #(
                 wr_valid = 1'b0; wr_we = '0; rd4_valid = 1'b0;
                 chk_group($sformatf("B beat %0d", k), tag_of(0), invw_of(0), 0, 1'b1, 1'b0);
             end
+            settle;   // last copy-1 write above must land before reading copy 1
             rd4(1, 5'd3, 5'd8);
             chk_group("B copy1 final", 32'hBEEF_0007, 31'd900 + 31'(7*LANES), 0, 1'b1, 1'b0);
             // copy 0 untouched by all that
@@ -214,6 +231,7 @@ module taginvw_copies_selftest import tsp_pkg::*; #(
         clr_depth = 31'h7F7F_7F7F;
         clr_tag   = 32'h0BAD_F00D;
         @(posedge clk); #1 clr_valid = 1'b0;
+        settle;   // CLEAR is a write too - let it land before reading the copy back
 
         rd4(COPIES-1, 5'd3, 5'd8);
         for (l = 0; l < 4; l = l + 1) begin
@@ -238,6 +256,7 @@ module taginvw_copies_selftest import tsp_pkg::*; #(
         pbc_valid = 1'b1;
         pbc_addr  = TCHUNK;
         @(posedge clk); #1 pbc_valid = 1'b0;
+        settle;   // ditto for the PeelBuffers valid-clear walk
 
         rd4(0, 5'd3, 5'd8);
         for (l = 0; l < 4; l = l + 1)

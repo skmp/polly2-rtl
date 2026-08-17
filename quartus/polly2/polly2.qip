@@ -128,3 +128,4 @@ set_global_assignment -name SYSTEMVERILOG_FILE ../../mister/sysmem.sv
 set_global_assignment -name QIP_FILE ../../polly2-de10nano/plls/pll.qip
 set_global_assignment -name QIP_FILE ../../polly2-de10nano/plls/pll_hdmi.qip
 set_global_assignment -name QIP_FILE ../../polly2-de10nano/plls/pll_audio.qip
+set_global_assignment -name QIP_FILE ../../polly2-de10nano/plls/switch/altclkctrl/synthesis/altclkctrl.qip

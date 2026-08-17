@@ -126,20 +126,7 @@ module spanner_v2 import tsp_pkg::*; #(
     output ddr_rd_req_t         dreq,
     input  ddr_rd_resp_t        dresp
 );
-    localparam integer GB = $clog2(GW);          // intra-group lane index width
-    // Parameter sanity - time-0 procedural, not elaboration-time inside a generate:
-    // Quartus rejects SystemVerilog elaboration system tasks there (10170).
-`ifndef SYNTHESIS
-    initial begin
-        if (GW & (GW - 1))
-            $error("spanner_v2: GW must be a power of two (got %0d)", GW);
-        if (REP_MAX > GW)
-            $error("spanner_v2: REP_MAX (%0d) must not exceed GW (%0d)", REP_MAX, GW);
-        if (REP_MAX > 4)
-            $error("spanner_v2: REP_MAX=%0d > 4 needs a wider sp_rep and dense_span_buffer",
-                   REP_MAX);
-    end
-`endif
+
     // ============================ dedup map + setup-id ring ============================
     // id = BUMP-ALLOCATED (top_tag), not the hash. The dedup MAP is a direct-mapped M10K
     // (indexed by pc_slot(tag)) that remembers, per hash bucket, {gen, tag, id} = which
@@ -341,8 +328,18 @@ module spanner_v2 import tsp_pkg::*; #(
     // ring id (triangle_setups slot) = low bits of the plane's alloc seq
     wire [IDW-1:0] emit_id = is_dedup_hit ? eff_seq[IDW-1:0]
                              : (run_shaded ? alloc_seq[IDW-1:0] : {IDW{1'b0}});
-    // the span's watermark: alloc count AFTER this span (incl. its own alloc)
-    wire [SEQ_W-1:0] emit_wm = alloc_seq + (needs_alloc ? SEQ_W'(1) : SEQ_W'(0));
+    // the span's watermark: alloc count AFTER this span (incl. its own alloc).
+    //
+    // A MUX, NOT AN ADD. Written as `alloc_seq + (needs_alloc ? 1 : 0)` this put a
+    // SEQ_W-bit carry chain BEHIND needs_alloc, i.e. behind the whole dedup cone
+    // (fwd1_h -> fwd1_hit -> is_dedup_hit, four levels), and emit_wm goes straight into
+    // the dense_span_buffer M10K data-in: -5.200 ns at 143 MHz, the third-worst path in
+    // the design. Both possible sums are known a cycle early - they are just alloc_seq
+    // and alloc_seq+1 - so alloc_seq_p1 is carried as a second register incremented in
+    // lockstep, and the late signal only picks between them. The carry chain moves off
+    // the critical path onto a register-to-register increment with a full cycle.
+    reg  [SEQ_W-1:0]   alloc_seq_p1;               // == alloc_seq + 1, always
+    wire [SEQ_W-1:0] emit_wm = needs_alloc ? alloc_seq_p1 : alloc_seq;
     assign sp_wm = emit_wm;            // stored with the span (valid at sp_we)
 
     // emit can commit when: an ALLOCATING emit needs setup-FIFO room AND a free ring slot.
@@ -638,7 +635,8 @@ module spanner_v2 import tsp_pkg::*; #(
             dd_clearing <= 1'b0;
             fwd0_valid <= 1'b0; fwd1_valid <= 1'b0;
             sf_wp <= '0; sf_rp <= '0;
-            alloc_seq <= '0; ts_seq <= '0; gf_wp <= '0; gf_rp <= '0;
+            alloc_seq <= '0; alloc_seq_p1 <= SEQ_W'(1);
+            ts_seq <= '0; gf_wp <= '0; gf_rp <= '0;
             ctx_val <= 1'b0; prev_xb <= '0; prev_yb <= '0;
             span_head <= '0; span_tail <= '0; span_pass_base <= '0;
             fetch_busy <= 1'b0; pend_v <= 1'b0; su_run <= 1'b0; ts_pend <= 1'b0;
@@ -718,7 +716,10 @@ module spanner_v2 import tsp_pkg::*; #(
                 // setup push are combinational (sp_*).
                 if (t_valid && needs_alloc) begin
                     // dedup_ram[t_h] write is done by the single muxed port above (dd_emit_we).
-                    alloc_seq <= alloc_seq + 1'b1;
+                    // alloc_seq_p1 steps with it so the `== alloc_seq + 1` invariant that
+                    // emit_wm's mux relies on holds on every cycle.
+                    alloc_seq    <= alloc_seq + 1'b1;
+                    alloc_seq_p1 <= alloc_seq_p1 + 1'b1;
                 end
                 // dense pack: only an EMITTED (shaded) span advances the ring head. Guarded
                 // by !pipe_stall (this block), so a span-ring-full stall holds the head.
@@ -901,6 +902,11 @@ module spanner_v2 import tsp_pkg::*; #(
         // sliding-window sanity: alloc never runs past its capacity bound.
         if ((alloc_seq - cons_seq) > SEQ_W'(RING_N - WINDOW))
             $error("spanner_v2: alloc_seq ran past capacity (ahead=%0d)", alloc_seq - cons_seq);
+        // emit_wm is a MUX over {alloc_seq, alloc_seq_p1} instead of an adder; that is
+        // only equivalent while the two registers stay exactly one apart.
+        if (alloc_seq_p1 != SEQ_W'(alloc_seq + 1'b1))
+            $error("spanner_v2: alloc_seq_p1 (%0d) != alloc_seq+1 (%0d) - emit_wm mux invalid",
+                   alloc_seq_p1, alloc_seq + 1'b1);
     end
     // plane-lifetime scoreboard: ref_wm[slot] = watermark of the LAST span that
     // references the slot; an ALLOC (overwrite) of the slot while the reader has

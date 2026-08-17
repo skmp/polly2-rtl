@@ -237,6 +237,7 @@ module isp_raster_line import tsp_pkg::*; #(
     reg probe_c;
     always @(posedge clk) if (reset) probe_c <= 1'b0; else probe_c <= in_valid && probe;
     reg [31:0] ch_cst [0:NCH-1], ch_row [0:NCH-1], ch_col [0:NCH-1];
+    reg  [7:0] ch_e   [0:NCH-1];                 // shared exponent, pre-computed here
     reg [31:0] dxc [0:3], dyc [0:3];
     reg  [4:0] y_c, xb_c;
     always @(posedge clk) begin
@@ -247,6 +248,19 @@ module isp_raster_line import tsp_pkg::*; #(
         ch_col[0]<=fneg(dy12); ch_col[1]<=fneg(dy23);
         ch_col[2]<=fneg(dy31); ch_col[3]<=fneg(dy41);
         ch_cst[WCH]<=c_invw; ch_row[WCH]<=ddy; ch_col[WCH]<=ddx;
+        // THE SHARED EXPONENT IS COMPUTED HERE, NOT IN s1. emax3 reads nothing but
+        // the three exponent fields, and ch_cst/ch_row/ch_col are plain registered
+        // copies of these very inputs - so E is bit-identical either way, one cycle
+        // earlier. It matters because in s1 the max-of-3 sat in FRONT of the barrel
+        // shifter: `E = emax3(...)` -> `sh = E - e` -> `>> sh` -> negate was a single
+        // 9-level path and the worst violation in the block (-5.255 ns at 143 MHz,
+        // with the two LessThan cones alone costing ~5 ns of it). s0 is a pure
+        // register stage with >3.2 ns of slack, so the compares are free here.
+        // (fneg only flips bit 31; emax3 looks at [30:23], so negating or not is
+        // immaterial - it is kept to mirror the ch_col assignment above exactly.)
+        ch_e[0]<=emax3(c1, dx12, fneg(dy12)); ch_e[1]<=emax3(c2, dx23, fneg(dy23));
+        ch_e[2]<=emax3(c3, dx31, fneg(dy31)); ch_e[3]<=emax3(c4, dx41, fneg(dy41));
+        ch_e[WCH]<=emax3(c_invw, ddy, ddx);
         y_c <= y; xb_c <= x_base;
     end
 
@@ -290,18 +304,17 @@ module isp_raster_line import tsp_pkg::*; #(
       for (gc = 0; gc < NCH; gc = gc + 1) begin : ch
         localparam integer W = (gc == WCH) ? FXW : EW;
 
-        // ---- s1: shared exponent + alignment. The only barrel shifters on the
-        // path; everything after this is adds. ----
+        // ---- s1: alignment. The only barrel shifters on the path; everything after
+        // this is adds. The shared exponent arrives already computed from s0
+        // (ch_e[gc]), so this stage is now just `sh = E - e` -> shift -> negate. ----
         reg signed [W-1:0] al_cst, al_row, al_col;
         reg        [7:0]   al_e;
         reg        [4:0]   al_y, al_x;
         always @(posedge clk) begin : align_stage
-            reg [7:0] E;
-            E      = emax3(ch_cst[gc], ch_row[gc], ch_col[gc]);
-            al_e   <= E;
-            al_cst <= align_fx(ch_cst[gc], E, W);
-            al_row <= align_fx(ch_row[gc], E, W);
-            al_col <= align_fx(ch_col[gc], E, W);
+            al_e   <= ch_e[gc];
+            al_cst <= align_fx(ch_cst[gc], ch_e[gc], W);
+            al_row <= align_fx(ch_row[gc], ch_e[gc], W);
+            al_col <= align_fx(ch_col[gc], ch_e[gc], W);
             al_y   <= y_sel[gc];
             al_x   <= x_sel[gc];
         end

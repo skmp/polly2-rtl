@@ -92,10 +92,23 @@ module tex_decode (
                                   : (offset[1] ? memtel[55:48] : memtel[23:16]);
     wire signed [9:0] yu_c = $signed({2'b0, yuv_u8}) - 10'sd128;   // u-128
     wire signed [9:0] yv_c = $signed({2'b0, yuv_v8}) - 10'sd128;   // v-128
-    (* multstyle = "logic" *) wire signed [17:0] m_yu11_c  = yu_c * 18'sd11;
-    (* multstyle = "logic" *) wire signed [17:0] m_yv11_c  = yv_c * 18'sd11;
-    (* multstyle = "logic" *) wire signed [17:0] m_yv22_c  = yv_c * 18'sd22;
-    (* multstyle = "logic" *) wire signed [17:0] m_yu110_c = yu_c * 18'sd110;
+    // WRITTEN AS SHIFT-ADDS, NOT `*`. The `multstyle="logic"` attribute that used to
+    // sit on these wire declarations did NOT take - Quartus 17.0 applies multstyle to
+    // instances/entities, not to a wire, so it silently inferred a DSP and `Mult3~mac`
+    // landed in DSP_X86_Y26_N0 with a 3.938 ns cell delay plus 2.5 ns of route to reach
+    // it, making tex_fetch4_ob -> tex_decode the worst path in the texture unit
+    // (-5.130 ns at 143 MHz). These are CONSTANT multiplies by 11/22/110 of a 10-bit
+    // value; spelled out they are two levels of adder in fabric, no DSP can be inferred,
+    // and no synthesis attribute has to be honoured for it to stay that way.
+    //   11 = 8+2+1      22 = 11<<1 (free, reuses the yv11 tree)
+    //  110 = 128-16-2   (3 terms / 2 levels, vs 5 terms for 64+32+8+4+2)
+    // Exact at 18 bits: |yu|,|yv| <= 512, so |*110| <= 65536 < 2^17.
+    wire signed [17:0] yu18 = 18'(signed'(yu_c));
+    wire signed [17:0] yv18 = 18'(signed'(yv_c));
+    wire signed [17:0] m_yu11_c  = (yu18<<<3) + (yu18<<<1) + yu18;
+    wire signed [17:0] m_yv11_c  = (yv18<<<3) + (yv18<<<1) + yv18;
+    wire signed [17:0] m_yv22_c  = m_yv11_c <<< 1;
+    wire signed [17:0] m_yu110_c = (yu18<<<7) - (yu18<<<4) - (yu18<<<1);
 
     // ============================================================================
     // C1 -> C2 REGISTER (also drives pal_addr for the 1-cycle palette read).

@@ -169,15 +169,35 @@ module tex_uvmap (
     // NOTE a deliberate divergence from refsw2, which truncates - it computes in host
     // floats that land exactly, so it never sees the shortfall.
     localparam [32:0] EPS = 33'd1;                 // 1/64 LSB, with 6 guard bits
-    wire [26:0] magu8 = (s2_magu + EPS) >> 6;
-    wire [26:0] magv8 = (s2_magv + EPS) >> 6;
-    // sign applied first, THEN the half-texel bias - matching refsw2's
-    // `ui = u*size*256 + halfpixel`, where the product is already signed.
-    wire signed [26:0] ui_raw = s2_su ? -$signed(magu8) : $signed(magu8);
-    wire signed [26:0] vi_raw = s2_sv ? -$signed(magv8) : $signed(magv8);
-    wire signed [26:0] half_bias = s2_half ? -27'sd128 : 27'sd0;   // -0.5 texel exactly
-    wire signed [26:0] ui = ui_raw + half_bias;
-    wire signed [26:0] vi = vi_raw + half_bias;
+    // THE THREE ADDS ABOVE ARE ONE ADD. Written literally - `(mag+EPS)>>6`, then the
+    // sign negate, then `+ half_bias` - this synthesised to three CASCADED adders
+    // (Add13 -> Add15 -> Add17) in front of the clampflip compare, and stage 3 was the
+    // worst path in the texture unit (-5.033 ns at 143 MHz, 7 logic levels). All three
+    // collapse because two of them add a CONSTANT:
+    //
+    //   (mag + 1) >> 6  ==  mag[32:6] + (&mag[5:0])      - the +1 only ever carries
+    //                                                      out of the low 6 bits
+    //   -(m + c)        ==  ~m + (1 - c)  ==  ~m + !c    - for c in {0,1}
+    //
+    // so  ui = (su ? ~m6 : m6) + K,  K = (su ? !eps_c : eps_c) + (half ? -128 : 0),
+    // and K is ONE OF FOUR CONSTANTS selected by two bits - a mux, not an adder.
+    // Bit-exact with the original, including the 27-bit wrap: everything below is the
+    // same value mod 2^27, and `magu8` was already reinterpreted as signed 27-bit.
+    wire [26:0] m6u   = s2_magu[32:6];
+    wire [26:0] m6v   = s2_magv[32:6];
+    wire        epscu = &s2_magu[5:0];             // EPS carries into bit 6
+    wire        epscv = &s2_magv[5:0];
+    wire [26:0] m6su  = s2_su ? ~m6u : m6u;        // conditional invert = negate less cin
+    wire [26:0] m6sv  = s2_sv ? ~m6v : m6v;
+    wire        cinu  = s2_su ? ~epscu : epscu;    // the negate's +1, less the EPS carry
+    wire        cinv  = s2_sv ? ~epscv : epscv;
+    // K: -0.5 texel exactly (half_bias) merged with the carry-in. Four constants.
+    wire signed [26:0] ku = s2_half ? (cinu ? -27'sd127 : -27'sd128)
+                                    : (cinu ?  27'sd1   :  27'sd0);
+    wire signed [26:0] kv = s2_half ? (cinv ? -27'sd127 : -27'sd128)
+                                    : (cinv ?  27'sd1   :  27'sd0);
+    wire signed [26:0] ui = $signed(m6su) + ku;
+    wire signed [26:0] vi = $signed(m6sv) + kv;
     wire signed [18:0] uint = ui >>> 8;      // arith (floors toward -inf, matching refsw)
     wire signed [18:0] vint = vi >>> 8;
     wire signed [20:0] cu0 = 21'(signed'(uint));

@@ -35,7 +35,15 @@
 //
 module taginvw_tile_buffer import tsp_pkg::*; #(
     parameter integer LANES  = 8,
-    parameter integer COPIES = 1                 // 1, 2, 4, 8, ... tile images
+    parameter integer COPIES = 1,                // 1, 2, 4, 8, ... tile images
+    // REG_WRITE=1 puts ONE pipeline register on the whole write port ({we, waddr,
+    // wdata} together, so they cannot desynchronize). See the WRITE PORT PIPELINE
+    // comment below for why this exists and what it costs. 0 restores the old
+    // fully-combinational write (kept so the tb can diff the two).
+    parameter bit     REG_WRITE = 1'b1,
+    // sim-only: the REG_WRITE read/write collision check at the bottom of this file.
+    // Only taginvw_regwrite_selftest turns it off, to probe the stale read on purpose.
+    parameter bit     CHK_COLLIDE = 1'b1
 ) (
     input                       clk,
     input                       reset,
@@ -102,7 +110,7 @@ module taginvw_tile_buffer import tsp_pkg::*; #(
     localparam integer TAW       = 10 - BANK_BITS;   // in-tile addr width (7 / 8)
     localparam integer CB        = (COPIES > 1) ? $clog2(COPIES) : 0;  // copy-select bits
     localparam integer AW        = CB + TAW;         // per-bank addr width
-    localparam integer GB        = $clog2(GW);       // group-lane index width
+
     // Parameter sanity. Written as a time-0 procedural check under `ifndef SYNTHESIS`
     // rather than as elaboration-time $error inside a generate: Quartus does not accept
     // SystemVerilog elaboration system tasks there (10170), and every parameter
@@ -111,11 +119,8 @@ module taginvw_tile_buffer import tsp_pkg::*; #(
     initial begin
         if (COPIES & (COPIES - 1))
             $error("taginvw_tile_buffer: COPIES must be a power of two (got %0d)", COPIES);
-        if (GW & (GW - 1))
-            $error("taginvw_tile_buffer: GW must be a power of two (got %0d)", GW);
-        if (GW > LANES)
-            $error("taginvw_tile_buffer: GW (%0d) must not exceed LANES (%0d) - a group lives in one chunk",
-                   GW, LANES);
+        // (the old GW group-width checks are gone with the parameter: the spanner
+        //  read port is FIXED 4-wide regardless of LANES - see the rd4_* comment.)
     end
 `endif
     localparam integer TW_INVW   = 0;    // [30:0] depthBufferA (invW, sign-stripped)
@@ -129,8 +134,40 @@ module taginvw_tile_buffer import tsp_pkg::*; #(
     reg  [AW*NB-1:0]     raddr;
     reg  [TI_W*NB-1:0]   wdata;
     wire [TI_W*NB-1:0]   rdata;
+
+    // -------------------- WRITE PORT PIPELINE --------------------
+    // THE WRITE ENABLE ARRIVES FROM A DEPTH COMPARE THAT ARRIVES FROM AN M10K READ.
+    // wr_we is peel_tile_buffer's stage-B accept (ras_pass_lp), which is combinational
+    // off ITS tile_ram's read data through isp_depth_cmp_lp's compare chain. Unregistered,
+    // that made peel M10K rdata -> 5-level compare -> we[] mux -> THIS M10K's write-enable
+    // pin one single-cycle path: 11.3 ns, -5.391 at 143 MHz - the worst path in the whole
+    // design, ending on an M10K WE (2.478 ns of setup) after 2.07 ns of route.
+    //
+    // Registering it is sound because this buffer is a pure DUPLICATE store: unlike u_peel
+    // it never reads its own contents to decide a write, so there is no read-modify-write
+    // loop to close and the write can simply land a cycle later. The one thing that must
+    // hold is that no READER touches a copy within a cycle of its last write - the tile_ram
+    // is read-first, so a read landing on the same cycle as the delayed write returns
+    // stale data. peel_core guarantees it: the per-copy ti_ready credit is only asserted
+    // from states gated on `consumer_idle && fq_empty` (raster fully drained), and the TSP
+    // side cannot issue its first read until the cycle after it observes that credit. The
+    // assertion at the bottom of this file states the invariant directly and runs on every
+    // scene in golden-check.
+    reg  [NB-1:0]        we_q;
+    reg  [AW*NB-1:0]     waddr_q;
+    reg  [TI_W*NB-1:0]   wdata_q;
+    always @(posedge clk) begin
+        if (reset) we_q <= '0;
+        else       we_q <= we;
+        waddr_q <= waddr;
+        wdata_q <= wdata;
+    end
+    wire [NB-1:0]      ram_we    = REG_WRITE ? we_q    : we;
+    wire [AW*NB-1:0]   ram_waddr = REG_WRITE ? waddr_q : waddr;
+    wire [TI_W*NB-1:0] ram_wdata = REG_WRITE ? wdata_q : wdata;
+
     tile_ram #(.WIDTH(TI_W), .NBANKS(NB), .COPIES(COPIES)) u_ram (
-        .clk(clk), .we(we), .waddr(waddr), .wdata(wdata),
+        .clk(clk), .we(ram_we), .waddr(ram_waddr), .wdata(ram_wdata),
         .raddr(raddr), .rdata(rdata)
     );
 
@@ -243,10 +280,28 @@ module taginvw_tile_buffer import tsp_pkg::*; #(
     end
 
 `ifndef SYNTHESIS
+    integer ck;
+    integer collide_cnt = 0;        // REG_WRITE read/write collisions seen (tb-visible)
     always @(posedge clk) if (!reset) begin
         if ((clr_valid + wr_valid + pbc_valid) > 1)
             $error("taginvw_tile_buffer: multiple WRITE clients (%b%b%b)",
                    clr_valid, wr_valid, pbc_valid);
+        // REG_WRITE SAFETY INVARIANT. The delayed write lands on the same cycle as
+        // whatever read is presented now; the RAM is read-first, so if they collide on
+        // a bank address the reader silently gets stale data. peel_core's ti_ready
+        // credit is supposed to make that impossible (producer copy != consumer copy,
+        // and the last write precedes the credit). Check it rather than trust it -
+        // this runs across all 42 golden-check scenes.
+        if (REG_WRITE && (rd4_valid || sh_rd_valid))
+            for (ck = 0; ck < NB; ck = ck + 1)
+                if (we_q[ck] && (waddr_q[AW*ck +: AW] == raddr[AW*ck +: AW])) begin
+                    // counted as well as reported, so a tb can prove the detector is
+                    // live rather than merely silent (taginvw_regwrite_selftest does).
+                    collide_cnt <= collide_cnt + 1;
+                    if (CHK_COLLIDE)
+                        $error("taginvw_tile_buffer: REG_WRITE collision - bank %0d addr %0h written (delayed) while read; reader would see stale data",
+                               ck, raddr[AW*ck +: AW]);
+                end
     end
 `endif
 endmodule

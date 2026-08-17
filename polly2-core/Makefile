@@ -36,7 +36,7 @@ BUILD = build
 CWD  := $(shell pwd)
 
 .PHONY: shade-drop raster-topleft coord-f32 interp depth-cmp-lp texfetchpl texmlp clean test tex tex-addr tex-uv tex-decode tex-filter tex-combiner \
-        oparse region regfile regen sortcache itquad itskip taginvw taginvw-copies dense_span_buffer fog \
+        oparse region regfile regen sortcache itquad itskip taginvw taginvw-copies taginvw-regwrite dense_span_buffer fog \
         frontendtsplp frontendtsplp-build golden-check spannerv2 mulc9 mul16sppro \
         add24sppro mulc9sppro add3sppro mul24sppro mul24c9sppro
 
@@ -382,3 +382,20 @@ $(BUILD):
 
 clean:
 	rm -rf $(BUILD)
+
+# taginvw_tile_buffer REGISTERED WRITE PORT (REG_WRITE=1). The write port is pipelined
+# one cycle to break "peel M10K rdata -> depth compare -> this M10K's write enable",
+# which was the worst path in the design. Runs a REG_WRITE=1 DUT against a REG_WRITE=0
+# reference under identical, contract-respecting stimulus (must be bit-identical every
+# cycle), then checks the write lands exactly one cycle late and that the in-module
+# collision detector really fires on the illegal pattern. Same three shapes as
+# taginvw-copies.
+taginvw-regwrite: | $(BUILD)
+	@set -e; for cfg in 8:4 4:4 8:2; do \
+	  L=$${cfg%%:*}; C=$${cfg##*:}; \
+	  $(VERILATOR) --binary $(VFLAGS) -Wno-BLKSEQ --top-module taginvw_regwrite_selftest \
+	    -GLANES=$$L -GCOPIES=$$C \
+	    -Irtl/gen $(TSP_PKG) rtl/isp/tile_ram.sv rtl/buffers/taginvw_tile_buffer.sv \
+	    tb/taginvw_regwrite_selftest.sv --Mdir $(BUILD)/obj_taginvwrw_$${L}_$${C} -o taginvwrw; \
+	  ./$(BUILD)/obj_taginvwrw_$${L}_$${C}/taginvwrw; \
+	done

@@ -370,9 +370,25 @@ pvr_mmio pvr_mmio
 );
 
 //////////////////////////////////////////////////////////////////////////
-// Core clock: 4 fixed PLL outputs (900 MHz VCO / 12,10,9,8) through the
-// soft glitch-free mux. Selection from the MMIO CLK register; the core is
-// held in reset for ~320ns on each side of the actual mux flip.
+// Core clock: 4 fixed PLL outputs through the soft glitch-free mux.
+// Selection from the MMIO CLK register; the core is held in reset for
+// ~320ns on each side of the actual mux flip.
+//
+// SLOT FREQUENCIES ARE SET BY plls/pll.qip, NOT HERE. As of 2026-08-17 the
+// VCO is 1577.25 MHz with C counters 14/13/12/11:
+//
+//     sel 0 -> 112.66 MHz     sel 2 -> 131.44 MHz
+//     sel 1 -> 121.33 MHz     sel 3 -> 143.39 MHz
+//
+// THE NET NAMES ARE HISTORICAL - clk_75/clk_90/clk_100/clk_112 date from
+// the 900 MHz VCO with C=12/10/9/8. They are NOT the current frequencies:
+// clk_75 carries 112.66 MHz, clk_112 carries 143.39 MHz. Go by the slot
+// table above, not by the name.
+//
+// NOTE the whole core has to close timing at the FASTEST slot: polly2.sdc
+// declares the four counters -physically_exclusive, so TimeQuest signs the
+// design off against slot 3. Raising slot 3 alone therefore re-targets the
+// entire fit, even if you only ever select slot 0 at runtime.
 //////////////////////////////////////////////////////////////////////////
 
 wire clk_sys;
@@ -390,9 +406,22 @@ pll pll
 	.locked(pll_locked)
 );
 
-clk_mux_gf pixclk_mux
+// KEPT SOFT, DELIBERATELY. The hard Cyclone V altclkctrl was tried (the
+// commented-out instance that used to sit here, and the still-referenced
+// plls/switch/altclkctrl IP in the .qsf) and it is worth about 0.5-1.3 ns:
+// this mux drives clk_sys onto the global network from a LAB output rather
+// than straight from the PLL, which costs ~8.4 ns of insertion delay and
+// leaves 0.55-1.26 ns of residual skew on the worst paths. It is not worth
+// taking: altclkctrl's clkselect is not glitch-free between unrelated
+// clocks, and a runt cycle on clk_sys corrupts the entire core rather than
+// slowing it down. clk_mux_gf's break-before-make is what makes runtime
+// slot switching safe. Revisit only if slot switching is dropped entirely
+// and clk_sys becomes a single fixed PLL output - then neither mux is
+// needed and the PLL can drive the global network directly, which is worth
+// far more than 1 ns.
+clk_mux_gf sysclk_mux
 (
-	.clks  ({clk_112, clk_100, clk_90, clk_75}),  // sel 0/1/2/3 = 75/90/100/112.5 MHz
+	.clks  ({clk_112, clk_100, clk_90, clk_75}),  // sel 0/1/2/3 -> slot 0/1/2/3
 	.sel   (clk_sel),
 	.outclk(clk_sys)
 );

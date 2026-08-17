@@ -293,13 +293,31 @@ module peel_core import tsp_pkg::*; #(
     // fanout uses the QUALIFIED beat (d_beat, not raw dready): keeps every client's
     // beat count in lockstep with the arbiter's d_beats and never delivers a stray
     // beat to the stale d_owner after release.
-    assign tex_dresp[0].dready = d_beat && (d_owner==3'd0);
-    assign tex_dresp[1].dready = d_beat && (d_owner==3'd1);
-    assign ts_dresp.dready     = d_beat && (d_owner==3'd2);
-    assign pr_dresp.dready     = d_beat && (d_owner==3'd3);
-    assign ol_dresp.dready     = d_beat && (d_owner==3'd4);
-    assign ra_dresp.dready     = d_beat && (d_owner==3'd5);
-    assign tex_dresp[2].dready = d_beat && (d_owner==3'd6);
+    //
+    // ONE `keep` COPY PER CLIENT. The seven clients are scattered across the die and a
+    // single shared d_beat node cannot be near all of them: the fitter placed it at
+    // X37_Y28 while the texture cache it feeds sits at X56_Y28 and the HPS bridge that
+    // drives it at X52_Y53, so the beat zigzagged 2.7 + 1.7 ns of interconnect before
+    // reaching a write enable. This one node was the source of 5,271 failing endpoints
+    // - by far the largest single contributor. Replicating costs 7 LUTs and lets each
+    // copy be placed with its client. Purely a fanout change: every copy is the same
+    // expression and `keep` only stops synthesis re-merging them.
+    //
+    // NOTE this does NOT fix the first hop, bridge -> copy, which is ~2.7 ns of pure
+    // distance at 83% ALM occupancy. That one needs a register stage in the DDR
+    // response path (a protocol change - see the d_beat handshake below), which is
+    // deliberately NOT done here.
+    genvar gdb;
+    generate for (gdb=0; gdb<7; gdb=gdb+1) begin : dbc
+        (* keep = 1 *) wire beat = ddr_resp.dready && !of_empty;
+    end endgenerate
+    assign tex_dresp[0].dready = dbc[0].beat && (d_owner==3'd0);
+    assign tex_dresp[1].dready = dbc[1].beat && (d_owner==3'd1);
+    assign ts_dresp.dready     = dbc[2].beat && (d_owner==3'd2);
+    assign pr_dresp.dready     = dbc[3].beat && (d_owner==3'd3);
+    assign ol_dresp.dready     = dbc[4].beat && (d_owner==3'd4);
+    assign ra_dresp.dready     = dbc[5].beat && (d_owner==3'd5);
+    assign tex_dresp[2].dready = dbc[6].beat && (d_owner==3'd6);
 
     // -------------------- caches --------------------
     // Region parser, OL parser, ISP iterator AND TSP param fetch all read DDR
