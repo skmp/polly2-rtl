@@ -498,7 +498,21 @@ module peel_core import tsp_pkg::*; #(
     // Sort-cache filtering moved UPSTREAM into the iterator (pre-fetch check): any
     // triangle that reaches fq already survived its verdict, so heads issue
     // unconditionally - no per-head verdict wait here anymore.
-    assign su_in_valid = fq_out_valid && (pq_count <= 5'd4);
+    // pq admission throttle. This is a THROUGHPUT heuristic, not a correctness
+    // reservation: isp_setup_streamed's `stall = d[16] && !out_ready` freezes the whole
+    // setup pipe LOSSLESSLY (see its BACKPRESSURE note), and out_ready is wired to
+    // !pq_full below, so nothing is dropped if pq fills with triangles in flight.
+    // THE RESERVE IS LOAD-BEARING - DO NOT RAISE THIS WITHOUT MEASURING. Raising it
+    // 4 -> 7 (throttle coinciding with the hard !pq_full) was tried 2026-08-18 and is a
+    // REGRESSION: sa_slow2 8,834,887 -> 8,984,728 cycles (+1.70%), soa_menu -0.34%,
+    // shenmue_intro2 -0.04%. The reserved slots are what keep setup FREE-RUNNING: with
+    // room for its in-flight triangles to retire, setup never asserts `stall`. Let pq
+    // reach full and setup freezes its ENTIRE pipe - all ~15 in-flight FP stages - and
+    // has to refill that latency on every unfreeze, which on the raster-bound scene
+    // costs more than the extra run-ahead buys. (pq looking EMPTY 91% of the time in
+    // those windows is not idle capacity: it means the raster drains it as fast as
+    // setup fills it, so deeper admission has nothing to do.)
+    assign su_in_valid = fq_out_valid && (pq_count <= 5'd7);
 
     isp_setup_streamed u_isp (
         .clk(clk), .reset(reset),

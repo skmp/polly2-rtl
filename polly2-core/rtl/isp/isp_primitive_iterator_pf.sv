@@ -64,20 +64,56 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
     output ddr_rd_req_t    dreq,
     input  ddr_rd_resp_t   dresp
 );
-    // ================= per-buffer record state (ping-pong, 2 deep) =================
+    // ================= per-buffer record state (NBUF-deep ring) =================
     // Each buffer holds one record's fetched data + the emit-relevant geometry.
-    xyz_t      vslot [0:1][0:7];       // [buf][vertex] XYZ
-    reg [31:0] b_isp   [0:1];          // isp word
-    reg        b_pt    [0:1];          // list-kind (PT) of this record, -> trio.is_pt
-    reg [5:0]  b_mask  [0:1];          // strip mask
-    reg [2:0]  b_skip  [0:1];
-    reg        b_shadow[0:1];
-    reg [20:0] b_po    [0:1];          // param_offs_in_words of this record
-    reg        b_array [0:1];          // 1 = array record (tag_offset 0), 0 = strip
-    reg        b_quad  [0:1];          // 1 = QUAD array record (4 verts, -> trio.quad)
-    reg [3:0]  b_nfill [0:1];          // vertices captured (Z landed)
-    reg        b_ready [0:1];          // buffer holds a complete/streaming record
-    reg        b_done  [0:1];          // buffer's burst fully read (all verts in)
+    // NBUF was 2 (a ping-pong). It is now 4 so the reader can keep OUTS DDR bursts
+    // in flight at once - see the READ DESCRIPTOR QUEUE below.
+    localparam integer NBUF = 4;
+    localparam integer BW   = $clog2(NBUF);
+    localparam integer OUTS = 4;                 // max record bursts in flight
+    xyz_t      vslot [0:NBUF-1][0:7];  // [buf][vertex] XYZ
+    reg [31:0] b_isp   [0:NBUF-1];     // isp word
+    reg        b_pt    [0:NBUF-1];     // list-kind (PT) of this record, -> trio.is_pt
+    reg [5:0]  b_mask  [0:NBUF-1];     // strip mask
+    reg [2:0]  b_skip  [0:NBUF-1];
+    reg        b_shadow[0:NBUF-1];
+    reg [20:0] b_po    [0:NBUF-1];     // param_offs_in_words of this record
+    reg        b_array [0:NBUF-1];     // 1 = array record (tag_offset 0), 0 = strip
+    reg        b_quad  [0:NBUF-1];     // 1 = QUAD array record (4 verts, -> trio.quad)
+    reg [3:0]  b_nfill [0:NBUF-1];     // vertices captured (Z landed)
+    reg        b_ready [0:NBUF-1];     // buffer holds a complete/streaming record
+    reg        b_done  [0:NBUF-1];     // buffer's burst fully read (all verts in)
+    reg        b_infl  [0:NBUF-1];     // burst ISSUED into this buffer, beats not in yet
+
+    // ================= READ DESCRIPTOR QUEUE (pipelined DDR reads) =================
+    // The reader used to be strictly one-burst-at-a-time: R_REQ issued, R_STREAM
+    // consumed every beat, only then could the next record issue. The DDR bus went
+    // IDLE for the whole round trip between records - measured at 37% of the window on
+    // sa_slow2, where the record fetcher owns the bus 86% of the time and the entire
+    // ISP front-end starves behind it (EQ full 66%, FQ/PQ empty >90%, raster idle 26%).
+    //
+    // Now ISSUE and RECEIVE are decoupled. The arbiter returns this client's beats in
+    // ISSUE ORDER, so the receiver only ever parses ONE burst at a time and simply
+    // needs to know which record the beats at the head belong to - that is this queue.
+    // Only the PARSE-relevant fields ride it; everything else (mask/skip/shadow/pt/po/
+    // array/quad) is published into b_* at ISSUE time, which is safe because emit does
+    // not look at a buffer until b_ready[buf] goes up at burst completion.
+    reg [BW-1:0] dq_buf    [0:OUTS-1];
+    reg [8:0]    dq_span   [0:OUTS-1];
+    reg [4:0]    dq_hdr    [0:OUTS-1];
+    reg [4:0]    dq_stride [0:OUTS-1];
+    reg [$clog2(OUTS)-1:0] dq_head, dq_tail;
+    reg [$clog2(OUTS):0]   dq_cnt;
+    wire dq_empty = (dq_cnt == 0);
+    wire dq_full  = (dq_cnt == OUTS[$clog2(OUTS):0]);
+    // last beat of the burst currently landing
+    // (declared with the queue; used by both the issue and receive sides)
+    // the burst currently landing = queue head
+    wire [BW-1:0] cur_buf    = dq_buf   [dq_head];
+    wire [8:0]    cur_span   = dq_span  [dq_head];
+    wire [4:0]    cur_hdr    = dq_hdr   [dq_head];
+    wire [4:0]    cur_stride = dq_stride[dq_head];
+    wire          rx_last    = !dq_empty && dresp.dready && (beat == cur_span - 9'd1);
 
     // ================= entry expansion (array -> multiple records) =================
     // The reader owns record advancement. For an array entry we expand `count`
@@ -187,7 +223,7 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
     // isp_core barrier (a pulse-cleared reg was racy).
 
     // ================= burst reader (fills rd_buf) =================
-    reg        rd_buf;                 // buffer the reader is filling
+    reg [BW-1:0] rd_buf;               // buffer the reader is filling (issue cursor)
     // geometry of the record currently being READ (latched when reader starts it)
     reg [26:0] rd_base;   reg [2:0] rd_skip;  reg rd_shadow; reg [5:0] rd_mask;
     reg [20:0] rd_po;     reg rd_array;      reg rd_quad;
@@ -239,7 +275,7 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
     assign dreq.w32   = 1'b1;   // 32-bit view: the arbiter shuffles + drops the half
 
     // ================= emit FSM (drains em_buf) =================
-    reg        em_buf;                 // buffer emit is draining
+    reg [BW-1:0] em_buf;               // buffer emit is draining
     reg        tri_ready_r;
     xyz_t      v0_r, v1_r, v2_r;
     core_tag_t tag_r;
@@ -260,20 +296,27 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
 
     // (mk_tag moved up beside the pre-fetch check state, which also uses it.)
 
+    integer    rbi;                    // reset loop index over the NBUF buffers
     localparam E_IDLE=2'd0, E_SEEK=2'd1, E_PRESENT=2'd2, E_REL=2'd3;
     reg [1:0]  est;
     reg [2:0]  s_i;
 
     // authoritative LEVEL busy: anything in flight anywhere in the iterator.
+    // any buffer ready-or-in-flight, or a descriptor still queued, counts as busy.
+    wire b_any_live = b_ready[0] || b_ready[1] || b_ready[2] || b_ready[3]
+                    || b_infl [0] || b_infl [1] || b_infl [2] || b_infl [3];
     assign busy = ex_active || (rst != R_IDLE) || (est != E_IDLE)
-                || (outstanding != 4'd0) || b_ready[0] || b_ready[1];
+                || (outstanding != 4'd0) || b_any_live || !dq_empty;
 
     always @(posedge clk) begin
         if (reset) begin
             rst<=R_IDLE; est<=E_IDLE; dreq_rd_r<=0; entry_ack<=0;
             rd_buf<=0; em_buf<=0; ex_active<=0; outstanding<=0;
             exg_s1_v<=0; exg_v<=0;
-            b_ready[0]<=0; b_ready[1]<=0; b_done[0]<=0; b_done[1]<=0;
+            dq_head<=0; dq_tail<=0; dq_cnt<=0; beat<=0;
+            for (rbi=0; rbi<NBUF; rbi=rbi+1) begin
+                b_ready[rbi]<=1'b0; b_done[rbi]<=1'b0; b_infl[rbi]<=1'b0;
+            end
             tri_ready_r<=0;
             pe_en<=0; pc_v<=0; pcs<=PC_IDLE; chk_valid<=0; skp_pulse<=0;
         end else begin
@@ -321,11 +364,16 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
             // ==================== READER ====================
             // Continuously: if not expanding an entry, pull the next entry; else
             // fetch the next record of the current entry into the FREE buffer.
+            // dq_cnt decrement on a completing burst when no issue happens this cycle
+            // (the issue path folds the -1 into its own += 1 above).
+            if (rx_last && !(rst == R_REQ && !dresp.busy && !dq_full))
+                dq_cnt <= dq_cnt - 1'b1;
+
             case (rst)
             R_IDLE: begin
                 if (!ex_active) begin
                     // pull a new entry to expand (if the target buffer is free)
-                    if (entry_valid && !b_ready[rd_buf]) begin
+                    if (entry_valid && !b_ready[rd_buf] && !b_infl[rd_buf]) begin
                         ex_active <= 1'b1;
                         ex_array  <= (entry_type != ENT_STRIP);
                         ex_quad   <= (entry_type == ENT_QUAD);
@@ -368,7 +416,7 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
                         ex_base  <= ex_base + exg_recb_r;
                         ex_po    <= ex_po   + exg_recw_r;
                     end else ex_active <= 1'b0;        // entry done expanding
-                end else if (!b_ready[rd_buf]) begin
+                end else if (!b_ready[rd_buf] && !b_infl[rd_buf] && !dq_full) begin
                     // start the next record of the current entry into rd_buf.
                     // Strips carry the FILTERED mask (pre-checked done triangles
                     // dropped) so emit never presents an already-rendered one.
@@ -394,70 +442,87 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
                     rst       <= R_REQ;
                 end
             end
-            R_REQ: if (!dresp.busy) begin
+            // ISSUE ONLY. Fires the burst and goes straight back to R_IDLE so the next
+            // record can be prepared and issued while this one's beats are still in
+            // flight. The RECEIVER below lands the beats. Everything the emit side will
+            // need is published into b_* HERE (safe: emit gates on b_ready, which only
+            // goes up at completion), so the descriptor queue carries just the four
+            // parse fields.
+            R_REQ: if (!dresp.busy && !dq_full) begin
                 dreq_rd_r    <= 1'b1;
                 dreq_addr_r  <= {8'd0, rd_view}; // 32-bit view word; arbiter shuffles
                 dreq_burst_r <= rd_span_r[7:0];
-                beat         <= 9'd0;
-                ni           <= 6'd0;
-                ni_vx        <= 4'd0;
-                ni_cmp       <= 2'd0;
-                need_off_r   <= 9'd0;   // ISP word is at offset 0
                 b_nfill[rd_buf] <= 4'd0;
                 b_done [rd_buf] <= 1'b0;
-                rst          <= R_STREAM;
+                b_infl [rd_buf] <= 1'b1;
+                // publish the emit-facing geometry now, while rd_*/ex_* still describe
+                // THIS record - by the time its beats land, expansion has moved on.
+                b_mask [rd_buf] <= rd_mask;
+                b_skip [rd_buf] <= rd_skip;
+                b_shadow[rd_buf]<= rd_shadow;
+                b_pt   [rd_buf] <= ex_ispt;
+                b_po   [rd_buf] <= rd_po;
+                b_array[rd_buf] <= rd_array;
+                b_quad [rd_buf] <= rd_quad;
+                // enqueue the parse descriptor
+                dq_buf   [dq_tail] <= rd_buf;
+                dq_span  [dq_tail] <= rd_span_r;
+                dq_hdr   [dq_tail] <= rd_hdr_r;
+                dq_stride[dq_tail] <= rd_stride_r;
+                dq_tail <= dq_tail + 1'b1;
+                dq_cnt  <= dq_cnt + 1'b1 - (rx_last ? 1'b1 : 1'b0);
+                rd_buf  <= rd_buf + 1'b1;
+                // advance the entry expansion HERE (it used to happen at burst end).
+                if (ex_array && ex_count != 5'd1) begin
+                    ex_count <= ex_count - 5'd1;
+                    ex_base  <= ex_base + rd_rec_bytes_r;
+                    ex_po    <= ex_po   + rd_rec_words_r;
+                    pc_v     <= 1'b0;      // re-arm the pre-check for the next record
+                end else begin
+                    ex_active <= 1'b0;     // entry done expanding
+                end
+                rst <= R_IDLE;
             end
-            R_STREAM: if (dresp.dready) begin
+            default: rst <= R_IDLE;
+            endcase
+
+            // ==================== BURST RECEIVER ====================
+            // Independent of the issue FSM above. This client's beats come back in
+            // ISSUE ORDER, so exactly one burst is landing at a time: the descriptor at
+            // the queue head. Parsing is unchanged from the old R_STREAM - same
+            // need_off_r accumulation, same vslot/b_isp writes - it just reads its
+            // record geometry from cur_* instead of rd_*, and targets cur_buf.
+            if (!dq_empty && dresp.dready) begin
                 if (beat == need_off) begin
-                    if (ni_isp) b_isp[rd_buf] <= beat_half;
+                    if (ni_isp) b_isp[cur_buf] <= beat_half;
                     else begin
                         case (ni_cmp)
-                            2'd0:    vslot[rd_buf][ni_vx].x <= beat_half;
-                            2'd1:    vslot[rd_buf][ni_vx].y <= beat_half;
-                            default: vslot[rd_buf][ni_vx].z <= beat_half;
+                            2'd0:    vslot[cur_buf][ni_vx].x <= beat_half;
+                            2'd1:    vslot[cur_buf][ni_vx].y <= beat_half;
+                            default: vslot[cur_buf][ni_vx].z <= beat_half;
                         endcase
-                        if (ni_cmp == 2'd2) b_nfill[rd_buf] <= b_nfill[rd_buf] + 4'd1;
+                        if (ni_cmp == 2'd2) b_nfill[cur_buf] <= b_nfill[cur_buf] + 4'd1;
                     end
                     ni <= ni + 6'd1;
-                    // advance need_off_r by the same value the old multiply produced:
-                    //   ISP word     -> first vertex x  : jump to header size
-                    //   z of vertex  -> x of next vertex : + (stride - 2)
-                    //   x/y within a vertex             : + 1
-                    if (ni_isp)              need_off_r <= {4'b0, rd_hdr_r};
-                    else if (ni_cmp == 2'd2) need_off_r <= need_off_r + {4'b0, rd_stride_r} - 9'd2;
+                    if (ni_isp)              need_off_r <= {4'b0, cur_hdr};
+                    else if (ni_cmp == 2'd2) need_off_r <= need_off_r + {4'b0, cur_stride} - 9'd2;
                     else                     need_off_r <= need_off_r + 9'd1;
                     if (!ni_isp) begin
                         if (ni_cmp == 2'd2) begin ni_cmp<=2'd0; ni_vx<=ni_vx+4'd1; end
                         else                       ni_cmp<=ni_cmp+2'd1;
                     end
                 end
-                if (beat == rd_span_r - 9'd1) begin
-                    // record fully read: publish geometry, mark buffer ready, and
-                    // advance the entry expansion / free the reader for the next.
-                    b_mask [rd_buf] <= rd_mask;
-                    b_skip [rd_buf] <= rd_skip;
-                    b_shadow[rd_buf]<= rd_shadow;
-                    b_pt   [rd_buf] <= ex_ispt;  // list-kind constant across an entry's records
-                    b_po   [rd_buf] <= rd_po;
-                    b_array[rd_buf] <= rd_array;
-                    b_quad [rd_buf] <= rd_quad;
-                    b_done [rd_buf] <= 1'b1;
-                    b_ready[rd_buf] <= 1'b1;
-                    rd_buf          <= ~rd_buf;
-                    // advance expansion: next array record, or finish this entry
-                    if (ex_array && ex_count != 5'd1) begin
-                        ex_count <= ex_count - 5'd1;
-                        ex_base  <= ex_base + rd_rec_bytes_r;
-                        ex_po    <= ex_po   + rd_rec_words_r;
-                        pc_v     <= 1'b0;      // re-arm the pre-check for the next record
-                    end else begin
-                        ex_active <= 1'b0;     // entry done expanding
-                    end
-                    rst <= R_IDLE;
+                if (rx_last) begin
+                    // record fully read: hand the buffer to emit and start the next
+                    // queued burst's parse state from scratch.
+                    b_done [cur_buf] <= 1'b1;
+                    b_ready[cur_buf] <= 1'b1;
+                    b_infl [cur_buf] <= 1'b0;
+                    dq_head <= dq_head + 1'b1;
+                    beat <= 9'd0; ni <= 6'd0; ni_vx <= 4'd0; ni_cmp <= 2'd0;
+                    need_off_r <= 9'd0;
                 end else beat <= beat + 9'd1;
             end
-            default: rst <= R_IDLE;
-            endcase
 
             // ==================== EMIT ====================
             case (est)
@@ -506,7 +571,12 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
             E_REL: begin
                 // release the buffer; one record retired.
                 b_ready[em_buf] <= 1'b0;
-                em_buf          <= ~em_buf;
+                // RING INCREMENT, not a toggle. This was `~em_buf` back when there were
+                // exactly 2 buffers and it was a ping-pong; with NBUF=4 the complement
+                // maps 0<->3 and 1<->2, so emit would only ever drain buffers 0 and 3
+                // while the reader filled 0,1,2,3 in order - the reader then wedges on
+                // !b_ready[rd_buf] and the whole iterator deadlocks.
+                em_buf          <= em_buf + 1'b1;
                 est             <= E_IDLE;
             end
             endcase
@@ -515,7 +585,7 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
             // a same-cycle fetch-complete (+1) and buffer-release (-1) reconcile.
             begin : os_update
                 reg push, pop;
-                push = (rst==R_STREAM) && dresp.dready && (beat==rd_span_r-9'd1);
+                push = rx_last;   // a record's burst fully landed (was: R_STREAM end)
                 pop  = (est==E_REL);
                 outstanding <= outstanding + (push ? 4'd1 : 4'd0) - (pop ? 4'd1 : 4'd0);
             end
