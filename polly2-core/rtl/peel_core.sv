@@ -368,6 +368,10 @@ module peel_core import tsp_pkg::*; #(
         .chk_valid(it_chk_valid),.chk_tag(it_chk_tag),
         .chk_valid_q(sc_chk_vq),.chk_done(sc_chk_done),
         .skp_pulse(it_skp_pulse),.skp_cnt(it_skp_cnt),
+        // setup-parameter cache probe (rides the same pre-fetch walk / tag bus)
+        .tc_en(tsc_en),
+        .tc_chk(it_tc_chk),.tc_vq(tsc_pr_vq),.tc_hit(tsc_pr_hit),
+        .tc_pin(it_tc_pin),
         .dreq(pr_dreq),.dresp(pr_dresp));
 
     // -------------------- depth/tag tile + color buffer + framebuffer --------------------
@@ -512,7 +516,16 @@ module peel_core import tsp_pkg::*; #(
     // costs more than the extra run-ahead buys. (pq looking EMPTY 91% of the time in
     // those windows is not idle capacity: it means the raster drains it as fast as
     // setup fills it, so deeper admission has nothing to do.)
-    assign su_in_valid = fq_out_valid && (pq_count <= 5'd7);
+    // a CACHED head (setup parameters resident in u_setupc) never enters setup:
+    // the bypass below injects its plane record into pq directly.
+    assign su_in_valid = fq_out_valid && !fq_out[FF_CACHED] && (pq_count <= 5'd7);
+
+    // ---- setup-cache BYPASS pop condition (mirrored as a wire for fq_pop_c, like
+    // su accept). Only when setup is fully DRAINED - every earlier triangle must
+    // have retired into pq first (ordering) - and one bypass in flight at a time.
+    // The pop issues the cache read; the record pushes into pq next cycle.
+    wire byp_pop_c = fq_out_valid && fq_out[FF_CACHED]
+                  && !byp_pend && !su_busy && !su_out_valid;
 
     isp_setup_streamed u_isp (
         .clk(clk), .reset(reset),
@@ -528,7 +541,9 @@ module peel_core import tsp_pkg::*; #(
         // anchor subtract), not applied per-pixel in the raster
         .half(regs.half_offset.fpu_pixel_half_offset),
         .busy(su_busy),
-        .out_ready(!pq_full),
+        // !byp_take: hold the retire while a setup-cache bypass push is completing
+        // (the bypass triangle is OLDER - it popped while setup was empty)
+        .out_ready(!pq_full && !byp_take),
         .out_valid(su_out_valid), .out_tag(su_out_tag), .out_pt(su_out_pt), .out_isp(su_out_isp),
         .sgn_neg(isp_sgn_neg), .cull(isp_cull),
         .dx12(w_dx12), .dx23(w_dx23), .dx31(w_dx31), .dx41(w_dx41),
@@ -856,7 +871,10 @@ module peel_core import tsp_pkg::*; #(
     wire [31:0] it_chk_tag;
     wire        it_skp_pulse;
     wire [2:0]  it_skp_cnt;
-    wire        sc_enter     = su_in_valid && su_in_ready && (peeling || pt_phase);
+    // enter on EVERY fq pop of a peel/PT triangle: setup accept, or the setup-cache
+    // bypass pop (a cached triangle still renders and must be presumed done).
+    wire        sc_enter     = ((su_in_valid && su_in_ready) || byp_pop_c)
+                             && (peeling || pt_phase);
     // A FRONT-CULLED triangle must not be left marked done: it was skipped because it
     // is in front of the peel, not because it is finished, and it is owed a later
     // pass. Its enter has already gone in (setup issue runs ahead of the probe
@@ -1657,14 +1675,21 @@ module peel_core import tsp_pkg::*; #(
     // combinational inputs; the setup units have the slack for it (they hold no
     // endpoint in the top 10k failing paths).
     localparam integer FIFO_N = 8;
-    localparam integer FQ_W = 418;   // 13 * 32 + 1 (is_pt) + 1 (quad)
+    localparam integer FQ_W = 420;   // 13*32 + 1 (is_pt) + 1 (quad) + 1 (cached) + 1 (pinned)
     localparam integer FF_ISP=0,  FF_TAG=32,
                        FF_X1=64,  FF_Y1=96,  FF_Z1=128,
                        FF_X2=160, FF_Y2=192, FF_Z2=224,
                        FF_X3=256, FF_Y3=288, FF_Z3=320,
                        FF_PT=352,    // list-kind (PT) bit
                        FF_X4=353, FF_Y4=385,   // QUAD 4th vertex (X/Y only, no Z)
-                       FF_QUAD=417;  // 1 = quad record (v4/edge-41 path active)
+                       FF_QUAD=417,  // 1 = quad record (v4/edge-41 path active)
+                       FF_CACHED=418, // 1 = setup-cache resident: verts/isp INVALID,
+                                      // the consumer bypasses setup (see byp_pop_c)
+                       FF_PINNED=419; // 1 = this triangle HIT the pre-fetch probe and
+                                      // holds its index's pin - its pop must unpin.
+                                      // ONLY a hitting tag may unpin: an alias sharing
+                                      // the index would have missed, so the pin is
+                                      // provably this triangle's own.
     // MLAB, not M10K: 418 bits x 8 = 3,344 bits, but an M10K caps port width at 40, so
     // this cost TEN blocks (102,400 bits) at 3.3% utilisation. As MLABs it is
     // ceil(418/20) = 21 cells (~210 ALMs). NOTE this is still a RAM, not logic - the
@@ -1691,6 +1716,8 @@ module peel_core import tsp_pkg::*; #(
     assign fq_wrw[FF_Z3  +:32] = it_trio.v2.z;
     assign fq_wrw[FF_X4  +:32] = it_trio.v3x;  assign fq_wrw[FF_Y4 +:32] = it_trio.v3y;
     assign fq_wrw[FF_QUAD]     = it_trio.quad;
+    assign fq_wrw[FF_CACHED]   = it_trio.cached;
+    assign fq_wrw[FF_PINNED]   = it_trio.cached | it_trio.pinned;
     wire fq_full  = (fq_count == FIFO_N);
     wire fq_empty = (fq_count == 0);
 
@@ -1705,7 +1732,7 @@ module peel_core import tsp_pkg::*; #(
     // fq_pop_c is fifo_pop by construction: the FSM sets it from exactly this condition
     // (see "accept IS the pop" below), and both su_in_valid and su_in_ready are wires,
     // so the two cannot drift. Same for the reload condition and the next-head index.
-    wire       fq_pop_c = su_in_valid && su_in_ready;
+    wire       fq_pop_c = (su_in_valid && su_in_ready) || byp_pop_c;
     wire [3:0] fq_nh_c  = fq_pop_c ? ((fq_head==FIFO_N-1) ? 4'd0 : fq_head+4'd1) : fq_head;
     wire       fq_rd_en = fq_pop_c || !fq_out_valid;
     always @(posedge clk) if (fq_rd_en) fq_ram_q <= fq_ram[fq_nh_c[2:0]];
@@ -1764,6 +1791,60 @@ module peel_core import tsp_pkg::*; #(
     assign pq_wrw[QF_BY0  +:  5] = w_by0;  assign pq_wrw[QF_BY1  +:  5] = w_by1;
     assign pq_wrw[QF_TL   +:  4] = w_tl;
 
+    // ---- SETUP-PARAMETER CACHE (u_setupc): TR/PT plane-record cache -----------------
+    // 256-entry direct-mapped, sort-cache indexing, payload = the COMPLETE pq record.
+    // FILL on every setup retire of a TR/PT triangle (cb=1 refused - the ISP
+    // cache-bypass bit); PROBE from the iterator's pre-fetch walk (a full-hit record
+    // skips its DDR burst and emits CACHED triangles); CONSUME at the fq head (the
+    // bypass below injects the record into pq, skipping setup). Entries are
+    // TILE-SCOPED - setup anchors C/c_invw and the bbox at the tile origin - so the
+    // cache is flash-invalidated on every tile change and at render go. The reuse
+    // it captures is passes 2..N of the TL peel / PT resolve loops re-walking the
+    // same lists on the same tile: each hit saves the record's DDR burst AND the
+    // whole setup pass. +nosetupcache disables it.
+    reg  tsc_cfg_en;
+`ifndef SYNTHESIS
+    initial tsc_cfg_en = !$test$plusargs("nosetupcache");
+`else
+    initial tsc_cfg_en = 1'b1;
+`endif
+    wire tsc_en = tsc_cfg_en && (peeling || pt_phase);
+    reg  [11:0] tsc_tile;
+    wire tsc_newtile = ({cur_tx, cur_ty} != tsc_tile);
+    always @(posedge clk) begin
+        if (reset) tsc_tile <= 12'hFFF;
+        else if (tsc_newtile) tsc_tile <= {cur_tx, cur_ty};
+    end
+    wire tsc_inval = go || tsc_newtile;
+    wire it_tc_chk, it_tc_pin;
+    wire tsc_pr_vq, tsc_pr_hit, tsc_rd_vq, tsc_rd_ok;
+    wire [PQ_W-1:0] tsc_rd_data;
+    reg  byp_pend;   // a cached head has been popped; its record push is in flight
+    reg  byp_dv;     // ...and the cache data is already latched (pq was full)
+    reg  byp_pt;     // the popped entry's WALK list-kind (patches the record's QF_PT)
+    // a bypass push is completing: its data has landed and it wants the pq slot.
+    // Gates setup's out_ready so a retire launched later can never overtake the
+    // OLDER bypass triangle when pq frees up (order), and the two can never claim
+    // one slot in the same cycle (loss). Setup's stall is lossless by design.
+    wire byp_take = byp_pend && (tsc_rd_vq || byp_dv);
+    // fill mirrors EXACTLY the setup-retire pq push (cull/pt_dead drops included)
+    wire tsc_fill = su_out_valid && !isp_cull && !pt_dead && tsc_en
+                 && !su_out_tag[28];   // core_tag_t.cache_bypass
+    isp_setup_cache #(.W(PQ_W), .IXW(8), .TAGOFF(QF_TAG)) u_setupc (
+        .clk(clk), .reset(reset), .inval(tsc_inval),
+        .pr_valid(it_tc_chk), .pr_tag(it_chk_tag),
+        .pr_vq(tsc_pr_vq), .pr_hit(tsc_pr_hit),
+        .pin_valid(it_tc_pin),
+        // the pop of a PINNED triangle unpins its index (bypass consume, or the
+        // setup accept of a partially-hit record's hit triangle). Gated on
+        // FF_PINNED: an unrelated triangle merely SHARING the index must not
+        // strip an in-flight pin (its own probe missed, so it holds none).
+        .cl_valid(fq_pop_c && fq_out[FF_PINNED]), .cl_tag(fq_out[FF_TAG +: 32]),
+        .fl_valid(tsc_fill), .fl_tag(su_out_tag), .fl_data(pq_wrw),
+        .rd_valid(byp_pop_c), .rd_tag(fq_out[FF_TAG +: 32]),
+        .rd_vq(tsc_rd_vq), .rd_data(tsc_rd_data), .rd_ok(tsc_rd_ok)
+    );
+
     // ---- PT alpha-fail bbox clip (consumed at RS_POP): intersect the popped
     // triangle's tile bbox with the active fail bbox; an empty intersection
     // skips the whole sweep (the triangle can only touch resolved/exhausted
@@ -1809,9 +1890,16 @@ module peel_core import tsp_pkg::*; #(
     // corrupting the peel buffer and clashing on the peel-RAM read port. Holding on
     // su_out_valid keeps the barrier closed until the triangle lands in pq (then
     // !pq_empty / rs_st keep it closed until the raster drains it).
+    // !byp_pend: a setup-cache bypass in flight is a triangle that has already been
+    // POPPED from fq but whose plane record has not yet pushed into pq - with fq,
+    // setup, pq and raster all showing idle it is otherwise INVISIBLE here, and the
+    // pass barrier would close around it (its record then rasters in the NEXT pass,
+    // against a swapped reference - wrong image). byp_pend covers the gap seamlessly:
+    // it is set on the pop edge (fq_empty is still low on the pop cycle) and cleared
+    // on the push edge (pq_empty is then low).
     wire consumer_idle = eq_empty && !it_pf_busy
                        && !su_busy && !su_out_valid && (rs_st==RS_IDLE) && pq_empty
-                       && !b_valid;
+                       && !b_valid && !byp_pend;
 
     // shade pass pixel accounting: producer index shp, consumer count sh_out_n
     integer sh_out_n;
@@ -1861,6 +1949,10 @@ module peel_core import tsp_pkg::*; #(
     integer pc_sort_skip;       // triangles skipped by the sort cache (fully rendered)
     integer pc_front_cull;      // triangles rejected as wholly IN FRONT of the peel
     integer pc_fcull_decl;      // front culls DECLINED (previous demote still pending)
+    integer pc_setup_byp;       // triangles delivered from the setup cache (DDR fetch
+                                // AND setup pass both skipped)
+    integer pc_setup_ptfix;     // ...whose QF_PT was patched (record referenced from
+                                // BOTH lists; the walk's kind is authoritative)
     integer pc_pt_pass;         // forward PT-resolve passes HANDED to shade
     integer pc_pt_tiles;        // entries that ran a PT-resolve phase
     integer pc_ptbb_skip;       // PT triangles sweep-skipped by the fail bbox
@@ -2098,7 +2190,8 @@ module peel_core import tsp_pkg::*; #(
             pc_hand<=0; pc_span<=0; pc_drain<=0; pc_blend<=0; pc_swrite<=0;
             pc_prefetch<=0; pc_pf_hit<=0; pc_pf_wasted<=0;
             pc_m_promote<=0; pc_m_waithit<=0; pc_m_waitmiss<=0; pc_m_cold<=0;
-            pc_sort_skip<=0; pc_front_cull<=0; pc_fcull_decl<=0;
+            pc_sort_skip<=0; pc_front_cull<=0; pc_fcull_decl<=0; pc_setup_byp<=0;
+            pc_setup_ptfix<=0;
             pc_pt_pass<=0; pc_pt_tiles<=0; pc_ptbb_skip<=0;
             pc_pt_empty<=0; pc_pt_late<=0; pc_peel_empty<=0;
 `endif
@@ -2109,6 +2202,7 @@ module peel_core import tsp_pkg::*; #(
             peeling<=1'b0; more_to_draw<=1'b0; peel_pass<=8'd0; op_shaded<=1'b0;
             zf_acc<=31'd0; zf_acc_v<=1'b0; zfront<=31'd0; zf_v<=1'b0;
             zf_ok<=1'b0; zf_clean<=1'b1; fc_pend<=1'b0; fc_tag<=32'd0;
+            byp_pend<=1'b0; byp_dv<=1'b0;
             ol_walk_done<=1'b0;
             pt_phase<=1'b0; pt_pass<=8'd0; pt_sh_pend<=3'd0; pt_more<=11'd0;
             pt_hand_p<=1'b0; pt_free_p<=1'b0; pt_stop<=1'b0;
@@ -3022,6 +3116,8 @@ module peel_core import tsp_pkg::*; #(
                     pc_sort_skip);
                 $display("  FRONT-CULL:  %0d peel triangles rejected as wholly in front of the peel (declined=%0d)",
                     pc_front_cull, pc_fcull_decl);
+                $display("  SETUP-CACHE: %0d triangles delivered from the setup cache (DDR fetch + setup skipped, pt-kind patched=%0d)",
+                    pc_setup_byp, pc_setup_ptfix);
                 $display("  PT-RESOLVE:  %0d forward passes over %0d entries (avg %0d passes/entry)  bbox-skips=%0d",
                     pc_pt_pass, pc_pt_tiles, pc_pt_tiles ? pc_pt_pass/pc_pt_tiles : 0,
                     pc_ptbb_skip);
@@ -3517,10 +3613,28 @@ module peel_core import tsp_pkg::*; #(
             // su_in_valid is assigned combinationally outside the always block.
             // accept IS the pop: it consumes the head entry sitting in fq_out.
             // (Sort-cache skips now happen UPSTREAM in the iterator, pre-fetch -
-            // skipped triangles never enter fq, so accept is the only pop.)
+            // skipped triangles never enter fq. A CACHED head pops via the
+            // setup-cache BYPASS below instead of being offered to setup.)
             if (su_in_valid && su_in_ready) begin
                 fq_head <= (fq_head==FIFO_N-1) ? 4'd0 : fq_head+4'd1;
                 fifo_pop = 1'b1;
+            end
+
+            // ---- SETUP-CACHE BYPASS pop: a CACHED head consumes the cached plane
+            // record instead of running setup. byp_pop_c (a wire, like fq_pop_c)
+            // requires setup fully drained, so pq ordering is preserved; the pop
+            // cycle also presents the cache read (u_setupc.rd_valid) and the
+            // record is pushed by pq_admit below the following cycle.
+            if (byp_pop_c) begin
+                fq_head <= (fq_head==FIFO_N-1) ? 4'd0 : fq_head+4'd1;
+                fifo_pop = 1'b1;
+                byp_pend <= 1'b1;
+                // list-kind is a property of the WALK, not the record: the same
+                // param record can be referenced from both a PT and a TR list, and
+                // the cached QF_PT then carries the FILL-time walk's kind. Latch
+                // this walk's kind from the fq entry and patch it into the
+                // delivered record (pq_admit below).
+                byp_pt <= fq_out[FF_PT];
             end
 `ifndef SYNTHESIS
             // pre-fetch skip stats (pulsed by the iterator, 1..6 triangles/record)
@@ -3571,13 +3685,50 @@ module peel_core import tsp_pkg::*; #(
             // describes the word currently sitting in front of setup, which is only
             // replaced on a reload.
 
-            // retire: on out_valid, push non-culled triangles into the plane FIFO.
+            // retire: setup output, OR a cached bypass record, into the plane FIFO.
+            // ONE write site for pq_ram (the MLAB note above: multiple textual write
+            // sites risk re-inferring the replicated multi-port shape). The two
+            // sources are mutually exclusive by the bypass drain interlock: a bypass
+            // only pops when setup is EMPTY, so its push (1 cycle later) can never
+            // coincide with a setup retire.
             // pt_dead: the PT pass is moot (verdict arrived) - drop instead of push.
-            if (su_out_valid) begin
-                if (isp_cull) begin
-                    cull_count <= cull_count + 1;
-                end else if (!pt_dead) begin
-                    pq_ram[pq_tail[2:0]] <= pq_wrw;   // one packed M10K word
+            begin : pq_admit
+                reg            adm;
+                reg [PQ_W-1:0] adm_w;
+                adm = 1'b0; adm_w = pq_wrw;
+`ifndef SYNTHESIS
+                // the out_ready gate makes this unreachable; a hit here means the
+                // bypass/setup slot arbitration broke
+                if (su_out_valid && byp_take)
+                    $error("pq_admit: setup retire during a completing bypass");
+`endif
+                if (su_out_valid) begin
+                    if (isp_cull) begin
+                        cull_count <= cull_count + 1;
+                    end else if (!pt_dead) begin
+                        adm = 1'b1;
+                    end
+                end else if (byp_take) begin
+                    // the cache read has landed (tsc_rd_data holds: no other read
+                    // is issued while a bypass is pending)
+                    if (pt_dead) begin
+                        byp_pend <= 1'b0; byp_dv <= 1'b0;   // moot pass: drop it
+                    end else if (!pq_full) begin
+                        adm = 1'b1; adm_w = tsc_rd_data;
+                        adm_w[QF_PT] = byp_pt;   // this WALK's list-kind (see byp_pt)
+                        byp_pend <= 1'b0; byp_dv <= 1'b0;
+`ifndef SYNTHESIS
+                        pc_setup_byp <= pc_setup_byp + 1;
+                        if (tsc_rd_data[QF_PT] != byp_pt)
+                            pc_setup_ptfix <= pc_setup_ptfix + 1;
+                        if (!tsc_rd_ok)
+                            $error("setup-cache bypass: record missing (store holds %08x)",
+                                   tsc_rd_data[QF_TAG +: 32]);
+`endif
+                    end else byp_dv <= 1'b1;                // hold until pq has room
+                end
+                if (adm) begin
+                    pq_ram[pq_tail[2:0]] <= adm_w;   // one packed M10K word
                     pq_tail <= (pq_tail==PQ_N-1) ? 4'd0 : pq_tail+4'd1;
                     pq_push  = 1'b1;
                 end
