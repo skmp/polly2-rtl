@@ -40,8 +40,6 @@ module itskip_selftest import tsp_pkg::*; ;
         .chk_valid(chk_valid), .chk_tag(chk_tag),
         .chk_valid_q(chk_valid_q), .chk_done(chk_done),
         .skp_pulse(skp_pulse), .skp_cnt(skp_cnt),
-        // setup-parameter cache disabled in this selftest
-        .tc_en(1'b0), .tc_chk(), .tc_vq(1'b0), .tc_hit(1'b0), .tc_pin(),
         .dreq(dreq), .dresp(dresp));
 
     // ---- sort cache (WAYS=8 as in the 8-lane core) ----

@@ -60,20 +60,6 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
     output reg             skp_pulse,        // 1-cyc: skipped skp_cnt triangles pre-fetch
     output reg [2:0]       skp_cnt,
 
-    // ---- PRE-FETCH setup-cache probe (isp_setup_cache; TR/PT phases only) ----
-    // Rides the SAME per-triangle walk as the sort-cache check above (chk_tag is
-    // shared; a triangle's two verdicts land on the same cycle). A record whose
-    // every SURVIVING triangle (enabled, not sort-skipped) hits is emitted as
-    // lightweight CACHED triangles - its DDR burst is skipped entirely and the
-    // fq consumer bypasses setup with the cached plane records. tc_pin pins a
-    // surviving hit's index the cycle its verdict lands (chk_tag still presents
-    // that triangle), so the entry cannot be evicted before it is consumed.
-    input                  tc_en,            // LEVEL: cache active (peeling || pt_phase)
-    output reg             tc_chk,           // 1-cyc: probe chk_tag
-    input                  tc_vq,            // verdict strobe (1 cyc after tc_chk)
-    input                  tc_hit,           // probe hit
-    output reg             tc_pin,           // 1-cyc: pin chk_tag's index
-
     // direct DDR3 read port (64-bit beats, via shared arbiter)
     output ddr_rd_req_t    dreq,
     input  ddr_rd_resp_t   dresp
@@ -87,10 +73,6 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
     localparam integer OUTS = 4;                 // max record bursts in flight
     xyz_t      vslot [0:NBUF-1][0:7];  // [buf][vertex] XYZ
     reg [31:0] b_isp   [0:NBUF-1];     // isp word
-    reg        b_cached[0:NBUF-1];     // CACHED record: no burst, no verts - the fq
-                                       // consumer reads the setup cache by tag
-    reg [5:0]  b_hitm  [0:NBUF-1];     // per-triangle setup-cache HIT (strip order,
-                                       // bit [5-i]; arrays use bit 5) -> trio.pinned
     reg        b_pt    [0:NBUF-1];     // list-kind (PT) of this record, -> trio.is_pt
     reg [5:0]  b_mask  [0:NBUF-1];     // strip mask
     reg [2:0]  b_skip  [0:NBUF-1];
@@ -208,16 +190,11 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
     //   strip record : one tag per enabled mask bit       -> pc_fmask (survivors)
     // pc_v gates the record start; re-armed (cleared) per record.
     reg        pe_en;                  // skip_en latched at entry pull (stable per entry)
-    reg        tcl;                    // tc_en latched at entry pull (stable per entry)
     reg        pc_v;                   // verdicts complete for the next record
     reg        pc_skip;                // array: record fully rendered -> skip fetch
     reg [5:0]  pc_fmask;               // strip: enabled AND not-done (same bit order
                                        //        as ex_mask: triangle i at bit [5-i])
-    reg        tc_hit1;                // array: surviving triangle hit the setup cache
-    reg [5:0]  tc_hitm;                // strip: surviving triangles that hit
     reg [2:0]  pc_i;                   // strip triangle index (toff) being checked
-    reg        tcc_pulse;              // BLOCKING temp: a cached record was claimed
-                                       // this cycle (read by os_update below)
     localparam PC_IDLE=2'd0, PC_ISSUE=2'd1, PC_WAIT=2'd2;
     reg [1:0]  pcs;
     // NOTE: pass the per-slot fields IN (read the arrays at the call site) rather
@@ -236,13 +213,6 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
                             ex_array ? 3'd0 : pc_i);
     // the record about to start is entirely skippable
     wire pc_rec_skip = ex_array ? pc_skip : (pc_fmask == 6'd0);
-    // ...or entirely resident in the setup cache: every SURVIVING triangle hit.
-    // (When the sort filter is off, every enabled triangle is a survivor.)
-    wire [5:0] surv_mask  = (pe_en && !ex_array) ? pc_fmask : ex_mask;
-    wire       tc_rec_hit = tcl && pc_v
-                          && (ex_array ? tc_hit1
-                                       : (surv_mask != 6'd0)
-                                         && ((surv_mask & ~tc_hitm) == 6'd0));
     function automatic [2:0] cnt6(input [5:0] m);
         cnt6 = {2'd0,m[0]} + {2'd0,m[1]} + {2'd0,m[2]}
              + {2'd0,m[3]} + {2'd0,m[4]} + {2'd0,m[5]};
@@ -257,7 +227,6 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
     // geometry of the record currently being READ (latched when reader starts it)
     reg [26:0] rd_base;   reg [2:0] rd_skip;  reg rd_shadow; reg [5:0] rd_mask;
     reg [20:0] rd_po;     reg rd_array;      reg rd_quad;
-    reg [5:0]  rd_hitm;   // per-triangle setup-cache hits of the record being read
     // Record geometry (span/header/stride) is CONSTANT for the whole record and
     // depends only on the latched shadow/skip/mask/array. Computing the span
     // combinationally (it has a multiply) used to feed the per-beat
@@ -310,7 +279,6 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
     reg        tri_ready_r;
     xyz_t      v0_r, v1_r, v2_r;
     core_tag_t tag_r;
-    reg        pin_r;     // this triangle hit the setup cache -> its pop unpins
     assign trio.triangle_ready = tri_ready_r;
     assign trio.isp            = b_isp[em_buf];
     assign trio.is_pt          = b_pt[em_buf];
@@ -321,8 +289,6 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
     assign trio.v3x  = vslot[em_buf][3].x;
     assign trio.v3y  = vslot[em_buf][3].y;
     assign trio.tag            = tag_r;
-    assign trio.cached         = b_cached[em_buf];   // setup-cache resident (no verts)
-    assign trio.pinned         = pin_r;              // its fq pop must unpin
     assign trio.prim_done      = 1'b0;   // not used by isp_core-pf path (drained instead)
 
     function automatic [3:0] va(input [2:0] i); va = {1'b0,i} + (i[0] ? 4'd1 : 4'd0); endfunction
@@ -353,63 +319,41 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
             end
             tri_ready_r<=0;
             pe_en<=0; pc_v<=0; pcs<=PC_IDLE; chk_valid<=0; skp_pulse<=0;
-            tcl<=0; tc_chk<=0; tc_pin<=0;
         end else begin
             entry_ack <= 1'b0;
             dreq_rd_r <= 1'b0;
             chk_valid <= 1'b0;
-            tc_chk    <= 1'b0;
-            tc_pin    <= 1'b0;
             skp_pulse <= 1'b0;
-            tcc_pulse  = 1'b0;   // blocking: set by the cached-record claim below
 
-            // ====== PRE-FETCH SORT$ CHECK + SETUP$ PROBE (concurrent with exg_*) ======
-            // Collect verdicts for the NEXT record (ex_po cursor). ONE walk serves
-            // both caches: each triangle's tag is presented once, chk_valid probes
-            // the sort cache (only when the skip filter is armed), tc_chk probes the
-            // setup cache (only in TR/PT phases), and both verdicts land on the same
-            // cycle. 1-in-flight (issue, wait strobe, next) - a strip's <=6 checks
-            // cost ~2 cycles each vs the ~30+-cycle fetch they can save.
+            // ============ PRE-FETCH SORT$ CHECK (concurrent with exg_*) ============
+            // Collect a verdict for the NEXT record (ex_po cursor). The sort-cache
+            // check port is 1-in-flight here (issue, wait strobe, next) - a strip's
+            // <=6 checks cost ~2 cycles each vs the ~30+-cycle fetch they can save.
             case (pcs)
-            PC_IDLE: if (ex_active && (pe_en || tcl) && !pc_v) begin
+            PC_IDLE: if (ex_active && pe_en && !pc_v) begin
                 if (ex_array) begin
-                    chk_valid <= pe_en;                   // single tag, toff=0
-                    tc_chk    <= tcl;
-                    tc_hit1   <= 1'b0;
+                    chk_valid <= 1'b1;                    // single tag, toff=0
                     pcs <= PC_WAIT;
                 end else begin
                     pc_fmask <= 6'd0;
-                    tc_hitm  <= 6'd0;
                     pc_i     <= 3'd0;
                     pcs <= PC_ISSUE;
                 end
             end
             PC_ISSUE: begin   // strip: check triangle pc_i if enabled, else advance
                 if (ex_mask[3'd5 - pc_i]) begin
-                    chk_valid <= pe_en;
-                    tc_chk    <= tcl;
+                    chk_valid <= 1'b1;
                     pcs <= PC_WAIT;
                 end else if (pc_i == 3'd5) begin
                     pc_v <= 1'b1; pcs <= PC_IDLE;
                 end else pc_i <= pc_i + 3'd1;
             end
-            PC_WAIT: if (pe_en ? chk_valid_q : tc_vq) begin : pc_verdict
-                // a SURVIVOR renders this pass (enabled, not sort-skipped). Its
-                // setup-cache hit is claimed NOW: tc_pin pins the index while
-                // chk_tag still presents this triangle, so the entry cannot be
-                // evicted before the fq consumer reads it (partial-hit records'
-                // pinned triangles flow through setup and unpin at that pop).
-                reg surv, hit;
-                surv = !(pe_en && chk_done);
-                hit  = tcl && tc_hit && surv;
-                tc_pin <= hit;
+            PC_WAIT: if (chk_valid_q) begin
                 if (ex_array) begin
-                    pc_skip <= pe_en && chk_done;
-                    tc_hit1 <= hit;
+                    pc_skip <= chk_done;
                     pc_v <= 1'b1; pcs <= PC_IDLE;
                 end else begin
-                    if (surv) pc_fmask[3'd5 - pc_i] <= 1'b1;   // survivor
-                    if (hit)  tc_hitm [3'd5 - pc_i] <= 1'b1;
+                    if (!chk_done) pc_fmask[3'd5 - pc_i] <= 1'b1;   // survivor
                     if (pc_i == 3'd5) begin pc_v <= 1'b1; pcs <= PC_IDLE; end
                     else begin pc_i <= pc_i + 3'd1; pcs <= PC_ISSUE; end
                 end
@@ -443,7 +387,6 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
                         exg_s1_v  <= 1'b0;     // geometry pipeline restarts for this entry
                         exg_v     <= 1'b0;
                         pe_en     <= skip_en;  // pre-fetch filtering, stable per entry
-                        tcl       <= tc_en;    // setup-cache probing, stable per entry
                         pc_v      <= 1'b0;     // re-arm the pre-check for record 0
                         pcs       <= PC_IDLE;
                         entry_ack <= 1'b1;     // consume it; producer advances
@@ -460,47 +403,14 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
                     exg_recb_r <= exg_recb_c;
                     exg_recw_r <= exg_recw_c;
                     exg_v      <= 1'b1;
-                end else if ((pe_en || tcl) && !pc_v) begin
-                    // wait for the pre-fetch sort$/setup$ verdicts of this record
+                end else if (pe_en && !pc_v) begin
+                    // wait for the pre-fetch sort$ verdicts of this record
                 end else if (pe_en && pc_rec_skip) begin
                     // every triangle of this record is already fully rendered:
                     // SKIP ITS FETCH - advance the expansion cursor directly.
                     skp_pulse <= 1'b1;
                     skp_cnt   <= ex_array ? 3'd1 : cnt6(ex_mask);
                     pc_v      <= 1'b0;                 // re-check the next record
-                    if (ex_array && ex_count != 5'd1) begin
-                        ex_count <= ex_count - 5'd1;
-                        ex_base  <= ex_base + exg_recb_r;
-                        ex_po    <= ex_po   + exg_recw_r;
-                    end else ex_active <= 1'b0;        // entry done expanding
-                end else if (tc_rec_hit && !b_ready[rd_buf] && !b_infl[rd_buf]) begin
-                    // CACHED record: every surviving triangle's setup parameters
-                    // are resident (and pinned) in the setup cache - NO DDR burst,
-                    // no vertex data. Publish the buffer directly as ready with
-                    // the cached flag; emit presents each surviving triangle as a
-                    // lightweight CACHED trio (tag only) and the fq consumer
-                    // bypasses setup with the cached plane records. Expansion
-                    // advances exactly as R_REQ does.
-                    b_mask [rd_buf] <= surv_mask;
-                    b_skip [rd_buf] <= ex_skip;
-                    b_shadow[rd_buf]<= ex_shadow;
-                    b_pt   [rd_buf] <= ex_ispt;
-                    b_po   [rd_buf] <= ex_po;
-                    b_array[rd_buf] <= ex_array;
-                    b_quad [rd_buf] <= ex_quad;
-                    b_cached[rd_buf]<= 1'b1;
-                    b_hitm [rd_buf] <= ex_array ? {tc_hit1, 5'b0} : tc_hitm;
-                    b_isp  [rd_buf] <= 32'd0;   // cb=0, matching the cb=0 probe tag
-                                                // that hit (a cb=1 fill is refused, so
-                                                // a hit PROVES the record's cb was 0);
-                                                // the real ISP word rides the cached
-                                                // plane record into pq
-                    b_nfill[rd_buf] <= 4'd8;    // no vertex waits in emit
-                    b_done [rd_buf] <= 1'b1;
-                    b_ready[rd_buf] <= 1'b1;
-                    rd_buf  <= rd_buf + 1'b1;
-                    tcc_pulse = 1'b1;           // outstanding++ (see os_update)
-                    pc_v    <= 1'b0;            // re-check the next record
                     if (ex_array && ex_count != 5'd1) begin
                         ex_count <= ex_count - 5'd1;
                         ex_base  <= ex_base + exg_recb_r;
@@ -521,10 +431,6 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
                     rd_po     <= ex_po;
                     rd_array  <= ex_array;
                     rd_quad   <= ex_quad;
-                    // a PARTIALLY-hit record fetches, but its hit triangles are
-                    // still PINNED (claimed at their verdicts) - carry the hit
-                    // mask so each one's fq pop unpins (trio.pinned).
-                    rd_hitm   <= tcl ? (ex_array ? {tc_hit1, 5'b0} : tc_hitm) : 6'd0;
                     // record geometry: plain register-to-register copies of the
                     // per-entry pre-computed values (no logic in this latch - the
                     // ex_shadow -> multiply cone was the Fmax violator here).
@@ -558,8 +464,6 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
                 b_po   [rd_buf] <= rd_po;
                 b_array[rd_buf] <= rd_array;
                 b_quad [rd_buf] <= rd_quad;
-                b_cached[rd_buf]<= 1'b0;   // a fetched record is never CACHED
-                b_hitm [rd_buf] <= rd_hitm;
                 // enqueue the parse descriptor
                 dq_buf   [dq_tail] <= rd_buf;
                 dq_span  [dq_tail] <= rd_span_r;
@@ -640,7 +544,6 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
                     v2_r <= vslot[em_buf][{1'b0,s_i}+4'd2];
                     tag_r <= mk_tag(b_isp[em_buf][ISP_CACHEBYPASS_BIT], b_shadow[em_buf],
                                     b_skip[em_buf], b_po[em_buf], s_i);
-                    pin_r <= b_hitm[em_buf][3'd5 - s_i];
                     tri_ready_r <= 1'b1;
                     est <= E_PRESENT;
                 end
@@ -653,7 +556,6 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
                         v0_r<=vslot[em_buf][0]; v1_r<=vslot[em_buf][1]; v2_r<=vslot[em_buf][2];
                         tag_r<=mk_tag(b_isp[em_buf][ISP_CACHEBYPASS_BIT], b_shadow[em_buf],
                                       b_skip[em_buf], b_po[em_buf], 3'd0);
-                        pin_r <= b_hitm[em_buf][5];
                         tri_ready_r <= 1'b1;
                     end
                 end else begin
@@ -680,16 +582,12 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
             endcase
 
             // outstanding = records fetched-but-not-emitted. Single update point so
-            // a same-cycle fetch-complete (+1), CACHED-record claim (+1) and
-            // buffer-release (-1) reconcile. (rx_last and a claim CAN coincide -
-            // a burst landing while the reader claims a cached record.)
+            // a same-cycle fetch-complete (+1) and buffer-release (-1) reconcile.
             begin : os_update
                 reg push, pop;
                 push = rx_last;   // a record's burst fully landed (was: R_STREAM end)
                 pop  = (est==E_REL);
-                outstanding <= outstanding + (push ? 4'd1 : 4'd0)
-                                           + (tcc_pulse ? 4'd1 : 4'd0)
-                                           - (pop ? 4'd1 : 4'd0);
+                outstanding <= outstanding + (push ? 4'd1 : 4'd0) - (pop ? 4'd1 : 4'd0);
             end
             // (list-done is observed by isp_core via !busy && eq_empty; no
             //  flush/drained handshake needed.)

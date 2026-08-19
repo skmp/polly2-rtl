@@ -217,15 +217,6 @@ sortcache: | $(BUILD)
 	  $(CWD)/tb/sort_cache_tb.cpp --Mdir $(BUILD)/obj_sortcache -o tb
 	./$(BUILD)/obj_sortcache/tb
 
-# isp_setup_cache unit test: fill/probe/consume, the pin protocol (pinned index
-# refuses aliasing fills), probe-vs-fill same-edge races, tile invalidate.
-# Built at W=64/TAGOFF=0 so the payload is a plain word with the tag in [31:0].
-setupcache: | $(BUILD)
-	+$(VERILATOR) --cc --exe --build $(VFLAGS) --top-module isp_setup_cache \
-	  -GW=64 -GTAGOFF=0 rtl/isp/isp_setup_cache.sv \
-	  $(CWD)/tb/isp_setup_cache_tb.cpp --Mdir $(BUILD)/obj_setupcache -o tb
-	./$(BUILD)/obj_setupcache/tb
-
 # isp_primitive_iterator_pf quad unit test: ENT_QUAD / ENT_TRI / ENT_STRIP entries
 # through a behavioral DDR; checks vertices, quad flag + v3x/v3y, and the tag
 # param_offs advance (hdr + nverts*stride per array record).

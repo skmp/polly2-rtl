@@ -45,7 +45,6 @@ set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/buffers/reg
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/lists/region_array_parser.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/lists/object_list_parser.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/isp/isp_primitive_iterator_pf.sv
-set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/isp/isp_setup_cache.sv
 
 # ---- ISP/TSP setups ----
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/setup/isp_setup_streamed.sv

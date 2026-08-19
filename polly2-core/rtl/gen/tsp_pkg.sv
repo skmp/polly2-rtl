@@ -274,17 +274,6 @@ package tsp_pkg;
         logic          is_pt;            // list-membership: this triangle came from the PT
                                          // list (not TL). Per-triangle so PT and TL can flow
                                          // back-to-back through the FIFOs (drives dt_pt).
-        logic          cached;           // 1: this triangle's SETUP PARAMETERS are resident
-                                         // (and pinned) in the setup cache - v0..v2/isp are
-                                         // NOT valid (no fetch happened); the consumer must
-                                         // bypass setup and read the plane record by tag.
-        logic          pinned;           // 1: this triangle's setup-cache index is PINNED
-                                         // (it HIT the pre-fetch probe - implied by cached,
-                                         // also set for hit triangles of a partially-hit
-                                         // record that took the fetch path). Its fq pop must
-                                         // unpin. Only a hitting tag may unpin: an alias
-                                         // sharing the index would have missed, so the pin
-                                         // is provably this triangle's own.
         logic          prim_done;        // 1-cycle: whole strip entry finished
     } triangle_out_t;
     typedef struct packed {
