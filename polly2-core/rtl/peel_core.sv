@@ -25,7 +25,7 @@ module peel_core import tsp_pkg::*; #(
     // >= 2. It bounds how many rastered-but-unshaded passes the ISP may queue: the
     // ISP stalls only when the copy it wants to write is still owned by the spanner,
     // so TI_COPIES-1 passes may be in flight ahead of the shade.
-    parameter integer TI_COPIES = 4
+    parameter integer TI_COPIES = 8
 ) (
     input             clk,
     input             reset,
@@ -845,8 +845,22 @@ module peel_core import tsp_pkg::*; #(
     reg  [23:0] zfB_acc;     // ...same, the two-layer (z3b pair) bound
     reg         zf_acc_v;    // ...any pixel had a real zb3
     reg  [30:0] zfront;      // published bound for the pass now running
-    reg  [23:0] zfrontB;     // published two-layer bound (24-bit round-up domain)
+    reg  [23:0] zfrontB;     // published two-layer bound: FLOOR-domain tile max + 1
+                             // (the +1 is the round-up compensation for z3b's floor
+                             // storage - probe24 > zfrontB implies probe > true bound)
     reg         zf_v;        // ...valid
+    // one registered stage between the chunk reduction trees and the fold: the
+    // RAM-read -> tree -> fold-compare -> accumulator cone was a -29 ns path at
+    // the 141 MHz slot. The walk stages each chunk's tree outputs here and folds
+    // them the NEXT cycle; the publish moves one cycle past walk end - raster is
+    // still fenced there (walk / handoff states), so nothing samples the bound
+    // in the gap.
+    reg         zfp_v;       // staged chunk valid
+    reg         zfp_last;    // ...and it was the walk's LAST chunk (publish after fold)
+    reg         zfp_first;   // first_peel of the staged chunk's walk
+    reg         zfp_any;
+    reg  [30:0] zfp_31;
+    reg  [23:0] zfp_24;
     reg         zf_ok;       // zb3 was complete when zfront was built
     reg         zf_clean;    // no cull has fired in the pass now running
     reg         fc_pend;     // a cull's sort-cache demote awaits a free way-0 slot
@@ -865,8 +879,9 @@ module peel_core import tsp_pkg::*; #(
     // TWO-LAYER: a two-layer pass consumes TWO keys per pixel, so the sound bound
     // is the per-pixel SECOND-owed depth - the z3b PAIR field (see peel_tile_buffer's
     // pb_z3b_max header for the storage, the round-up domain and the single-owed
-    // A fallback). zfrontB is its tile max; the probe is truncated DOWN into the
-    // same 24-bit domain, so probe24 > zfrontB still implies probe > true bound.
+    // A fallback). zfrontB is its tile max PLUS ONE (z3b is stored FLOOR-truncated
+    // to keep adders out of the RMW loop; the publish's +1 restores the round-up),
+    // and the probe truncates DOWN, so probe24 > zfrontB implies probe > true bound.
     // (An earlier version gated the cull off entirely under tl2_en: zfront alone
     // bounds only next-A, and a triangle in front of every next-A can be exactly
     // a pixel's next-B - observed as dropped layer content on cull-heavy scenes.)
@@ -2195,6 +2210,7 @@ module peel_core import tsp_pkg::*; #(
             pass_bany<=1'b0; bany_l<=1'b0;
             zf_acc<=31'd0; zf_acc_v<=1'b0; zfront<=31'd0; zf_v<=1'b0;
             zfB_acc<=24'd0; zfrontB<=24'd0;
+            zfp_v<=1'b0; zfp_last<=1'b0;
             zf_ok<=1'b0; zf_clean<=1'b1; fc_pend<=1'b0; fc_tag<=32'd0;
             ol_walk_done<=1'b0;
             pt_phase<=1'b0; pt_pass<=8'd0; pt_sh_pend<=3'd0; pt_more<=11'd0;
@@ -2231,6 +2247,10 @@ module peel_core import tsp_pkg::*; #(
             // ahead of the FSM so a cull firing this cycle still wins the set
             // (nonblocking: the RS_RAS assignment below is later in the block).
             if (fc_go) fc_pend <= 1'b0;
+            // zb3/z3b fold staging defaults (S_PEEL_BUF_RUN overrides while walking;
+            // the registered fold after the st case consumes them)
+            zfp_v    <= 1'b0;
+            zfp_last <= 1'b0;
 `ifndef SYNTHESIS
             // -------- performance counters: charge THIS clock to its buckets --------
             // Only count while the core is doing tile work (not the top-level idle wait
@@ -3073,33 +3093,23 @@ module peel_core import tsp_pkg::*; #(
             S_PEEL_BUF_RUN: begin
                 pb_pipe <= 1'b1;
                 pb_i    <= pb_rd;
-                // Fold this chunk's zb3 into the tile bound. The reduction is off the
-                // walk's own registered read, so it is exactly aligned with the write
-                // that resets zb3 for the coming pass - one pass of lookahead, no
-                // extra read port and no extra walk.
-                if (pb_pipe && pb_zb3_any) begin
-                    zf_acc_v <= 1'b1;
-                    if (pb_zb3_max > zf_acc) zf_acc <= pb_zb3_max;
-                    if (pb_z3b_max > zfB_acc) zfB_acc <= pb_z3b_max;
-                end
+                // STAGE this chunk's zb3/z3b tree outputs; the registered fold
+                // after the st case folds them NEXT cycle (see zfp_* decls). Still
+                // aligned with the write that resets zb3 for the coming pass -
+                // one pass of lookahead, no extra read port and no extra walk.
+                zfp_v    <= pb_pipe;
+                zfp_any  <= pb_zb3_any;
+                zfp_31   <= pb_zb3_max;
+                zfp_24   <= pb_z3b_max;
+                zfp_last <= pb_pipe && (pb_i == CHUNK_AW'(NCHUNK-1));
+                zfp_first<= first_peel;
                 if (pb_pipe && pb_i == CHUNK_AW'(NCHUNK-1)) begin
                     // whole tile transformed. The pass's OL walk (+ fetch/setup
                     // into fq/pq) has been running since the pass decision; with
                     // the swap done the RS_IDLE fence lifts and raster starts on
-                    // an already-primed plane FIFO.
+                    // an already-primed plane FIFO. (zfront/zfrontB publish one
+                    // cycle later, off the staged last chunk - see the fold.)
                     first_peel <= 1'b0;
-                    // publish the bound for the pass about to run. The LAST chunk is
-                    // folded in here explicitly - the accumulate above lands on this
-                    // same edge, so zf_acc still reads pre-update. The FIRST walk of
-                    // a tile publishes zf_v=0: its "zb3" read-back is ceiling/CLEAR
-                    // residue in the shared PW_ZCEIL slot (or a previous z_keep
-                    // entry's leftovers), not this tile's accumulation.
-                    zfront   <= (pb_zb3_any && (pb_zb3_max > zf_acc)) ? pb_zb3_max : zf_acc;
-                    zfrontB  <= (pb_zb3_any && (pb_z3b_max > zfB_acc)) ? pb_z3b_max : zfB_acc;
-                    zf_v     <= (zf_acc_v | pb_zb3_any) && !first_peel;
-                    // trustworthy only if the pass that produced this zb3 swept in full
-                    zf_ok    <= zf_clean;
-                    zf_clean <= 1'b1;
                     // TWO-LAYER: this walk also MATERIALIZED the drained pass's
                     // slot-B image into u_taginvw[htile] (tvw_pbc_bmode). If that
                     // pass staged a B, hand the image now (shaded after A, still
@@ -3271,6 +3281,33 @@ module peel_core import tsp_pkg::*; #(
             end
             default: st<=S_IDLE;
             endcase
+
+            // ---- registered zb3/z3b fold + one-cycle-late publish ----------------
+            // Consumes the chunk staged by S_PEEL_BUF_RUN (zfp_*). The LAST chunk is
+            // folded into the publish explicitly - the accumulate lands on this same
+            // edge, so zf_acc/zfB_acc still read pre-update (the old inline fold's
+            // rule, one stage later). The FIRST walk of a tile publishes zf_v=0: its
+            // "zb3" read-back is ceiling/CLEAR residue in the shared PW_ZCEIL slot
+            // (or a previous z_keep entry's leftovers), not this tile's accumulation.
+            if (zfp_v) begin
+                if (zfp_any) begin
+                    zf_acc_v <= 1'b1;
+                    if (zfp_31 > zf_acc)  zf_acc  <= zfp_31;
+                    if (zfp_24 > zfB_acc) zfB_acc <= zfp_24;
+                end
+                if (zfp_last) begin
+                    zfront  <= (zfp_any && (zfp_31 > zf_acc)) ? zfp_31 : zf_acc;
+                    // z3b is stored FLOOR-truncated: the +1 makes the published
+                    // bound the round-up, so `probe24 > zfrontB` is sound (no
+                    // overflow: the floor of any real depth <= 24'hFEFFFF).
+                    zfrontB <= ((zfp_any && (zfp_24 > zfB_acc)) ? zfp_24 : zfB_acc)
+                             + 24'd1;
+                    zf_v    <= (zf_acc_v | zfp_any) && !zfp_first;
+                    // trustworthy only if the pass that produced it swept in full
+                    zf_ok   <= zf_clean;
+                    zf_clean<= 1'b1;
+                end
+            end
 
             // ================= SPANNER_v2 GLUE FSM (spn) =================
             // Runs every cycle alongside `st`/`rs_st`/the TSP reader. Starts spanner_v2 on a

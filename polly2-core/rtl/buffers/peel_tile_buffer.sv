@@ -8,8 +8,8 @@
 // Slots A+B are the TWO-LAYER peel working set (A = farthest owed, shaded first;
 // B = next). The zceil slot is PHASE-OWNED: opaque ceiling during the PT resolve,
 // the zb3 nearest-deferred bound during TL peeling (see the zb3 port header
-// below); z3b is zb3's PAIR companion (the SECOND-minimum owed depth, 24-bit
-// round-up), which is what makes the front cull sound under two-layer.
+// below); z3b is zb3's PAIR companion (the SECOND-minimum owed depth, stored
+// FLOOR-truncated to 24 bits), which makes the front cull sound under two-layer.
 // Depths are 31-bit SIGN-STRIPPED floats: invW is always positive non-zero, so
 // the sign bit is never stored and positive-float ordering == unsigned ordering.
 // Bank = x[BANK_BITS-1:0], addr = {y[4:0], x[4:BANK_BITS]} (AW bits, 1024/LANES
@@ -195,16 +195,17 @@ module peel_tile_buffer import tsp_pkg::*; #(
     // B = 2nd-min), so a sound front cull must clear the SECOND selection too - zb3
     // alone bounds only A (a triangle in front of every next-A can be exactly a
     // pixel's next-B: the original unsoundness). z3b tracks the 2nd-min over the
-    // same candidate events, stored as 24 bits ROUNDED UP (drop invW[6:0], +1 if
-    // any dropped bit set): over-stating the bound only weakens the cull - the
-    // same safe direction as zb3's under-recording rule. Soundness inherits the
+    // same candidate events, stored FLOOR-truncated to 24 bits (a pure slice, no
+    // adders); the consumer compensates with a single +1 at the published bound
+    // (peel_core's zfrontB), so the effective bound only over-states - the same
+    // safe direction as zb3's under-recording rule. Soundness inherits the
     // self-registration argument: a swept triangle's own depth is a candidate at
     // every covered pixel, so it can be culled only where >= 2 owed fragments sit
     // farther - exactly "can't be A or B next pass".
     // pb_z3b_max is the tile bound built the same way as pb_zb3_max, with a
     // per-lane fallback: a lane with only ONE owed fragment (z3b = sentinel)
-    // contributes up24(zb3) - its next-B selection is any fragment in front of A,
-    // so the A bound is the only sound one there. Lanes with zb3 = FLT_MAX are
+    // contributes floor24(zb3) - its next-B selection is any fragment in front of
+    // A, so the A bound is the only sound one there. Lanes with zb3 = FLT_MAX are
     // excluded (nothing owed). Same validity companion: pb_zb3_any.
     output     [23:0]           pb_z3b_max,
     // ---- slot-B image export (two-layer peel): the read chunk's B fields, comb
@@ -247,15 +248,15 @@ module peel_tile_buffer import tsp_pkg::*; #(
     localparam integer PW_VALIDB  = 213;  // [0]     slot B staged
     localparam integer PW_ISPTA   = 214;  // [0]     slot A fragment is PT-list
     localparam integer PW_ISPTB   = 215;  // [0]     slot B fragment is PT-list
-    // z3b: the SECOND-minimum owed depth (24-bit round-up; see the pb_z3b_max port
+    // z3b: the SECOND-minimum owed depth (24-bit floor; see the pb_z3b_max port
     // header). 216 -> 240 is FREE M10K: at chunk depths <= 256 each block gives 40
     // bits of width, and PEEL_W=216 already paid for ceil(216/40) = 6 blocks/bank
     // = 240 bits of capacity - these are the 24 bits that were going spare.
     localparam integer PW_Z3B     = 216;  // [23:0]  zb3 pair (TL peel only)
     localparam integer PEEL_W = 240;
     localparam [30:0]  FLT_MAX = 31'h7F7FFFFF;
-    // z3b's "fewer than two owed here" sentinel. up24() of any real depth tops out
-    // at 24'hFF0000 (FLT_MAX >> 7 rounded up), so the all-ones code is never a value.
+    // z3b's "fewer than two owed here" sentinel. The floor of any real depth tops
+    // out at 24'hFEFFFF (FLT_MAX[30:7]), so the all-ones code is never a value.
     localparam [23:0]  Z3B_MAX = 24'hFFFFFF;
     // reference-sort seeds. TR pass 1: "nothing rendered yet" = TAG_INVALID_SENTINEL,
     // whose sort field is 0, i.e. at-or-below every real fragment at the same depth.
@@ -311,14 +312,9 @@ module peel_tile_buffer import tsp_pkg::*; #(
     // the same slot under its TL-peel ownership: the zb3 nearest-deferred bound
     function automatic [30:0] f_z3    (input [PEEL_W*NB-1:0] w, input integer b);
         f_z3     = w[PEEL_W*b + PW_Z3     +: 31]; endfunction
-    // zb3's pair companion: the 2nd-minimum owed depth (24-bit round-up domain)
+    // zb3's pair companion: the 2nd-minimum owed depth (24-bit floor domain)
     function automatic [23:0] f_z3b   (input [PEEL_W*NB-1:0] w, input integer b);
         f_z3b    = w[PEEL_W*b + PW_Z3B    +: 24]; endfunction
-    // 31-bit depth -> the 24-bit z3b domain, ROUNDED UP (conservative: the stored
-    // bound may only over-state, which weakens the cull). Monotonic in the
-    // positive-float-bits ordering; never reaches Z3B_MAX for a real depth.
-    function automatic [23:0] up24 (input [30:0] v);
-        up24 = v[30:7] + {23'd0, |v[6:0]}; endfunction
     function automatic       f_valid  (input [PEEL_W*NB-1:0] w, input integer b);
         f_valid  = w[PEEL_W*b + PW_VALID]; endfunction
     // ---- slot B extractors ----
@@ -400,53 +396,76 @@ module peel_tile_buffer import tsp_pkg::*; #(
             // ---- zb3 accumulate (consumed only when b_peeling - see the write mux).
             // `more` IS the "still needs drawing" predicate, and the candidate's
             // depth is the evicted resident on an accept, else the deferred fragment
-            // itself - the same old/new mux the sort cache's demote tag already uses.
+            // itself. TIMING: both possible candidates' compares run in PARALLEL
+            // with the depth compare that produces disp/more (they need only the RAM
+            // read), and the late disp verdict merely SELECTS - the original form
+            // chained disp -> candidate mux -> compare into the stage-B write data,
+            // stacking onto the binding peel RMW loop.
             wire        lp_cand   = b_inside[gd] & ras_more_lp[gd];
-            wire [30:0] lp_cand_d = ras_disp_lp[gd] ? (b_2l ? f_zbB(rdata, gd)
-                                                            : f_depth(rdata, gd))
-                                                    : b_invw[31*gd +: 31];
+            wire [30:0] cd_disp   = b_2l ? f_zbB(rdata, gd) : f_depth(rdata, gd);
+            wire [30:0] cd_new    = b_invw[31*gd +: 31];
             wire [30:0] zb3_old   = f_z3(rdata, gd);
-            assign zb3_nxt[31*gd +: 31] =
-                (lp_cand && (lp_cand_d < zb3_old)) ? lp_cand_d : zb3_old;
+            wire        lt_disp   = (cd_disp < zb3_old);
+            wire        lt_new    = (cd_new  < zb3_old);
+            wire        cand_lt   = ras_disp_lp[gd] ? lt_disp : lt_new;
+            wire [30:0] cand_v    = ras_disp_lp[gd] ? cd_disp : cd_new;
+            assign zb3_nxt[31*gd +: 31] = (lp_cand && cand_lt) ? cand_v : zb3_old;
             // ---- z3b pair accumulate: classic two-register min tracking. A new
-            // minimum DEMOTES the old one to the pair slot (up24(old min) <= any
+            // minimum DEMOTES the old one to the pair slot (floor(old min) <= any
             // stored pair value, so the demote is unconditional); otherwise the
-            // candidate competes for the pair slot in the rounded domain. Every
-            // event carries exactly ONE owed candidate (a defer is the fragment,
-            // an accept's `more` is the single displaced-out resident), so one
-            // tracker per lane is complete.
-            wire [23:0] z3b_old = f_z3b(rdata, gd);
-            wire [23:0] cand24  = up24(lp_cand_d);
+            // candidate competes in the FLOOR domain - a pure bit slice, NO adders
+            // in the RMW loop (the round-up compensation is one +1 at the peel_core
+            // publish; see zfrontB there). Same parallel-compare/late-select shape
+            // as zb3 above. Every event carries exactly ONE owed candidate (a defer
+            // is the fragment, an accept's `more` is the single displaced-out
+            // resident), so one tracker per lane is complete.
+            wire [23:0] z3b_old   = f_z3b(rdata, gd);
+            wire        lt24_disp = (cd_disp[30:7] < z3b_old);
+            wire        lt24_new  = (cd_new [30:7] < z3b_old);
+            wire        c24_lt    = ras_disp_lp[gd] ? lt24_disp : lt24_new;
+            wire [23:0] c24_v     = ras_disp_lp[gd] ? cd_disp[30:7] : cd_new[30:7];
             assign z3b_nxt[24*gd +: 24] =
-                  !lp_cand                ? z3b_old
-                : (lp_cand_d < zb3_old)   ? ((zb3_old == FLT_MAX) ? Z3B_MAX
-                                                                  : up24(zb3_old))
-                : (cand24 < z3b_old)      ? cand24
-                                          : z3b_old;
+                  !lp_cand  ? z3b_old
+                : cand_lt   ? ((zb3_old == FLT_MAX) ? Z3B_MAX : zb3_old[30:7])
+                : c24_lt    ? c24_v
+                            : z3b_old;
         end
     endgenerate
 
     // per-chunk zb3 reduction for the caller's per-tile max, off the SAME registered
     // read the PeelBuffers walk already performs (no extra port, no extra pass).
-    reg [30:0] zb3_mx; reg zb3_anyv; integer mz;
-    reg [23:0] z3b_mx; reg [23:0] z3b_lb;
-    always @(*) begin
-        zb3_mx = 31'd0; zb3_anyv = 1'b0; z3b_mx = 24'd0; z3b_lb = 24'd0;
-        for (mz = 0; mz < NB; mz = mz + 1)
-            if (f_z3(rdata, mz) != FLT_MAX) begin
-                zb3_anyv = 1'b1;
-                if (f_z3(rdata, mz) > zb3_mx) zb3_mx = f_z3(rdata, mz);
-                // per-lane two-layer bound: the pair when it exists, else the A
-                // bound (single-owed lane: any fragment in front of A is its
-                // next-B - see the pb_z3b_max port header)
-                z3b_lb = (f_z3b(rdata, mz) != Z3B_MAX) ? f_z3b(rdata, mz)
-                                                       : up24(f_z3(rdata, mz));
-                if (z3b_lb > z3b_mx) z3b_mx = z3b_lb;
-            end
-    end
-    assign pb_zb3_max = zb3_mx;
-    assign pb_zb3_any = zb3_anyv;
-    assign pb_z3b_max = z3b_mx;
+    // Both reductions are explicit BALANCED TREES ($clog2(NB) compare levels,
+    // heap-indexed: leaves at NB..2NB-1, node i = max(2i, 2i+1), root = node 1).
+    // The original for-loop running max synthesized as a SERIAL NB-deep
+    // compare-mux chain straight off the RAM read - at NB=8 that alone blew the
+    // clock (seen as -29 ns into the zfB_acc fold). An excluded lane contributes
+    // 0, the identity for an unsigned max; pb_zb3_any tells the caller when the
+    // whole chunk is excluded.
+    wire [30:0] rt31 [1:2*NB-1];
+    wire [23:0] rt24 [1:2*NB-1];
+    wire [NB-1:0] rt_any;
+    genvar gm;
+    generate
+        for (gm = 0; gm < NB; gm = gm + 1) begin : rleaf
+            wire [30:0] z3v  = f_z3 (rdata, gm);
+            wire [23:0] z3bv = f_z3b(rdata, gm);
+            wire        own  = (z3v != FLT_MAX);
+            assign rt_any[gm] = own;
+            assign rt31[NB+gm] = own ? z3v : 31'd0;
+            // per-lane two-layer bound: the pair when it exists, else the FLOOR
+            // of the A bound (single-owed lane: any fragment in front of A is
+            // its next-B - see the pb_z3b_max port header)
+            assign rt24[NB+gm] = !own ? 24'd0
+                               : (z3bv != Z3B_MAX) ? z3bv : z3v[30:7];
+        end
+        for (gm = 1; gm < NB; gm = gm + 1) begin : rnode
+            assign rt31[gm] = (rt31[2*gm] > rt31[2*gm+1]) ? rt31[2*gm] : rt31[2*gm+1];
+            assign rt24[gm] = (rt24[2*gm] > rt24[2*gm+1]) ? rt24[2*gm] : rt24[2*gm+1];
+        end
+    endgenerate
+    assign pb_zb3_max = rt31[1];
+    assign pb_zb3_any = |rt_any;
+    assign pb_z3b_max = rt24[1];
 
     // slot-B image export for the materialize write (see the port comment)
     genvar gb;
