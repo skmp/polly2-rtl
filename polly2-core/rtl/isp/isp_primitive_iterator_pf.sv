@@ -33,11 +33,27 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
     input      objlist_entry_t entry,        // mask (STRIP) / count (ARRAY)
     input                  entry_pt,         // list-kind: this entry is from the PT list
                                              // (carried through to trio.is_pt per-triangle)
+    input                  entry_early,      // this entry belongs to an EARLY-kicked
+                                             // NEXT-pass walk consumed during the current
+                                             // pass's drain: its records fetch/probe/claim
+                                             // normally but WITHOUT the sort-cache filter
+                                             // (verdicts are invalid until the pass's
+                                             // demotes settle), and its triangles carry
+                                             // trio.early so the caller can fence them
+    input                  early_open,       // 1-cyc (pass decision): every in-flight
+                                             // EARLY flag becomes CURRENT-pass - a
+                                             // stale flag surviving into the next
+                                             // pass's window would fence live work
+                                             // as next-pass and deadlock the barrier
     output reg             entry_ack,        // 1-cycle: consumed the entry
     output                 busy,             // LEVEL: iterator has work in flight
                                              // (records read/being read/emitting).
                                              // isp_core's barrier gates on !busy &&
                                              // eq_empty (no flush/drained needed).
+    output                 busy_live,        // LEVEL: busy with NON-early work only -
+                                             // what the PASS BARRIER waits on (early
+                                             // records belong to the NEXT pass and must
+                                             // not hold the current pass open)
 
     // triangle output
     output triangle_out_t  trio,
@@ -57,6 +73,12 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
     output core_tag_t      chk_tag,
     input                  chk_valid_q,      // verdict strobe (1 cyc after chk_valid)
     input                  chk_done,         // 1 = fully rendered -> skippable
+    // the check port is SHARED with the caller's pq-pop deferred check (the sort
+    // filter for early-fetched triangles). chk_hold defers this walk's issues for
+    // a cycle so the two can never collide; chk_src_q routes the strobes: this
+    // walk's verdicts carry src=0, the caller's carry src=1 and are ignored here.
+    input                  chk_hold,
+    input                  chk_src_q,
     output reg             skp_pulse,        // 1-cyc: skipped skp_cnt triangles pre-fetch
     output reg [2:0]       skp_cnt,
 
@@ -91,6 +113,8 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
                                        // consumer reads the setup cache by tag
     reg [5:0]  b_hitm  [0:NBUF-1];     // per-triangle setup-cache HIT (strip order,
                                        // bit [5-i]; arrays use bit 5) -> trio.pinned
+    reg        b_early [0:NBUF-1];     // record came from an early-pulled entry
+                                       // -> trio.early, excluded from busy_live
     reg        b_pt    [0:NBUF-1];     // list-kind (PT) of this record, -> trio.is_pt
     reg [5:0]  b_mask  [0:NBUF-1];     // strip mask
     reg [2:0]  b_skip  [0:NBUF-1];
@@ -209,6 +233,7 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
     // pc_v gates the record start; re-armed (cleared) per record.
     reg        pe_en;                  // skip_en latched at entry pull (stable per entry)
     reg        tcl;                    // tc_en latched at entry pull (stable per entry)
+    reg        exl_early;              // entry_early latched at entry pull
     reg        pc_v;                   // verdicts complete for the next record
     reg        pc_skip;                // array: record fully rendered -> skip fetch
     reg [5:0]  pc_fmask;               // strip: enabled AND not-done (same bit order
@@ -258,6 +283,7 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
     reg [26:0] rd_base;   reg [2:0] rd_skip;  reg rd_shadow; reg [5:0] rd_mask;
     reg [20:0] rd_po;     reg rd_array;      reg rd_quad;
     reg [5:0]  rd_hitm;   // per-triangle setup-cache hits of the record being read
+    reg        rd_early;  // record comes from an early-pulled entry
     // Record geometry (span/header/stride) is CONSTANT for the whole record and
     // depends only on the latched shadow/skip/mask/array. Computing the span
     // combinationally (it has a multiply) used to feed the per-beat
@@ -323,6 +349,7 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
     assign trio.tag            = tag_r;
     assign trio.cached         = b_cached[em_buf];   // setup-cache resident (no verts)
     assign trio.pinned         = pin_r;              // its fq pop must unpin
+    assign trio.early          = b_early[em_buf];    // next-pass triangle (pq fence)
     assign trio.prim_done      = 1'b0;   // not used by isp_core-pf path (drained instead)
 
     function automatic [3:0] va(input [2:0] i); va = {1'b0,i} + (i[0] ? 4'd1 : 4'd0); endfunction
@@ -341,6 +368,18 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
                     || b_infl [0] || b_infl [1] || b_infl [2] || b_infl [3];
     assign busy = ex_active || (rst != R_IDLE) || (est != E_IDLE)
                 || (outstanding != 4'd0) || b_any_live || !dq_empty;
+    // busy with NON-early work only: everything the current pass's barrier must
+    // wait for. In-order processing means early work is always the TAIL, so per-
+    // buffer/expansion flags classify it exactly. (dq beats are covered by b_infl;
+    // outstanding/emit are covered by b_ready + the est term.)
+    wire bl_buf = ((b_ready[0] || b_infl[0]) && !b_early[0])
+               || ((b_ready[1] || b_infl[1]) && !b_early[1])
+               || ((b_ready[2] || b_infl[2]) && !b_early[2])
+               || ((b_ready[3] || b_infl[3]) && !b_early[3]);
+    assign busy_live = (ex_active && !exl_early)
+                    || (rst != R_IDLE && !rd_early)
+                    || bl_buf
+                    || ((est != E_IDLE) && !b_early[em_buf]);
 
     always @(posedge clk) begin
         if (reset) begin
@@ -353,7 +392,8 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
             end
             tri_ready_r<=0;
             pe_en<=0; pc_v<=0; pcs<=PC_IDLE; chk_valid<=0; skp_pulse<=0;
-            tcl<=0; tc_chk<=0; tc_pin<=0;
+            tcl<=0; tc_chk<=0; tc_pin<=0; exl_early<=0; rd_early<=0;
+            for (rbi=0; rbi<NBUF; rbi=rbi+1) b_early[rbi]<=1'b0;
         end else begin
             entry_ack <= 1'b0;
             dreq_rd_r <= 1'b0;
@@ -371,7 +411,7 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
             // cycle. 1-in-flight (issue, wait strobe, next) - a strip's <=6 checks
             // cost ~2 cycles each vs the ~30+-cycle fetch they can save.
             case (pcs)
-            PC_IDLE: if (ex_active && (pe_en || tcl) && !pc_v) begin
+            PC_IDLE: if (ex_active && (pe_en || tcl) && !pc_v && !chk_hold) begin
                 if (ex_array) begin
                     chk_valid <= pe_en;                   // single tag, toff=0
                     tc_chk    <= tcl;
@@ -386,14 +426,18 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
             end
             PC_ISSUE: begin   // strip: check triangle pc_i if enabled, else advance
                 if (ex_mask[3'd5 - pc_i]) begin
-                    chk_valid <= pe_en;
-                    tc_chk    <= tcl;
-                    pcs <= PC_WAIT;
+                    if (!chk_hold) begin                  // yield the shared port
+                        chk_valid <= pe_en;
+                        tc_chk    <= tcl;
+                        pcs <= PC_WAIT;
+                    end
                 end else if (pc_i == 3'd5) begin
                     pc_v <= 1'b1; pcs <= PC_IDLE;
                 end else pc_i <= pc_i + 3'd1;
             end
-            PC_WAIT: if (pe_en ? chk_valid_q : tc_vq) begin : pc_verdict
+            // wait for OUR strobe: sort verdicts routed by src (src=1 belongs to the
+            // caller's pq-pop checker); the private tc port needs no routing.
+            PC_WAIT: if (pe_en ? (chk_valid_q && !chk_src_q) : tc_vq) begin : pc_verdict
                 // a SURVIVOR renders this pass (enabled, not sort-skipped). Its
                 // setup-cache hit is claimed NOW: tc_pin pins the index while
                 // chk_tag still presents this triangle, so the entry cannot be
@@ -442,8 +486,15 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
                         ex_count  <= (entry_type != ENT_STRIP) ? entry.count : 5'd1;
                         exg_s1_v  <= 1'b0;     // geometry pipeline restarts for this entry
                         exg_v     <= 1'b0;
-                        pe_en     <= skip_en;  // pre-fetch filtering, stable per entry
+                        // NO sort filter for early entries: their verdicts would read
+                        // demotes that have not settled (the current pass is still
+                        // rastering) - a false "done" would drop live geometry. They
+                        // fetch unfiltered; the setup-cache probe (tcl) is
+                        // pass-invariant and stays on, so most re-walked records are
+                        // cache hits and never touch DDR anyway.
+                        pe_en     <= skip_en && !entry_early;
                         tcl       <= tc_en;    // setup-cache probing, stable per entry
+                        exl_early <= entry_early;
                         pc_v      <= 1'b0;     // re-arm the pre-check for record 0
                         pcs       <= PC_IDLE;
                         entry_ack <= 1'b1;     // consume it; producer advances
@@ -490,6 +541,7 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
                     b_quad [rd_buf] <= ex_quad;
                     b_cached[rd_buf]<= 1'b1;
                     b_hitm [rd_buf] <= ex_array ? {tc_hit1, 5'b0} : tc_hitm;
+                    b_early[rd_buf] <= exl_early;
                     b_isp  [rd_buf] <= 32'd0;   // cb=0, matching the cb=0 probe tag
                                                 // that hit (a cb=1 fill is refused, so
                                                 // a hit PROVES the record's cb was 0);
@@ -525,6 +577,7 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
                     // still PINNED (claimed at their verdicts) - carry the hit
                     // mask so each one's fq pop unpins (trio.pinned).
                     rd_hitm   <= tcl ? (ex_array ? {tc_hit1, 5'b0} : tc_hitm) : 6'd0;
+                    rd_early  <= exl_early;
                     // record geometry: plain register-to-register copies of the
                     // per-entry pre-computed values (no logic in this latch - the
                     // ex_shadow -> multiply cone was the Fmax violator here).
@@ -560,6 +613,7 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
                 b_quad [rd_buf] <= rd_quad;
                 b_cached[rd_buf]<= 1'b0;   // a fetched record is never CACHED
                 b_hitm [rd_buf] <= rd_hitm;
+                b_early[rd_buf] <= rd_early;
                 // enqueue the parse descriptor
                 dq_buf   [dq_tail] <= rd_buf;
                 dq_span  [dq_tail] <= rd_span_r;
@@ -693,6 +747,14 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
             end
             // (list-done is observed by isp_core via !busy && eq_empty; no
             //  flush/drained handshake needed.)
+
+            // ---- EARLY-FLAG OPEN (last, so it wins any same-edge write): the pass
+            // decision promotes every in-flight early record/entry to CURRENT-pass.
+            if (early_open) begin
+                exl_early <= 1'b0;
+                rd_early  <= 1'b0;
+                for (rbi = 0; rbi < NBUF; rbi = rbi + 1) b_early[rbi] <= 1'b0;
+            end
         end
     end
 endmodule

@@ -116,9 +116,14 @@ module sort_cache #(
     input  [WAYS*TAGW-1:0]  wr_tag,
 
     // ---- CHECK: result 1 cycle later; chk_done=1 -> skip this triangle ----
+    // chk_src is an opaque 1-bit SOURCE tag that rides with the check (in with
+    // chk_valid, out with chk_valid_q) so two check clients can share the port:
+    // each waits only for strobes carrying its own tag. The cache itself ignores it.
     input                   chk_valid,
+    input                   chk_src,
     input  [TAGW-1:0]       chk_tag,
     output reg              chk_valid_q,
+    output reg              chk_src_q,
     output                  chk_done
 );
     localparam integer NENT = 1 << IXW;
@@ -167,6 +172,7 @@ module sort_cache #(
             chk_valid_q <= chk_valid && ready;
             q_tag       <= chk_tag;
         end
+        chk_src_q <= chk_src;
     end
 
     wire [WAYS-1:0] way_done;

@@ -34,12 +34,14 @@ module itskip_selftest import tsp_pkg::*; ;
         .clk(clk), .reset(reset),
         .param_base(27'd0), .intensity_shadow(1'b0),
         .entry_valid(entry_valid), .entry_type(entry_type), .entry(entry),
-        .entry_pt(1'b0), .entry_ack(entry_ack), .busy(it_busy),
+        .entry_pt(1'b0), .entry_early(1'b0), .early_open(1'b0),
+        .entry_ack(entry_ack), .busy(it_busy), .busy_live(),
         .trio(trio), .ack(ack),
         .skip_en(skip_en),
         .chk_valid(chk_valid), .chk_tag(chk_tag),
         .chk_valid_q(chk_valid_q), .chk_done(chk_done),
         .skp_pulse(skp_pulse), .skp_cnt(skp_cnt),
+        .chk_hold(1'b0), .chk_src_q(1'b0),
         // setup-parameter cache disabled in this selftest
         .tc_en(1'b0), .tc_chk(), .tc_vq(1'b0), .tc_hit(1'b0), .tc_pin(),
         .dreq(dreq), .dresp(dresp));
@@ -53,8 +55,8 @@ module itskip_selftest import tsp_pkg::*; ;
         .clk(clk), .reset(reset), .ready(sc_ready),
         .en_valid(en_valid), .en_tag(en_tag),
         .wr_valid(wr_valid), .wr_tag(wr_tag),
-        .chk_valid(chk_valid), .chk_tag(chk_tag),
-        .chk_valid_q(chk_valid_q), .chk_done(chk_done));
+        .chk_valid(chk_valid), .chk_src(1'b0), .chk_tag(chk_tag),
+        .chk_valid_q(chk_valid_q), .chk_src_q(), .chk_done(chk_done));
 
     // ---- behavioral burst DDR (as object_list_parser_tb_top) ----
     localparam integer RD_LAT = 8;

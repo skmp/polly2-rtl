@@ -356,17 +356,22 @@ module peel_core import tsp_pkg::*; #(
     wire             it_entry_valid, it_entry_ack, it_pf_busy;
     objlist_entry_t  it_entry; entry_type_e it_etype;   // combinational eq head
     reg              it_entry_pt;                       // combinational eq head list-kind (PT)
+    reg              it_entry_early;                    // combinational eq head early stamp
+    wire             it_busy_live;                      // iterator busy with CURRENT-pass work
     triangle_out_t   it_trio; triangle_ack_t it_ack;
     isp_primitive_iterator_pf u_it (.clk(clk),.reset(reset),
         .intensity_shadow(regs.fpu_shad_scale.intensity_shadow),
         .param_base(param_base),
         .entry_valid(it_entry_valid),.entry_type(it_etype),.entry(it_entry),
         .entry_pt(it_entry_pt),
-        .entry_ack(it_entry_ack),.busy(it_pf_busy),
+        .entry_early(it_entry_early),
+        .early_open(ol_open_r),
+        .entry_ack(it_entry_ack),.busy(it_pf_busy),.busy_live(it_busy_live),
         .trio(it_trio),.ack(it_ack),
         .skip_en(sc_skip_en),
         .chk_valid(it_chk_valid),.chk_tag(it_chk_tag),
         .chk_valid_q(sc_chk_vq),.chk_done(sc_chk_done),
+        .chk_hold(it_chk_hold),.chk_src_q(sc_src_q),
         .skp_pulse(it_skp_pulse),.skp_cnt(it_skp_cnt),
         // setup-parameter cache probe (rides the same pre-fetch walk / tag bus)
         .tc_en(tsc_en),
@@ -524,8 +529,15 @@ module peel_core import tsp_pkg::*; #(
     // su accept). Only when setup is fully DRAINED - every earlier triangle must
     // have retired into pq first (ordering) - and one bypass in flight at a time.
     // The pop issues the cache read; the record pushes into pq next cycle.
+    // !pq_full: do not POP until the push is guaranteed a slot (setup is empty at
+    // the pop, and anything it accepts afterwards retires >=15 cycles later, so
+    // nothing can steal it). Without this, an EARLY cached head popped against a
+    // pq full of FENCED early records deadlocks: its push waits for pq to drain,
+    // pq cannot drain before the pass decision, and the decision's barrier waits
+    // on !byp_pend - circular. Held un-popped in fq, the head is barrier-invisible
+    // (fq_live==0) and the bypass simply resumes after the open.
     wire byp_pop_c = fq_out_valid && fq_out[FF_CACHED]
-                  && !byp_pend && !su_busy && !su_out_valid;
+                  && !byp_pend && !su_busy && !su_out_valid && !pq_full;
 
     isp_setup_streamed u_isp (
         .clk(clk), .reset(reset),
@@ -873,8 +885,13 @@ module peel_core import tsp_pkg::*; #(
     wire [2:0]  it_skp_cnt;
     // enter on EVERY fq pop of a peel/PT triangle: setup accept, or the setup-cache
     // bypass pop (a cached triangle still renders and must be presumed done).
+    // EXCEPT an EARLY pop (fq_live==0: no live entries ahead): its enter would be
+    // read back by its own DEFERRED check at the pq pop next pass and false-skip
+    // the triangle before it ever rastered. Early triangles enter at that check's
+    // verdict instead (rs_enter below): "not done" enters then; "done" keeps its
+    // previous-pass entry and needs none.
     wire        sc_enter     = ((su_in_valid && su_in_ready) || byp_pop_c)
-                             && (peeling || pt_phase);
+                             && (peeling || pt_phase) && (fq_live != 5'd0);
     // A FRONT-CULLED triangle must not be left marked done: it was skipped because it
     // is in front of the peel, not because it is finished, and it is owed a later
     // pass. Its enter has already gone in (setup issue runs ahead of the probe
@@ -897,12 +914,34 @@ module peel_core import tsp_pkg::*; #(
         end
       end
     endgenerate
+    // ---- DEFERRED sort check for early-runahead triangles (QF_EARLY) ----------
+    // Early-fetched records skipped the pre-fetch check (their verdicts would have
+    // read unsettled demotes). By the time their plane records POP from pq the pass
+    // has switched and the previous pass's demotes are long settled, so the check
+    // is run HERE: issue at RS_CORNER (tri_tag is latched, the corner probe issues
+    // in parallel), verdict on the first RS_RAS cycle -> a "done" triangle aborts
+    // its sweep like a clip-skip. The port is shared with the iterator's walk:
+    // chk_hold makes the iterator yield around the pop so issues never collide,
+    // and the src bit routes each client's strobes.
+    reg  rs_chk_arm;     // latched at RS_POP: this triangle needs the deferred check
+    wire rs_chk_issue = (rs_st == RS_CORNER) && rs_chk_arm;
+    wire sc_src_q;
+    // verdict strobe for the RS side; sampled in RS_RAS (one cycle after CORNER)
+    wire rse_kill  = sc_chk_vq && sc_src_q && sc_chk_done;
+    // a NOT-done verdict is where an early triangle's (deferred) enter happens; it
+    // wins the enter port over a same-cycle fq-pop enter (losing an enter is
+    // conservative - the agreement test reads "not done" and the triangle renders).
+    wire rs_enter  = sc_chk_vq && sc_src_q && !sc_chk_done;
+    wire it_chk_hold = (rs_st == RS_POP) && sc_skip_en;
     sort_cache #(.WAYS(RAS_LANES)) u_sort (
         .clk(clk), .reset(reset), .ready(sc_ready),
-        .en_valid(sc_enter),      .en_tag(fq_out[FF_TAG +: 32]),
+        .en_valid(sc_enter || rs_enter),
+        .en_tag(rs_enter ? tri_tag : fq_out[FF_TAG +: 32]),
         .wr_valid(sc_wr_valid),   .wr_tag(sc_wr_tag),
-        .chk_valid(it_chk_valid), .chk_tag(it_chk_tag),
-        .chk_valid_q(sc_chk_vq),  .chk_done(sc_chk_done)
+        .chk_valid(it_chk_valid || rs_chk_issue),
+        .chk_src(rs_chk_issue),
+        .chk_tag(rs_chk_issue ? tri_tag : it_chk_tag),
+        .chk_valid_q(sc_chk_vq),  .chk_src_q(sc_src_q), .chk_done(sc_chk_done)
     );
 
     // ---- MULTI-BUFFERED ISP->TSP handoff buffer (u_taginvw): the {valid,tag,invW}
@@ -1636,6 +1675,41 @@ module peel_core import tsp_pkg::*; #(
     reg       eq_push, eq_pop;
     wire eq_full  = (eq_count == EQ_N);
     wire eq_empty = (eq_count == 0);
+    // ---- EARLY OL KICK + RUNAHEAD (TL peel): the next pass's walk runs during
+    // THIS pass's S_DRAIN tail, and the whole front end runs it forward - the
+    // iterator pulls its entries, fetches/probes/claims its records, setup computes
+    // its planes - QUEUED ALL THE WAY INTO PQ. The single hard fence is the pq POP:
+    // next-pass plane records must not raster in this pass, so they are a HELD TAIL
+    // of pq (in-order processing keeps early work contiguous at every stage), and
+    // the pass barrier counts only LIVE (current-pass) occupancy at each stage.
+    // Everything opens wholesale at the pass decision (eq_open_p).
+    //
+    // The ONE thing the early window may not do is consult the SORT CACHE: its
+    // verdicts read demotes that have not settled (this pass still rasters), and a
+    // false "done" drops live geometry. Early entries therefore fetch UNFILTERED
+    // (iterator pe_en gate) - bounded by the runahead depth, image-safe (a done
+    // triangle just rejects everywhere), and mostly free since the pass-invariant
+    // setup-cache probes still bypass DDR+setup for re-walked records. Early sort
+    // ENTERS are safe: a stale current-pass demote landing after one only forces a
+    // conservative re-render.
+    reg        ol_early;        // an early walk is queued/running for the NEXT pass
+    reg  [4:0] eq_early_cnt;    // early entries still in eq (tail)
+    reg        eq_open_p;       // BLOCKING temp: decision opens all early state
+    wire [4:0] eq_live = eq_count - eq_early_cnt;
+    reg        eq_early [0:EQ_N-1];   // per-entry stamp -> iterator entry_early
+    // fq: early triangles are a contiguous tail (in-order emission through the
+    // iterator); the count classifies pops (a pop with fq_live==0 consumes early).
+    reg  [4:0] fq_early_cnt;
+    wire [4:0] fq_live = fq_count - fq_early_cnt;
+    // setup: live-in-flight triangle count. Early ones are behind all live ones
+    // (in-order accept/retire), so retires with su_cnt_live==0 are early retires.
+    reg  [4:0] su_cnt_total, su_cnt_live;
+    // pq: early plane records - the HARD FENCE. Never popped before the open (all
+    // raster pop sites gate on pq_live), so no decrement exists.
+    reg  [4:0] pq_early_cnt;
+    wire [4:0] pq_live = pq_count - pq_early_cnt;
+    reg        pq_push_early;   // BLOCKING temp: this cycle's pq push is early
+    reg        ol_open_r;       // registered open pulse -> iterator early_open
 
     // entry FIFO head -> prefetching iterator's streaming input. The iterator pulls
     // entries via entry_valid/entry_ack; the barrier observes list-done via
@@ -1644,8 +1718,22 @@ module peel_core import tsp_pkg::*; #(
         it_entry = eq_entry[eq_head[2:0]];
         it_etype = entry_type_e'(eq_etype[eq_head[2:0]]);
         it_entry_pt = eq_ispt[eq_head[2:0]];
+        it_entry_early = eq_early[eq_head[2:0]];
     end
-    assign it_entry_valid = !eq_empty;
+    // early entries flow to the iterator too (fetch/probe/claim runahead) - the
+    // fence sits at the pq POP, not here; entry_early rides along so the iterator
+    // disables the sort filter for them and tags their triangles.
+    // +noearlyfetch reverts to HOLDING them here (walk-only runahead): early
+    // entries then keep the pre-fetch sort filter, at the cost of an idle front
+    // end through the drain. Which mode wins is scene/lane-count dependent -
+    // measured 8-lane shenmue_intro2 prefers the hold, long-drain configs may not.
+    reg ite_fetch_en;
+`ifndef SYNTHESIS
+    initial ite_fetch_en = !$test$plusargs("noearlyfetch");
+`else
+    initial ite_fetch_en = 1'b1;
+`endif
+    assign it_entry_valid = ite_fetch_en ? !eq_empty : (eq_live != 5'd0);
 
     // ---- triangle FIFO (producer -> consumer), depth 8 ----
     // Like pq, the data lives in ONE M10K word per entry instead of 11 register
@@ -1748,7 +1836,7 @@ module peel_core import tsp_pkg::*; #(
     // push and pop never target the same address in the same cycle (pop only fires when
     // !pq_empty -> head!=tail; push is blocked by out_ready=!pq_full when head==tail),
     // so no_rw_check is safe. Only the small head/tail/count control stays in logic.
-    localparam integer PQ_W = 569;   // 17*32 + 4*5 + 1 (is_pt) + 4 (tl)
+    localparam integer PQ_W = 570;   // 17*32 + 4*5 + 1 (is_pt) + 4 (tl) + 1 (early)
     localparam integer QF_DX12=0,  QF_DX23=32,  QF_DX31=64,  QF_DX41=96;
     localparam integer QF_DY12=128,QF_DY23=160, QF_DY31=192, QF_DY41=224;
     localparam integer QF_C1=256,  QF_C2=288,   QF_C3=320,   QF_C4=352;
@@ -1757,6 +1845,10 @@ module peel_core import tsp_pkg::*; #(
     localparam integer QF_BX0=544, QF_BX1=549,  QF_BY0=554,  QF_BY1=559;   // 5b each
     localparam integer QF_PT=564;    // list-kind (PT) bit
     localparam integer QF_TL=565;    // 4b: per-edge IsTopLeft
+    localparam integer QF_EARLY=569; // pushed UNFILTERED from the early-runahead
+                                     // window (no pre-fetch sort check was possible)
+                                     // -> RS_POP runs the DEFERRED check and skips
+                                     // the sweep if the triangle is fully rendered
     // MLAB, and it needs the SINGLE READ PORT below to be legal. 569 bits x 8 = 4,552
     // bits: an M10K caps port width at 40, so this cost 28 blocks per copy - and it had
     // TWO copies, because four read sites in four case branches made Quartus infer a
@@ -1790,6 +1882,7 @@ module peel_core import tsp_pkg::*; #(
     assign pq_wrw[QF_BX0  +:  5] = w_bx0;  assign pq_wrw[QF_BX1  +:  5] = w_bx1;
     assign pq_wrw[QF_BY0  +:  5] = w_by0;  assign pq_wrw[QF_BY1  +:  5] = w_by1;
     assign pq_wrw[QF_TL   +:  4] = w_tl;
+    assign pq_wrw[QF_EARLY]      = 1'b0;   // overridden per-push in pq_admit
 
     // ---- SETUP-PARAMETER CACHE (u_setupc): TR/PT plane-record cache -----------------
     // 256-entry direct-mapped, sort-cache indexing, payload = the COMPLETE pq record.
@@ -1822,6 +1915,7 @@ module peel_core import tsp_pkg::*; #(
     reg  byp_pend;   // a cached head has been popped; its record push is in flight
     reg  byp_dv;     // ...and the cache data is already latched (pq was full)
     reg  byp_pt;     // the popped entry's WALK list-kind (patches the record's QF_PT)
+    reg  byp_early;  // the popped entry was an EARLY head (its pq push is fenced)
     // a bypass push is completing: its data has landed and it wants the pq slot.
     // Gates setup's out_ready so a retire launched later can never overtake the
     // OLDER bypass triangle when pq frees up (order), and the two can never claim
@@ -1897,8 +1991,17 @@ module peel_core import tsp_pkg::*; #(
     // against a swapped reference - wrong image). byp_pend covers the gap seamlessly:
     // it is set on the pop edge (fq_empty is still low on the pop cycle) and cleared
     // on the push edge (pq_empty is then low).
-    wire consumer_idle = eq_empty && !it_pf_busy
-                       && !su_busy && !su_out_valid && (rs_st==RS_IDLE) && pq_empty
+    // LIVE-occupancy barrier: every stage counts only CURRENT-pass work, because
+    // the early runahead (next pass's walk/fetch/setup) fills the same structures
+    // during this pass's drain - waiting on it would deadlock (it only opens AT
+    // the decision this barrier gates). su_cnt_live subsumes the old !su_busy &&
+    // !su_out_valid pair: a live retire keeps the count >0 through its retire
+    // cycle, and pq_live counts the record from the same edge its push lands.
+    // !byp_pend stays unconditional (an in-flight EARLY bypass merely delays the
+    // barrier by its 1-2 cycle completion - simpler than classifying it).
+    wire consumer_idle = (eq_live == 5'd0) && !it_busy_live
+                       && (su_cnt_live == 5'd0) && (rs_st==RS_IDLE)
+                       && (pq_live == 5'd0)
                        && !b_valid && !byp_pend;
 
     // shade pass pixel accounting: producer index shp, consumer count sh_out_n
@@ -1953,6 +2056,8 @@ module peel_core import tsp_pkg::*; #(
                                 // AND setup pass both skipped)
     integer pc_setup_ptfix;     // ...whose QF_PT was patched (record referenced from
                                 // BOTH lists; the walk's kind is authoritative)
+    integer pc_ol_early;        // peel passes whose OL walk was EARLY-kicked (during
+                                // the previous pass's S_DRAIN)
     integer pc_pt_pass;         // forward PT-resolve passes HANDED to shade
     integer pc_pt_tiles;        // entries that ran a PT-resolve phase
     integer pc_ptbb_skip;       // PT triangles sweep-skipped by the fail bbox
@@ -2086,6 +2191,42 @@ module peel_core import tsp_pkg::*; #(
                  fq_out[FF_X3 +:32], fq_out[FF_Y3 +:32], fq_out[FF_X4 +:32], fq_out[FF_Y4 +:32]);
 
     final $display("[peel_core] corner-cull: %0d triangle(s) trivially rejected (256-chunk sweep skipped)", pc_corner_cull);
+
+    // hang watchdog: if the whole front end + raster go quiet for 200k cycles
+    // while a tile is in flight, dump the stall state and stop (debug aid for
+    // the early-runahead fences).
+    integer wd_idle;
+    always @(posedge clk) begin
+        if (reset || eq_push || eq_pop || fifo_push || fifo_pop || pq_push || pq_pop
+            || su_out_valid || ras_out_valid || (st == S_IDLE) || (st == S_RA)
+            || spv_busy || (tsp_st != R_IDLE) || (vst != VO_IDLE))
+            wd_idle <= 0;
+        else begin
+            wd_idle <= wd_idle + 1;
+            if (wd_idle == 200000) begin
+                $display("=== HANG st=%0d rs_st=%0d peeling=%b pt_phase=%b pass=%0d more=%b",
+                         st, rs_st, peeling, pt_phase, peel_pass, more_to_draw);
+                $display("    eq=%0d/e%0d fq=%0d/e%0d su=%0d/l%0d pq=%0d/e%0d",
+                         eq_count, eq_early_cnt, fq_count, fq_early_cnt,
+                         su_cnt_total, su_cnt_live, pq_count, pq_early_cnt);
+                $display("    ol_early=%b ol_walk_done=%b it_busy=%b it_busy_live=%b su_busy=%b",
+                         ol_early, ol_walk_done, it_pf_busy, it_busy_live, su_busy);
+                $display("    byp_pend=%b byp_dv=%b fq_out_valid=%b fq_head_cached=%b b_valid=%b",
+                         byp_pend, byp_dv, fq_out_valid, fq_out[FF_CACHED], b_valid);
+                $display("    consumer_idle=%b ti_ready=%b htile=%0d tile(%0d,%0d)",
+                         consumer_idle, ti_ready, htile, cur_tx, cur_ty);
+                $display("    it: est=%0d rst=%0d ex_active=%b exl_early=%b rd_early=%b em_buf=%0d rd_buf=%0d",
+                         u_it.est, u_it.rst, u_it.ex_active, u_it.exl_early,
+                         u_it.rd_early, u_it.em_buf, u_it.rd_buf);
+                $display("    it: ready=%b%b%b%b infl=%b%b%b%b early=%b%b%b%b dq=%0d outst=%0d trdy=%b",
+                         u_it.b_ready[3], u_it.b_ready[2], u_it.b_ready[1], u_it.b_ready[0],
+                         u_it.b_infl[3],  u_it.b_infl[2],  u_it.b_infl[1],  u_it.b_infl[0],
+                         u_it.b_early[3], u_it.b_early[2], u_it.b_early[1], u_it.b_early[0],
+                         u_it.dq_cnt, u_it.outstanding, u_it.tri_ready_r);
+                $fatal(1, "peel_core hang");
+            end
+        end
+    end
 `endif
 
     // ============ COMBINATIONAL buffer request ports (valid THIS cycle) ============
@@ -2191,7 +2332,7 @@ module peel_core import tsp_pkg::*; #(
             pc_prefetch<=0; pc_pf_hit<=0; pc_pf_wasted<=0;
             pc_m_promote<=0; pc_m_waithit<=0; pc_m_waitmiss<=0; pc_m_cold<=0;
             pc_sort_skip<=0; pc_front_cull<=0; pc_fcull_decl<=0; pc_setup_byp<=0;
-            pc_setup_ptfix<=0;
+            pc_setup_ptfix<=0; pc_ol_early<=0;
             pc_pt_pass<=0; pc_pt_tiles<=0; pc_ptbb_skip<=0;
             pc_pt_empty<=0; pc_pt_late<=0; pc_peel_empty<=0;
 `endif
@@ -2199,6 +2340,10 @@ module peel_core import tsp_pkg::*; #(
             pq_head<=0; pq_tail<=0; pq_count<=0;
             fq_head<=0; fq_tail<=0; fq_count<=0; fq_out_valid<=1'b0; fq_byp_sel<=1'b0;
             eq_head<=0; eq_tail<=0; eq_count<=0;
+            ol_early<=1'b0; eq_early_cnt<=5'd0;
+            fq_early_cnt<=5'd0; pq_early_cnt<=5'd0;
+            su_cnt_total<=5'd0; su_cnt_live<=5'd0; byp_early<=1'b0; ol_open_r<=1'b0;
+            rs_chk_arm<=1'b0;
             peeling<=1'b0; more_to_draw<=1'b0; peel_pass<=8'd0; op_shaded<=1'b0;
             zf_acc<=31'd0; zf_acc_v<=1'b0; zfront<=31'd0; zf_v<=1'b0;
             zf_ok<=1'b0; zf_clean<=1'b1; fc_pend<=1'b0; fc_tag<=32'd0;
@@ -2329,6 +2474,8 @@ module peel_core import tsp_pkg::*; #(
             spv_start<=1'b0; spv_rd_done<=1'b0;  // 1-cyc spanner start / ring-free strobes
             ra_ack.list_done<=0; ol_ack.entry_done<=0; it_ack.triangle_done<=0;
             eq_push = 1'b0;
+            eq_open_p = 1'b0;      // blocking: pass decision opens all early state
+            pq_push_early = 1'b0;  // blocking: set at the pq_admit push sites
             col_post<=1'b0;                   // 1-cyc: color-buffer post-to-VO intent
             // fbw_req is driven COMBINATIONALLY by the decoupled VO engine.
 
@@ -2500,6 +2647,7 @@ module peel_core import tsp_pkg::*; #(
                 eq_etype[eq_tail[2:0]] <= ol_prim.entry_type;
                 eq_entry[eq_tail[2:0]] <= ol_prim.entry;
                 eq_ispt [eq_tail[2:0]] <= (peel_which==1'b0);  // list-kind tag
+                eq_early[eq_tail[2:0]] <= ol_early;            // next-pass stamp
                 eq_tail <= (eq_tail==EQ_N-1) ? 4'd0 : eq_tail+4'd1;
                 eq_push = 1'b1;
                 ol_ack.entry_done <= 1'b1;
@@ -2840,7 +2988,29 @@ module peel_core import tsp_pkg::*; #(
             // FIFO + setup/raster to all drain before letting region advance.
             //  - OP  : run the OP shade sub-phase, then ack the region.
             //  - peel: run the peel shade sub-phase, then decide whether to peel again.
-            S_DRAIN: if (fq_empty && consumer_idle) begin
+            S_DRAIN: begin
+            // EARLY OL KICK: the moment this peel pass is KNOWN to continue
+            // (more_to_draw, another pass allowed) and its own walk has fully
+            // presented, restart the walker on the next pass's lists NOW - the
+            // walk (and its DDR list reads) then overlaps this pass's raster
+            // tail and shade drain instead of serializing behind the barrier.
+            // Its entries are HELD in eq (eq_early_cnt) until the decision below
+            // opens them; the PT->TL merge chain works unchanged for the early
+            // walk (peel_which/ol_list_ptr are set here, not at the decision).
+            if (peeling && !ol_early && ol_walk_done && more_to_draw
+                && peel_pass < PEEL_MAX_PASS[7:0]) begin
+                ol_early <= 1'b1;
+                if (has_pt) begin
+                    peel_which <= 1'b0; ol_list_ptr <= pt_ptr_l;
+                end else begin
+                    peel_which <= 1'b1; ol_list_ptr <= tr_ptr_l;
+                end
+                ol_start <= 1'b1; ol_walk_done <= 1'b0;
+`ifndef SYNTHESIS
+                pc_ol_early <= pc_ol_early + 1;
+`endif
+            end
+            if ((fq_live == 5'd0) && consumer_idle) begin
                 if (pt_phase) begin
                     if (!pass_drew || pt_stop) begin
                         // ABORTED PT pass, two flavours, both skipping the spanner
@@ -2939,14 +3109,22 @@ module peel_core import tsp_pkg::*; #(
                             // another pass: advance the counter and kick off its OL
                             // walk NOW - the walker/iterator/setup run through the
                             // credit wait + PeelBuffers swap (raster is fenced).
+                            // If the walk was EARLY-kicked (see the S_DRAIN head),
+                            // it is already running (or done): just OPEN its held
+                            // eq entries - peel_which/ol_list_ptr must not be
+                            // touched (the PT->TL merge may have advanced them).
                             peel_pass <= peel_pass + 8'd1;
                             pass_drew <= 1'b0;   // next pass: track its accepts
-                            if (has_pt) begin
-                                peel_which <= 1'b0; ol_list_ptr <= pt_ptr_l;
-                            end else begin
-                                peel_which <= 1'b1; ol_list_ptr <= tr_ptr_l;
+                            if (!ol_early) begin
+                                if (has_pt) begin
+                                    peel_which <= 1'b0; ol_list_ptr <= pt_ptr_l;
+                                end else begin
+                                    peel_which <= 1'b1; ol_list_ptr <= tr_ptr_l;
+                                end
+                                ol_start <= 1'b1; ol_walk_done <= 1'b0;
                             end
-                            ol_start <= 1'b1; ol_walk_done <= 1'b0;
+                            ol_early  <= 1'b0;
+                            eq_open_p  = 1'b1;   // held entries become this pass's
                             st <= S_PEEL_BUF;    // do another pass (PeelBuffers+raster)
                         end else begin
                             // last pass: this ENTRY done producing. Reset the per-entry
@@ -2991,6 +3169,7 @@ module peel_core import tsp_pkg::*; #(
                     st <= S_OP_DONE;
                 end
             end
+            end   // S_DRAIN
 
             // OP shade HANDED to TSP (running concurrently) -> mark tile OP-shaded,
             // ack the OP region. Do NOT wait for the shade to drain.
@@ -3118,6 +3297,8 @@ module peel_core import tsp_pkg::*; #(
                     pc_front_cull, pc_fcull_decl);
                 $display("  SETUP-CACHE: %0d triangles delivered from the setup cache (DDR fetch + setup skipped, pt-kind patched=%0d)",
                     pc_setup_byp, pc_setup_ptfix);
+                $display("  OL-EARLY:    %0d peel passes had their OL walk kicked during the previous pass's drain",
+                    pc_ol_early);
                 $display("  PT-RESOLVE:  %0d forward passes over %0d entries (avg %0d passes/entry)  bbox-skips=%0d",
                     pc_pt_pass, pc_pt_tiles, pc_pt_tiles ? pc_pt_pass/pc_pt_tiles : 0,
                     pc_ptbb_skip);
@@ -3635,6 +3816,9 @@ module peel_core import tsp_pkg::*; #(
                 // this walk's kind from the fq entry and patch it into the
                 // delivered record (pq_admit below).
                 byp_pt <= fq_out[FF_PT];
+                // early classification: an early head is one with no live entries
+                // ahead of it (contiguous tail)
+                byp_early <= (fq_live == 5'd0);
             end
 `ifndef SYNTHESIS
             // pre-fetch skip stats (pulsed by the iterator, 1..6 triangles/record)
@@ -3707,6 +3891,9 @@ module peel_core import tsp_pkg::*; #(
                         cull_count <= cull_count + 1;
                     end else if (!pt_dead) begin
                         adm = 1'b1;
+                        // a retire with no LIVE triangles in setup is an EARLY one
+                        // (in-order: early triangles are behind all live ones)
+                        pq_push_early = (su_cnt_live == 5'd0);
                     end
                 end else if (byp_take) begin
                     // the cache read has landed (tsc_rd_data holds: no other read
@@ -3716,6 +3903,7 @@ module peel_core import tsp_pkg::*; #(
                     end else if (!pq_full) begin
                         adm = 1'b1; adm_w = tsc_rd_data;
                         adm_w[QF_PT] = byp_pt;   // this WALK's list-kind (see byp_pt)
+                        pq_push_early = byp_early;
                         byp_pend <= 1'b0; byp_dv <= 1'b0;
 `ifndef SYNTHESIS
                         pc_setup_byp <= pc_setup_byp + 1;
@@ -3728,6 +3916,7 @@ module peel_core import tsp_pkg::*; #(
                     end else byp_dv <= 1'b1;                // hold until pq has room
                 end
                 if (adm) begin
+                    adm_w[QF_EARLY] = pq_push_early;   // deferred-check marker
                     pq_ram[pq_tail[2:0]] <= adm_w;   // one packed M10K word
                     pq_tail <= (pq_tail==PQ_N-1) ? 4'd0 : pq_tail+4'd1;
                     pq_push  = 1'b1;
@@ -3745,7 +3934,7 @@ module peel_core import tsp_pkg::*; #(
             // is pre-swap. Raster alone must wait for the walk to finish.
             pq_pop = 1'b0;
             case (rs_st)
-            RS_IDLE: if (!pq_empty && !(st == S_PEEL_BUF || st == S_PEEL_BUF_RUN
+            RS_IDLE: if ((pq_live != 5'd0) && !(st == S_PEEL_BUF || st == S_PEEL_BUF_RUN
                                         || st == S_ZK_INV || st == S_PT_BUF
                                         || st == S_PT_INIT || st == S_PT_SWAP
                                         || st == S_PT_FIX)) begin
@@ -3800,6 +3989,10 @@ module peel_core import tsp_pkg::*; #(
                 cr_issue <= cr_en;     // fire the probe next cycle (RS_CORNER)
                 cr_seen  <= 1'b0;      // verdict not yet sampled for this triangle
                 cr_cnt   <= 4'd0;
+                // deferred sort check for early-runahead triangles (QF_EARLY): the
+                // pre-fetch check was impossible for them; run it now (issue at
+                // CORNER via rs_chk_issue, verdict on the first RS_RAS cycle).
+                rs_chk_arm <= pq_rdw[QF_EARLY] && sc_skip_en;
                 // ALWAYS route through RS_CORNER: with back-to-back triangle
                 // chaining (no RS_DRAIN between same-pass triangles) the POP +
                 // CORNER pair guarantees a 2-cycle issue gap, which is exactly
@@ -3810,7 +4003,7 @@ module peel_core import tsp_pkg::*; #(
                 // next triangle.
                 if (ptc_empty) begin
                     cr_issue <= 1'b0;
-                    if (ch_pop && !pq_empty) begin
+                    if (ch_pop && (pq_live != 5'd0)) begin
                         pq_pop   = 1'b1;
                         rs_st   <= RS_POP;
                     end else
@@ -3831,6 +4024,7 @@ module peel_core import tsp_pkg::*; #(
             RS_CORNER: begin
                 cr_issue <= 1'b0;      // 1-cycle probe issue pulse
                 cr_cnt   <= CR_LAT[4:0];
+                rs_chk_arm <= 1'b0;    // rs_chk_issue fires THIS cycle only
                 rs_st <= RS_RAS;
             end
             RS_RAS: begin
@@ -3841,6 +4035,20 @@ module peel_core import tsp_pkg::*; #(
                 // sweep ends before the countdown expires (tiny bbox), we just leave RS_RAS;
                 // the moot verdict is never sampled (correct - a finished sweep can't abort).
                 if (cr_cnt != 5'd0) cr_cnt <= cr_cnt - 5'd1;
+                // deferred sort verdict (first RS_RAS cycle, src-routed): a DONE
+                // triangle's whole sweep is dead work - abort it exactly like a
+                // clip-skip. The one chunk already issued is harmless (a fully
+                // rendered triangle's fragments are at/before the reference and
+                // write nothing).
+                if (rse_kill) begin
+`ifndef SYNTHESIS
+                    pc_sort_skip <= pc_sort_skip + 1;
+`endif
+                    if (ch_abort && (pq_live != 5'd0)) begin
+                        pq_pop   = 1'b1;
+                        rs_st   <= RS_POP;
+                    end else rs_st <= RS_DRAIN;
+                end
                 if (cr_en && !cr_seen && cr_cnt == 5'd1) begin
                     cr_seen <= 1'b1;
 `ifndef SYNTHESIS
@@ -3881,20 +4089,20 @@ module peel_core import tsp_pkg::*; #(
                         // real owed-fragment bookkeeping - and zf_clean is cleared).
                         // CHAIN to the next same-pass triangle if one is queued
                         // (see RS_POP note).
-                        if (ch_abort && !pq_empty) begin
+                        if (ch_abort && (pq_live != 5'd0)) begin
                             pq_pop   = 1'b1;
                             rs_st   <= RS_POP;
                         end else rs_st <= RS_DRAIN;
                     end
                 end
-                if (!(cr_en && !cr_seen && cr_cnt == 5'd1 && cr_kill)) begin
+                if (!(cr_en && !cr_seen && cr_cnt == 5'd1 && cr_kill) && !rse_kill) begin
                     if (ras_x == rbx1) begin
                         ras_x <= rbx0;
                         if (ras_y == rby1) begin
                             // sweep done. Same-pass triangles CHAIN with no pipe
                             // drain: only the pass-end (empty pq) needs RS_DRAIN,
                             // for the barrier + last write-back.
-                            if (ch_row && !pq_empty) begin
+                            if (ch_row && (pq_live != 5'd0)) begin
                                 pq_pop   = 1'b1;
                                 rs_st   <= RS_POP;
                             end else rs_st <= RS_DRAIN;
@@ -3925,7 +4133,7 @@ module peel_core import tsp_pkg::*; #(
                 // the next pass only exist after this drain completed - but kept
                 // identical so the two pop sites cannot drift apart). +nc_drain
                 // restores the drain-to-idle behavior (debug/bisect aid).
-                if (ch_drain && !pq_empty
+                if (ch_drain && (pq_live != 5'd0)
                     && !(st == S_PEEL_BUF || st == S_PEEL_BUF_RUN
                          || st == S_ZK_INV || st == S_PT_BUF
                          || st == S_PT_INIT || st == S_PT_SWAP
@@ -3958,6 +4166,52 @@ module peel_core import tsp_pkg::*; #(
             // ---- FIFO count maintenance (single update; push/pop may coincide) ----
             fq_count <= fq_count + (fifo_push ? 5'd1 : 5'd0) - (fifo_pop ? 5'd1 : 5'd0);
             eq_count <= eq_count + (eq_push  ? 5'd1 : 5'd0) - (eq_pop   ? 5'd1 : 5'd0);
+            // ---- early-runahead tail tracking, one counter per stage ----
+            // eq: inc on early push, dec when the iterator consumes an early entry
+            // (a pop with no live entries left ahead of it). The decision opens
+            // everything - a push/pop landing on that edge belongs to the new pass.
+            eq_early_cnt <= eq_open_p ? 5'd0
+                          : eq_early_cnt + ((eq_push && ol_early) ? 5'd1 : 5'd0)
+                                         - ((eq_pop && eq_live == 5'd0) ? 5'd1 : 5'd0);
+            // fq: inc on an early trio's push (the stamp is only counted inside the
+            // window - post-open pushes of late-emitted early-stamped trios are
+            // current-pass), dec when setup/bypass consumes an early head.
+            fq_early_cnt <= eq_open_p ? 5'd0
+                          : fq_early_cnt
+                            + ((fifo_push && it_trio.early && ol_early) ? 5'd1 : 5'd0)
+                            - ((fifo_pop && fq_live == 5'd0) ? 5'd1 : 5'd0);
+            // setup: total in flight, and how many of those are live. At the open
+            // every in-flight triangle becomes live (same-edge accept/retire folded).
+            begin : su_cnt_upd
+                reg acc, ret;
+                acc = su_in_valid && su_in_ready;
+                ret = su_out_valid;
+                su_cnt_total <= su_cnt_total + (acc ? 5'd1 : 5'd0) - (ret ? 5'd1 : 5'd0);
+                if (eq_open_p)
+                    su_cnt_live <= su_cnt_total + (acc ? 5'd1 : 5'd0) - (ret ? 5'd1 : 5'd0);
+                else
+                    su_cnt_live <= su_cnt_live
+                                 + ((acc && fq_live != 5'd0) ? 5'd1 : 5'd0)
+                                 - ((ret && su_cnt_live != 5'd0) ? 5'd1 : 5'd0);
+            end
+            // pq: the hard fence - early records accumulate until the open
+            pq_early_cnt <= eq_open_p ? 5'd0
+                          : pq_early_cnt + ((pq_push && pq_push_early) ? 5'd1 : 5'd0);
+            // THE OPEN MUST ERASE EVERY EARLY FLAG, not just the counters: a stamp
+            // surviving into the next pass re-latches through the iterator
+            // (entry_early -> exl_early -> b_early -> trio.early) and fences
+            // CURRENT-pass work as next-pass once that pass's own kick raises
+            // ol_early again - its pq records then never raster and the pass
+            // deadlocks in S_DRAIN (observed: live records sandwiched between
+            // stale-flagged ones). eq stamps clear here; the iterator's in-flight
+            // copies clear via the registered ol_open_r pulse (1 cycle late is
+            // safe: ol_early is already 0, so nothing counts in that cycle).
+            if (eq_open_p) begin : eq_open_clr
+                integer oci;
+                for (oci = 0; oci < EQ_N; oci = oci + 1) eq_early[oci] <= 1'b0;
+                byp_early <= 1'b0;
+            end
+            ol_open_r <= eq_open_p;
             pq_count <= pq_count + (pq_push  ? 5'd1 : 5'd0) - (pq_pop   ? 5'd1 : 5'd0);
             // PT shades in flight (hand at S_DRAIN, free at the reader's drain)
             pt_sh_pend <= pt_sh_pend + (pt_hand_p ? 3'd1 : 3'd0)

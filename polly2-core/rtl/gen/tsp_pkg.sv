@@ -278,6 +278,10 @@ package tsp_pkg;
                                          // (and pinned) in the setup cache - v0..v2/isp are
                                          // NOT valid (no fetch happened); the consumer must
                                          // bypass setup and read the plane record by tag.
+        logic          early;            // 1: emitted from an EARLY-pulled entry (the next
+                                         // pass's walk, consumed during this pass's drain).
+                                         // Its plane record must be HELD at the pq boundary
+                                         // until the pass decision (peel_core pq_early_cnt).
         logic          pinned;           // 1: this triangle's setup-cache index is PINNED
                                          // (it HIT the pre-fetch probe - implied by cached,
                                          // also set for hit triangles of a partially-hit
