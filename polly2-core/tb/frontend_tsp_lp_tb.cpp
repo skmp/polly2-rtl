@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <sys/resource.h>
 
 static Vfrontend_tsp_lp_tb_top* dut;
 #define VRAM dut->rootp->frontend_tsp_lp_tb_top__DOT__u_sim__DOT__vram
@@ -56,6 +57,10 @@ static void write_bmp(const char* path, int w, int h){
 }
 
 int main(int argc,char**argv){
+    // The Verilated ico_sequent settle functions carry multi-MB stack frames
+    // and overflow the default 8MB rlimit (SIGSEGV in eval_settle at t=0).
+    { struct rlimit rl; getrlimit(RLIMIT_STACK,&rl); rl.rlim_cur = rl.rlim_max;
+      setrlimit(RLIMIT_STACK,&rl); }
     Verilated::commandArgs(argc,argv);
 
     // optional dump-set name (default "menu2")

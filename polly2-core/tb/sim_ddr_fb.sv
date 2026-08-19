@@ -41,6 +41,36 @@ module sim_ddr_fb import tsp_pkg::*; #(
     // the on-HW black-transparency: the at_en/TSP payload slipping vs the texel).
     reg ddrvary;
     initial ddrvary = $test$plusargs("ddrvary");
+    // +ddrlat=N : override the BASE read latency at runtime (default RD_LAT).
+    // The fixed RD_LAT=8 is far below the real DE10 f2h SDRAM path (~30-50
+    // fabric cycles + arbitration) - measured on HW, features that win at
+    // lat=8 can INVERT at real latency. Composes with +ddrvary.
+    reg [7:0] rd_lat_r;
+    initial begin
+        int v;
+        rd_lat_r = RD_LAT[7:0];
+        if ($value$plusargs("ddrlat=%d", v)) rd_lat_r = v[7:0];
+    end
+    // +ddrserial : count latency down for the HEAD command only - the fully
+    // SERIALIZED controller (no activate overlap). The default concurrent
+    // countdown models perfect command pipelining, which real row/bank
+    // conflicts do not deliver; the truth is between the two. Under serial,
+    // BURSTY traffic (many small reads arriving together) pays latency per
+    // command instead of once - the shape-sensitivity real HW shows.
+    reg ddrserial;
+    initial ddrserial = $test$plusargs("ddrserial");
+    // +ddrgap=N : N dead cycles between BURSTS (row activate/precharge,
+    // bus turnaround, write/scanout contention). This is the per-command
+    // OVERHEAD term the latency knob cannot express: scattered small bursts
+    // (texture fills, VQ codebooks, record reads) pay it once each, so
+    // effective bandwidth collapses the way real f2h traffic does.
+    reg [7:0] ddrgap;
+    initial begin
+        int g;
+        ddrgap = 8'd0;
+        if ($value$plusargs("ddrgap=%d", g)) ddrgap = g[7:0];
+    end
+    reg [7:0] gap_cnt = 8'd0;
     // command queue: up to CQ accepted bursts; per-slot latency counts down for ALL
     // queued commands each cycle (overlap), beats stream from the head in order.
     // CQ is the BACKEND's pending-read window - the thing that actually decides how much
@@ -87,17 +117,27 @@ module sim_ddr_fb import tsp_pkg::*; #(
             if (ddr_req.rd && !q_full) begin
                 q_word [q_wp[CQW-1:0]] <= ddr_req.addr[19:0];
                 q_beats[q_wp[CQW-1:0]] <= ddr_req.burst;
-                q_lat  [q_wp[CQW-1:0]] <= RD_LAT[7:0] + (ddrvary ? {4'd0, ddr_req.addr[3:0]} : 8'd0);
+                q_lat  [q_wp[CQW-1:0]] <= rd_lat_r + (ddrvary ? {4'd0, ddr_req.addr[3:0]} : 8'd0);
                 q_wp <= q_wp + 1'b1;
             end
             for (qi = 0; qi < CQ; qi = qi + 1)
-                if (q_lat[qi] != 8'd0 && !(ddr_req.rd && !q_full && qi == int'({{(32-CQW){1'b0}}, q_wp[CQW-1:0]})))
+                if (q_lat[qi] != 8'd0
+                    && !(ddrserial && qi != int'({{(32-CQW){1'b0}}, q_h}))
+                    // gap is bus DEAD time: in serial mode it must delay the next
+                    // access's start, not overlap its latency countdown (otherwise
+                    // any gap <= lat is invisible and the calibration curve is flat)
+                    && !(ddrserial && gap_cnt != 8'd0)
+                    && !(ddr_req.rd && !q_full && qi == int'({{(32-CQW){1'b0}}, q_wp[CQW-1:0]})))
                     q_lat[qi] <= q_lat[qi] - 8'd1;
-            if (!q_empty && q_lat[q_h] == 8'd0) begin
+            if (gap_cnt != 8'd0) gap_cnt <= gap_cnt - 8'd1;
+            else if (!q_empty && q_lat[q_h] == 8'd0) begin
                 d_do <= vram[q_word[q_h]]; d_dv <= 1'b1;
                 q_word[q_h]  <= q_word[q_h] + 20'd1;
                 q_beats[q_h] <= q_beats[q_h] - 8'd1;
-                if (q_beats[q_h] <= 8'd1) q_rp <= q_rp + 1'b1;
+                if (q_beats[q_h] <= 8'd1) begin
+                    q_rp <= q_rp + 1'b1;
+                    gap_cnt <= ddrgap;   // inter-burst overhead
+                end
             end
         end
     end

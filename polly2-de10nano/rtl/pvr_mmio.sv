@@ -36,7 +36,8 @@
 //                            73; sys_top stretches pvr_done onto the
 //                            f2h line, forwarded to userspace by the
 //                            driver/polly2 kernel module),
-//                            4 = VRAM_CFG (16 MB VRAM select).
+//                            4 = VRAM_CFG (16 MB VRAM select),
+//                            5 = FEAT (runtime feature enables).
 //                            Writes ignored.
 //   0xFF202020  FB_TOP       RW. DDR BYTE address of a 640x30 RGB565
 //                            linear framebuffer (stride 1280 bytes),
@@ -51,7 +52,11 @@
 //                            accesses at 8 MB, the Dreamcast default), 1 = this
 //                            board has 16 MB and no mirroring is applied. Other
 //                            bits reserved, write 0. Reset value 0.
-//   0xFF20202C - 0xFF20203C  reserved (read 0, writes ignored).
+//   0xFF20202C  FEAT         RW. Runtime feature enables (reset 0xF = all ON;
+//                            quasi-static - change only while the core is idle):
+//                            [0] two-layer peeling  [1] setup-parameter cache
+//                            [2] peel front cull    [3] raster drain chain-out
+//   0xFF202030 - 0xFF20203C  reserved (read 0, writes ignored).
 //
 // Single clock domain (clk_sys). waitrequest is low except for AUDIO_DATA
 // writes with the FIFO full - every other access completes immediately;
@@ -85,6 +90,9 @@ module pvr_mmio
 	output reg         pvr_rst   = 1'b0,   // stretched reset
 	output reg   [7:0] vram_top  = VRAM_TOP_INIT,
 	output reg   [1:0] clk_sel   = 2'd0,     // core clock select (75 MHz default)
+	output reg   [3:0] feat_en   = 4'hF,     // FEAT: runtime feature enables, all ON
+	                                         // [0] two-layer peel [1] setup cache
+	                                         // [2] front cull     [3] drain chain
 	input  wire        pvr_done,             // render done (level or pulse)
 
 	// audio FIFO write port (audio_i2s)
@@ -105,10 +113,11 @@ localparam [8:0] RSTC = RST_CYCLES;
 /* verilator lint_on WIDTHTRUNC */
 
 // MMIO interface revision (REVISION reg): bump on every interface change.
+// 5 = FEAT (runtime feature enables); 4 = VRAM_CFG (16 MB select);
 // 3 = render-done f2h IRQ1 (raised in sys_top, not here - see the
 // pvr_render_irq block there); 2 = border bands (FB_TOP/FB_BOT); 1 = audio
 // (AUDIO_DATA + REVISION added); 0 = anything older.
-localparam [31:0] REVISION = 32'd4;
+localparam [31:0] REVISION = 32'd5;
 
 wire wr32     = avs_write && (avs_byteenable == 4'b1111);
 wire sel_regs = (avs_address[20:13] == 8'd0);     // 0x0000-0x1FFF
@@ -170,6 +179,7 @@ always @(posedge clk) begin
 			4'd8: fb_top <= {avs_writedata[31:7], 7'd0};   // FB_TOP (128B aligned)
 			4'd9: fb_bot <= {avs_writedata[31:7], 7'd0};   // FB_BOT
 			4'd10: vram_cfg <= {31'd0, avs_writedata[0]};  // VRAM_CFG
+			4'd11: feat_en <= avs_writedata[3:0];          // FEAT
 			default: ;                                     // STATUS/CYCLES/rsvd: RO
 		endcase
 	end
@@ -201,6 +211,7 @@ always @(posedge clk) begin
 			4'd8: avs_readdata <= fb_top;                  // FB_TOP
 			4'd9: avs_readdata <= fb_bot;                  // FB_BOT
 			4'd10: avs_readdata <= vram_cfg;               // VRAM_CFG
+			4'd11: avs_readdata <= {28'd0, feat_en};       // FEAT
 			default: ;
 		endcase
 	end

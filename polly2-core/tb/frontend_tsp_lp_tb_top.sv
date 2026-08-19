@@ -31,6 +31,7 @@ module frontend_tsp_lp_tb_top import tsp_pkg::*; #(
 
     // the render core
     peel_core #(.RAS_LANES(RAS_LANES), .TI_COPIES(TI_COPIES)) u_core (
+        .feat_en(4'b1111),   // sim: the +plusarg switches are the master
         .clk(clk), .reset(reset),
         .wr_en(wr_en), .wr_addr(wr_addr), .wr_data(wr_data),
         .go(go), .done(done), .vram_cfg(32'd0),  // 8 MB VRAM (dumps are 8 MB)

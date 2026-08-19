@@ -28,6 +28,10 @@ module peel_core import tsp_pkg::*; #(
     parameter integer TI_COPIES = 2
 ) (
     input             clk,
+    // runtime FEATURE ENABLES (MMIO FEAT register, quasi-static between
+    // renders; sim ties all-ones and the +plusarg switches stay the master):
+    // [0] two-layer peel  [1] setup cache  [2] front cull  [3] RS_DRAIN chain-out
+    input  [3:0]           feat_en,
     input             reset,
     // register/command load (host writes the PVR reg dump before `go`)
     input             wr_en,
@@ -673,19 +677,20 @@ module peel_core import tsp_pkg::*; #(
     // NOTE: these plusarg names must not PREFIX one another - $test$plusargs
     // prefix-matches, so a "+nc_row"-style name that starts with "nochain"
     // would silently disable everything.
-    reg chain_en, ch_pop, ch_abort, ch_row, ch_drain;
+    reg chain_en, ch_pop, ch_abort, ch_row, ch_drain_r;
 `ifndef SYNTHESIS
     initial begin
-        chain_en = !$test$plusargs("nochain");
-        ch_pop   = chain_en && !$test$plusargs("nc_pop");
-        ch_abort = chain_en && !$test$plusargs("nc_abort");
-        ch_row   = chain_en && !$test$plusargs("nc_row");
-        ch_drain = chain_en && !$test$plusargs("nc_drain");
+        chain_en   = !$test$plusargs("nochain");
+        ch_pop     = chain_en && !$test$plusargs("nc_pop");
+        ch_abort   = chain_en && !$test$plusargs("nc_abort");
+        ch_row     = chain_en && !$test$plusargs("nc_row");
+        ch_drain_r = chain_en && !$test$plusargs("nc_drain");
     end
 `else
     initial begin chain_en = 1'b1; ch_pop = 1'b1; ch_abort = 1'b1; ch_row = 1'b1;
-                  ch_drain = 1'b1; end
+                  ch_drain_r = 1'b1; end
 `endif
+    wire ch_drain = ch_drain_r && feat_en[3];
 
     wire [2:0] depth_mode = isp_word[31:29];
     wire       zwrite_dis = isp_word[26];
@@ -774,14 +779,16 @@ module peel_core import tsp_pkg::*; #(
     end
     assign pr_grp = (pr_fw_v && (pr_fw_a == cb2_id[9:ZR_BB])) ? pr_fw_d : pr_q_bl;
 
-    // two-layer peel kill switch (bisect aid): +onelayer restores the exact
-    // single-slot peel loop (slot B never stages, no B hands, no CLR2/BFIN).
-    reg tl2_en;
+    // two-layer peel kill switch: +onelayer (sim) or FEAT[0]=0 (MMIO) restores
+    // the exact single-slot peel loop (slot B never stages, no B hands, no
+    // CLR2/BFIN).
+    reg tl2_cfg;
 `ifndef SYNTHESIS
-    initial tl2_en = !$test$plusargs("onelayer");
+    initial tl2_cfg = !$test$plusargs("onelayer");
 `else
-    initial tl2_en = 1'b1;
+    initial tl2_cfg = 1'b1;
 `endif
+    wire tl2_en = tl2_cfg && feat_en[0];
     peel_tile_buffer #(.LANES(RAS_LANES)) u_peel (
         .clk(clk), .reset(reset),
         // raster stage A
@@ -846,12 +853,13 @@ module peel_core import tsp_pkg::*; #(
     reg         zf_clean;    // no cull has fired in the pass now running
     reg         fc_pend;     // a cull's sort-cache demote awaits a free way-0 slot
     reg  [31:0] fc_tag;
-    reg         fc_en;       // +nofrontcull kill switch
+    reg         fc_cfg;      // +nofrontcull (sim) / FEAT[2] (MMIO) kill switch
 `ifndef SYNTHESIS
-    initial fc_en = !$test$plusargs("nofrontcull");
+    initial fc_cfg = !$test$plusargs("nofrontcull");
 `else
-    initial fc_en = 1'b1;
+    initial fc_cfg = 1'b1;
 `endif
+    wire fc_en = fc_cfg && feat_en[2];
     // The verdict is sampled with the corner probe's, so the two rejects share a
     // cycle. !fc_pend: a cull is DECLINED while the previous cull's demote is still
     // waiting for its way-0 slot - losing a demote is the only unsafe direction in
@@ -1845,12 +1853,13 @@ module peel_core import tsp_pkg::*; #(
     // it captures is passes 2..N of the TL peel / PT resolve loops re-walking the
     // same lists on the same tile: each hit saves the record's DDR burst AND the
     // whole setup pass. +nosetupcache disables it.
-    reg  tsc_cfg_en;
+    reg  tsc_cfg_r;
 `ifndef SYNTHESIS
-    initial tsc_cfg_en = !$test$plusargs("nosetupcache");
+    initial tsc_cfg_r = !$test$plusargs("nosetupcache");
 `else
-    initial tsc_cfg_en = 1'b1;
+    initial tsc_cfg_r = 1'b1;
 `endif
+    wire tsc_cfg_en = tsc_cfg_r && feat_en[1];
     wire tsc_en = tsc_cfg_en && (peeling || pt_phase);
     reg  [11:0] tsc_tile;
     wire tsc_newtile = ({cur_tx, cur_ty} != tsc_tile);

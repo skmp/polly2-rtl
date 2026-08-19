@@ -52,6 +52,11 @@ set_clock_groups -physically_exclusive \
 # soft mux's per-domain synchronizers. All hops are synchronized; cut them.
 set_false_path -from [get_registers {*clk_sel*}]
 
+# MMIO FEAT register: quasi-static feature enables (two-layer / setup cache /
+# front cull / drain chain), changed only while the core is idle - cut them so
+# the deep control cones they feed cost no timing.
+set_false_path -from [get_registers {*feat_en*}]
+
 # ---- render-done f2h IRQ (sys_top render_irq_stretch) ----
 # The stretcher's output goes into the HPS interrupts atom, which the GIC
 # samples asynchronously - a 64-cycle pulse needs no timing at all. Cut every

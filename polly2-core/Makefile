@@ -30,7 +30,17 @@ VTHREADS ?= 1
 VFLAGS    = -Wno-WIDTH -Wno-UNOPTFLAT -Wno-UNSIGNED -Wno-DECLFILENAME -Irtl/tsp/gen \
             -j $(NJOBS) $(if $(filter-out 1,$(VTHREADS)),--threads $(VTHREADS),) \
             --output-split 40000 --output-split-cfuncs 2000 \
-            -CFLAGS "-O3 -march=native"
+            -CFLAGS "-O3 -march=native -fno-tree-vectorize -fno-tree-slp-vectorize"
+            # TWO distinct SIGSEGV-at-settle traps in ico_sequent__TOP__* (2026-08-19):
+            # 1) STACK OVERFLOW: the huge settle functions carry multi-MB frames that
+            #    blow the default 8MB rlimit (comes/goes as edits move output-split
+            #    boundaries). tb main() now raises RLIMIT_STACK at startup; if it
+            #    recurs, run under `ulimit -s unlimited`.
+            # 2) BAD GCC VECTORIZATION at -O2/-O3 + -march=native: gcc emits vmovdqa
+            #    (alignment-checking AVX load) for a member at a 16-mod-32 offset ->
+            #    #GP -> SIGSEGV with si_addr=0. Hence -fno-tree-vectorize
+            #    -fno-tree-slp-vectorize (auto-vectorization gains ~nothing on
+            #    verilated code). Diagnostic tell: si_addr==0 + vmovdqa at $pc.
 
 BUILD = build
 CWD  := $(shell pwd)
