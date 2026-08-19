@@ -7,7 +7,7 @@
 //
 module frontend_tsp_lp_tb_top import tsp_pkg::*; #(
     parameter integer RAS_LANES = 8,   // override with verilator -GRAS_LANES=4
-    parameter integer TI_COPIES = 2     // override with verilator -GTI_COPIES=2
+    parameter integer TI_COPIES = 4     // override with verilator -GTI_COPIES=2
 ) (
     input             clk,
     input             reset,

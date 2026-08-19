@@ -25,7 +25,7 @@ module peel_core import tsp_pkg::*; #(
     // >= 2. It bounds how many rastered-but-unshaded passes the ISP may queue: the
     // ISP stalls only when the copy it wants to write is still owned by the spanner,
     // so TI_COPIES-1 passes may be in flight ahead of the shade.
-    parameter integer TI_COPIES = 2
+    parameter integer TI_COPIES = 4
 ) (
     input             clk,
     // runtime FEATURE ENABLES (MMIO FEAT register, quasi-static between
