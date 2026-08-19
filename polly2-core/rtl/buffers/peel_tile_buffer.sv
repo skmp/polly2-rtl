@@ -2,12 +2,14 @@
 // peel_tile_buffer - the layer-peel depth/tag tile buffer, banked into M10K, with
 // its access pattern ENFORCED by typed per-client ports (not by convention).
 //
-// Storage: ONE simple-dual-port tile_ram (u_ram), WIDTH = 216 bits/lane packing
-// {isptB, isptA, validB, tagB[31:0], zbB[30:0], valid, zceil[30:0], refsort[23:0],
-// tag[31:0], depth2[30:0], depth[30:0]}, NBANKS = LANES banks. Slots A+B are the
-// TWO-LAYER peel working set (A = farthest owed, shaded first; B = next).
-// The zceil slot is PHASE-OWNED: opaque ceiling during the PT resolve, the zb3
-// nearest-deferred bound during TL peeling (see the zb3 port header below).
+// Storage: ONE simple-dual-port tile_ram (u_ram), WIDTH = 240 bits/lane packing
+// {z3b[23:0], isptB, isptA, validB, tagB[31:0], zbB[30:0], valid, zceil[30:0],
+// refsort[23:0], tag[31:0], depth2[30:0], depth[30:0]}, NBANKS = LANES banks.
+// Slots A+B are the TWO-LAYER peel working set (A = farthest owed, shaded first;
+// B = next). The zceil slot is PHASE-OWNED: opaque ceiling during the PT resolve,
+// the zb3 nearest-deferred bound during TL peeling (see the zb3 port header
+// below); z3b is zb3's PAIR companion (the SECOND-minimum owed depth, 24-bit
+// round-up), which is what makes the front cull sound under two-layer.
 // Depths are 31-bit SIGN-STRIPPED floats: invW is always positive non-zero, so
 // the sign bit is never stored and positive-float ordering == unsigned ordering.
 // Bank = x[BANK_BITS-1:0], addr = {y[4:0], x[4:BANK_BITS]} (AW bits, 1024/LANES
@@ -188,6 +190,23 @@ module peel_tile_buffer import tsp_pkg::*; #(
                                              // FLT_MAX lanes excluded (valid with pb_rd's
                                              // data, i.e. alongside pb_wr)
     output                      pb_zb3_any,  // any lane of that chunk was not FLT_MAX
+    // ---- z3b: zb3's PAIR companion, the SECOND-minimum owed depth per pixel ----
+    // A TWO-LAYER pass consumes the two farthest owed fragments per pixel (A = min,
+    // B = 2nd-min), so a sound front cull must clear the SECOND selection too - zb3
+    // alone bounds only A (a triangle in front of every next-A can be exactly a
+    // pixel's next-B: the original unsoundness). z3b tracks the 2nd-min over the
+    // same candidate events, stored as 24 bits ROUNDED UP (drop invW[6:0], +1 if
+    // any dropped bit set): over-stating the bound only weakens the cull - the
+    // same safe direction as zb3's under-recording rule. Soundness inherits the
+    // self-registration argument: a swept triangle's own depth is a candidate at
+    // every covered pixel, so it can be culled only where >= 2 owed fragments sit
+    // farther - exactly "can't be A or B next pass".
+    // pb_z3b_max is the tile bound built the same way as pb_zb3_max, with a
+    // per-lane fallback: a lane with only ONE owed fragment (z3b = sentinel)
+    // contributes up24(zb3) - its next-B selection is any fragment in front of A,
+    // so the A bound is the only sound one there. Lanes with zb3 = FLT_MAX are
+    // excluded (nothing owed). Same validity companion: pb_zb3_any.
+    output     [23:0]           pb_z3b_max,
     // ---- slot-B image export (two-layer peel): the read chunk's B fields, comb
     // off the SAME registered walk read as pb_zb3_* - peel_core forwards them into
     // the u_taginvw copy the B layer will shade from (the "materialize" write).
@@ -207,7 +226,8 @@ module peel_tile_buffer import tsp_pkg::*; #(
     // the two ispt companions): at LANES=8 that is ceil(216/40) = 6 M10K per bank
     // (was 4), +16 blocks total. The B slot is what lets one pass consume two depth
     // layers - the pass-count-proportional costs it removes (re-sweeps, walks,
-    // barriers) are the trade.
+    // barriers) are the trade. The z3b pair field (216 -> 240) rides in the same
+    // 6 blocks for free (see PW_Z3B).
     localparam integer PW_DEPTH   = 0;    // [30:0]  depthBufferA (zb)  working best
     localparam integer PW_DEPTH2  = 31;   // [30:0]  depthBufferB (zb2) reference / boundary
     localparam integer PW_TAG     = 62;   // [31:0]  tagBufferA   (pb)  working / staged tag
@@ -227,8 +247,16 @@ module peel_tile_buffer import tsp_pkg::*; #(
     localparam integer PW_VALIDB  = 213;  // [0]     slot B staged
     localparam integer PW_ISPTA   = 214;  // [0]     slot A fragment is PT-list
     localparam integer PW_ISPTB   = 215;  // [0]     slot B fragment is PT-list
-    localparam integer PEEL_W = 216;
+    // z3b: the SECOND-minimum owed depth (24-bit round-up; see the pb_z3b_max port
+    // header). 216 -> 240 is FREE M10K: at chunk depths <= 256 each block gives 40
+    // bits of width, and PEEL_W=216 already paid for ceil(216/40) = 6 blocks/bank
+    // = 240 bits of capacity - these are the 24 bits that were going spare.
+    localparam integer PW_Z3B     = 216;  // [23:0]  zb3 pair (TL peel only)
+    localparam integer PEEL_W = 240;
     localparam [30:0]  FLT_MAX = 31'h7F7FFFFF;
+    // z3b's "fewer than two owed here" sentinel. up24() of any real depth tops out
+    // at 24'hFF0000 (FLT_MAX >> 7 rounded up), so the all-ones code is never a value.
+    localparam [23:0]  Z3B_MAX = 24'hFFFFFF;
     // reference-sort seeds. TR pass 1: "nothing rendered yet" = TAG_INVALID_SENTINEL,
     // whose sort field is 0, i.e. at-or-below every real fragment at the same depth.
     // PT init: the boundary starts NEARER than everything, so its sort field is max.
@@ -283,6 +311,14 @@ module peel_tile_buffer import tsp_pkg::*; #(
     // the same slot under its TL-peel ownership: the zb3 nearest-deferred bound
     function automatic [30:0] f_z3    (input [PEEL_W*NB-1:0] w, input integer b);
         f_z3     = w[PEEL_W*b + PW_Z3     +: 31]; endfunction
+    // zb3's pair companion: the 2nd-minimum owed depth (24-bit round-up domain)
+    function automatic [23:0] f_z3b   (input [PEEL_W*NB-1:0] w, input integer b);
+        f_z3b    = w[PEEL_W*b + PW_Z3B    +: 24]; endfunction
+    // 31-bit depth -> the 24-bit z3b domain, ROUNDED UP (conservative: the stored
+    // bound may only over-state, which weakens the cull). Monotonic in the
+    // positive-float-bits ordering; never reaches Z3B_MAX for a real depth.
+    function automatic [23:0] up24 (input [30:0] v);
+        up24 = v[30:7] + {23'd0, |v[6:0]}; endfunction
     function automatic       f_valid  (input [PEEL_W*NB-1:0] w, input integer b);
         f_valid  = w[PEEL_W*b + PW_VALID]; endfunction
     // ---- slot B extractors ----
@@ -306,6 +342,7 @@ module peel_tile_buffer import tsp_pkg::*; #(
     wire [NB-1:0] ras_pass_b, ras_disp_lp; // 2-layer peel: slot-B accept / displaced-out
     wire [NB-1:0] ras_slide;               // slot A was STAGED at this A-accept (slides in)
     wire [31*NB-1:0] zb3_nxt;              // per-lane zb3 after this fragment
+    wire [24*NB-1:0] z3b_nxt;              // per-lane z3b (zb3 pair) after this fragment
     genvar gd;
     generate
         for (gd = 0; gd < NB; gd = gd + 1) begin : dcmp
@@ -371,22 +408,45 @@ module peel_tile_buffer import tsp_pkg::*; #(
             wire [30:0] zb3_old   = f_z3(rdata, gd);
             assign zb3_nxt[31*gd +: 31] =
                 (lp_cand && (lp_cand_d < zb3_old)) ? lp_cand_d : zb3_old;
+            // ---- z3b pair accumulate: classic two-register min tracking. A new
+            // minimum DEMOTES the old one to the pair slot (up24(old min) <= any
+            // stored pair value, so the demote is unconditional); otherwise the
+            // candidate competes for the pair slot in the rounded domain. Every
+            // event carries exactly ONE owed candidate (a defer is the fragment,
+            // an accept's `more` is the single displaced-out resident), so one
+            // tracker per lane is complete.
+            wire [23:0] z3b_old = f_z3b(rdata, gd);
+            wire [23:0] cand24  = up24(lp_cand_d);
+            assign z3b_nxt[24*gd +: 24] =
+                  !lp_cand                ? z3b_old
+                : (lp_cand_d < zb3_old)   ? ((zb3_old == FLT_MAX) ? Z3B_MAX
+                                                                  : up24(zb3_old))
+                : (cand24 < z3b_old)      ? cand24
+                                          : z3b_old;
         end
     endgenerate
 
     // per-chunk zb3 reduction for the caller's per-tile max, off the SAME registered
     // read the PeelBuffers walk already performs (no extra port, no extra pass).
     reg [30:0] zb3_mx; reg zb3_anyv; integer mz;
+    reg [23:0] z3b_mx; reg [23:0] z3b_lb;
     always @(*) begin
-        zb3_mx = 31'd0; zb3_anyv = 1'b0;
+        zb3_mx = 31'd0; zb3_anyv = 1'b0; z3b_mx = 24'd0; z3b_lb = 24'd0;
         for (mz = 0; mz < NB; mz = mz + 1)
             if (f_z3(rdata, mz) != FLT_MAX) begin
                 zb3_anyv = 1'b1;
                 if (f_z3(rdata, mz) > zb3_mx) zb3_mx = f_z3(rdata, mz);
+                // per-lane two-layer bound: the pair when it exists, else the A
+                // bound (single-owed lane: any fragment in front of A is its
+                // next-B - see the pb_z3b_max port header)
+                z3b_lb = (f_z3b(rdata, mz) != Z3B_MAX) ? f_z3b(rdata, mz)
+                                                       : up24(f_z3(rdata, mz));
+                if (z3b_lb > z3b_mx) z3b_mx = z3b_lb;
             end
     end
     assign pb_zb3_max = zb3_mx;
     assign pb_zb3_any = zb3_anyv;
+    assign pb_z3b_max = z3b_mx;
 
     // slot-B image export for the materialize write (see the port comment)
     genvar gb;
@@ -597,6 +657,15 @@ module peel_tile_buffer import tsp_pkg::*; #(
                                                             : f_iB)
                 : (w_ras)                ? f_iB
                                          : 1'b0;
+
+            // z3b: zb3's pair - same lifecycle: reseeded to the sentinel by every
+            // TL PeelBuffers walk (and CLEAR, for hygiene), accumulated by peel
+            // stage-B, dead (kept) everywhere else. Residue before the first walk
+            // is discarded by the caller's first_peel gate, like zb3's.
+            wdata[PEEL_W*cw + PW_Z3B +: 24] =
+                  (w_clr || w_pb)        ? Z3B_MAX
+                : (w_ras && b_peeling)   ? z3b_nxt[24*cw +: 24]
+                                         : f_z3b(rdata, cw);
         end
     end
 

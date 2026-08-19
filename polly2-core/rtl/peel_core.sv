@@ -143,6 +143,21 @@ module peel_core import tsp_pkg::*; #(
     // be the reason a demand fill waits for the channel. TC+PF < DDR_OUT so speculative
     // and demand texture traffic together can never fill the FIFO and lock out geometry.
     localparam [OCW-1:0] PF_OUT_MAX = OCW'(4);   // = the receiver's PFQD ring depth
+    // The ITERATOR's record-fetch client (2, ts) is multi-outstanding: the pf
+    // iterator's issue/receive split (OUTS-deep descriptor queue, beats parsed at
+    // the queue head in issue order) was BUILT for this, but the busy equation here
+    // stayed `d_oc != 0`, silently degrading it to one-burst-at-a-time - the next
+    // record's burst could not issue until the previous one's LAST beat returned.
+    // Cap = the iterator's own OUTS (its dq_full gates issue beyond that anyway).
+    // TC + PF + TS + the three single-outstanding clients = 15 < DDR_OUT, so the
+    // order FIFO still can never be the limiter. On the DE10 the shared
+    // RD_MAX_BEATS=128 budget means two LARGE record bursts (up to 127 beats) do
+    // not fit together - the second waits at the adapter's rd_cap (clean
+    // backpressure, beats always drain), so the realized HW depth is
+    // budget-limited; typical records are far smaller and do overlap. NOTE the
+    // in-order return: every QUEUED record burst extends a later-granted texture
+    // demand fill's wait, so if texture-bound scenes regress, lower this first.
+    localparam [OCW-1:0] TS_OUT_MAX = OCW'(4);   // = the iterator's OUTS
     reg [2:0]  of_owner [0:DDR_OUT-1];
     reg [7:0]  of_beats [0:DDR_OUT-1];
     reg        of_half  [0:DDR_OUT-1];   // 32-bit clients: which half this burst wants
@@ -282,7 +297,9 @@ module peel_core import tsp_pkg::*; #(
     // overwritten and lost) or it is at its outstanding cap.
     assign tex_dresp[0].busy = pend[0] || (d_oc[0] == TC_OUT_MAX);
     assign tex_dresp[1].busy = pend[1] || (d_oc[1] != '0);
-    assign ts_dresp.busy     = pend[2] || (d_oc[2] != '0);
+    // Client 2 (ts, iterator record fetch) is MULTI-OUTSTANDING like tc: busy only
+    // while its request is ungranted or it is at its cap (see TS_OUT_MAX above).
+    assign ts_dresp.busy     = pend[2] || (d_oc[2] == TS_OUT_MAX);
     assign pr_dresp.busy     = pend[3] || (d_oc[3] != '0);
     assign ol_dresp.busy     = pend[4] || (d_oc[4] != '0);
     assign ra_dresp.busy     = pend[5] || (d_oc[5] != '0);
@@ -818,7 +835,7 @@ module peel_core import tsp_pkg::*; #(
         .pb_rd_valid(pb_bufrd_valid), .pb_rd_addr(pb_bufrd_addr),
         .pb_wr_valid(pb_bufwr_valid), .pb_wr_addr(pb_bufwr_addr),
         .pb_first(first_peel), .pb_zkeep(pb_zkeep), .pb_bfin(pb_bfin),
-        .pb_zb3_max(pb_zb3_max), .pb_zb3_any(pb_zb3_any),
+        .pb_zb3_max(pb_zb3_max), .pb_zb3_any(pb_zb3_any), .pb_z3b_max(pb_z3b_max),
         .pb_bt_valid(pb_bt_valid), .pb_bt_tag(pb_bt_tag),
         .pb_bt_invw(pb_bt_invw), .pb_bt_pt(pb_bt_pt), .pb_bt_any(pb_bt_any)
     );
@@ -845,9 +862,12 @@ module peel_core import tsp_pkg::*; #(
     // the z_keep-entry case where the RAM carries a PREVIOUS entry's leftovers).
     wire [30:0] pb_zb3_max;
     wire        pb_zb3_any;
+    wire [23:0] pb_z3b_max;  // two-layer bound: per-pixel 2nd-owed (or A fallback)
     reg  [30:0] zf_acc;      // building this pass (max over chunks walked)
+    reg  [23:0] zfB_acc;     // ...same, the two-layer (z3b pair) bound
     reg         zf_acc_v;    // ...any pixel had a real zb3
     reg  [30:0] zfront;      // published bound for the pass now running
+    reg  [23:0] zfrontB;     // published two-layer bound (24-bit round-up domain)
     reg         zf_v;        // ...valid
     reg         zf_ok;       // zb3 was complete when zfront was built
     reg         zf_clean;    // no cull has fired in the pass now running
@@ -864,15 +884,18 @@ module peel_core import tsp_pkg::*; #(
     // cycle. !fc_pend: a cull is DECLINED while the previous cull's demote is still
     // waiting for its way-0 slot - losing a demote is the only unsafe direction in
     // the sort cache, and declining a cull is always safe (the sweep just runs).
-    // !tl2_en: the front cull is UNSOUND under two-layer peeling - zfront bounds
-    // only the nearest owed depth per pixel, but a two-layer pass also consumes
-    // the SECOND key, and a triangle wholly in front of every next-A selection can
-    // be exactly a pixel's next-B selection (observed: dropped layer content on
-    // cull-heavy scenes). A sound two-layer bound needs the per-pixel SECOND-owed
-    // depth (a zb3 pair); until that exists the two mechanisms are exclusive -
-    // they attack the same per-pass waste, and two-layer is the stronger one.
-    wire front_cull = fc_en && !tl2_en && peeling && zf_v && zf_ok && !fc_pend
-                   && ras_probe_invw_ok && (ras_probe_invw > zfront);
+    // TWO-LAYER: a two-layer pass consumes TWO keys per pixel, so the sound bound
+    // is the per-pixel SECOND-owed depth - the z3b PAIR field (see peel_tile_buffer's
+    // pb_z3b_max header for the storage, the round-up domain and the single-owed
+    // A fallback). zfrontB is its tile max; the probe is truncated DOWN into the
+    // same 24-bit domain, so probe24 > zfrontB still implies probe > true bound.
+    // (An earlier version gated the cull off entirely under tl2_en: zfront alone
+    // bounds only next-A, and a triangle in front of every next-A can be exactly
+    // a pixel's next-B - observed as dropped layer content on cull-heavy scenes.)
+    wire [23:0] probe24 = ras_probe_invw[30:7];
+    wire fc_hit = tl2_en ? (probe24 > zfrontB) : (ras_probe_invw > zfront);
+    wire front_cull = fc_en && peeling && zf_v && zf_ok && !fc_pend
+                   && ras_probe_invw_ok && fc_hit;
     // either verdict aborts the sweep; they differ only in the bookkeeping at the
     // RS_RAS sample point
     wire cr_kill = ras_probe_reject | front_cull;
@@ -2273,6 +2296,7 @@ module peel_core import tsp_pkg::*; #(
             peeling<=1'b0; more_to_draw<=1'b0; peel_pass<=8'd0; op_shaded<=1'b0;
             pass_bany<=1'b0; bany_l<=1'b0;
             zf_acc<=31'd0; zf_acc_v<=1'b0; zfront<=31'd0; zf_v<=1'b0;
+            zfB_acc<=24'd0; zfrontB<=24'd0;
             zf_ok<=1'b0; zf_clean<=1'b1; fc_pend<=1'b0; fc_tag<=32'd0;
             byp_pend<=1'b0; byp_dv<=1'b0;
             ol_walk_done<=1'b0;
@@ -3140,6 +3164,7 @@ module peel_core import tsp_pkg::*; #(
                 pb_i    <= '0;       // write chunk (1 behind read once primed)
                 pb_pipe <= 1'b0;     // stage-B not yet primed
                 zf_acc  <= 31'd0;    // rebuild the front bound over this walk
+                zfB_acc <= 24'd0;    // ...and its two-layer pair bound
                 zf_acc_v<= 1'b0;
                 st <= S_PEEL_BUF_RUN;
             end
@@ -3158,6 +3183,7 @@ module peel_core import tsp_pkg::*; #(
                 if (pb_pipe && pb_zb3_any) begin
                     zf_acc_v <= 1'b1;
                     if (pb_zb3_max > zf_acc) zf_acc <= pb_zb3_max;
+                    if (pb_z3b_max > zfB_acc) zfB_acc <= pb_z3b_max;
                 end
                 if (pb_pipe && pb_i == CHUNK_AW'(NCHUNK-1)) begin
                     // whole tile transformed. The pass's OL walk (+ fetch/setup
@@ -3172,6 +3198,7 @@ module peel_core import tsp_pkg::*; #(
                     // residue in the shared PW_ZCEIL slot (or a previous z_keep
                     // entry's leftovers), not this tile's accumulation.
                     zfront   <= (pb_zb3_any && (pb_zb3_max > zf_acc)) ? pb_zb3_max : zf_acc;
+                    zfrontB  <= (pb_zb3_any && (pb_z3b_max > zfB_acc)) ? pb_z3b_max : zfB_acc;
                     zf_v     <= (zf_acc_v | pb_zb3_any) && !first_peel;
                     // trustworthy only if the pass that produced this zb3 swept in full
                     zf_ok    <= zf_clean;
@@ -4016,14 +4043,15 @@ module peel_core import tsp_pkg::*; #(
 `ifndef SYNTHESIS
                         pc_front_cull <= pc_front_cull + 1;
                         if ($test$plusargs("probedump"))
-                            $display("[FCULL] tile(%0d,%0d) tag=%08x min=%08x zfront=%08x",
-                                     cur_tx, cur_ty, tri_tag, ras_probe_invw, zfront);
+                            $display("[FCULL] tile(%0d,%0d) tag=%08x min=%08x zfront=%08x zfrontB=%06x tl2=%b",
+                                     cur_tx, cur_ty, tri_tag, ras_probe_invw,
+                                     zfront, zfrontB, tl2_en);
 `endif
                     end
 `ifndef SYNTHESIS
                     // a cull that WOULD have fired but was declined (demote pending)
                     if (fc_en && peeling && zf_v && zf_ok && fc_pend
-                        && ras_probe_invw_ok && (ras_probe_invw > zfront))
+                        && ras_probe_invw_ok && fc_hit)
                         pc_fcull_decl <= pc_fcull_decl + 1;
 `endif
                     if (cr_kill) begin
