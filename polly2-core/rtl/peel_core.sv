@@ -646,16 +646,18 @@ module peel_core import tsp_pkg::*; #(
     // NOTE: these plusarg names must not PREFIX one another - $test$plusargs
     // prefix-matches, so a "+nc_row"-style name that starts with "nochain"
     // would silently disable everything.
-    reg chain_en, ch_pop, ch_abort, ch_row;
+    reg chain_en, ch_pop, ch_abort, ch_row, ch_drain;
 `ifndef SYNTHESIS
     initial begin
         chain_en = !$test$plusargs("nochain");
         ch_pop   = chain_en && !$test$plusargs("nc_pop");
         ch_abort = chain_en && !$test$plusargs("nc_abort");
         ch_row   = chain_en && !$test$plusargs("nc_row");
+        ch_drain = chain_en && !$test$plusargs("nc_drain");
     end
 `else
-    initial begin chain_en = 1'b1; ch_pop = 1'b1; ch_abort = 1'b1; ch_row = 1'b1; end
+    initial begin chain_en = 1'b1; ch_pop = 1'b1; ch_abort = 1'b1; ch_row = 1'b1;
+                  ch_drain = 1'b1; end
 `endif
 
     wire [2:0] depth_mode = isp_word[31:29];
@@ -3755,13 +3757,40 @@ module peel_core import tsp_pkg::*; #(
             // also wait for the depth-cmp write-back (stage B, b_valid) to land, else
             // the NEXT triangle's stage-A read races this triangle's last stage-B
             // write to the same peel-RAM word (RAW -> stale depth -> corruption).
-            RS_DRAIN: if (ras_inflight==0 && !ras_in_valid && !ras_out_valid
-                          && !b_valid) rs_st<=RS_IDLE;
+            RS_DRAIN: begin
+                // CHAIN OUT OF THE DRAIN: a plane landing MID-drain starts
+                // immediately instead of waiting out the pipe. Every RS_DRAIN entry
+                // is "pq was empty at the decision point"; when setup is the
+                // serializer the next plane often lands a few cycles later, and at
+                // RAS_LANES=32 the drain (~pipe depth, 9+ cycles) is LONGER than a
+                // small triangle's whole sweep - measured 44% of raster-busy time
+                // on sa_slow2 was RS_DRAIN. Safety is the existing chain argument:
+                // in-flight chunks keep streaming through stage A/B untouched, the
+                // POP+CORNER pair re-establishes the 2-cycle stage-A/B RAW window,
+                // sideband claims stay >=3 cycles apart, and rs_st never touches
+                // RS_IDLE so the pass barrier (consumer_idle) stays closed. The
+                // st fence mirrors RS_IDLE's: no pop while a buffer walk owns the
+                // peel-RAM ports (unreachable here by pass sequencing - planes for
+                // the next pass only exist after this drain completed - but kept
+                // identical so the two pop sites cannot drift apart). +nc_drain
+                // restores the drain-to-idle behavior (debug/bisect aid).
+                if (ch_drain && !pq_empty
+                    && !(st == S_PEEL_BUF || st == S_PEEL_BUF_RUN
+                         || st == S_ZK_INV || st == S_PT_BUF
+                         || st == S_PT_INIT || st == S_PT_SWAP
+                         || st == S_PT_FIX)) begin
+                    pq_pop  = 1'b1;
+                    rs_st   <= RS_POP;
+                end
+                else if (ras_inflight==0 && !ras_in_valid && !ras_out_valid
+                         && !b_valid) rs_st<=RS_IDLE;
+            end
             endcase
 
             // ---- pq_ram: THE SINGLE READ PORT ----
-            // Every pop site (RS_IDLE, and the three RS_RAS chain paths) used to carry its
-            // own `pq_rdw <= pq_ram[pq_head[2:0]]` + head advance. All four read the SAME
+            // Every pop site (RS_IDLE, the three RS_RAS chain paths, and the RS_DRAIN
+            // chain-out) used to carry its
+            // own `pq_rdw <= pq_ram[pq_head[2:0]]` + head advance. All five read the SAME
             // address, but sitting in different case branches made Quartus infer a
             // multi-read RAM: it REPLICATED the array into pq_ram_rtl_0/_1 at 28 M10K each
             // (56 blocks, 11% of the device, for 4,552 bits) and then crashed outright when
