@@ -589,6 +589,8 @@ module peel_core import tsp_pkg::*; #(
     reg        cr_seen;           // this triangle's probe verdict already sampled
     wire ras_probe = (rs_st == RS_CORNER) && cr_en;   // witness-select level for the issue
     wire ras_probe_reject, ras_probe_valid;
+    wire [30:0] ras_probe_invw;      // bbox-MIN invW of the probed triangle
+    wire        ras_probe_invw_ok;   // ...usable as a bound (finite, non-negative)
     // Verdict timing: the probe verdict is valid a FIXED number of cycles after the issue.
     // Instead of consuming the (un-triangle-tagged) probe_valid bus - which could belong to
     // a PRIOR triangle's probe when a short sweep finished early - run a per-triangle
@@ -618,6 +620,11 @@ module peel_core import tsp_pkg::*; #(
         .ddx(isp_ddx_invw),.ddy(isp_ddy_invw),.c_invw(isp_c_invw),
         .tl(isp_tl),
         .probe(ras_probe), .probe_reject(ras_probe_reject), .probe_valid(ras_probe_valid),
+        // min-witness far corner = the sweep bbox max: rby1 exactly; in x the last
+        // covered lane of the last chunk (rbx1 is chunk-ALIGNED, so | LANES-1).
+        // Both are RS_POP-latched and stable across the RS_CORNER issue.
+        .probe_y1(rby1), .probe_x1(rbx1 | 5'(RAS_LANES-1)),
+        .probe_invw(ras_probe_invw), .probe_invw_ok(ras_probe_invw_ok),
         .qi(tri_qi), .out_qi(ras_qi),
         .out_valid(ras_out_valid),
         .inside_mask(ras_inside),
@@ -764,8 +771,55 @@ module peel_core import tsp_pkg::*; #(
         // PeelBuffers RMW walk
         .pb_rd_valid(pb_bufrd_valid), .pb_rd_addr(pb_bufrd_addr),
         .pb_wr_valid(pb_bufwr_valid), .pb_wr_addr(pb_bufwr_addr),
-        .pb_first(first_peel), .pb_zkeep(pb_zkeep)
+        .pb_first(first_peel), .pb_zkeep(pb_zkeep),
+        .pb_zb3_max(pb_zb3_max), .pb_zb3_any(pb_zb3_any)
     );
+
+    // ---- PEEL FRONT CULL -------------------------------------------------------------
+    // zfront = max over the tile of zb3 (the nearest still-owed depth per pixel), taken
+    // on the PeelBuffers walk that already reads every chunk. A triangle whose bbox-MIN
+    // invW is strictly in front of zfront defers at EVERY pixel, so its whole sweep is
+    // dead work and the probe can reject it - the front-layer analogue of the sort
+    // cache, which only ever catches the consumed BACK layers.
+    //
+    // Soundness rests on zb3 being complete, and it is complete only for a pass in
+    // which every triangle was fully swept. A front cull ABORTS a sweep whose fragments
+    // would have registered as candidates, so the pixels it covered may be left at the
+    // FLT_MAX sentinel - which the max EXCLUDES on the grounds that nothing is owed
+    // there. That would be a lie, and it would let a later pass reject geometry that
+    // still needs drawing. zf_ok tracks it: a pass that culled leaves zb3
+    // untrustworthy, so the next pass sweeps in full and rebuilds it. The cull
+    // therefore fires on alternate passes at worst, and never on stale data.
+    //
+    // zb3 lives in the phase-owned PW_ZCEIL slot (see peel_tile_buffer), so the FIRST
+    // PeelBuffers walk of a tile reads ceiling/CLEAR residue as "zb3" - zf_v is gated
+    // on !first_peel so that walk's published bound is discarded (which also covers
+    // the z_keep-entry case where the RAM carries a PREVIOUS entry's leftovers).
+    wire [30:0] pb_zb3_max;
+    wire        pb_zb3_any;
+    reg  [30:0] zf_acc;      // building this pass (max over chunks walked)
+    reg         zf_acc_v;    // ...any pixel had a real zb3
+    reg  [30:0] zfront;      // published bound for the pass now running
+    reg         zf_v;        // ...valid
+    reg         zf_ok;       // zb3 was complete when zfront was built
+    reg         zf_clean;    // no cull has fired in the pass now running
+    reg         fc_pend;     // a cull's sort-cache demote awaits a free way-0 slot
+    reg  [31:0] fc_tag;
+    reg         fc_en;       // +nofrontcull kill switch
+`ifndef SYNTHESIS
+    initial fc_en = !$test$plusargs("nofrontcull");
+`else
+    initial fc_en = 1'b1;
+`endif
+    // The verdict is sampled with the corner probe's, so the two rejects share a
+    // cycle. !fc_pend: a cull is DECLINED while the previous cull's demote is still
+    // waiting for its way-0 slot - losing a demote is the only unsafe direction in
+    // the sort cache, and declining a cull is always safe (the sweep just runs).
+    wire front_cull = fc_en && peeling && zf_v && zf_ok && !fc_pend
+                   && ras_probe_invw_ok && (ras_probe_invw > zfront);
+    // either verdict aborts the sweep; they differ only in the bookkeeping at the
+    // RS_RAS sample point
+    wire cr_kill = ras_probe_reject | front_cull;
 
     // ---- SORT CACHE (u_sort): peel "fully rendered" triangle filter ----
     // ENTER: every peel-pass triangle popped to setup writes {tag,1} to all ways
@@ -801,12 +855,26 @@ module peel_core import tsp_pkg::*; #(
     wire        it_skp_pulse;
     wire [2:0]  it_skp_cnt;
     wire        sc_enter     = su_in_valid && su_in_ready && (peeling || pt_phase);
-    wire [RAS_LANES-1:0] sc_wr_valid = b_valid ? b_more : {RAS_LANES{1'b0}};
+    // A FRONT-CULLED triangle must not be left marked done: it was skipped because it
+    // is in front of the peel, not because it is finished, and it is owed a later
+    // pass. Its enter has already gone in (setup issue runs ahead of the probe
+    // through pq), so undo it with an explicit demote - one way disagreeing is enough
+    // to force a render. The demote waits (fc_pend) until way 0 has no real demote
+    // that cycle, so it can never displace one; a new cull is DECLINED while one is
+    // still waiting (see front_cull above).
+    wire [RAS_LANES-1:0] sc_more = b_valid ? b_more : {RAS_LANES{1'b0}};
+    wire       fc_go = fc_pend && !sc_more[0];
+    wire [RAS_LANES-1:0] sc_wr_valid = sc_more | {{(RAS_LANES-1){1'b0}}, fc_go};
     wire [32*RAS_LANES-1:0] sc_wr_tag;
     genvar gsc;
     generate
       for (gsc = 0; gsc < RAS_LANES; gsc = gsc + 1) begin : scwt
-        assign sc_wr_tag[32*gsc +: 32] = b_pass_lp[gsc] ? b_oldtag[32*gsc +: 32] : b_tag;
+        if (gsc == 0) begin : scwt0
+          assign sc_wr_tag[0 +: 32] = fc_go ? fc_tag
+                                            : (b_pass_lp[0] ? b_oldtag[0 +: 32] : b_tag);
+        end else begin : scwtn
+          assign sc_wr_tag[32*gsc +: 32] = b_pass_lp[gsc] ? b_oldtag[32*gsc +: 32] : b_tag;
+        end
       end
     endgenerate
     sort_cache #(.WAYS(RAS_LANES)) u_sort (
@@ -1789,6 +1857,8 @@ module peel_core import tsp_pkg::*; #(
     integer pc_ras_corner;      // RS_CORNER: per-triangle 4-corner probe wait (8 cyc/tri)
     integer pc_corner_cull;     // triangles trivially rejected by the 4-corner test
     integer pc_sort_skip;       // triangles skipped by the sort cache (fully rendered)
+    integer pc_front_cull;      // triangles rejected as wholly IN FRONT of the peel
+    integer pc_fcull_decl;      // front culls DECLINED (previous demote still pending)
     integer pc_pt_pass;         // forward PT-resolve passes HANDED to shade
     integer pc_pt_tiles;        // entries that ran a PT-resolve phase
     integer pc_ptbb_skip;       // PT triangles sweep-skipped by the fail bbox
@@ -2026,7 +2096,8 @@ module peel_core import tsp_pkg::*; #(
             pc_hand<=0; pc_span<=0; pc_drain<=0; pc_blend<=0; pc_swrite<=0;
             pc_prefetch<=0; pc_pf_hit<=0; pc_pf_wasted<=0;
             pc_m_promote<=0; pc_m_waithit<=0; pc_m_waitmiss<=0; pc_m_cold<=0;
-            pc_sort_skip<=0; pc_pt_pass<=0; pc_pt_tiles<=0; pc_ptbb_skip<=0;
+            pc_sort_skip<=0; pc_front_cull<=0; pc_fcull_decl<=0;
+            pc_pt_pass<=0; pc_pt_tiles<=0; pc_ptbb_skip<=0;
             pc_pt_empty<=0; pc_pt_late<=0; pc_peel_empty<=0;
 `endif
             rs_st<=RS_IDLE; tri_qi<=3'd0;
@@ -2034,6 +2105,8 @@ module peel_core import tsp_pkg::*; #(
             fq_head<=0; fq_tail<=0; fq_count<=0; fq_out_valid<=1'b0; fq_byp_sel<=1'b0;
             eq_head<=0; eq_tail<=0; eq_count<=0;
             peeling<=1'b0; more_to_draw<=1'b0; peel_pass<=8'd0; op_shaded<=1'b0;
+            zf_acc<=31'd0; zf_acc_v<=1'b0; zfront<=31'd0; zf_v<=1'b0;
+            zf_ok<=1'b0; zf_clean<=1'b1; fc_pend<=1'b0; fc_tag<=32'd0;
             ol_walk_done<=1'b0;
             pt_phase<=1'b0; pt_pass<=8'd0; pt_sh_pend<=3'd0; pt_more<=11'd0;
             pt_hand_p<=1'b0; pt_free_p<=1'b0; pt_stop<=1'b0;
@@ -2065,6 +2138,10 @@ module peel_core import tsp_pkg::*; #(
             htile<='0;
             pass_drew<=1'b0;
         end else begin
+            // Retire a pending front-cull demote as soon as way 0 is free. Placed
+            // ahead of the FSM so a cull firing this cycle still wins the set
+            // (nonblocking: the RS_RAS assignment below is later in the block).
+            if (fc_go) fc_pend <= 1'b0;
 `ifndef SYNTHESIS
             // -------- performance counters: charge THIS clock to its buckets --------
             // Only count while the core is doing tile work (not the top-level idle wait
@@ -2839,6 +2916,9 @@ module peel_core import tsp_pkg::*; #(
             // directly (first_peel), while still copying depth2 <- depth (the OP depth
             // reference). Net pass-1 state: pb2 = TAG_INVALID_SENTINEL, zb2 = OP depth.
             S_PEEL_INIT: begin
+                // a fresh entry has no previous pass: no bound until a non-first
+                // PeelBuffers walk publishes one.
+                zf_v <= 1'b0; zf_ok <= 1'b0; zf_clean <= 1'b1;
                 peeling    <= 1'b1;  // (pre-peel OP shade may have cleared it)
                 pass_drew  <= 1'b0;  // pass 1: track its stage-B accepts
                 peel_pass  <= 8'd1;  // pass 1 (counter now advances at the pass
@@ -2875,6 +2955,8 @@ module peel_core import tsp_pkg::*; #(
                 pb_rd   <= '0;       // read-ahead chunk
                 pb_i    <= '0;       // write chunk (1 behind read once primed)
                 pb_pipe <= 1'b0;     // stage-B not yet primed
+                zf_acc  <= 31'd0;    // rebuild the front bound over this walk
+                zf_acc_v<= 1'b0;
                 st <= S_PEEL_BUF_RUN;
             end
 
@@ -2885,12 +2967,31 @@ module peel_core import tsp_pkg::*; #(
             S_PEEL_BUF_RUN: begin
                 pb_pipe <= 1'b1;
                 pb_i    <= pb_rd;
+                // Fold this chunk's zb3 into the tile bound. The reduction is off the
+                // walk's own registered read, so it is exactly aligned with the write
+                // that resets zb3 for the coming pass - one pass of lookahead, no
+                // extra read port and no extra walk.
+                if (pb_pipe && pb_zb3_any) begin
+                    zf_acc_v <= 1'b1;
+                    if (pb_zb3_max > zf_acc) zf_acc <= pb_zb3_max;
+                end
                 if (pb_pipe && pb_i == CHUNK_AW'(NCHUNK-1)) begin
                     // whole tile transformed. The pass's OL walk (+ fetch/setup
                     // into fq/pq) has been running since the pass decision; with
                     // the swap done the RS_IDLE fence lifts and raster starts on
                     // an already-primed plane FIFO.
                     first_peel <= 1'b0;
+                    // publish the bound for the pass about to run. The LAST chunk is
+                    // folded in here explicitly - the accumulate above lands on this
+                    // same edge, so zf_acc still reads pre-update. The FIRST walk of
+                    // a tile publishes zf_v=0: its "zb3" read-back is ceiling/CLEAR
+                    // residue in the shared PW_ZCEIL slot (or a previous z_keep
+                    // entry's leftovers), not this tile's accumulation.
+                    zfront   <= (pb_zb3_any && (pb_zb3_max > zf_acc)) ? pb_zb3_max : zf_acc;
+                    zf_v     <= (zf_acc_v | pb_zb3_any) && !first_peel;
+                    // trustworthy only if the pass that produced this zb3 swept in full
+                    zf_ok    <= zf_clean;
+                    zf_clean <= 1'b1;
                     st <= S_OL_RUN;
                 end else if (pb_rd != CHUNK_AW'(NCHUNK-1)) begin
                     pb_rd <= pb_rd + 1'b1;
@@ -2917,6 +3018,8 @@ module peel_core import tsp_pkg::*; #(
                     tri_count ? pc_ras_corner/tri_count : 0, pc_corner_cull*256);
                 $display("  SORT-CACHE:  skipped=%0d peel triangles (fetch+setup+raster avoided)",
                     pc_sort_skip);
+                $display("  FRONT-CULL:  %0d peel triangles rejected as wholly in front of the peel (declined=%0d)",
+                    pc_front_cull, pc_fcull_decl);
                 $display("  PT-RESOLVE:  %0d forward passes over %0d entries (avg %0d passes/entry)  bbox-skips=%0d",
                     pc_pt_pass, pc_pt_tiles, pc_pt_tiles ? pc_pt_pass/pc_pt_tiles : 0,
                     pc_ptbb_skip);
@@ -3591,20 +3694,47 @@ module peel_core import tsp_pkg::*; #(
                     if ($test$plusargs("probedump"))
                         $display("[PROBE] tile(%0d,%0d) rej=%b", cur_tx, cur_ty, ras_probe_reject);
 `endif
-                    if (ras_probe_reject) begin
+                    // FRONT cull rides the same verdict slot as the geometric one. It
+                    // is NOT pass-invariant: the triangle still owes a later pass, so
+                    // unlike a corner cull it must keep the peel loop alive
+                    // (more_to_draw), undo its sort-cache enter, and mark zb3
+                    // incomplete for the next pass.
+                    if (front_cull && !ras_probe_reject) begin
+                        more_to_draw <= 1'b1;
+                        zf_clean     <= 1'b0;
+                        fc_pend      <= 1'b1;
+                        fc_tag       <= tri_tag;
 `ifndef SYNTHESIS
-                        pc_corner_cull <= pc_corner_cull + 1;  // sim-only stat (decl guarded)
+                        pc_front_cull <= pc_front_cull + 1;
+                        if ($test$plusargs("probedump"))
+                            $display("[FCULL] tile(%0d,%0d) tag=%08x min=%08x zfront=%08x",
+                                     cur_tx, cur_ty, tri_tag, ras_probe_invw, zfront);
+`endif
+                    end
+`ifndef SYNTHESIS
+                    // a cull that WOULD have fired but was declined (demote pending)
+                    if (fc_en && peeling && zf_v && zf_ok && fc_pend
+                        && ras_probe_invw_ok && (ras_probe_invw > zfront))
+                        pc_fcull_decl <= pc_fcull_decl + 1;
+`endif
+                    if (cr_kill) begin
+`ifndef SYNTHESIS
+                        if (ras_probe_reject)
+                            pc_corner_cull <= pc_corner_cull + 1;  // sim-only stat (decl guarded)
 `endif
                         // abort the rest of the sweep; the in-flight chunks are
-                        // no-ops (no coverage -> no writes). CHAIN to the next
-                        // same-pass triangle if one is queued (see RS_POP note).
+                        // harmless (corner reject: no coverage -> no writes; front
+                        // cull: only DEFERRED lanes, whose zb3/demote writes are
+                        // real owed-fragment bookkeeping - and zf_clean is cleared).
+                        // CHAIN to the next same-pass triangle if one is queued
+                        // (see RS_POP note).
                         if (ch_abort && !pq_empty) begin
                             pq_pop   = 1'b1;
                             rs_st   <= RS_POP;
                         end else rs_st <= RS_DRAIN;
                     end
                 end
-                if (!(cr_en && !cr_seen && cr_cnt == 5'd1 && ras_probe_reject)) begin
+                if (!(cr_en && !cr_seen && cr_cnt == 5'd1 && cr_kill)) begin
                     if (ras_x == rbx1) begin
                         ras_x <= rbx0;
                         if (ras_y == rby1) begin

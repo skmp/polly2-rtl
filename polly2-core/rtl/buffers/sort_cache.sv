@@ -44,6 +44,33 @@
 // enter instead, which the agreement test reads as "not done" -> renders (safe, and
 // the same failure mode the header already describes).
 //
+// REDUNDANT-DEMOTE FILTER. "Demote wins" is correct but was ruinously expensive,
+// because demotes are overwhelmingly REPEATS: a deferred triangle demotes the same
+// way with the same tag once per chunk of its bbox (measured ~323 demotes per
+// rasterized triangle, ~43% of all lane slots), and each repeat rewrites {0,tag}
+// over an identical {0,tag} while stealing the port from a concurrent enter. That
+// cost 35% of all enters, and a triangle whose enter is lost cannot be skipped next
+// pass - it re-rasters a full ~95-cycle sweep (~29% of the frame, measured).
+//
+// Suppressing a repeat is EXACT, not heuristic. The filter fires only when the last
+// value THIS way wrote was this same {0,tag}; this way is the sole writer of its
+// mem, so the entry is provably still {0,tag} and the write is a no-op. Any
+// intervening write by this way - the sweep, an enter, or a demote of a DIFFERENT
+// tag - clears or replaces the tracker and re-enables the write. Note the tracker
+// keys on the last write, not the last write TO THIS ADDRESS: an enter to an
+// unrelated index still clears it, which only costs a redundant write.
+//
+// The filter's 32-bit compare rides its own register stage (dm_*) ON TOP of the
+// timing registration above, so it never lands on the reg -> M10K setup path: the
+// demote now writes TWO cycles after presentation while the enter still writes after
+// ONE. That stagger is itself a win, not a hazard: a demote and an enter PRESENTED
+// in the same cycle no longer collide at all (they land on different edges), which
+// removes the whole same-cycle class of enter loss - 35% of enters on the sa_slow2
+// scene. Ordering is still safe both ways: a triangle's own enter precedes its own
+// demotes by 30+ cycles, so +1 cycle of demote lag cannot reorder its history, and
+// a demote that now lands on the FOLLOWING enter's edge still wins by swallowing
+// that enter (conservative, renders).
+//
 // Caller rules (peel_core):
 //   * consult CHECK only from the SECOND peel pass of a tile onward: every
 //     triangle checked in pass p>=1 was entered/demoted in pass p-1 of the
@@ -53,11 +80,12 @@
 //     this tile (e.g. the fetch-FIFO consume side): the A/B pre-walk overlaps
 //     the previous pass, so a check made mid-pass could read a not-yet-demoted
 //     entry and skip a triangle that is still going to lose a pixel.
-//   * allow 2 cycles after the last demote write before trusting a check: one for
-//     the input register added below, one because the registered read of a
-//     same-edge write returns the OLD entry. peel_core satisfies this by orders of
-//     magnitude - checks happen in the iterator's pre-fetch for pass p+1, on the far
-//     side of the S_DRAIN barrier that waits for the whole raster/TSP pipe to empty.
+//   * allow 3 cycles after the last demote before trusting a check: two for the
+//     input registers the demote now rides (the timing stage plus the filter
+//     stage), one because the registered read of a same-edge write returns the OLD
+//     entry. peel_core satisfies this by orders of magnitude - checks happen in the
+//     iterator's pre-fetch for pass p+1, on the far side of the S_DRAIN barrier
+//     that waits for the whole raster/TSP pipe to empty.
 //   * do NOT demote when the displaced resident is the SetTagToMax filler -
 //     only real triangle tags carry state here.
 //
@@ -144,20 +172,53 @@ module sort_cache #(
     wire [WAYS-1:0] way_done;
     assign chk_done = &way_done;
 
+    // Demote FILTER stage. The filter's 32-bit compare must not sit between the
+    // timing registers above and the M10K controls, so the demote takes one more
+    // register (dm_*) and the compare runs flop-to-flop with a full cycle. Demotes
+    // captured during the reset sweep are dropped (they lost to the sweep anyway),
+    // which also keeps the tracker consistent across the sweep.
+    reg [WAYS-1:0]      dm_v;
+    reg [WAYS*TAGW-1:0] dm_tag;
+    always @(posedge clk) begin
+        if (reset) dm_v <= '0;
+        else       dm_v <= wr_valid_r & {WAYS{ready}};
+        dm_tag <= wr_tag_r;
+    end
+
+    wire [WAYS-1:0] dem_eff;   // demote that actually reaches the write port
+
     genvar gw;
     generate
       for (gw = 0; gw < WAYS; gw = gw + 1) begin : way
         (* ramstyle = "M10K, no_rw_check" *) reg [SW-1:0] mem [0:NENT-1];
 
-        // one write port: sweep, else this way's demote, else the enter broadcast.
-        wire [TAGW-1:0] wtag = wr_tag_r[TAGW*gw +: TAGW];
-        wire            wv = !ready || wr_valid_r[gw] || en_valid_r;
-        wire [IXW-1:0]  wa = !ready          ? rst_i[IXW-1:0]
-                           : wr_valid_r[gw]  ? idx(wtag)
-                           :                   idx(en_tag_r);
-        wire [SW-1:0]   wd = !ready          ? {SW{1'b0}}
-                           : wr_valid_r[gw]  ? {1'b0, wtag}
-                           :                   {1'b1, en_tag_r};
+        wire [TAGW-1:0] wtag = dm_tag[TAGW*gw +: TAGW];
+
+        // tracker: tag of the last demote THIS way wrote, and whether that write is
+        // still the way's most recent one (i.e. the entry is still {0, lst_tag}).
+        reg [TAGW-1:0] lst_tag;
+        reg            lst_v;
+        assign dem_eff[gw] = dm_v[gw] && !(lst_v && (lst_tag == wtag));
+
+        // one write port: sweep, else this way's (unsuppressed) demote, else the
+        // enter broadcast. Suppressing a redundant demote is what hands the port to
+        // the enter - that is the entire point of the filter.
+        wire            wv = !ready || dem_eff[gw] || en_valid_r;
+        wire [IXW-1:0]  wa = !ready        ? rst_i[IXW-1:0]
+                           : dem_eff[gw]   ? idx(wtag)
+                           :                 idx(en_tag_r);
+        wire [SW-1:0]   wd = !ready        ? {SW{1'b0}}
+                           : dem_eff[gw]   ? {1'b0, wtag}
+                           :                 {1'b1, en_tag_r};
+
+        // mirrors the write mux's priority exactly: any write that is NOT this
+        // demote invalidates the tracker, so suppression can never outlive the
+        // {0,tag} it asserts is resident.
+        always @(posedge clk) begin
+            if (reset || !ready)   lst_v <= 1'b0;
+            else if (dem_eff[gw])  begin lst_v <= 1'b1; lst_tag <= wtag; end
+            else if (en_valid_r)   lst_v <= 1'b0;
+        end
 
         reg [SW-1:0] rq;
         always @(posedge clk) begin
@@ -171,22 +232,25 @@ module sort_cache #(
     endgenerate
 
 `ifndef SYNTHESIS
-    // stats: how much the filter would save, and how often an enter lost its slot.
-    integer st_enter, st_demote, st_check, st_skip, st_enter_lost;
+    // stats: how much the filter saves, and how often an enter lost its slot.
+    integer st_enter, st_demote, st_check, st_skip, st_enter_lost, st_dem_sup;
     always @(posedge clk) begin
         if (reset) begin
             st_enter<=0; st_demote<=0; st_check<=0; st_skip<=0; st_enter_lost<=0;
+            st_dem_sup<=0;
         end else begin
-            // off the REGISTERED ports: enter-lost is a property of the actual write
-            // arbitration, which now happens a cycle after the caller presents it.
             if (en_valid_r && ready)       st_enter  <= st_enter + 1;
             if (chk_valid_q)               st_check  <= st_check + 1;
             if (chk_valid_q && chk_done)   st_skip   <= st_skip + 1;
-            st_demote <= st_demote + $countones(wr_valid_r);
-            if (en_valid_r && ready && (|wr_valid_r)) st_enter_lost <= st_enter_lost + 1;
+            // st_demote counts demotes PRESENTED; st_dem_sup how many the filter ate.
+            // enter-lost keys on the EFFECTIVE demote - that is the collision that
+            // actually costs a re-raster next pass.
+            st_demote  <= st_demote  + $countones(dm_v);
+            st_dem_sup <= st_dem_sup + $countones(dm_v & ~dem_eff);
+            if (en_valid_r && ready && (|dem_eff)) st_enter_lost <= st_enter_lost + 1;
         end
     end
-    final $display("=== SORT$ %m: enters=%0d demotes=%0d checks=%0d SKIPS=%0d (enter-lost=%0d) ===",
-                   st_enter, st_demote, st_check, st_skip, st_enter_lost);
+    final $display("=== SORT$ %m: enters=%0d demotes=%0d (suppressed=%0d) checks=%0d SKIPS=%0d (enter-lost=%0d) ===",
+                   st_enter, st_demote, st_dem_sup, st_check, st_skip, st_enter_lost);
 `endif
 endmodule

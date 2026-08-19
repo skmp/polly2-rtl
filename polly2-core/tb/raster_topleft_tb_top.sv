@@ -97,6 +97,8 @@ module raster_topleft_tb_top (
         .ddx(rddx),.ddy(rddy),.c_invw(rcw),
         .tl(rtl),
         .probe(r_probe), .probe_reject(probe_reject), .probe_valid(probe_valid),
+        // front-cull depth probe unused here: whole-tile witnesses, outputs open
+        .probe_y1(5'd31), .probe_x1(5'd31), .probe_invw(), .probe_invw_ok(),
         .out_valid(out_valid), .inside_mask(inside_mask), .invw_flat(invw_flat),
         .qi(3'd0), .out_qi(),
         .out_x(out_x), .out_y(out_y)

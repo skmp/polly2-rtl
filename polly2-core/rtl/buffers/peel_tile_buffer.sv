@@ -4,6 +4,8 @@
 //
 // Storage: ONE simple-dual-port tile_ram (u_ram), WIDTH = 150 bits/lane packing
 // {valid, zceil[30:0], refsort[23:0], tag[31:0], depth2[30:0], depth[30:0]}, NBANKS = LANES banks.
+// The zceil slot is PHASE-OWNED: opaque ceiling during the PT resolve, the zb3
+// nearest-deferred bound during TL peeling (see the zb3 port header below).
 // Depths are 31-bit SIGN-STRIPPED floats: invW is always positive non-zero, so
 // the sign bit is never stored and positive-float ordering == unsigned ordering.
 // Bank = x[BANK_BITS-1:0], addr = {y[4:0], x[4:BANK_BITS]} (AW bits, 1024/LANES
@@ -126,7 +128,41 @@ module peel_tile_buffer import tsp_pkg::*; #(
     // preserved (the tag invalidate for the OP pre-walk is done in the SEPARATE u_taginvw
     // buffer). Only pixels the final peel pass left as the sentinel are restored, so an
     // OP-only predecessor (real zb, stale zb2) is untouched.
-    input                       pb_zkeep
+    input                       pb_zkeep,
+
+    // ---- zb3: NEAREST DEFERRED DEPTH (the peel front-cull lookahead) ----------------
+    // A TL peel pass converges zb DOWNWARD to the farthest fragment at-or-in-front of
+    // the reference, so "deferred" is stable once it happens. zb3 accumulates the
+    // MINIMUM depth over the fragments that still need drawing at this pixel:
+    //   * deferred   (k_new > k_best)      -> candidate depth = nw
+    //   * displaced  (accept while valid)  -> candidate depth = the old zb it evicts
+    // Those two are EXACTLY the events that raise `more` (see isp_depth_cmp_lp), and
+    // the candidate depth is the same old/new mux the sort cache demote already uses -
+    // so zb3 needs one comparator per lane and no new decision logic.
+    //
+    // At pass end zb3 is precisely the depth the NEXT pass will select at that pixel,
+    // so max(zb3) over the tile upper-bounds the next front and lets a whole triangle
+    // in front of it be rejected before it is swept. UNDER-recording is safe (a missed
+    // candidate only raises zb3, weakening the cull); over-recording never happens
+    // because every value written is a real fragment depth.
+    //
+    // STORAGE IS THE PW_ZCEIL SLOT - zb3 costs no RAM at all. The opaque ceiling is
+    // parked there by pb_ptinit and CONSUMED by pb_ptfix (into zb) before any TL peel
+    // starts, and during TL passes every writer only ever KEEPS it - so the field is
+    // provably dead exactly when zb3 is alive. The phases hand over through full-tile
+    // walks: pb_ptinit re-parks the ceiling (clobbering zb3 residue), and each TL
+    // PeelBuffers walk reseeds zb3 <- FLT_MAX. The FIRST such walk therefore reads
+    // ceiling/CLEAR residue as "zb3", which is why the caller must discard the bound
+    // it publishes on first_peel (see zf_v in peel_core).
+    //
+    // FLT_MAX means "nothing here will ever be selected again" and is EXCLUDED from
+    // the max - otherwise one finished pixel pins the bound and no cull ever fires.
+    // That exclusion is only valid while zb3 is complete, which is why the caller must
+    // not trust the bound after a pass that skipped a sweep (see zf_ok in peel_core).
+    output     [30:0]           pb_zb3_max,  // max over lanes of the read chunk's zb3,
+                                             // FLT_MAX lanes excluded (valid with pb_rd's
+                                             // data, i.e. alongside pb_wr)
+    output                      pb_zb3_any   // any lane of that chunk was not FLT_MAX
 );
     localparam integer NB     = LANES;
     localparam integer BANK_BITS = $clog2(LANES);       // 3 for 8, 2 for 4
@@ -141,6 +177,9 @@ module peel_tile_buffer import tsp_pkg::*; #(
     localparam integer PW_TAG     = 62;   // [31:0]  tagBufferA   (pb)  working / staged tag
     localparam integer PW_REFSORT = 94;   // [23:0]  reference / boundary tag[23:0]
     localparam integer PW_ZCEIL   = 118;  // [30:0]  opaque ceiling (PT phase only)
+    localparam integer PW_Z3      = PW_ZCEIL; // [30:0] zb3 (TL peel only) - see the
+                                          // zb3 header: the slot is phase-owned, the
+                                          // ceiling is dead once pb_ptfix consumed it
     localparam integer PW_VALID   = 149;  // [0]     tagStatus.valid
     localparam integer PEEL_W = 150;
     localparam [30:0]  FLT_MAX = 31'h7F7FFFFF;
@@ -195,6 +234,9 @@ module peel_tile_buffer import tsp_pkg::*; #(
     // the (sign-stripped) opaque depth, parked across the PT phase
     function automatic [30:0] f_zceil (input [PEEL_W*NB-1:0] w, input integer b);
         f_zceil  = w[PEEL_W*b + PW_ZCEIL  +: 31]; endfunction
+    // the same slot under its TL-peel ownership: the zb3 nearest-deferred bound
+    function automatic [30:0] f_z3    (input [PEEL_W*NB-1:0] w, input integer b);
+        f_z3     = w[PEEL_W*b + PW_Z3     +: 31]; endfunction
     function automatic       f_valid  (input [PEEL_W*NB-1:0] w, input integer b);
         f_valid  = w[PEEL_W*b + PW_VALID]; endfunction
 
@@ -202,6 +244,7 @@ module peel_tile_buffer import tsp_pkg::*; #(
     // Runs off the read-back chunk (rdata = the chunk stage A read last cycle) using
     // the latched b_* fragment fields.
     wire [NB-1:0] ras_pass_op, ras_pass_lp, ras_more_lp, ras_pass_fwd, ras_more_fwd;
+    wire [31*NB-1:0] zb3_nxt;              // per-lane zb3 after this fragment
     genvar gd;
     generate
         for (gd = 0; gd < NB; gd = gd + 1) begin : dcmp
@@ -242,16 +285,49 @@ module peel_tile_buffer import tsp_pkg::*; #(
             wire fwd_live = ras_pass_op[gd] && !b_res[gd];
             assign ras_pass_fwd[gd] = fwd_live && cmp_pass;
             assign ras_more_fwd[gd] = fwd_live && cmp_more;
+
+            // ---- zb3 accumulate (consumed only when b_peeling - see the write mux).
+            // `more` IS the "still needs drawing" predicate, and the candidate's
+            // depth is the evicted resident on an accept, else the deferred fragment
+            // itself - the same old/new mux the sort cache's demote tag already uses.
+            wire        lp_cand   = b_inside[gd] & ras_more_lp[gd];
+            wire [30:0] lp_cand_d = ras_pass_lp[gd] ? f_depth(rdata, gd)
+                                                    : b_invw[31*gd +: 31];
+            wire [30:0] zb3_old   = f_z3(rdata, gd);
+            assign zb3_nxt[31*gd +: 31] =
+                (lp_cand && (lp_cand_d < zb3_old)) ? lp_cand_d : zb3_old;
         end
     endgenerate
+
+    // per-chunk zb3 reduction for the caller's per-tile max, off the SAME registered
+    // read the PeelBuffers walk already performs (no extra port, no extra pass).
+    reg [30:0] zb3_mx; reg zb3_anyv; integer mz;
+    always @(*) begin
+        zb3_mx = 31'd0; zb3_anyv = 1'b0;
+        for (mz = 0; mz < NB; mz = mz + 1)
+            if (f_z3(rdata, mz) != FLT_MAX) begin
+                zb3_anyv = 1'b1;
+                if (f_z3(rdata, mz) > zb3_mx) zb3_mx = f_z3(rdata, mz);
+            end
+    end
+    assign pb_zb3_max = zb3_mx;
+    assign pb_zb3_any = zb3_anyv;
     // peel accept / more are only meaningful on peel/forward lanes that are inside
     assign b_pass_lp = (b_peeling ? ras_pass_lp : b_fwd ? ras_pass_fwd : '0) & b_inside;
     assign b_more    = (b_peeling ? ras_more_lp : b_fwd ? ras_more_fwd : '0) & b_inside;
     // per-lane stage-B write-enable = inside & (peel | forward | opaque accept).
-    // Exactly the `we[cw]` computed in the write mux below; exposed so u_taginvw
-    // can duplicate the accepted {valid,tag,invW} write with an identical mask.
+    // Exposed so u_taginvw can duplicate the accepted {valid,tag,invW} write with an
+    // identical mask - it must see exactly the shaded fragments, so this stays
+    // ACCEPT-ONLY even though the internal write set below is wider on peel lanes
+    // (a DEFERRED lane also writes, to move zb3; its other fields are kept).
     assign b_we = ras_b_valid ? (b_inside &
                   (b_peeling ? ras_pass_lp : b_fwd ? ras_pass_fwd : ras_pass_op)) : '0;
+    // the internal stage-B write set: accepts, PLUS (peel only) deferred lanes. A
+    // deferred lane costs no extra RAM traffic - the port is idle on the cycles it
+    // would use anyway.
+    wire [NB-1:0] ras_we = b_inside &
+                  (b_peeling ? (ras_pass_lp | ras_more_lp)
+                             : b_fwd ? ras_pass_fwd : ras_pass_op);
 
     // -------------------- READ port mux --------------------
     always @(*) begin
@@ -289,7 +365,7 @@ module peel_tile_buffer import tsp_pkg::*; #(
         reg [23:0] f_rs;
         reg        f_vl;
 
-        we    = w_ras ? b_we : ((w_clr || w_pt || w_zk || w_pb) ? {NB{1'b1}} : '0);
+        we    = w_ras ? ras_we : ((w_clr || w_pt || w_zk || w_pb) ? {NB{1'b1}} : '0);
         waddr = w_clr               ? {NB{clr_addr}}
               : (w_pt || w_zk || w_pb) ? {NB{pb_wr_addr}}
               : w_ras               ? pack_addr(b_y, b_x)
@@ -316,8 +392,9 @@ module peel_tile_buffer import tsp_pkg::*; #(
                                     : 31'h0)
                 : w_zk  ? ((f_zb == FLT_MAX) ? f_zb2 : f_zb)
                 : w_pb  ? FLT_MAX
-                : w_ras ? ((b_peeling || b_fwd) ? b_invw[31*cw +: 31]
-                                                : (b_zwdis ? f_zb : b_invw[31*cw +: 31]))
+                : w_ras ? (b_peeling ? (ras_pass_lp[cw] ? b_invw[31*cw +: 31] : f_zb)
+                         : b_fwd     ? b_invw[31*cw +: 31]
+                                     : (b_zwdis ? f_zb : b_invw[31*cw +: 31]))
                         : 31'h0;
 
             // zb2: the TR reference / PT boundary. PeelBuffers advances it to the old
@@ -336,7 +413,8 @@ module peel_tile_buffer import tsp_pkg::*; #(
 
             wdata[PEEL_W*cw + PW_TAG +: 32] =
                   w_clr ? clr_tag
-                : w_ras ? b_tag
+                : w_ras ? ((b_peeling && !ras_pass_lp[cw]) ? f_tg   // deferred: keep
+                                                           : b_tag)
                         : f_tg;                       // every walk keeps the tag
 
             // the reference SORT field moves with zb2 above, by the SAME condition, so
@@ -350,14 +428,22 @@ module peel_tile_buffer import tsp_pkg::*; #(
                 : w_pb  ? (pb_first ? REFSORT_TR_FIRST : f_tagsort(rdata, cw))
                         : f_rs;                       // z_keep and stage-B keep it
 
+            // ONE slot, two phase-owned meanings (see the zb3 header):
+            //   ceiling: parked by ptinit, kept by ptswap/ptfix/z_keep/fwd/opaque.
+            //   zb3    : reseeded FLT_MAX by every TL PeelBuffers walk (the caller
+            //            samples the OLD value off this same read, so the walk is
+            //            exactly the pass boundary), accumulated by peel stage-B.
             wdata[PEEL_W*cw + PW_ZCEIL +: 31] =
                   w_clr ? 31'h0
-                : (w_pt && pb_ptinit) ? f_zb          // park the opaque Z for the PT phase
-                                      : f_zc;
+                : (w_pt && pb_ptinit)    ? f_zb       // park the opaque Z for the PT phase
+                : w_pb                   ? FLT_MAX    // zb3 <- "nothing owed" for the pass
+                : (w_ras && b_peeling)   ? zb3_nxt[31*cw +: 31]
+                                         : f_zc;
 
             wdata[PEEL_W*cw + PW_VALID] =
                   w_zk  ? f_vl
-                : w_ras ? ((b_peeling || b_fwd) ? 1'b1 : f_vl)
+                : w_ras ? (b_peeling ? (ras_pass_lp[cw] ? 1'b1 : f_vl)  // deferred: keep
+                         : b_fwd ? 1'b1 : f_vl)
                         : 1'b0;                       // clear / PT walk / PeelBuffers
         end
     end

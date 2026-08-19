@@ -138,6 +138,40 @@ module isp_raster_line import tsp_pkg::*; #(
     input             probe,
     output reg               probe_reject,   // reject verdict (valid when probe_valid)
     output reg               probe_valid,    // 1-cyc: a probe issue's verdict is on the bus
+    // ---- CORNER-PROBE, depth half: the BBOX-MIN of invW, for the peel front cull.
+    // invW = c_invw + ddy*y + ddx*x is affine, so its minimum over the triangle's
+    // swept bbox is at ONE bbox corner: y* = (ddy<0 ? y1 : y0), x* = (ddx<0 ? x1 :
+    // x0). The probe issue steers the invW channel's OWN witnesses to that corner
+    // exactly like the edge channels steer to their max corners (the invW value on a
+    // probe cycle was dead before - probe issues suppress out_valid), so the bound
+    // costs two 5-bit muxes and rides the existing fixed-point datapath: lane 0's
+    // value IS the corner. The probe issue's y/x_base already carry the bbox origin
+    // (the sweep starts there); y1/x1 arrive on the two ports below. The BBOX corner
+    // (not the tile corner) is deliberate: bbox >= covered pixels keeps it sound,
+    // while for a triangle smaller than the tile it is close to the true triangle
+    // min - the tile corner extrapolates far below it and rarely culls anything.
+    //
+    // THE BOUND IS EXACT AGAINST THE SWEEP, NOT AGAINST THE ANALYTIC PLANE: the
+    // corner value comes from the SAME aligned coefficients (alignment is a pure
+    // function of the registered inputs, so per-issue results are identical), the
+    // fixed-point adds are exact, and fx_to_f32 truncates monotonically - so
+    // probe_invw <= every swept pixel's COMPUTED invW, bit-exactly. (A vertex-min
+    // computed at setup would NOT have this property: the sweep's value can land
+    // below it by alignment/rounding, and an overstated bound can falsely cull a
+    // fragment the pass would have SELECTED - which loses it forever, since the
+    // reference then advances past its key.)
+    //
+    // probe_invw_ok qualifies it. The witness corner can be OUTSIDE the triangle,
+    // where the plane extrapolates freely: it can go negative (and depths compare
+    // SIGN-STRIPPED downstream, so the normalizer's dropped sign would read back a
+    // negative min as a huge positive and could FALSELY reject), or the normalize can
+    // saturate to the FF exponent. Both are refused here rather than clamped - the
+    // cull is an optimisation, so declining to bound is always the safe answer.
+    input      [4:0]         probe_y1,       // bbox max row (tile-local, inclusive)
+    input      [4:0]         probe_x1,       // bbox max col (inclusive: the last
+                                             // covered lane of the last swept chunk)
+    output reg [30:0]        probe_invw,     // bbox-min invW, sign-stripped
+    output reg               probe_invw_ok,  // min corner is finite, >= 0 -> bound usable
 
     output reg               out_valid,
     output reg [LANES-1:0]    inside_mask,
@@ -240,6 +274,7 @@ module isp_raster_line import tsp_pkg::*; #(
     reg  [7:0] ch_e   [0:NCH-1];                 // shared exponent, pre-computed here
     reg [31:0] dxc [0:3], dyc [0:3];
     reg  [4:0] y_c, xb_c;
+    reg  [4:0] py1_c, px1_c;   // probe bbox max (min-witness far corner)
     always @(posedge clk) begin
         dxc[0]<=dx12; dxc[1]<=dx23; dxc[2]<=dx31; dxc[3]<=dx41;
         dyc[0]<=dy12; dyc[1]<=dy23; dyc[2]<=dy31; dyc[3]<=dy41;
@@ -262,6 +297,7 @@ module isp_raster_line import tsp_pkg::*; #(
         ch_e[2]<=emax3(c3, dx31, fneg(dy31)); ch_e[3]<=emax3(c4, dx41, fneg(dy41));
         ch_e[WCH]<=emax3(c_invw, ddy, ddx);
         y_c <= y; xb_c <= x_base;
+        py1_c <= probe_y1; px1_c <= probe_x1;
     end
 
 `ifndef SYNTHESIS
@@ -280,8 +316,14 @@ module isp_raster_line import tsp_pkg::*; #(
         assign x_sel[gc] = probe_c ? (dyc[gc][31] ? 5'd31 : 5'd0 ) : xb_c;
       end
     endgenerate
-    assign y_sel[WCH] = y_c;
-    assign x_sel[WCH] = xb_c;
+    // invW's own witnesses, for the front cull's bbox-min bound: plain affine, so
+    // the MIN is at y* = y1 when ddy < 0 else y0, x* = x1 when ddx < 0 else x0 - and
+    // the probe issue's y_c/xb_c ARE the bbox origin (the sweep starts there). (The
+    // edge witnesses above differ because they want the MAX over the whole tile and
+    // their column coefficient carries a sign flip.) ch_row[WCH]/ch_col[WCH] are the
+    // registered ddy/ddx, mirroring the dxc/dyc use above.
+    assign y_sel[WCH] = probe_c ? (ch_row[WCH][31] ? py1_c : y_c ) : y_c;
+    assign x_sel[WCH] = probe_c ? (ch_col[WCH][31] ? px1_c : xb_c) : xb_c;
 
     // tl to the base stage, where it becomes the -1
     reg [3:0] tl_dl [0:TLDLY-1];
@@ -515,6 +557,13 @@ module isp_raster_line import tsp_pkg::*; #(
     reg [LANES-1:0]    im0;
     reg [32*LANES-1:0] iw0;
     reg                pr_rej0;
+    reg [30:0]         pr_iw0;    // probe tile-min invW (lane 0), retimed below
+    reg                pr_iwok0;  // ...and whether that corner is usable as a bound
+
+    // lane 0's normalized value doubles as the probe's tile-min invW (the witness
+    // steering above put the min corner on lane 0). Named so the ok-qualifier can
+    // look at its exponent; synthesis shares it with iw0's lane 0.
+    wire [31:0] w0_f32 = fx_to_f32(w_lane[0][FXW-2:0], w_exp);
 
     integer j;
     always @(posedge clk) begin : result_stage
@@ -525,6 +574,12 @@ module isp_raster_line import tsp_pkg::*; #(
         // PROBE: lane 0's value IS Xhs_n at that edge's max corner. Reject if ANY
         // edge's max corner is outside - the whole tile is then outside it.
         pr_rej0 <= ~(e_in[0][0] & e_in[1][0] & e_in[2][0] & e_in[3][0]);
+        // same stage as the edge verdict: this lane's invW IS the tile-min corner on
+        // a probe issue (see the WCH witnesses above). Usable iff the corner is
+        // non-negative IN THE FIXED POINT (the normalizer drops the sign by
+        // contract) and the normalize did not saturate to the FF exponent.
+        pr_iw0   <= w0_f32[30:0];
+        pr_iwok0 <= ~w_lane[0][FXW-1] && (w0_f32[30:23] != 8'hFF);
     end
 
     // ---- valid / sideband pipe ----
@@ -560,5 +615,7 @@ module isp_raster_line import tsp_pkg::*; #(
         invw_flat    <= iw0;
         probe_valid  <= ppipe[LAT-1];
         probe_reject <= pr_rej0 & ppipe[LAT-1];
+        probe_invw    <= pr_iw0;
+        probe_invw_ok <= pr_iwok0 & ppipe[LAT-1];
     end
 endmodule
