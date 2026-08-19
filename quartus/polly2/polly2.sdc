@@ -29,11 +29,13 @@ set_clock_groups -exclusive \
     -group [get_clocks {FPGA_CLK2_50}] \
     -group [get_clocks {FPGA_CLK3_50}]
 
-# ---- clk_sys core clock: 4 fixed PLL outputs muxed through an altclkctrl ----
+# ---- clk_sys core clock: 4 fixed PLL outputs muxed through altclkctrl ----
 # The emu PLL (rtl/pll) has 4 fixed outputs from the 900 MHz VCO:
 # outclk_0/1/2/3 = 75 / 90 / 100 / 112.5 MHz (C0=12/10/9/8). No runtime PLL
-# reconfig anymore - clk_sys is picked by the pixclk_mux clkctrl (glitch-free
-# switchover), so derive_pll_clocks constrains each counter at its real
+# reconfig anymore - clk_sys is picked by the soft glitch-free mux
+# (clk_mux_gf; a hard clkctrl tree is IMPOSSIBLE here - clkctrl outputs
+# cannot cascade into clkctrl inputs, see the sysclk_mux comment in
+# sys_top), so derive_pll_clocks constrains each counter at its real
 # frequency and all four propagate through the mux into the clk_sys domain.
 # Only one can be active at a time: declare them physically exclusive so
 # TimeQuest doesn't analyze impossible cross-transfers (e.g. 75->112.5 on the

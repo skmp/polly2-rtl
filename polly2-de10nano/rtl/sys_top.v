@@ -406,19 +406,25 @@ pll pll
 	.locked(pll_locked)
 );
 
-// KEPT SOFT, DELIBERATELY. The hard Cyclone V altclkctrl was tried (the
-// commented-out instance that used to sit here, and the still-referenced
-// plls/switch/altclkctrl IP in the .qsf) and it is worth about 0.5-1.3 ns:
-// this mux drives clk_sys onto the global network from a LAB output rather
-// than straight from the PLL, which costs ~8.4 ns of insertion delay and
-// leaves 0.55-1.26 ns of residual skew on the worst paths. It is not worth
-// taking: altclkctrl's clkselect is not glitch-free between unrelated
-// clocks, and a runt cycle on clk_sys corrupts the entire core rather than
-// slowing it down. clk_mux_gf's break-before-make is what makes runtime
-// slot switching safe. Revisit only if slot switching is dropped entirely
-// and clk_sys becomes a single fixed PLL output - then neither mux is
-// needed and the PLL can drive the global network directly, which is worth
-// far more than 1 ns.
+// KEPT SOFT - NOW PROVEN NECESSARY, twice over. The hard clkctrl was
+// re-attempted 2026-08-19 as a 3-block TREE on inclk2x/inclk3x only (inputs
+// 0/1 of these blocks have no routing from the PLL counters). The pair
+// stages are legal, but the fitter rejects the ROOT stage outright:
+//   Error (15836): inclk[2] port of Clock Select Block ... is driven by
+//   altclkctrl:sysclk_mux_lo|...|wire_sd1_outclk, but must be driven by a
+//   PLL's output clock
+// i.e. a clkctrl INPUT accepts only a clock pin or a PLL C/FBOUT output - a
+// clkctrl OUTPUT can never cascade into another clkctrl, so no hard 4:1
+// exists on this device. A hard-pair + soft-root hybrid gains nothing: the
+// soft mux's cost is the LAB-output -> global-network promotion at the FINAL
+// stage (~8.4 ns insertion, 0.55-1.26 ns residual skew), which a soft root
+// pays in full. Hence: the 4:1 stays fully soft, glitch-free by
+// construction (break-before-make; see clk_mux_gf).
+//
+// The one hard-clock design point that remains: drop runtime slot switching
+// and feed clk_sys from a single fixed PLL output (optionally through ONE
+// clkctrl, inclk2) - worth far more than 1 ns, at the price of rebuilding
+// the bitstream per frequency.
 clk_mux_gf sysclk_mux
 (
 	.clks  ({clk_112, clk_100, clk_90, clk_75}),  // sel 0/1/2/3 -> slot 0/1/2/3
