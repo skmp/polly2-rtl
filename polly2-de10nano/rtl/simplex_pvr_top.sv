@@ -41,9 +41,6 @@ module simplex_pvr_top import tsp_pkg::*; (
     // only (CONF_STR "Texel Reads" off). Pass-through to peel_core.
     input             tex_en,
     input      [31:0] vram_cfg,     // [0] VRAM_16MB: 16 MB board, no 8 MB mirror
-    input      [3:0]  feat_en,      // MMIO FEAT register: runtime feature enables
-                                    // [0] two-layer peel [1] setup cache
-                                    // [2] front cull     [3] RS_DRAIN chain-out
 
     // ---- framebuffer DDR word base ----
     // The FB write base and split-VRAM half come from the core's OWN FB_W_SOF1
@@ -95,7 +92,6 @@ module simplex_pvr_top import tsp_pkg::*; (
         .clk(clk), .reset(reset),
         .wr_en(wr_en), .wr_addr(wr_addr), .wr_data(wr_data),
         .go(go), .done(done), .vram_cfg(vram_cfg),
-        .feat_en(feat_en),
         //.tex_en(tex_en),
         .ddr_req(ddr_req), .ddr_resp(ddr_resp),
         .fbw_req(fbw_req), .fbw_resp(fbw_resp),

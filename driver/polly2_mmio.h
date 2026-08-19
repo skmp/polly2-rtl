@@ -23,7 +23,8 @@
  *                          (AUDIO_DATA + this register), 2 = border bands
  *                          (FB_TOP/FB_BOT), 3 = render-done interrupt on
  *                          f2h IRQ1 (GIC ID 73), 4 = VRAM_CFG,
- *                          5 = FEAT.
+ *                          5 = a short-lived internal build (never
+ *                          shipped), 6 = current.
  *   0xFF202020  FB_TOP     RW   DDR byte address of a 640x30 RGB565 linear
  *                          framebuffer (stride 1280 bytes) shown 2x-doubled
  *                          as a 1280x60 band in the top border of the 1080p
@@ -34,10 +35,6 @@
  *   0xFF202028  VRAM_CFG   RW   [0] VRAM_16MB: 0 = 8 MB VRAM (accesses mirror
  *                          at 8 MB, the Dreamcast default), 1 = 16 MB board,
  *                          no mirroring. Other bits reserved, write 0.
- *   0xFF20202C  FEAT       RW   runtime feature enables (reset 0xF = all ON;
- *                          quasi-static - change only while the core is idle):
- *                          [0] two-layer peeling  [1] setup-parameter cache
- *                          [2] peel front cull    [3] raster drain chain-out
  *
  * REVISION >= 3 bitstreams also raise f2h IRQ1 (GIC ID 73) on render done.
  * The polly2 kernel module (driver/polly2) claims it and sends SIGUSR1 to
@@ -69,14 +66,6 @@
 #define POLLY2_MMIO_FB_TOP    0x2020
 #define POLLY2_MMIO_FB_BOT    0x2024
 #define POLLY2_MMIO_VRAM_CFG  0x2028
-#define POLLY2_MMIO_FEAT      0x202C
-
-/* FEAT bits (reset value = all ON) */
-#define POLLY2_FEAT_TWO_LAYER   0x1u  /* two-layer TL peeling */
-#define POLLY2_FEAT_SETUP_CACHE 0x2u  /* triangle setup-parameter cache */
-#define POLLY2_FEAT_FRONT_CULL  0x4u  /* peel front cull (zb3 probe) */
-#define POLLY2_FEAT_DRAIN_CHAIN 0x8u  /* raster drain chain-out */
-#define POLLY2_FEAT_ALL         0xFu
 
 #define POLLY2_AUDIO_FIFO_DEPTH 2048u
 
@@ -84,7 +73,6 @@
 #define POLLY2_REV_BANDS   2u /* first revision with FB_TOP/FB_BOT */
 #define POLLY2_REV_IRQ     3u /* first revision with render-done f2h IRQ1 */
 #define POLLY2_REV_VRAMCFG 4u /* first revision with VRAM_CFG */
-#define POLLY2_REV_FEAT    5u /* first revision with FEAT */
 
 /* border band framebuffer geometry (source; displayed 2x as 1280x60) */
 #define POLLY2_BAND_W      640u
@@ -221,23 +209,5 @@ static inline void polly2_set_fb_top(uint32_t ddr_byte_addr)
 static inline void polly2_set_fb_bot(uint32_t ddr_byte_addr)
 {
 	polly2_mmio_wr(POLLY2_MMIO_FB_BOT, ddr_byte_addr);
-}
-
-static inline int polly2_has_feat(void)
-{
-	return polly2_revision() >= POLLY2_REV_FEAT;
-}
-
-/* FEAT is quasi-static: only change it while the core is idle (before GO).
- * On bitstreams that predate the register (revision < 5) the write is
- * ignored and the readback is not meaningful - gate on polly2_has_feat(). */
-static inline void polly2_set_feat(uint32_t mask)
-{
-	polly2_mmio_wr(POLLY2_MMIO_FEAT, mask & POLLY2_FEAT_ALL);
-}
-
-static inline uint32_t polly2_get_feat(void)
-{
-	return polly2_mmio_rd(POLLY2_MMIO_FEAT) & POLLY2_FEAT_ALL;
 }
 

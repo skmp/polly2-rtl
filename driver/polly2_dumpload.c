@@ -20,10 +20,6 @@
 // Run (as root, needs /dev/mem):
 //   ./polly2_dumpload <dumpdir>        # dumpdir/vram.bin + dumpdir/pvr_regs.bin
 //   ./polly2_dumpload <vram.bin> <pvr_regs.bin>
-//   -f <mask> sets the FEAT register (0xFF20202C) before GO for on-HW feature
-//   bisection: bit0 two-layer peel, bit1 setup cache, bit2 front cull,
-//   bit3 drain chain. Default: leave the bitstream at 0xF (all ON).
-//   e.g. `-f 0x0` = all new features off, `-f 0xE` = isolate two-layer peel.
 //
 #include <stdio.h>
 #include <stdint.h>
@@ -64,34 +60,15 @@ static uint8_t *load_file(const char *path, size_t want, size_t *got) {
 
 int main(int argc, char **argv) {
     char vram_path[512], regs_path[512];
-    long feat = -1;                      /* -1 = leave the bitstream default (all ON) */
-    const char *pos[2]; int npos = 0;
-    for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "-f") || !strcmp(argv[i], "--feat")) {
-            if (++i >= argc) { fprintf(stderr, "-f needs a mask\n"); return 2; }
-            feat = strtol(argv[i], NULL, 0);
-        } else if (npos < 2) {
-            pos[npos++] = argv[i];
-        } else {
-            npos = 3; break;
-        }
-    }
-    if (npos == 1) {
-        snprintf(vram_path, sizeof vram_path, "%s/vram.bin", pos[0]);
-        snprintf(regs_path, sizeof regs_path, "%s/pvr_regs.bin", pos[0]);
-    } else if (npos == 2) {
-        snprintf(vram_path, sizeof vram_path, "%s", pos[0]);
-        snprintf(regs_path, sizeof regs_path, "%s", pos[1]);
+    if (argc == 2) {
+        snprintf(vram_path, sizeof vram_path, "%s/vram.bin", argv[1]);
+        snprintf(regs_path, sizeof regs_path, "%s/pvr_regs.bin", argv[1]);
+    } else if (argc == 3) {
+        snprintf(vram_path, sizeof vram_path, "%s", argv[1]);
+        snprintf(regs_path, sizeof regs_path, "%s", argv[2]);
     } else {
-        fprintf(stderr,
-            "usage: %s [-f <mask>] <dumpdir> | [-f <mask>] <vram.bin> <pvr_regs.bin>\n"
-            "  -f <mask>  FEAT enables (0x0..0xF, default: leave bitstream at 0xF):\n"
-            "             bit0 two-layer peel  bit1 setup cache\n"
-            "             bit2 front cull      bit3 drain chain\n", argv[0]);
+        fprintf(stderr, "usage: %s <dumpdir> | <vram.bin> <pvr_regs.bin>\n", argv[0]);
         return 2;
-    }
-    if (feat != -1 && (feat < 0 || feat > 0xF)) {
-        fprintf(stderr, "-f mask must be 0x0..0xF\n"); return 2;
     }
 
     size_t vsz = 0, rsz = 0;
@@ -129,16 +106,6 @@ int main(int argc, char **argv) {
 
     polly2_reset();
     polly2_set_vram_base(VRAM_PHYS);
-
-    if (feat != -1) {
-        if (!polly2_has_feat()) {
-            fprintf(stderr, "-f: bitstream revision %u < %u, no FEAT register\n",
-                    polly2_revision(), POLLY2_REV_FEAT);
-            return 1;
-        }
-        polly2_set_feat((uint32_t)feat);
-        printf("FEAT set to 0x%lX (readback 0x%X)\n", feat, polly2_get_feat());
-    }
 
     uint32_t nregs = (uint32_t)(rsz / 4);
     for (uint32_t i = 0; i < nregs; i++) {
