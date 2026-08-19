@@ -83,6 +83,16 @@ module taginvw_tile_buffer import tsp_pkg::*; #(
     // overwritten by the next pass's raster accepts before they're read). ----
     input                       pbc_valid,
     input      [10-$clog2(LANES)-1:0] pbc_addr,
+    // ---- TWO-LAYER PEEL: the pbc walk write doubles as the slot-B image
+    // MATERIALIZE. With pbc_bmode=1 the chunk is written with the B fields the
+    // PeelBuffers walk read back (peel_tile_buffer pb_bt_*) instead of the blind
+    // valid-clear: valid lanes get {1, tag, invW, pt}, invalid lanes clear. The
+    // shade of this copy then sees exactly the pass's second layer.
+    input                       pbc_bmode,
+    input      [LANES-1:0]      pbc_bv,
+    input      [32*LANES-1:0]   pbc_btag,
+    input      [31*LANES-1:0]   pbc_binvw,
+    input      [LANES-1:0]      pbc_bpt,
 
     // ---- SHADE: single-pixel read (id = {y[4:0], x[4:0]}) ----
     input                       sh_rd_valid,
@@ -247,12 +257,21 @@ module taginvw_tile_buffer import tsp_pkg::*; #(
                 // plane-cache misses). Keep it 0.
                 wdata[TI_W*cw + TW_VALID]      = 1'b0;
             end
-        end else if (pbc_valid) begin              // PeelBuffers valid-clear walk
-            // Blind-write valid=0 (tag/invW become 0 but are never read while valid=0;
-            // the next peel pass's raster accept overwrites all three before any read).
+        end else if (pbc_valid) begin              // PeelBuffers walk write
+            // pbc_bmode=0: blind valid-clear (tag/invW become 0 but are never read
+            // while valid=0; the next peel pass's raster accept overwrites all
+            // three before any read). pbc_bmode=1: slot-B image materialize.
             we    = {NB{1'b1}};
             waddr = bcast_addr(wbase | AW'(pbc_addr));
-            // wdata already all-zero from the reset above -> valid=0, tag=0, invW=0.
+            if (pbc_bmode) begin
+                for (cw = 0; cw < NB; cw = cw + 1) begin
+                    wdata[TI_W*cw + TW_INVW +: 31] = pbc_binvw[31*cw +: 31];
+                    wdata[TI_W*cw + TW_TAG  +: 32] = pbc_btag [32*cw +: 32];
+                    wdata[TI_W*cw + TW_VALID]      = pbc_bv[cw];
+                    wdata[TI_W*cw + TW_PT]         = pbc_bpt[cw];
+                end
+            end
+            // else: wdata already all-zero -> valid=0, tag=0, invW=0.
         end else if (wr_valid) begin               // stage-B accept duplicate
             waddr = pack_addr(wr_y, wr_x);
             for (cw = 0; cw < NB; cw = cw + 1) begin

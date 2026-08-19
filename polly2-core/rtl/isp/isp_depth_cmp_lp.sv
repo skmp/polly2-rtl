@@ -72,16 +72,50 @@
 // stored): positive floats order like unsigned integers, so the depth compares are
 // plain unsigned operators, and so is the concatenated key.
 //
+// ---------------------------------------------------------------------------
+// TWO-LAYER PEELING (pt=0 only). The TR working set is now a 2-element sorted
+// insertion list: slot A = this pass's FARTHEST owed fragment (the old zb/pb,
+// shaded first), slot B = the NEXT one (shaded second, still back-to-front).
+// One pass thereby consumes TWO depth layers. The walk direction and the
+// reference test are unchanged; only the "best" side grew a slot:
+//
+//   k_new <= k_ref            -> reject (already drawn)
+//   k_new <  kA               -> pass   (A' = new, old A slides to B; a staged
+//                                        old B is DISPLACED OUT -> more)
+//   kA <= k_new < kB          -> pass_b (B' = new; a staged old B is DISPLACED
+//                                        OUT -> more)
+//   k_new >= kB               -> defer  (more)
+//
+// kB is +inf while !validB (nothing staged in B yet), so the first two
+// candidates of a pass land in order without stored seeds. validB implies
+// validA (B only fills via a valid A), which the caller may assert.
+//
+// disp marks a DISPLACED-OUT more (the lost fragment is the OLD B - its tag is
+// the caller's demote target) as opposed to a deferred one (the demote target
+// is the incoming fragment). A fragment sliding A->B is NOT lost and produces
+// neither more nor a demote.
+//
+// PT (pt=1) is untouched: single working slot, exactly the old behaviour; the
+// B inputs are ignored and pass_b/disp never assert (disp's role is played by
+// the old pass&&valid convention, which the caller folds in).
+// ---------------------------------------------------------------------------
 module isp_depth_cmp_lp (
+    input             en2,       // 1 = two-layer TR (slot B active); 0 = the exact
+                                 // single-slot behaviour (+onelayer bisect switch)
     input             pt,        // 0 = TR layer peel (ascending), 1 = PT resolve (descending)
     input      [30:0] nw,        // new depth (invW, sign-stripped) for this fragment
     input      [31:0] tag,       // new fragment's CoreTag
-    input      [30:0] zb,        // depthBufferA - this pass's working best
-    input      [31:0] pb,        // tagBufferA   - this pass's pending tag
+    input      [30:0] zb,        // depthBufferA - slot A depth (TR) / working best (PT)
+    input      [31:0] pb,        // tagBufferA   - slot A tag
     input      [30:0] zb2,       // depthBufferB - reference (TR) / boundary (PT) depth
     input      [23:0] pb2_sort,  // PW_REFSORT   - reference / boundary tag sort field
-    input             valid,     // tagStatus.valid (staged this pass)
-    output reg        pass,      // write fragment (zb<-nw, pb<-tag, valid<-1)
+    input             valid,     // tagStatus.valid (slot A staged this pass)
+    input      [30:0] zbB,       // TR slot B depth
+    input      [23:0] pbB_sort,  // TR slot B tag sort field (tagB[23:0])
+    input             validB,    // TR slot B staged this pass
+    output reg        pass,      // A-accept: zb<-nw, pb<-tag, valid<-1 (B <- old A)
+    output reg        pass_b,    // TR B-accept: zbB<-nw, tagB<-tag, validB<-1
+    output reg        disp,      // TR: this `more` displaced OLD B out (demote tagB)
     output reg        more       // MoreToDraw feedback
 );
     localparam int KW = 31 + 24;        // {depth, tag[23:0]}
@@ -89,26 +123,50 @@ module isp_depth_cmp_lp (
     wire [KW-1:0] k_new  = { nw,  tag[23:0] };
     wire [KW-1:0] k_best = { zb,  pb [23:0] };
     wire [KW-1:0] k_ref  = { zb2, pb2_sort  };
+    // +inf while empty: the first candidate above A always lands in B
+    wire [KW-1:0] k_b    = validB ? { zbB, pbB_sort } : {KW{1'b1}};
 
-    // TWO comparisons for both modes. gt_best is shared (it means "defer" walking up,
+    // gt_best is shared between the modes (it means "not the new A" walking up,
     // "accept" walking down); the reference test just changes which side is stale.
     wire gt_best = (k_new >  k_best);
+    wire gt_b    = (k_new >= k_b);      // TR: at/behind slot B -> defer
     wire gt_ref  = (k_new >  k_ref);    // pt=0: !gt_ref  == (k_new <= k_ref)
     wire lt_ref  = (k_new <  k_ref);    // pt=1: !lt_ref  == (k_new >= k_ref)
 
     always @* begin
-        pass = 1'b0;
-        more = 1'b0;
+        pass   = 1'b0;
+        pass_b = 1'b0;
+        disp   = 1'b0;
+        more   = 1'b0;
 
-        if (!pt) begin
-            // ---- TR: ascending, keep the smallest key above the reference ----
+        if (!pt && !en2) begin
+            // ---- single-slot TR (bisect mode): the pre-two-layer behaviour ----
             if (gt_best) begin
                 more = 1'b1;                    // nearer than the best -> a later pass
             end else if (!gt_ref) begin
                                                 // at/before the reference -> already drawn
             end else begin
                 pass = 1'b1;
-                if (valid) more = 1'b1;         // displaced a staged fragment
+                if (valid) begin
+                    more = 1'b1; disp = 1'b1;   // displaced the staged fragment
+                end
+            end
+        end else if (!pt) begin
+            // ---- TR: ascending, keep the TWO smallest keys above the reference ----
+            if (!gt_ref) begin
+                                                // at/before the reference -> already drawn
+            end else if (!gt_best) begin
+                pass = 1'b1;                    // new A; old A slides to B
+                if (validB) begin
+                    more = 1'b1; disp = 1'b1;   // ...displacing the staged old B out
+                end
+            end else if (!gt_b) begin
+                pass_b = 1'b1;                  // lands between A and B
+                if (validB) begin
+                    more = 1'b1; disp = 1'b1;   // the staged old B is displaced out
+                end
+            end else begin
+                more = 1'b1;                    // behind both slots -> a later pass
             end
         end else begin
             // ---- PT: descending, keep the largest key below the boundary ----

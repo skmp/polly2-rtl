@@ -2,8 +2,10 @@
 // peel_tile_buffer - the layer-peel depth/tag tile buffer, banked into M10K, with
 // its access pattern ENFORCED by typed per-client ports (not by convention).
 //
-// Storage: ONE simple-dual-port tile_ram (u_ram), WIDTH = 150 bits/lane packing
-// {valid, zceil[30:0], refsort[23:0], tag[31:0], depth2[30:0], depth[30:0]}, NBANKS = LANES banks.
+// Storage: ONE simple-dual-port tile_ram (u_ram), WIDTH = 216 bits/lane packing
+// {isptB, isptA, validB, tagB[31:0], zbB[30:0], valid, zceil[30:0], refsort[23:0],
+// tag[31:0], depth2[30:0], depth[30:0]}, NBANKS = LANES banks. Slots A+B are the
+// TWO-LAYER peel working set (A = farthest owed, shaded first; B = next).
 // The zceil slot is PHASE-OWNED: opaque ceiling during the PT resolve, the zb3
 // nearest-deferred bound during TL peeling (see the zb3 port header below).
 // Depths are 31-bit SIGN-STRIPPED floats: invW is always positive non-zero, so
@@ -69,11 +71,27 @@ module peel_tile_buffer import tsp_pkg::*; #(
     input                       b_fwd,       // 1 = forward PT-resolve compare
     input      [LANES-1:0]      b_res,       // per-lane RESOLVED bit (alpha passed
                                              // in an earlier PT pass): lane inert
-    output     [LANES-1:0]      b_pass_lp,   // per-lane peel accept (for dt_pt)
+    input                       b_2l,        // LEVEL: two-layer peel enabled (the
+                                             // +onelayer bisect switch drives it 0:
+                                             // slot B then never stages and the walk
+                                             // advance always takes slot A)
+    input                       b_ispt,      // fragment came from the PT list (rides
+                                             // into the slot ispt bits for the
+                                             // taginvw images' alpha-test enable)
+    output     [LANES-1:0]      b_pass_lp,   // per-lane slot-A accept (for dt_pt +
+                                             // the u_taginvw A-image duplicate)
+    output     [LANES-1:0]      b_pass_b,    // per-lane slot-B accept (peel only)
+    output     [LANES-1:0]      b_bstg,      // per-lane: slot B STAGED this write -
+                                             // a direct B-accept OR an A-accept
+                                             // sliding a staged A in (the caller's
+                                             // pass_bany must see both)
     output     [LANES-1:0]      b_more,      // per-lane MoreToDraw (peel)
-    output     [32*LANES-1:0]   b_oldtag,    // per-lane RESIDENT pending tag (tagBufferA
-                                             // read back in stage B) - the tag a peel
-                                             // accept displaces; for the sort cache
+    output     [LANES-1:0]      b_disp,      // per-lane: this `more` DISPLACED a
+                                             // staged fragment out (demote b_oldtag;
+                                             // a clear b_disp more demotes b_tag)
+    output     [32*LANES-1:0]   b_oldtag,    // per-lane DISPLACED tag for the sort
+                                             // cache: slot B's old tag (peel) / the
+                                             // working best (PT forward)
     // per-lane STAGE-B WRITE-ENABLE (accept: inside & pass, peel or opaque). Mirrors
     // exactly the lanes this module writes back, so the split-out u_taginvw handoff
     // buffer can DUPLICATE the {valid,tag,invW} write with an identical mask.
@@ -129,6 +147,13 @@ module peel_tile_buffer import tsp_pkg::*; #(
     // buffer). Only pixels the final peel pass left as the sentinel are restored, so an
     // OP-only predecessor (real zb, stale zb2) is untouched.
     input                       pb_zkeep,
+    // ---- final-pass B fold (two-layer peel) ----------------------------------
+    // Asserted for the S_PEEL_BFIN materialize walk's write-back: the peel loop
+    // ended with slot B staged, and the POST-PEEL CONTRACT (z_keep successors
+    // read zb / zb2 as "the last-drawn depth") requires zb to be the NEAREST
+    // drawn fragment - which is B, not A. Transform: zb <- (validB ? zbB : zb);
+    // every other field is KEPT verbatim.
+    input                       pb_bfin,
 
     // ---- zb3: NEAREST DEFERRED DEPTH (the peel front-cull lookahead) ----------------
     // A TL peel pass converges zb DOWNWARD to the farthest fragment at-or-in-front of
@@ -162,7 +187,15 @@ module peel_tile_buffer import tsp_pkg::*; #(
     output     [30:0]           pb_zb3_max,  // max over lanes of the read chunk's zb3,
                                              // FLT_MAX lanes excluded (valid with pb_rd's
                                              // data, i.e. alongside pb_wr)
-    output                      pb_zb3_any   // any lane of that chunk was not FLT_MAX
+    output                      pb_zb3_any,  // any lane of that chunk was not FLT_MAX
+    // ---- slot-B image export (two-layer peel): the read chunk's B fields, comb
+    // off the SAME registered walk read as pb_zb3_* - peel_core forwards them into
+    // the u_taginvw copy the B layer will shade from (the "materialize" write).
+    output     [LANES-1:0]      pb_bt_valid,
+    output     [32*LANES-1:0]   pb_bt_tag,
+    output     [31*LANES-1:0]   pb_bt_invw,
+    output     [LANES-1:0]      pb_bt_pt,
+    output                      pb_bt_any    // any lane of this chunk staged a B
 );
     localparam integer NB     = LANES;
     localparam integer BANK_BITS = $clog2(LANES);       // 3 for 8, 2 for 4
@@ -170,8 +203,11 @@ module peel_tile_buffer import tsp_pkg::*; #(
     // Per-pixel per-lane record. PW_REFSORT carries the reference (TR) / boundary (PT)
     // tag sort field - the compare's composite key needs it in BOTH phases, and the
     // old tagBufferB slot cannot supply it during PT because that slot parks Zceil.
-    // 150 bits still maps onto the same 4 M10Ks per bank as the old 127 (a 128x150
-    // simple-dual-port fits in 4 x 40-bit-wide blocks), so the field is free in RAM.
+    // TWO-LAYER PEEL grew the record 150 -> 216 bits (slot B: depth+tag+valid, plus
+    // the two ispt companions): at LANES=8 that is ceil(216/40) = 6 M10K per bank
+    // (was 4), +16 blocks total. The B slot is what lets one pass consume two depth
+    // layers - the pass-count-proportional costs it removes (re-sweeps, walks,
+    // barriers) are the trade.
     localparam integer PW_DEPTH   = 0;    // [30:0]  depthBufferA (zb)  working best
     localparam integer PW_DEPTH2  = 31;   // [30:0]  depthBufferB (zb2) reference / boundary
     localparam integer PW_TAG     = 62;   // [31:0]  tagBufferA   (pb)  working / staged tag
@@ -180,8 +216,18 @@ module peel_tile_buffer import tsp_pkg::*; #(
     localparam integer PW_Z3      = PW_ZCEIL; // [30:0] zb3 (TL peel only) - see the
                                           // zb3 header: the slot is phase-owned, the
                                           // ceiling is dead once pb_ptfix consumed it
-    localparam integer PW_VALID   = 149;  // [0]     tagStatus.valid
-    localparam integer PEEL_W = 150;
+    localparam integer PW_VALID   = 149;  // [0]     tagStatus.valid (slot A)
+    // ---- TWO-LAYER PEEL slot B (TR only): the pass's SECOND-farthest owed
+    // fragment. Slot A (the fields above) is shaded first, B second - still
+    // back-to-front. B's is_pt bit must be stored (the taginvw B-image needs it
+    // and it is not derivable from the tag), and A's too (an A-accept slides old
+    // A into B, ispt included).
+    localparam integer PW_DEPTHB  = 150;  // [30:0]  slot B depth (zbB)
+    localparam integer PW_TAGB    = 181;  // [31:0]  slot B tag
+    localparam integer PW_VALIDB  = 213;  // [0]     slot B staged
+    localparam integer PW_ISPTA   = 214;  // [0]     slot A fragment is PT-list
+    localparam integer PW_ISPTB   = 215;  // [0]     slot B fragment is PT-list
+    localparam integer PEEL_W = 216;
     localparam [30:0]  FLT_MAX = 31'h7F7FFFFF;
     // reference-sort seeds. TR pass 1: "nothing rendered yet" = TAG_INVALID_SENTINEL,
     // whose sort field is 0, i.e. at-or-below every real fragment at the same depth.
@@ -239,11 +285,26 @@ module peel_tile_buffer import tsp_pkg::*; #(
         f_z3     = w[PEEL_W*b + PW_Z3     +: 31]; endfunction
     function automatic       f_valid  (input [PEEL_W*NB-1:0] w, input integer b);
         f_valid  = w[PEEL_W*b + PW_VALID]; endfunction
+    // ---- slot B extractors ----
+    function automatic [30:0] f_zbB   (input [PEEL_W*NB-1:0] w, input integer b);
+        f_zbB    = w[PEEL_W*b + PW_DEPTHB +: 31]; endfunction
+    function automatic [31:0] f_tagB  (input [PEEL_W*NB-1:0] w, input integer b);
+        f_tagB   = w[PEEL_W*b + PW_TAGB   +: 32]; endfunction
+    function automatic [23:0] f_tagBs (input [PEEL_W*NB-1:0] w, input integer b);
+        f_tagBs  = w[PEEL_W*b + PW_TAGB   +: 24]; endfunction
+    function automatic       f_validB (input [PEEL_W*NB-1:0] w, input integer b);
+        f_validB = w[PEEL_W*b + PW_VALIDB]; endfunction
+    function automatic       f_isptA (input [PEEL_W*NB-1:0] w, input integer b);
+        f_isptA  = w[PEEL_W*b + PW_ISPTA]; endfunction
+    function automatic       f_isptB (input [PEEL_W*NB-1:0] w, input integer b);
+        f_isptB  = w[PEEL_W*b + PW_ISPTB]; endfunction
 
     // -------------------- internal depth compare (stage B) --------------------
     // Runs off the read-back chunk (rdata = the chunk stage A read last cycle) using
     // the latched b_* fragment fields.
     wire [NB-1:0] ras_pass_op, ras_pass_lp, ras_more_lp, ras_pass_fwd, ras_more_fwd;
+    wire [NB-1:0] ras_pass_b, ras_disp_lp; // 2-layer peel: slot-B accept / displaced-out
+    wire [NB-1:0] ras_slide;               // slot A was STAGED at this A-accept (slides in)
     wire [31*NB-1:0] zb3_nxt;              // per-lane zb3 after this fragment
     genvar gd;
     generate
@@ -262,8 +323,9 @@ module peel_tile_buffer import tsp_pkg::*; #(
             // ONE ordered compare serves both resolves - pt selects the direction.
             // The old pure-depth taps (nw>zb / nw<zb2) are gone: with the boundary
             // carrying a sort field, the PT window test IS the composite compare.
-            wire cmp_pass, cmp_more;
+            wire cmp_pass, cmp_pass_b, cmp_disp, cmp_more;
             isp_depth_cmp_lp u_cmp_lp (
+                .en2     (b_2l),
                 .pt      (b_fwd),
                 .nw      (b_invw[31*gd +: 31]),
                 .tag     (b_tag),
@@ -272,11 +334,23 @@ module peel_tile_buffer import tsp_pkg::*; #(
                 .zb2     (f_depth2 (rdata, gd)),
                 .pb2_sort(f_refsort(rdata, gd)),
                 .valid   (f_valid  (rdata, gd)),
+                .zbB     (f_zbB    (rdata, gd)),
+                .pbB_sort(f_tagBs  (rdata, gd)),
+                .validB  (f_validB (rdata, gd)),
                 .pass    (cmp_pass),
+                .pass_b  (cmp_pass_b),
+                .disp    (cmp_disp),
                 .more    (cmp_more));
             assign ras_pass_lp[gd] = cmp_pass;
+            assign ras_pass_b[gd]  = cmp_pass_b;
             assign ras_more_lp[gd] = cmp_more;
-            assign b_oldtag[32*gd +: 32] = f_tag(rdata, gd);
+            // the DISPLACED tag for the sort cache: peel loses slot B's old tag,
+            // the PT forward resolve loses the working best (as before)
+            assign ras_disp_lp[gd] = cmp_disp;
+            assign ras_slide[gd]   = f_valid(rdata, gd);
+            assign b_oldtag[32*gd +: 32] = b_fwd ? f_tag(rdata, gd)
+                                                 : (b_2l ? f_tagB(rdata, gd)
+                                                         : f_tag(rdata, gd));
             // FORWARD accept: the ordered compare picks the nearest candidate strictly
             // below the boundary; on top of that PT needs the ceiling test (beats Zceil
             // via ras_pass_op with the ob mux) and the lane not already resolved. Those
@@ -291,7 +365,8 @@ module peel_tile_buffer import tsp_pkg::*; #(
             // depth is the evicted resident on an accept, else the deferred fragment
             // itself - the same old/new mux the sort cache's demote tag already uses.
             wire        lp_cand   = b_inside[gd] & ras_more_lp[gd];
-            wire [30:0] lp_cand_d = ras_pass_lp[gd] ? f_depth(rdata, gd)
+            wire [30:0] lp_cand_d = ras_disp_lp[gd] ? (b_2l ? f_zbB(rdata, gd)
+                                                            : f_depth(rdata, gd))
                                                     : b_invw[31*gd +: 31];
             wire [30:0] zb3_old   = f_z3(rdata, gd);
             assign zb3_nxt[31*gd +: 31] =
@@ -312,9 +387,27 @@ module peel_tile_buffer import tsp_pkg::*; #(
     end
     assign pb_zb3_max = zb3_mx;
     assign pb_zb3_any = zb3_anyv;
+
+    // slot-B image export for the materialize write (see the port comment)
+    genvar gb;
+    generate for (gb = 0; gb < NB; gb = gb + 1) begin : bexp
+        assign pb_bt_valid[gb]          = f_validB(rdata, gb);
+        assign pb_bt_tag [32*gb +: 32]  = f_tagB  (rdata, gb);
+        assign pb_bt_invw[31*gb +: 31]  = f_zbB   (rdata, gb);
+        assign pb_bt_pt  [gb]           = f_isptB (rdata, gb);
+    end endgenerate
+    assign pb_bt_any = |pb_bt_valid;
     // peel accept / more are only meaningful on peel/forward lanes that are inside
     assign b_pass_lp = (b_peeling ? ras_pass_lp : b_fwd ? ras_pass_fwd : '0) & b_inside;
+    assign b_pass_b  = (b_peeling ? ras_pass_b : '0) & b_inside;
+    // B staged: direct insert, or the slide of a STAGED A on an A-accept
+    assign b_bstg    = (b_peeling ? (ras_pass_b | (ras_pass_lp & ras_slide)) : '0)
+                     & b_inside;
     assign b_more    = (b_peeling ? ras_more_lp : b_fwd ? ras_more_fwd : '0) & b_inside;
+    // displaced-out (demote b_oldtag): peel = the 2-slot compare's disp; PT fwd =
+    // an accept that displaced a staged fragment (pass && valid, the old rule)
+    assign b_disp    = (b_peeling ? ras_disp_lp
+                       : b_fwd    ? (ras_pass_fwd & {NB{1'b1}}) : '0) & b_inside;
     // per-lane stage-B write-enable = inside & (peel | forward | opaque accept).
     // Exposed so u_taginvw can duplicate the accepted {valid,tag,invW} write with an
     // identical mask - it must see exactly the shaded fragments, so this stays
@@ -326,7 +419,7 @@ module peel_tile_buffer import tsp_pkg::*; #(
     // deferred lane costs no extra RAM traffic - the port is idle on the cycles it
     // would use anyway.
     wire [NB-1:0] ras_we = b_inside &
-                  (b_peeling ? (ras_pass_lp | ras_more_lp)
+                  (b_peeling ? (ras_pass_lp | ras_pass_b | ras_more_lp)
                              : b_fwd ? ras_pass_fwd : ras_pass_op);
 
     // -------------------- READ port mux --------------------
@@ -354,20 +447,22 @@ module peel_tile_buffer import tsp_pkg::*; #(
     // sweep is expected to come back bit-identical.
     wire w_clr = clr_valid;
     wire w_pt  = !w_clr && pb_wr_valid &&  pb_ptwalk;
-    wire w_zk  = !w_clr && pb_wr_valid && !pb_ptwalk &&  pb_zkeep;
-    wire w_pb  = !w_clr && pb_wr_valid && !pb_ptwalk && !pb_zkeep;
+    wire w_bf  = !w_clr && pb_wr_valid && !pb_ptwalk &&  pb_bfin;
+    wire w_zk  = !w_clr && pb_wr_valid && !pb_ptwalk && !pb_bfin &&  pb_zkeep;
+    wire w_pb  = !w_clr && pb_wr_valid && !pb_ptwalk && !pb_bfin && !pb_zkeep;
     wire w_ras = !w_clr && !pb_wr_valid && ras_b_valid;
 
     integer cw;
     always @(*) begin : wmux
-        reg [30:0] f_zb, f_zb2, f_zc;
-        reg [31:0] f_tg;
+        reg [30:0] f_zb, f_zb2, f_zc, f_zB;
+        reg [31:0] f_tg, f_tB;
         reg [23:0] f_rs;
-        reg        f_vl;
+        reg        f_vl, f_vB, f_iA, f_iB;
 
-        we    = w_ras ? ras_we : ((w_clr || w_pt || w_zk || w_pb) ? {NB{1'b1}} : '0);
+        we    = w_ras ? ras_we
+              : ((w_clr || w_pt || w_zk || w_pb || w_bf) ? {NB{1'b1}} : '0);
         waddr = w_clr               ? {NB{clr_addr}}
-              : (w_pt || w_zk || w_pb) ? {NB{pb_wr_addr}}
+              : (w_pt || w_zk || w_pb || w_bf) ? {NB{pb_wr_addr}}
               : w_ras               ? pack_addr(b_y, b_x)
                                     : '0;
         wdata = '0;
@@ -380,6 +475,11 @@ module peel_tile_buffer import tsp_pkg::*; #(
             f_rs  = f_refsort(rdata, cw);
             f_zc  = f_zceil  (rdata, cw);
             f_vl  = f_valid  (rdata, cw);
+            f_zB  = f_zbB    (rdata, cw);
+            f_tB  = f_tagB   (rdata, cw);
+            f_vB  = f_validB (rdata, cw);
+            f_iA  = f_isptA  (rdata, cw);
+            f_iB  = f_isptB  (rdata, cw);
 
             // zb: the working depth. PT fix restores Zfinal (the blend's resolved
             // depth where the pixel locked, else the opaque Z parked in zceil);
@@ -390,6 +490,7 @@ module peel_tile_buffer import tsp_pkg::*; #(
                   w_clr ? clr_depth
                 : w_pt  ? (pb_ptfix ? (pb_res[cw] ? pb_zres[31*cw +: 31] : f_zc)
                                     : 31'h0)
+                : w_bf  ? (f_vB ? f_zB : f_zb)   // fold B into "last drawn" (z_keep)
                 : w_zk  ? ((f_zb == FLT_MAX) ? f_zb2 : f_zb)
                 : w_pb  ? FLT_MAX
                 : w_ras ? (b_peeling ? (ras_pass_lp[cw] ? b_invw[31*cw +: 31] : f_zb)
@@ -408,14 +509,24 @@ module peel_tile_buffer import tsp_pkg::*; #(
                 : w_pt  ? (pb_ptinit ? FLT_MAX
                          : pb_ptswap ? ((f_zb == 31'h0) ? f_zb2 : f_zb)
                                      : f_zb2)
-                : w_pb  ? ((f_zb == FLT_MAX) ? f_zb2 : f_zb)
+                // TWO-LAYER advance: the NEAREST fragment drawn this pass is slot
+                // B when it staged, else slot A, else keep (the sentinel rule).
+                // !pb_first: the FIRST walk of a peel may read slot-B RESIDUE of a
+                // PREVIOUS entry's final pass (the read-only BFIN materialize leaves
+                // it staged for z_keep's sake) - the seed must come from zb (the OP
+                // depth), never from residue.
+                : w_pb  ? ((f_vB && !pb_first) ? f_zB
+                                               : ((f_zb == FLT_MAX) ? f_zb2 : f_zb))
                         : f_zb2;                      // z_keep and stage-B keep it
 
             wdata[PEEL_W*cw + PW_TAG +: 32] =
                   w_clr ? clr_tag
                 : w_ras ? ((b_peeling && !ras_pass_lp[cw]) ? f_tg   // deferred: keep
                                                            : b_tag)
-                        : f_tg;                       // every walk keeps the tag
+                // the resting tag is zb2's COMPANION (the sentinel path re-derives
+                // refsort from it): when B advanced the reference, B's tag rests
+                : w_pb  ? ((f_vB && !pb_first) ? f_tB : f_tg)
+                        : f_tg;                       // every other walk keeps it
 
             // the reference SORT field moves with zb2 above, by the SAME condition, so
             // the boundary KEY advances as one - that is what steps a coplanar group
@@ -425,7 +536,9 @@ module peel_tile_buffer import tsp_pkg::*; #(
                 : w_pt  ? (pb_ptinit ? REFSORT_PT_INIT
                          : pb_ptswap ? ((f_zb == 31'h0) ? f_rs : f_tagsort(rdata, cw))
                                      : f_rs)
-                : w_pb  ? (pb_first ? REFSORT_TR_FIRST : f_tagsort(rdata, cw))
+                : w_pb  ? (pb_first ? REFSORT_TR_FIRST
+                                    : (f_vB ? f_tB[23:0] : f_tagsort(rdata, cw)))
+                                    // (pb_first wins, so B residue cannot leak here)
                         : f_rs;                       // z_keep and stage-B keep it
 
             // ONE slot, two phase-owned meanings (see the zb3 header):
@@ -441,10 +554,49 @@ module peel_tile_buffer import tsp_pkg::*; #(
                                          : f_zc;
 
             wdata[PEEL_W*cw + PW_VALID] =
-                  w_zk  ? f_vl
+                  (w_zk || w_bf) ? f_vl
                 : w_ras ? (b_peeling ? (ras_pass_lp[cw] ? 1'b1 : f_vl)  // deferred: keep
                          : b_fwd ? 1'b1 : f_vl)
                         : 1'b0;                       // clear / PT walk / PeelBuffers
+
+            // ---- TWO-LAYER slot B + the ispt companions ----
+            // stage-B peel: an A-accept SLIDES old A into B (depth/tag/valid/ispt
+            // move as one); a B-accept writes the fragment into B; everything else
+            // keeps. Walks: PeelBuffers consumed B into the reference above ->
+            // reset; PT walks/CLEAR zero it; z_keep keeps (dead fields there).
+            wdata[PEEL_W*cw + PW_DEPTHB +: 31] =
+                  (w_zk || w_bf)         ? f_zB
+                : (w_ras && b_peeling)   ? (ras_pass_lp[cw] ? f_zb
+                                          : ras_pass_b[cw]  ? b_invw[31*cw +: 31]
+                                                            : f_zB)
+                : (w_ras)                ? f_zB
+                                         : 31'h0;
+            wdata[PEEL_W*cw + PW_TAGB +: 32] =
+                  (w_zk || w_bf)         ? f_tB
+                : (w_ras && b_peeling)   ? (ras_pass_lp[cw] ? f_tg
+                                          : ras_pass_b[cw]  ? b_tag
+                                                            : f_tB)
+                : (w_ras)                ? f_tB
+                                         : 32'h0;
+            wdata[PEEL_W*cw + PW_VALIDB] =
+                  (w_zk || w_bf)         ? f_vB
+                : (w_ras && b_peeling)   ? (ras_pass_lp[cw] ? (b_2l && f_vl)
+                                          : ras_pass_b[cw]  ? 1'b1
+                                                            : f_vB)
+                : (w_ras)                ? f_vB
+                                         : 1'b0;
+            wdata[PEEL_W*cw + PW_ISPTA] =
+                  (w_zk || w_bf)         ? f_iA
+                : (w_ras && b_peeling)   ? (ras_pass_lp[cw] ? b_ispt : f_iA)
+                : (w_ras)                ? f_iA
+                                         : 1'b0;
+            wdata[PEEL_W*cw + PW_ISPTB] =
+                  (w_zk || w_bf)         ? f_iB
+                : (w_ras && b_peeling)   ? (ras_pass_lp[cw] ? f_iA
+                                          : ras_pass_b[cw]  ? b_ispt
+                                                            : f_iB)
+                : (w_ras)                ? f_iB
+                                         : 1'b0;
         end
     end
 

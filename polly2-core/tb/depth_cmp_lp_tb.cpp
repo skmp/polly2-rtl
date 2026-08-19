@@ -51,36 +51,56 @@ static uint64_t key_of(uint32_t z, uint32_t tag) {
 static int g_fail = 0;
 static void fail(const char* what) { printf("  FAIL: %s\n", what); g_fail++; }
 
-// one full resolve of `frags`; returns the emitted candidates in order
+// one full resolve of `frags`; returns the emitted candidates in order.
+// TR runs the TWO-LAYER loop exactly as peel_tile_buffer does: slot A (farthest
+// owed) + slot B (next), an A-accept SLIDES old A into B, the pass emits A then
+// B (still back-to-front), and the reference advances to the NEAREST staged
+// (B if it staged, else A) with B's tag left resting in the PW_TAG companion.
+// PT is the unchanged single-slot walk (slot B tied off).
 static std::vector<Frag> resolve(Vdepth_cmp_lp_tb_top* dut, bool pt,
                                  const std::vector<Frag>& frags,
                                  uint32_t ref_z, uint32_t ref_sort, int* passes_out) {
     std::vector<Frag> emitted;
     uint32_t zb2 = ref_z, pb2 = ref_sort;
-    uint32_t pb  = TAG_INVALID_SENTINEL;      // stale across passes, like PW_TAG
+    uint32_t pbA = TAG_INVALID_SENTINEL;      // resting tag across passes (PW_TAG)
     const uint32_t seed_z = pt ? 0u : FLT_MAX_BITS;
     int passes = 0;
     const int PASS_LIMIT = (int)frags.size() + 8;
 
     for (;;) {
-        uint32_t zb = seed_z;
-        int valid = 0, more_acc = 0;
+        uint32_t zbA = seed_z;
+        uint32_t zbB = 0, tagB = 0;
+        int vA = 0, vB = 0, more_acc = 0;
         passes++;
 
         for (const Frag& f : frags) {
             dut->pt = pt;
             dut->nw = f.z;  dut->tag = f.tag;
-            dut->zb = zb;   dut->pb  = pb;
+            dut->zb = zbA;  dut->pb  = pbA;
             dut->zb2 = zb2; dut->pb2_sort = pb2;
-            dut->valid = valid;
+            dut->valid  = vA;
+            dut->zbB    = zbB;
+            dut->pbB_sort = tagB & 0x00FFFFFFu;
+            dut->validB = vB;
             dut->eval();
             if (dut->more) more_acc = 1;
-            if (dut->pass) { zb = f.z; pb = f.tag; valid = 1; }
+            if (pt) {
+                if (dut->pass) { zbA = f.z; pbA = f.tag; vA = 1; }
+            } else {
+                if (dut->pass) {            // A-accept: old A slides into B
+                    zbB = zbA; tagB = pbA; vB = vA;
+                    zbA = f.z; pbA = f.tag; vA = 1;
+                } else if (dut->pass_b) {   // lands between A and B
+                    zbB = f.z; tagB = f.tag; vB = 1;
+                }
+            }
         }
 
-        if (valid) emitted.push_back({zb, pb});
-        // boundary/reference advances only where the pass staged something
-        if (zb != seed_z) { zb2 = zb; pb2 = pb & 0x00FFFFFFu; }
+        if (vA)        emitted.push_back({zbA, pbA});
+        if (!pt && vB) emitted.push_back({zbB, tagB});
+        // boundary/reference advances to the NEAREST staged this pass
+        if (!pt && vB)          { zb2 = zbB; pb2 = tagB & 0x00FFFFFFu; pbA = tagB; }
+        else if (zbA != seed_z) { zb2 = zbA; pb2 = pbA & 0x00FFFFFFu; }
 
         if (!more_acc) break;
         if (passes > PASS_LIMIT) { fail("resolve did not converge (pass limit)"); break; }

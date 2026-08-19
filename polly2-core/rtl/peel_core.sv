@@ -424,8 +424,20 @@ module peel_core import tsp_pkg::*; #(
     reg  [CHUNK_AW-1:0]    pb_bufrd_addr;
     reg                    pb_bufwr_valid;      // PeelBuffers delayed write
     reg  [CHUNK_AW-1:0]    pb_bufwr_addr;
+    reg                    tvw_pbc_v;           // u_taginvw walk write (clear/B-image)
+    reg  [CHUNK_AW-1:0]    tvw_pbc_a;
+    reg                    tvw_pbc_bmode;       // 1 = slot-B materialize data
     reg                    pb_zkeep;            // pb write = z_keep depth-restore (not peel swap)
-    wire [RAS_LANES-1:0]   b_pass_lp;           // per-lane peel accept (for dt_pt)
+    reg                    pb_bfin;             // pb write = final-pass B fold (BFIN walk)
+    wire [RAS_LANES-1:0]   b_pass_lp;           // per-lane slot-A accept (for dt_pt)
+    wire [RAS_LANES-1:0]   b_pass_b;            // per-lane slot-B accept (2-layer)
+    wire [RAS_LANES-1:0]   b_bstg;              // per-lane slot-B STAGED (accept or slide)
+    wire [RAS_LANES-1:0]   b_disp;              // per-lane displaced-out (demote b_oldtag)
+    // slot-B image export from the PeelBuffers walk (u_peel -> u_taginvw materialize)
+    wire [RAS_LANES-1:0]    pb_bt_valid, pb_bt_pt;
+    wire [32*RAS_LANES-1:0] pb_bt_tag;
+    wire [31*RAS_LANES-1:0] pb_bt_invw;
+    wire                    pb_bt_any;
     wire [RAS_LANES-1:0]   b_more;              // per-lane MoreToDraw
     wire [32*RAS_LANES-1:0] b_oldtag;           // per-lane resident pending tag (sort$)
     wire [RAS_LANES-1:0]   b_we;                // per-lane stage-B accept (-> u_taginvw)
@@ -762,6 +774,14 @@ module peel_core import tsp_pkg::*; #(
     end
     assign pr_grp = (pr_fw_v && (pr_fw_a == cb2_id[9:ZR_BB])) ? pr_fw_d : pr_q_bl;
 
+    // two-layer peel kill switch (bisect aid): +onelayer restores the exact
+    // single-slot peel loop (slot B never stages, no B hands, no CLR2/BFIN).
+    reg tl2_en;
+`ifndef SYNTHESIS
+    initial tl2_en = !$test$plusargs("onelayer");
+`else
+    initial tl2_en = 1'b1;
+`endif
     peel_tile_buffer #(.LANES(RAS_LANES)) u_peel (
         .clk(clk), .reset(reset),
         // raster stage A
@@ -771,7 +791,9 @@ module peel_core import tsp_pkg::*; #(
         .b_y(b_oy), .b_x(b_ox), .b_tag(b_tag), .b_mode(b_mode),
         .b_zwdis(b_zwdis), .b_peeling(b_peeling),
         .b_fwd(b_fwd), .b_res(b_res_w),
-        .b_pass_lp(b_pass_lp), .b_more(b_more), .b_oldtag(b_oldtag),
+        .b_2l(tl2_en), .b_ispt(b_which),
+        .b_pass_lp(b_pass_lp), .b_pass_b(b_pass_b), .b_bstg(b_bstg), .b_more(b_more),
+        .b_disp(b_disp), .b_oldtag(b_oldtag),
         .b_we(b_we),
         // forward PT-resolve walks (share the pb_rd/pb_wr cursors)
         .pb_ptinit(st == S_PT_INIT), .pb_ptswap(st == S_PT_SWAP),
@@ -788,8 +810,10 @@ module peel_core import tsp_pkg::*; #(
         // PeelBuffers RMW walk
         .pb_rd_valid(pb_bufrd_valid), .pb_rd_addr(pb_bufrd_addr),
         .pb_wr_valid(pb_bufwr_valid), .pb_wr_addr(pb_bufwr_addr),
-        .pb_first(first_peel), .pb_zkeep(pb_zkeep),
-        .pb_zb3_max(pb_zb3_max), .pb_zb3_any(pb_zb3_any)
+        .pb_first(first_peel), .pb_zkeep(pb_zkeep), .pb_bfin(pb_bfin),
+        .pb_zb3_max(pb_zb3_max), .pb_zb3_any(pb_zb3_any),
+        .pb_bt_valid(pb_bt_valid), .pb_bt_tag(pb_bt_tag),
+        .pb_bt_invw(pb_bt_invw), .pb_bt_pt(pb_bt_pt), .pb_bt_any(pb_bt_any)
     );
 
     // ---- PEEL FRONT CULL -------------------------------------------------------------
@@ -832,7 +856,14 @@ module peel_core import tsp_pkg::*; #(
     // cycle. !fc_pend: a cull is DECLINED while the previous cull's demote is still
     // waiting for its way-0 slot - losing a demote is the only unsafe direction in
     // the sort cache, and declining a cull is always safe (the sweep just runs).
-    wire front_cull = fc_en && peeling && zf_v && zf_ok && !fc_pend
+    // !tl2_en: the front cull is UNSOUND under two-layer peeling - zfront bounds
+    // only the nearest owed depth per pixel, but a two-layer pass also consumes
+    // the SECOND key, and a triangle wholly in front of every next-A selection can
+    // be exactly a pixel's next-B selection (observed: dropped layer content on
+    // cull-heavy scenes). A sound two-layer bound needs the per-pixel SECOND-owed
+    // depth (a zb3 pair); until that exists the two mechanisms are exclusive -
+    // they attack the same per-pass waste, and two-layer is the stronger one.
+    wire front_cull = fc_en && !tl2_en && peeling && zf_v && zf_ok && !fc_pend
                    && ras_probe_invw_ok && (ras_probe_invw > zfront);
     // either verdict aborts the sweep; they differ only in the bookkeeping at the
     // RS_RAS sample point
@@ -891,9 +922,9 @@ module peel_core import tsp_pkg::*; #(
       for (gsc = 0; gsc < RAS_LANES; gsc = gsc + 1) begin : scwt
         if (gsc == 0) begin : scwt0
           assign sc_wr_tag[0 +: 32] = fc_go ? fc_tag
-                                            : (b_pass_lp[0] ? b_oldtag[0 +: 32] : b_tag);
+                                            : (b_disp[0] ? b_oldtag[0 +: 32] : b_tag);
         end else begin : scwtn
-          assign sc_wr_tag[32*gsc +: 32] = b_pass_lp[gsc] ? b_oldtag[32*gsc +: 32] : b_tag;
+          assign sc_wr_tag[32*gsc +: 32] = b_disp[gsc] ? b_oldtag[32*gsc +: 32] : b_tag;
         end
       end
     endgenerate
@@ -954,8 +985,13 @@ module peel_core import tsp_pkg::*; #(
         // CLEAR
         .clr_valid(pb_clr_valid), .clr_addr(pb_clr_addr),
         .clr_depth(regs.isp_backgnd_d[30:0]), .clr_tag(regs.isp_backgnd_t),
-        // PeelBuffers valid-clear walk (mirrors u_peel's pb write)
-        .pbc_valid(pb_bufwr_valid), .pbc_addr(pb_bufwr_addr),
+        // PeelBuffers walk write: valid-clear, or (two-layer peel) the slot-B
+        // image MATERIALIZE - the walk's B read-back goes straight into the copy
+        // the B layer will shade from. tvw_pbc_* are driven beside pb_buf* below.
+        .pbc_valid(tvw_pbc_v), .pbc_addr(tvw_pbc_a),
+        .pbc_bmode(tvw_pbc_bmode),
+        .pbc_bv(pb_bt_valid), .pbc_btag(pb_bt_tag),
+        .pbc_binvw(pb_bt_invw), .pbc_bpt(pb_bt_pt),
         // single-pixel shade read retired: spanner_v2 uses the 4-wide port
         .sh_rd_valid(1'b0), .sh_rd_id(10'd0),
         .sh_valid(), .sh_tag(), .sh_depth(), .sh_pt(),
@@ -1424,6 +1460,11 @@ module peel_core import tsp_pkg::*; #(
                // M10K bulk-op walks over the peel RAM ports (128 chunk addrs each):
                S_CLEAR_WR=34,              // CLEAR: write {bg_depth, bg_tag} chunks
                S_PEEL_BUF_RUN=35,          // PeelBuffers RMW walk (read A -> write B)
+               // TWO-LAYER peel walk extras (see the S_PEEL_BUF_RUN comment):
+               S_PEEL_CLR2=30,             // credit wait for the next raster copy
+               S_PEEL_CLR2_RUN=31,         // ...and its 128-chunk taginvw clear
+               S_PEEL_BFIN=37,             // final pass staged a B: credit wait
+               S_PEEL_BFIN_RUN=38,         // ...read-only walk materializing it
                S_ZK_INV=36,                // z_keep=1 OP: invalidate htile tags (keep depth)
                // forward punch-through resolve phase (see the pt_phase comment)
                S_PT_BUF=39,                // wait taginvw credit; clear pt_res; prime walk
@@ -1511,6 +1552,8 @@ module peel_core import tsp_pkg::*; #(
     // (Plain OP passes always hand: shade_mode=1 shades ALL pixels incl. the
     // background poly, staged or not.)
     reg          pass_drew;
+    reg          pass_bany;     // this peel pass staged >=1 slot-B fragment
+    reg          bany_l;        // ...latched at the pass decision for the walk
 
     // ---- M10K bulk-op walk counters (NCHUNK addresses = whole 32x32 tile) ----
     reg        zk_l;             // z_keep of the CLEAR being walked: 1 => tag-invalidate
@@ -1951,6 +1994,7 @@ module peel_core import tsp_pkg::*; #(
     integer pc_fcull_decl;      // front culls DECLINED (previous demote still pending)
     integer pc_setup_byp;       // triangles delivered from the setup cache (DDR fetch
                                 // AND setup pass both skipped)
+    integer pc_peel_b;          // second-layer (slot B) images handed to shade
     integer pc_setup_ptfix;     // ...whose QF_PT was patched (record referenced from
                                 // BOTH lists; the walk's kind is authoritative)
     integer pc_pt_pass;         // forward PT-resolve passes HANDED to shade
@@ -2108,14 +2152,31 @@ module peel_core import tsp_pkg::*; #(
         // (S_PEEL_BUF_RUN) and the z_keep=1 depth-restore pre-walk (S_ZK_INV). pb_zkeep
         // selects the transform in u_peel; u_taginvw's pbc valid-clear fires either way.
         pb_bufrd_valid = (st == S_PEEL_BUF_RUN) || (st == S_ZK_INV)
-                      || (st == S_PT_INIT) || (st == S_PT_SWAP) || (st == S_PT_FIX);
+                      || (st == S_PT_INIT) || (st == S_PT_SWAP) || (st == S_PT_FIX)
+                      || (st == S_PEEL_BFIN_RUN);   // read-only: B materialize
         pb_bufrd_addr  = pb_rd;
         pb_bufwr_valid = ((st == S_PEEL_BUF_RUN) || (st == S_ZK_INV)
-                       || (st == S_PT_INIT) || (st == S_PT_SWAP) || (st == S_PT_FIX))
+                       || (st == S_PT_INIT) || (st == S_PT_SWAP) || (st == S_PT_FIX)
+                       || (st == S_PEEL_BFIN_RUN))
                       && pb_pipe;
         pb_bufwr_addr  = pb_i;
         pb_zkeep       = (st == S_ZK_INV);            // restore transform (else peel swap)
+        pb_bfin        = (st == S_PEEL_BFIN_RUN);     // fold B into "last drawn"
         // (stage-B write is driven by the b_valid port directly on u_peel)
+
+        // ---- u_taginvw walk write (valid-clear / slot-B materialize) ----
+        // Follows pb_bufwr for the RMW walks (as before), plus the two-layer
+        // extras: the final-pass B materialize (read-only on the peel RAM, so it
+        // cannot ride pb_bufwr) and the phase-2 clear of the next raster copy
+        // (no peel RAM traffic at all - a bare 128-chunk counter walk).
+        tvw_pbc_v = pb_bufwr_valid
+                  || ((st == S_PEEL_BFIN_RUN) && pb_pipe)
+                  || (st == S_PEEL_CLR2_RUN);
+        tvw_pbc_a = pb_i;
+        // B data goes in on the peel-walk write (the read-back of the pass just
+        // drained) and on the final materialize; everything else is the clear.
+        tvw_pbc_bmode = ((st == S_PEEL_BUF_RUN) && !first_peel)
+                     || (st == S_PEEL_BFIN_RUN);
 
         // ---- color buffer ----
         // STREAMING shade pipe: pp_out_valid is a clean 1-cycle pulse INDEPENDENT of
@@ -2191,6 +2252,7 @@ module peel_core import tsp_pkg::*; #(
             pc_prefetch<=0; pc_pf_hit<=0; pc_pf_wasted<=0;
             pc_m_promote<=0; pc_m_waithit<=0; pc_m_waitmiss<=0; pc_m_cold<=0;
             pc_sort_skip<=0; pc_front_cull<=0; pc_fcull_decl<=0; pc_setup_byp<=0;
+            pc_peel_b<=0;
             pc_setup_ptfix<=0;
             pc_pt_pass<=0; pc_pt_tiles<=0; pc_ptbb_skip<=0;
             pc_pt_empty<=0; pc_pt_late<=0; pc_peel_empty<=0;
@@ -2200,6 +2262,7 @@ module peel_core import tsp_pkg::*; #(
             fq_head<=0; fq_tail<=0; fq_count<=0; fq_out_valid<=1'b0; fq_byp_sel<=1'b0;
             eq_head<=0; eq_tail<=0; eq_count<=0;
             peeling<=1'b0; more_to_draw<=1'b0; peel_pass<=8'd0; op_shaded<=1'b0;
+            pass_bany<=1'b0; bany_l<=1'b0;
             zf_acc<=31'd0; zf_acc_v<=1'b0; zfront<=31'd0; zf_v<=1'b0;
             zf_ok<=1'b0; zf_clean<=1'b1; fc_pend<=1'b0; fc_tag<=32'd0;
             byp_pend<=1'b0; byp_dv<=1'b0;
@@ -2390,6 +2453,8 @@ module peel_core import tsp_pkg::*; #(
                     /* verilator lint_on WIDTH */
                 end
                 if (|b_we) pass_drew <= 1'b1;   // this pass staged >=1 pixel
+                if (|b_bstg) pass_bany <= 1'b1;    // ...and >=1 second-layer fragment
+                                                   // (direct B-accept OR A-slide)
             end
             ras_inflight <= ras_inflight + (ras_in_valid ? 1 : 0) - (ras_out_valid ? 1 : 0);
 
@@ -2903,7 +2968,9 @@ module peel_core import tsp_pkg::*; #(
                         if (pass_drew) begin
                         ti_ready[htile] <= 1'b1;
                         ti_mode [htile] <= 1'b1;                 // PEEL
-                        ti_last [htile] <= !more_to_draw && wo_l;
+                        // two-layer: if this pass staged a B image, THAT hand (the
+                        // materialize walk's) closes the tile, not A's
+                        ti_last [htile] <= !more_to_draw && !pass_bany && wo_l;
                         ti_ptres[htile] <= 1'b0;
                         ti_postonly[htile] <= 1'b0;   // this is a real shade, NOT a post-only
                                                       // (must clear a stale post-only left by a
@@ -2941,6 +3008,8 @@ module peel_core import tsp_pkg::*; #(
                             // credit wait + PeelBuffers swap (raster is fenced).
                             peel_pass <= peel_pass + 8'd1;
                             pass_drew <= 1'b0;   // next pass: track its accepts
+                            bany_l    <= pass_bany;   // the walk hands this pass's B
+                            pass_bany <= 1'b0;
                             if (has_pt) begin
                                 peel_which <= 1'b0; ol_list_ptr <= pt_ptr_l;
                             end else begin
@@ -2956,7 +3025,15 @@ module peel_core import tsp_pkg::*; #(
                             // final shade drains.
                             peeling <= 1'b0;
                             has_pt <= 1'b0; has_tr <= 1'b0;
-                            ra_ack.list_done <= 1'b1; st <= S_RA_ACK;
+                            if (pass_bany) begin
+                                // the FINAL pass staged a second layer: materialize
+                                // and hand it before acking. Read-only on the peel
+                                // RAM - its post-peel state must survive for z_keep
+                                // successor entries exactly as today.
+                                st <= S_PEEL_BFIN;
+                            end else begin
+                                ra_ack.list_done <= 1'b1; st <= S_RA_ACK;
+                            end
                         end
                     end
                 end else if (zk_entry && !pass_drew) begin
@@ -3017,6 +3094,8 @@ module peel_core import tsp_pkg::*; #(
                 zf_v <= 1'b0; zf_ok <= 1'b0; zf_clean <= 1'b1;
                 peeling    <= 1'b1;  // (pre-peel OP shade may have cleared it)
                 pass_drew  <= 1'b0;  // pass 1: track its stage-B accepts
+                pass_bany  <= 1'b0;
+                bany_l     <= 1'b0;
                 peel_pass  <= 8'd1;  // pass 1 (counter now advances at the pass
                                      // DECISION, not the walk end, so sc_skip_en
                                      // is correct for the early-started OL walk)
@@ -3088,7 +3167,71 @@ module peel_core import tsp_pkg::*; #(
                     // trustworthy only if the pass that produced this zb3 swept in full
                     zf_ok    <= zf_clean;
                     zf_clean <= 1'b1;
-                    st <= S_OL_RUN;
+                    // TWO-LAYER: this walk also MATERIALIZED the drained pass's
+                    // slot-B image into u_taginvw[htile] (tvw_pbc_bmode). If that
+                    // pass staged a B, hand the image now (shaded after A, still
+                    // back-to-front) and go clear the NEXT raster copy; if not,
+                    // the all-invalid materialize WAS the clear - proceed as the
+                    // single-layer flow did. (first_peel walks write the plain
+                    // clear and never hand.)
+                    if (!first_peel && bany_l) begin
+                        ti_ready[htile] <= 1'b1;
+                        ti_mode [htile] <= 1'b1;                 // PEEL (valid-gated)
+                        ti_last [htile] <= 1'b0;                 // the loop continues
+                        ti_ptres[htile] <= 1'b0;
+                        ti_postonly[htile] <= 1'b0;
+                        ti_tx[htile] <= cur_tx; ti_ty[htile] <= cur_ty;
+                        htile <= htile + 1'b1;
+`ifndef SYNTHESIS
+                        pc_hand <= pc_hand + 1;
+                        pc_peel_b <= pc_peel_b + 1;
+`endif
+                        st <= S_PEEL_CLR2;
+                    end else st <= S_OL_RUN;
+                end else if (pb_rd != CHUNK_AW'(NCHUNK-1)) begin
+                    pb_rd <= pb_rd + 1'b1;
+                end
+            end
+
+            // ---- TWO-LAYER walk extras ----
+            // phase 2: the B hand consumed htile, so the NEXT raster copy still
+            // needs its valid-clear (single-layer got it from the pbc walk write,
+            // which phase 1 spent on the B image). Bare 128-chunk counter walk on
+            // u_taginvw only; raster stays fenced until it completes.
+            S_PEEL_CLR2: if (!ti_ready[htile]) begin
+                pb_i <= '0;
+                st <= S_PEEL_CLR2_RUN;
+            end
+            S_PEEL_CLR2_RUN: begin
+                if (pb_i == CHUNK_AW'(NCHUNK-1)) st <= S_OL_RUN;
+                else pb_i <= pb_i + 1'b1;
+            end
+            // final-pass B materialize: the peel loop ended with a staged second
+            // layer that no following walk would deliver. taginvw gets the B
+            // image, and the peel RAM gets the pb_bfin fold (zb <- B when staged:
+            // the post-peel "last drawn depth" contract z_keep successors read;
+            // every other field is kept verbatim), then hand + ack.
+            S_PEEL_BFIN: if (!ti_ready[htile]) begin
+                pb_rd <= '0; pb_i <= '0; pb_pipe <= 1'b0;
+                st <= S_PEEL_BFIN_RUN;
+            end
+            S_PEEL_BFIN_RUN: begin
+                pb_pipe <= 1'b1;
+                pb_i    <= pb_rd;
+                if (pb_pipe && pb_i == CHUNK_AW'(NCHUNK-1)) begin
+                    ti_ready[htile] <= 1'b1;
+                    ti_mode [htile] <= 1'b1;
+                    ti_last [htile] <= wo_l;   // the tile's final shade
+                    ti_ptres[htile] <= 1'b0;
+                    ti_postonly[htile] <= 1'b0;
+                    ti_tx[htile] <= cur_tx; ti_ty[htile] <= cur_ty;
+                    htile <= htile + 1'b1;
+`ifndef SYNTHESIS
+                    pc_hand <= pc_hand + 1;
+                    pc_peel_b <= pc_peel_b + 1;
+`endif
+                    pass_bany <= 1'b0;
+                    ra_ack.list_done <= 1'b1; st <= S_RA_ACK;
                 end else if (pb_rd != CHUNK_AW'(NCHUNK-1)) begin
                     pb_rd <= pb_rd + 1'b1;
                 end
@@ -3118,6 +3261,8 @@ module peel_core import tsp_pkg::*; #(
                     pc_front_cull, pc_fcull_decl);
                 $display("  SETUP-CACHE: %0d triangles delivered from the setup cache (DDR fetch + setup skipped, pt-kind patched=%0d)",
                     pc_setup_byp, pc_setup_ptfix);
+                $display("  TWO-LAYER:   %0d second-layer images handed (passes saved ~= that many)",
+                    pc_peel_b);
                 $display("  PT-RESOLVE:  %0d forward passes over %0d entries (avg %0d passes/entry)  bbox-skips=%0d",
                     pc_pt_pass, pc_pt_tiles, pc_pt_tiles ? pc_pt_pass/pc_pt_tiles : 0,
                     pc_ptbb_skip);
@@ -3746,6 +3891,8 @@ module peel_core import tsp_pkg::*; #(
             pq_pop = 1'b0;
             case (rs_st)
             RS_IDLE: if (!pq_empty && !(st == S_PEEL_BUF || st == S_PEEL_BUF_RUN
+                                        || st == S_PEEL_CLR2 || st == S_PEEL_CLR2_RUN
+                                        || st == S_PEEL_BFIN || st == S_PEEL_BFIN_RUN
                                         || st == S_ZK_INV || st == S_PT_BUF
                                         || st == S_PT_INIT || st == S_PT_SWAP
                                         || st == S_PT_FIX)) begin
@@ -3927,6 +4074,8 @@ module peel_core import tsp_pkg::*; #(
                 // restores the drain-to-idle behavior (debug/bisect aid).
                 if (ch_drain && !pq_empty
                     && !(st == S_PEEL_BUF || st == S_PEEL_BUF_RUN
+                         || st == S_PEEL_CLR2 || st == S_PEEL_CLR2_RUN
+                         || st == S_PEEL_BFIN || st == S_PEEL_BFIN_RUN
                          || st == S_ZK_INV || st == S_PT_BUF
                          || st == S_PT_INIT || st == S_PT_SWAP
                          || st == S_PT_FIX)) begin
