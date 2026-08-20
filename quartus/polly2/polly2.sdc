@@ -29,27 +29,39 @@ set_clock_groups -exclusive \
     -group [get_clocks {FPGA_CLK2_50}] \
     -group [get_clocks {FPGA_CLK3_50}]
 
-# ---- clk_sys core clock: 4 fixed PLL outputs muxed through altclkctrl ----
-# The emu PLL (rtl/pll) has 4 fixed outputs from the 900 MHz VCO:
-# outclk_0/1/2/3 = 75 / 90 / 100 / 112.5 MHz (C0=12/10/9/8). No runtime PLL
-# reconfig anymore - clk_sys is picked by the soft glitch-free mux
-# (clk_mux_gf; a hard clkctrl tree is IMPOSSIBLE here - clkctrl outputs
-# cannot cascade into clkctrl inputs, see the sysclk_mux comment in
-# sys_top), so derive_pll_clocks constrains each counter at its real
-# frequency and all four propagate through the mux into the clk_sys domain.
-# Only one can be active at a time: declare them physically exclusive so
-# TimeQuest doesn't analyze impossible cross-transfers (e.g. 75->112.5 on the
-# same register pair, which would be ~1.1 ns bogus setup requirements). The
-# core then has to close timing on the fastest slot, 112.5 MHz - the
-# deliberate overclock option.
+# ---- clk_sys core clock: a HARD 2:1 altclkctrl on two PLL outputs ----
+# The emu PLL (rtl/pll) has 4 fixed outputs (75 / 112.5 / 131 / 141 MHz) but
+# only outclk_0 (75) and outclk_1 (112.5) reach clk_sys, through the hard
+# clkctrl in sys_top (inclk2/inclk3 - the only PLL-routable inputs; a 4:1 is
+# impossible on this device, see the sysclk_ctrl comment there). outclk_2/3
+# have no fanout. derive_pll_clocks constrains each counter at its real
+# frequency and the two muxed clocks propagate through the clkctrl into the
+# clk_sys domain. Only one can be active at a time: declare them physically
+# exclusive so TimeQuest doesn't analyze impossible cross-transfers (e.g.
+# 75->112.5 on the same register pair, ~1.1 ns bogus setup requirements).
 set_clock_groups -physically_exclusive \
     -group [get_clocks {pll|pll_inst|altera_pll_i|*[0].*|divclk}] \
     -group [get_clocks {pll|pll_inst|altera_pll_i|*[1].*|divclk}] \
     -group [get_clocks {pll|pll_inst|altera_pll_i|*[2].*|divclk}] \
     -group [get_clocks {pll|pll_inst|altera_pll_i|*[3].*|divclk}]
 
+# Slots 2/3 (131 / 141 MHz) no longer reach clk_sys at all (the hard 2:1
+# clkctrl carries only 75/112.5), so they have no timed fanout. The multicycle
+# below is kept as a belt-and-braces guard in case something is ever hung off
+# them again: it relaxes their analysis to just past the 75 MHz requirement,
+# so general[0] governs and fitter effort stays where it counts (asking the
+# fitter to chase 7.0 ns everywhere is what produced the 18.7 ns single-net
+# routing detour and thousands of small 75 MHz violations on baseline-clean
+# paths). general[1] (112.5) stays fully timed as the shipping overclock.
+foreach oc {2 3} {
+    set g [get_clocks "pll|pll_inst|altera_pll_i|*\[$oc\].*|divclk"]
+    set_multicycle_path -setup -end 2 -from $g -to $g
+    set_multicycle_path -hold  -end 1 -from $g -to $g
+}
+
 # clkselect: MMIO clk_sel reg (clk_sys) -> 50MHz sync pair -> clk_sel -> the
-# soft mux's per-domain synchronizers. All hops are synchronized; cut them.
+# hard clkctrl's clkselect port. Quasi-static (the flip lands inside the
+# clk_switch_reset window); cut every hop.
 set_false_path -from [get_registers {*clk_sel*}]
 
 # ---- render-done f2h IRQ (sys_top render_irq_stretch) ----

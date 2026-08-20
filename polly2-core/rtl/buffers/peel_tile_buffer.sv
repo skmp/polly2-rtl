@@ -187,9 +187,12 @@ module peel_tile_buffer import tsp_pkg::*; #(
     // That exclusion is only valid while zb3 is complete, which is why the caller must
     // not trust the bound after a pass that skipped a sweep (see zf_ok in peel_core).
     output     [30:0]           pb_zb3_max,  // max over lanes of the read chunk's zb3,
-                                             // FLT_MAX lanes excluded (valid with pb_rd's
-                                             // data, i.e. alongside pb_wr)
+                                             // FLT_MAX lanes excluded. TIMING: valid ONE
+                                             // CYCLE AFTER pb_rd's data (a registered
+                                             // leaf stage feeds the reduction tree - see
+                                             // the tree comment below)
     output                      pb_zb3_any,  // any lane of that chunk was not FLT_MAX
+                                             // (same one-cycle-late alignment)
     // ---- z3b: zb3's PAIR companion, the SECOND-minimum owed depth per pixel ----
     // A TWO-LAYER pass consumes the two farthest owed fragments per pixel (A = min,
     // B = 2nd-min), so a sound front cull must clear the SECOND selection too - zb3
@@ -435,28 +438,39 @@ module peel_tile_buffer import tsp_pkg::*; #(
     // per-chunk zb3 reduction for the caller's per-tile max, off the SAME registered
     // read the PeelBuffers walk already performs (no extra port, no extra pass).
     // Both reductions are explicit BALANCED TREES ($clog2(NB) compare levels,
-    // heap-indexed: leaves at NB..2NB-1, node i = max(2i, 2i+1), root = node 1).
-    // The original for-loop running max synthesized as a SERIAL NB-deep
-    // compare-mux chain straight off the RAM read - at NB=8 that alone blew the
-    // clock (seen as -29 ns into the zfB_acc fold). An excluded lane contributes
-    // 0, the identity for an unsigned max; pb_zb3_any tells the caller when the
-    // whole chunk is excluded.
+    // heap-indexed: leaves at NB..2NB-1, node i = max(2i, 2i+1), root = node 1)
+    // fed from a REGISTERED LEAF STAGE. The original for-loop running max
+    // synthesized as a SERIAL NB-deep compare-mux chain straight off the RAM
+    // read (-29 ns into the zfB_acc fold); tree-shaping alone still left
+    // RAM -> sentinel-equality -> mux -> 3 tree levels in one cycle (-6.3 ns at
+    // 75 MHz: each level costs ~2.5 ns crossing M10K columns). The leaf regs cut
+    // it at the natural joint: RAM -> leaf select -> REG, then REG -> tree.
+    // Consequence: pb_zb3_max/pb_z3b_max/pb_zb3_any lag the walk read by ONE
+    // EXTRA cycle (two cycles after pb_rd_valid) - peel_core's staging pipeline
+    // absorbs it (see the zfp_*/pbw_* alignment there). An excluded lane
+    // contributes 0, the identity for an unsigned max.
+    reg  [30:0] rl31 [0:NB-1];
+    reg  [23:0] rl24 [0:NB-1];
+    reg  [NB-1:0] rl_any;
     wire [30:0] rt31 [1:2*NB-1];
     wire [23:0] rt24 [1:2*NB-1];
-    wire [NB-1:0] rt_any;
     genvar gm;
     generate
         for (gm = 0; gm < NB; gm = gm + 1) begin : rleaf
             wire [30:0] z3v  = f_z3 (rdata, gm);
             wire [23:0] z3bv = f_z3b(rdata, gm);
             wire        own  = (z3v != FLT_MAX);
-            assign rt_any[gm] = own;
-            assign rt31[NB+gm] = own ? z3v : 31'd0;
-            // per-lane two-layer bound: the pair when it exists, else the FLOOR
-            // of the A bound (single-owed lane: any fragment in front of A is
-            // its next-B - see the pb_z3b_max port header)
-            assign rt24[NB+gm] = !own ? 24'd0
-                               : (z3bv != Z3B_MAX) ? z3bv : z3v[30:7];
+            always @(posedge clk) begin
+                rl_any[gm] <= own;
+                rl31[gm]   <= own ? z3v : 31'd0;
+                // per-lane two-layer bound: the pair when it exists, else the
+                // FLOOR of the A bound (single-owed lane: any fragment in front
+                // of A is its next-B - see the pb_z3b_max port header)
+                rl24[gm]   <= !own ? 24'd0
+                            : (z3bv != Z3B_MAX) ? z3bv : z3v[30:7];
+            end
+            assign rt31[NB+gm] = rl31[gm];
+            assign rt24[NB+gm] = rl24[gm];
         end
         for (gm = 1; gm < NB; gm = gm + 1) begin : rnode
             assign rt31[gm] = (rt31[2*gm] > rt31[2*gm+1]) ? rt31[2*gm] : rt31[2*gm+1];
@@ -464,7 +478,7 @@ module peel_tile_buffer import tsp_pkg::*; #(
         end
     endgenerate
     assign pb_zb3_max = rt31[1];
-    assign pb_zb3_any = |rt_any;
+    assign pb_zb3_any = |rl_any;
     assign pb_z3b_max = rt24[1];
 
     // slot-B image export for the materialize write (see the port comment)

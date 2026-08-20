@@ -370,25 +370,22 @@ pvr_mmio pvr_mmio
 );
 
 //////////////////////////////////////////////////////////////////////////
-// Core clock: 4 fixed PLL outputs through the soft glitch-free mux.
+// Core clock: a HARD altclkctrl 2:1 between two PLL outputs.
 // Selection from the MMIO CLK register; the core is held in reset for
-// ~320ns on each side of the actual mux flip.
+// ~320ns on each side of the actual select flip.
 //
-// SLOT FREQUENCIES ARE SET BY plls/pll.qip, NOT HERE. As of 2026-08-17 the
-// VCO is 1577.25 MHz with C counters 14/13/12/11:
+// SLOT FREQUENCIES ARE SET BY plls/pll.qip, NOT HERE. The VCO is
+// 1577.25 MHz; the two clocks reaching clk_sys are:
 //
-//     sel 0 -> 112.66 MHz     sel 2 -> 131.44 MHz
-//     sel 1 -> 121.33 MHz     sel 3 -> 143.39 MHz
+//     outclk_0 (net clk_75) -> 75.11 MHz    CLK sel 0 or 1
+//     outclk_1 (net clk_90) -> 112.66 MHz   CLK sel 2 or 3
 //
-// THE NET NAMES ARE HISTORICAL - clk_75/clk_90/clk_100/clk_112 date from
-// the 900 MHz VCO with C=12/10/9/8. They are NOT the current frequencies:
-// clk_75 carries 112.66 MHz, clk_112 carries 143.39 MHz. Go by the slot
-// table above, not by the name.
+// (outclk_2/3 = 131.44 / 143.39 MHz still exist on the PLL but no longer
+// reach clk_sys - a clkctrl block routes at most TWO PLL clocks, and those
+// slots never closed timing anyway; see polly2.sdc.)
 //
-// NOTE the whole core has to close timing at the FASTEST slot: polly2.sdc
-// declares the four counters -physically_exclusive, so TimeQuest signs the
-// design off against slot 3. Raising slot 3 alone therefore re-targets the
-// entire fit, even if you only ever select slot 0 at runtime.
+// THE NET NAMES ARE HISTORICAL C-counter labels, not guaranteed
+// frequencies - go by the table above.
 //////////////////////////////////////////////////////////////////////////
 
 wire clk_sys;
@@ -406,31 +403,44 @@ pll pll
 	.locked(pll_locked)
 );
 
-// KEPT SOFT - NOW PROVEN NECESSARY, twice over. The hard clkctrl was
-// re-attempted 2026-08-19 as a 3-block TREE on inclk2x/inclk3x only (inputs
-// 0/1 of these blocks have no routing from the PLL counters). The pair
-// stages are legal, but the fitter rejects the ROOT stage outright:
-//   Error (15836): inclk[2] port of Clock Select Block ... is driven by
-//   altclkctrl:sysclk_mux_lo|...|wire_sd1_outclk, but must be driven by a
-//   PLL's output clock
-// i.e. a clkctrl INPUT accepts only a clock pin or a PLL C/FBOUT output - a
-// clkctrl OUTPUT can never cascade into another clkctrl, so no hard 4:1
-// exists on this device. A hard-pair + soft-root hybrid gains nothing: the
-// soft mux's cost is the LAB-output -> global-network promotion at the FINAL
-// stage (~8.4 ns insertion, 0.55-1.26 ns residual skew), which a soft root
-// pays in full. Hence: the 4:1 stays fully soft, glitch-free by
-// construction (break-before-make; see clk_mux_gf).
+// HARD 2:1 CLKCTRL (2026-08-20). A hard 4:1 remains impossible on Cyclone V
+// (a clkctrl INPUT accepts only a clock pin or a PLL C/FBOUT output - never
+// another clkctrl's output, Error 15836 - and one block routes at most TWO
+// PLL clocks, only on inclk[2]/inclk[3]). But a single-block 2:1 on
+// inclk2/inclk3 is exactly what the silicon allows, and two slots (75 for
+// closure, 112.5 as the shipping overclock) are all that ever mattered -
+// slots at 131/141 never closed and only burned fitter effort. This removes
+// the soft mux's ~8.4 ns LAB->global insertion and its residual skew from
+// every clk_sys path.
 //
-// The one hard-clock design point that remains: drop runtime slot switching
-// and feed clk_sys from a single fixed PLL output (optionally through ONE
-// clkctrl, inclk2) - worth far more than 1 ns, at the price of rebuilding
-// the bitstream per frequency.
-clk_mux_gf sysclk_mux
-(
-	.clks  ({clk_112, clk_100, clk_90, clk_75}),  // sel 0/1/2/3 -> slot 0/1/2/3
-	.sel   (clk_sel),
-	.outclk(clk_sys)
+// GLITCH NOTE: unlike clk_mux_gf (break-before-make), a clkctrl dynamic
+// select is not formally glitch-free. Both inputs come from the SAME VCO
+// and the flip lands mid-window inside clk_switch_reset (the core and its
+// consumers are held in reset ~320 ns on each side), which is the same
+// contract the CLK register has always documented ("avoid MMIO traffic
+// ~2us after writing").
+//
+// CLK register mapping: sel 0/1 -> 75 MHz (inclk2), sel 2/3 -> 112.5 MHz
+// (inclk3), i.e. clkselect = {1'b1, clk_sel[1]}.
+
+altclkctrl sysclk_ctrl (
+	.inclk3x   (clk_90),
+	.inclk2x   (clk_75),
+	.inclk1x   (1'b0),
+	.inclk0x   (1'b0),
+	.clkselect ({1'b1, clk_sel[1]}),
+	.outclk    (clk_sys)
 );
+	
+
+// The soft glitch-free 4:1 this replaces - kept for reference; see the
+// clkctrl note above for why the hard 2:1 is legal where the 4:1 was not.
+// clk_mux_gf sysclk_mux
+// (
+// 	.clks  ({clk_112, clk_100, clk_90, clk_75}),  // sel 0/1/2/3 -> slot 0/1/2/3
+// 	.sel   (clk_sel),
+// 	.outclk(clk_sys)
+// );
 
 reg  [1:0] clk_sel_meta   = 2'd0;
 reg  [1:0] clk_sel_sync   = 2'd0;

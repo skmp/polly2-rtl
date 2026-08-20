@@ -861,6 +861,13 @@ module peel_core import tsp_pkg::*; #(
     reg         zfp_any;
     reg  [30:0] zfp_31;
     reg  [23:0] zfp_24;
+    // walk-read markers, one cycle ahead of zfp_*: peel_tile_buffer's reduction
+    // now has a REGISTERED LEAF stage, so its tree outputs lag the read by one
+    // cycle - pbw_* rides alongside that lag and zfp_* captures the aligned
+    // tree outputs the cycle after. Publish lands 2 cycles past walk end.
+    reg         pbw_v;
+    reg         pbw_last;
+    reg         pbw_first;
     reg         zf_ok;       // zb3 was complete when zfront was built
     reg         zf_clean;    // no cull has fired in the pass now running
     reg         fc_pend;     // a cull's sort-cache demote awaits a free way-0 slot
@@ -2210,7 +2217,7 @@ module peel_core import tsp_pkg::*; #(
             pass_bany<=1'b0; bany_l<=1'b0;
             zf_acc<=31'd0; zf_acc_v<=1'b0; zfront<=31'd0; zf_v<=1'b0;
             zfB_acc<=24'd0; zfrontB<=24'd0;
-            zfp_v<=1'b0; zfp_last<=1'b0;
+            zfp_v<=1'b0; zfp_last<=1'b0; pbw_v<=1'b0; pbw_last<=1'b0;
             zf_ok<=1'b0; zf_clean<=1'b1; fc_pend<=1'b0; fc_tag<=32'd0;
             ol_walk_done<=1'b0;
             pt_phase<=1'b0; pt_pass<=8'd0; pt_sh_pend<=3'd0; pt_more<=11'd0;
@@ -2247,10 +2254,23 @@ module peel_core import tsp_pkg::*; #(
             // ahead of the FSM so a cull firing this cycle still wins the set
             // (nonblocking: the RS_RAS assignment below is later in the block).
             if (fc_go) fc_pend <= 1'b0;
-            // zb3/z3b fold staging defaults (S_PEEL_BUF_RUN overrides while walking;
-            // the registered fold after the st case consumes them)
-            zfp_v    <= 1'b0;
-            zfp_last <= 1'b0;
+            // zb3/z3b fold pipeline, free-running (the st case below cannot see the
+            // tree outputs in time: the buffer's leaf stage delays them one cycle
+            // past the walk read, and the walk state exits before the last chunk's
+            // outputs land). pbw_* marks walk reads; zfp_* captures the aligned tree
+            // outputs; the fold after the st case consumes zfp_*. S_PEEL_BUF (walk
+            // start) overrides both valids to 0 - it runs at least a full walk
+            // before any new chunk is staged, so nothing real is ever cancelled.
+            pbw_v    <= (st == S_PEEL_BUF_RUN) && pb_pipe;
+            pbw_last <= (st == S_PEEL_BUF_RUN) && pb_pipe
+                        && (pb_i == CHUNK_AW'(NCHUNK-1));
+            pbw_first<= first_peel;
+            zfp_v    <= pbw_v;
+            zfp_any  <= pb_zb3_any;
+            zfp_31   <= pb_zb3_max;
+            zfp_24   <= pb_z3b_max;
+            zfp_last <= pbw_last;
+            zfp_first<= pbw_first;
 `ifndef SYNTHESIS
             // -------- performance counters: charge THIS clock to its buckets --------
             // Only count while the core is doing tile work (not the top-level idle wait
@@ -3083,6 +3103,10 @@ module peel_core import tsp_pkg::*; #(
                 zf_acc  <= 31'd0;    // rebuild the front bound over this walk
                 zfB_acc <= 24'd0;    // ...and its two-layer pair bound
                 zf_acc_v<= 1'b0;
+                pbw_v   <= 1'b0;     // cancel stale fold-pipeline entries (overrides
+                zfp_v   <= 1'b0;     // the free-running stage; see its comment)
+                pbw_last<= 1'b0;
+                zfp_last<= 1'b0;
                 st <= S_PEEL_BUF_RUN;
             end
 
@@ -3093,16 +3117,8 @@ module peel_core import tsp_pkg::*; #(
             S_PEEL_BUF_RUN: begin
                 pb_pipe <= 1'b1;
                 pb_i    <= pb_rd;
-                // STAGE this chunk's zb3/z3b tree outputs; the registered fold
-                // after the st case folds them NEXT cycle (see zfp_* decls). Still
-                // aligned with the write that resets zb3 for the coming pass -
-                // one pass of lookahead, no extra read port and no extra walk.
-                zfp_v    <= pb_pipe;
-                zfp_any  <= pb_zb3_any;
-                zfp_31   <= pb_zb3_max;
-                zfp_24   <= pb_z3b_max;
-                zfp_last <= pb_pipe && (pb_i == CHUNK_AW'(NCHUNK-1));
-                zfp_first<= first_peel;
+                // (the zb3/z3b fold rides the free-running pbw_*/zfp_* pipeline
+                // declared with the defaults above - nothing to stage here)
                 if (pb_pipe && pb_i == CHUNK_AW'(NCHUNK-1)) begin
                     // whole tile transformed. The pass's OL walk (+ fetch/setup
                     // into fq/pq) has been running since the pass decision; with
@@ -3282,7 +3298,7 @@ module peel_core import tsp_pkg::*; #(
             default: st<=S_IDLE;
             endcase
 
-            // ---- registered zb3/z3b fold + one-cycle-late publish ----------------
+            // ---- registered zb3/z3b fold + late publish (2 cycles past walk end) --
             // Consumes the chunk staged by S_PEEL_BUF_RUN (zfp_*). The LAST chunk is
             // folded into the publish explicitly - the accumulate lands on this same
             // edge, so zf_acc/zfB_acc still read pre-update (the old inline fold's

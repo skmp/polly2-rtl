@@ -11,7 +11,8 @@
  *   0xFF202008  GO         WO   any write starts the region-array parse
  *   0xFF20200C  RESET      WO   any write runs a stretched PVR reset cycle
  *   0xFF202010  CYCLES     RO   clk_sys cycles GO->DONE (resets on GO)
- *   0xFF202014  CLK        RW   [1:0] core clock: 0=75 1=90 2=100 3=112.5MHz
+ *   0xFF202014  CLK        RW   [1:0] core clock (only bit [1] decides):
+ *                          0/1 = 75 MHz, 2/3 = 112.5 MHz
  *   0xFF202018  AUDIO_DATA W: push a stereo sample ([15:0] left, [31:16]
  *                          right, signed 16-bit PCM) into the 2048-entry
  *                          48 kHz HDMI audio FIFO. While the FIFO is full
@@ -82,9 +83,12 @@
 #define POLLY2_STATUS_WORKING 0x1u
 #define POLLY2_STATUS_DONE    0x2u
 
+/* CLK select values. The hard 2:1 clkctrl decides on bit [1] only:
+ * 0/1 -> 75 MHz, 2/3 -> 112.5 MHz. The legacy 90/100 names are kept so old
+ * configs still parse - they now land on the nearest surviving slot. */
 #define POLLY2_75MHZ 0
-#define POLLY2_90MHZ 1
-#define POLLY2_100MHZ 2
+#define POLLY2_90MHZ 1   /* legacy name: selects 75 MHz   */
+#define POLLY2_100MHZ 2  /* legacy name: selects 112.5 MHz */
 #define POLLY2_112MHZ 3
 
 static volatile uint8_t *polly2_mmio;
@@ -134,9 +138,9 @@ static inline int      polly2_working(void)     { return polly2_status() & POLLY
 static inline int      polly2_done(void)        { return (polly2_status() & POLLY2_STATUS_DONE) != 0; }
 static inline uint32_t polly2_frame_cycles(void){ return polly2_mmio_rd(POLLY2_MMIO_CYCLES); }
 
-/* 0=75, 1=90, 2=100, 3=112.5 MHz. Switching briefly pauses clk_sys and
- * pulses the core reset window; leave the MMIO alone for ~2us afterwards
- * and re-upload nothing - registers and VRAM base survive. */
+/* 0/1 = 75 MHz, 2/3 = 112.5 MHz (bit [1] decides). Switching pulses the
+ * core reset window; leave the MMIO alone for ~2us afterwards and re-upload
+ * nothing - registers and VRAM base survive. */
 static inline void polly2_set_clock(unsigned sel)
 {
 	polly2_mmio_wr(POLLY2_MMIO_CLK, sel & 3u);
@@ -146,8 +150,8 @@ static inline void polly2_set_clock(unsigned sel)
 /* current core clock in Hz, from the CLK register readback */
 static inline uint32_t polly2_clock_hz(void)
 {
-	static const uint32_t hz[4] = { 75000000u, 90000000u,
-	                                100000000u, 112500000u };
+	static const uint32_t hz[4] = { 75000000u, 75000000u,
+	                                112500000u, 112500000u };
 	return hz[polly2_mmio_rd(POLLY2_MMIO_CLK) & 3u];
 }
 

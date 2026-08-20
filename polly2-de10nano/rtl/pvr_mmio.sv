@@ -17,10 +17,11 @@
 //                            PVR: reset held high for RST_CYCLES clocks.
 //   0xFF202010  FRAME_CYCLES RO. clk_sys cycles from GO until DONE; resets
 //                            on GO, holds after DONE.
-//   0xFF202014  CLK          RW. [1:0] core clock select: 0=75, 1=90, 2=100,
-//                            3=112.5 MHz. Switching pauses clk_sys briefly
-//                            and pulses the core reset window; avoid other
-//                            MMIO traffic for ~2us after writing.
+//   0xFF202014  CLK          RW. [1:0] core clock select through the hard
+//                            2:1 clkctrl (only bit [1] decides): 0/1 = 75,
+//                            2/3 = 112.5 MHz. Switching pulses the core
+//                            reset window; avoid other MMIO traffic for
+//                            ~2us after writing.
 //   0xFF202018  AUDIO_DATA   W: push one stereo sample ([15:0] left,
 //                            [31:16] right, signed 16-bit PCM) into the
 //                            2048-entry audio FIFO (audio_i2s -> HDMI I2S).

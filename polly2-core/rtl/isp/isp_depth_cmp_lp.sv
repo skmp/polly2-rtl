@@ -123,13 +123,18 @@ module isp_depth_cmp_lp (
     wire [KW-1:0] k_new  = { nw,  tag[23:0] };
     wire [KW-1:0] k_best = { zb,  pb [23:0] };
     wire [KW-1:0] k_ref  = { zb2, pb2_sort  };
-    // +inf while empty: the first candidate above A always lands in B
-    wire [KW-1:0] k_b    = validB ? { zbB, pbB_sort } : {KW{1'b1}};
+    wire [KW-1:0] k_b    = { zbB, pbB_sort  };
 
     // gt_best is shared between the modes (it means "not the new A" walking up,
     // "accept" walking down); the reference test just changes which side is stale.
     wire gt_best = (k_new >  k_best);
-    wire gt_b    = (k_new >= k_b);      // TR: at/behind slot B -> defer
+    // TR: at/behind slot B -> defer. An EMPTY B counts as +inf, so the first
+    // candidate above A always lands in B. TIMING: the empty case overrides the
+    // 1-bit VERDICT after the compare instead of muxing all KW bits of k_b in
+    // front of the carry chain (this compare sits in the peel RMW loop, the
+    // binding path family). Equivalent to `k_new >= all-ones` because k_new can
+    // never BE all-ones: nw is a sign-stripped finite invW <= 31'h7F7FFFFF.
+    wire gt_b    = validB && (k_new >= k_b);
     wire gt_ref  = (k_new >  k_ref);    // pt=0: !gt_ref  == (k_new <= k_ref)
     wire lt_ref  = (k_new <  k_ref);    // pt=1: !lt_ref  == (k_new >= k_ref)
 

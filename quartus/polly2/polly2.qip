@@ -6,8 +6,10 @@
 # module instantiations (not filenames) transitively from peel_core.sv over the
 # reorganized rtl/ tree, PLUS the polly2-de10nano board-wrapper layer that
 # sys_top instantiates (simplex_pvr_top / spg / pvr_mmio / hps_lw_bridge /
-# clk_mux_gf - the soft mux is load-bearing: no hard clkctrl 4:1 exists on
-# this device, clkctrl outputs cannot cascade into clkctrl inputs).
+# clk_mux_gf - RETIRED 2026-08-20: clk_sys now comes from a hard 2:1
+# altclkctrl on inclk2/3 (75 / 112.5); the soft mux stays in the file list
+# but is instantiated nowhere. No hard 4:1 exists on this device - clkctrl
+# outputs cannot cascade into clkctrl inputs).
 #
 # Paths are relative to the Quartus build dir (quartus/mister_top/):
 #   ../../polly2-core/rtl/     - the reusable render core
