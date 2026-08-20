@@ -138,7 +138,7 @@ static inline int      polly2_working(void)     { return polly2_status() & POLLY
 static inline int      polly2_done(void)        { return (polly2_status() & POLLY2_STATUS_DONE) != 0; }
 static inline uint32_t polly2_frame_cycles(void){ return polly2_mmio_rd(POLLY2_MMIO_CYCLES); }
 
-/* 0/1 = 75 MHz, 2/3 = 112.5 MHz (bit [1] decides). Switching pulses the
+/* 0/1 = 112.5 MHz, 2/3 = 131.25 MHz (bit [1] decides). Switching pulses the
  * core reset window; leave the MMIO alone for ~2us afterwards and re-upload
  * nothing - registers and VRAM base survive. */
 static inline void polly2_set_clock(unsigned sel)
@@ -150,8 +150,10 @@ static inline void polly2_set_clock(unsigned sel)
 /* current core clock in Hz, from the CLK register readback */
 static inline uint32_t polly2_clock_hz(void)
 {
-	static const uint32_t hz[4] = { 75000000u, 75000000u,
-	                                112500000u, 112500000u };
+	/* real PLL outputs, not the IP-GUI targets: VCO 1574.999984 MHz,
+	 * C0 /14 and C1 /12 (plls/pll.qip actuals) */
+	static const uint32_t hz[4] = { 112499999u, 112499999u,
+	                                131249999u, 131249999u };
 	return hz[polly2_mmio_rd(POLLY2_MMIO_CLK) & 3u];
 }
 
