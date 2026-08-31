@@ -23,9 +23,9 @@
 //                            MMIO traffic for ~2us after writing.
 //   0xFF202018  AUDIO_DATA   W: push one stereo sample ([15:0] left,
 //                            [31:16] right, signed 16-bit PCM) into the
-//                            2048-entry audio FIFO (audio_i2s -> HDMI I2S).
+//                            2048-entry audio sample FIFO.
 //                            While the FIFO is full, waitrequest stalls the
-//                            write (the HPS store blocks) until the I2S side
+//                            write (the HPS store blocks) until the audio side
 //                            frees a slot - up to ~21us at 48 kHz.
 //                            R: [11:0] samples currently queued (0..2048).
 //   0xFF20201C  REVISION     RO. MMIO interface revision. 0 = pre-audio

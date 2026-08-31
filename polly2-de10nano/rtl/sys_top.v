@@ -5,25 +5,22 @@
 //  Written from scratch - NO MiSTer framework components. Contents:
 //
 //   - HPS plumbing: sysmem_lite (f2sdram atom wrapper: ram1/ram2/vbuf),
-//     h2f gp registers (loader reset handshake), HDMI I2C pass-through
-//     (minicast setup_hdmi programs the ADV7513), f2h interrupts (IRQ0
-//     vsync, IRQ1 render done), lightweight-bridge MMIO (hps_lw_bridge +
+//     h2f gp registers (loader reset handshake), f2h interrupts (IRQ0 field
+//     sync, IRQ1 render done), and lightweight-bridge MMIO (hps_lw_bridge +
 //     pvr_mmio @ 0xFF200000).
 //   - Core clock: rtl/pll (4 fixed outputs 75/90/100/112.5 MHz) through the
 //     soft glitch-free mux (clk_mux_gf), selected by the MMIO CLK register;
 //     reset window held around a switch.
 //   - peel_core (simplex_pvr_top): registers/GO/RESET/VRAM base via MMIO,
 //     render reads on ram1, framebuffer writes on ram2.
-//   - Display: pll_hdmi (fixed 148.5 MHz) + SPG (1080p raster, 640x480
-//     split-VRAM FB doubled to 1280x960, vbuf port) -> TX register stage ->
-//     ADV7513. No OSD, no scaler, no analog output.
-//   - Audio: pll_audio (24.576 MHz) + audio_i2s: 2048-entry sample FIFO
-//     fed from the MMIO AUDIO_DATA register (blocking when full), drained
-//     at 48 kHz onto the ADV7513's I2S input (16-bit, standard I2S).
+//   - Display: pll_video (27 MHz) + spg_sd, producing native
+//     480i/240p/576i/288p RGBs on the MiSTer analog pins.
+//   - Audio: pll_audio (24.576 MHz) + audio_pcm: 2048-entry sample FIFO
+//     feeding independent stereo sigma-delta DACs at 48 kHz.
 //
-//  The ARM (minicast) owns: bitstream load + reset release (gp[31:30],
-//  01 -> 00 -> 10), ADV7513 init, VRAM loading via /dev/mem, and the PVR
-//  MMIO map (see rtl/pvr_mmio.sv / minicast/pvr_mmio.h).
+//  The ARM (minicast) owns bitstream load + reset release (gp[31:30],
+//  01 -> 00 -> 10), VRAM loading via /dev/mem, and the PVR MMIO map
+//  (see rtl/pvr_mmio.sv / minicast/pvr_mmio.h).
 //
 //============================================================================
 
@@ -136,16 +133,35 @@ assign SDRAM_nCS  = 1'b1;
 assign SDRAM_CLK  = 1'b0;
 assign SDRAM_CKE  = 1'b0;
 
-assign VGA_R  = 6'bZZZZZZ;
-assign VGA_G  = 6'bZZZZZZ;
-assign VGA_B  = 6'bZZZZZZ;
-assign VGA_VS = 1'bZ;
-assign VGA_HS = 1'bZ;       // must stay Z: readable as SD detect on IO boards
+wire [7:0] analog_r, analog_g, analog_b;
+wire       analog_csync, analog_vsync;
+wire       analog_audio_l, analog_audio_r;
 
-assign AUDIO_L     = 1'bZ;
-assign AUDIO_R     = 1'bZ;
+// VGA_EN is active-low on MiSTer analogue boards. VGA_HS returns to high
+// impedance while disabled because the pin doubles as secondary-SD detect.
+assign VGA_R  = VGA_EN ? 6'bZZZZZZ : analog_r[7:2];
+assign VGA_G  = VGA_EN ? 6'bZZZZZZ : analog_g[7:2];
+assign VGA_B  = VGA_EN ? 6'bZZZZZZ : analog_b[7:2];
+assign VGA_HS = VGA_EN ? 1'bZ : ~analog_csync;
+assign VGA_VS = VGA_EN ? 1'bZ : 1'b1;
+
+assign AUDIO_L     = analog_audio_l;
+assign AUDIO_R     = analog_audio_r;
 assign AUDIO_SPDIF = 1'bZ;
 assign SDCD_SPDIF  = 1'bZ;
+
+// The ADV7513 is deliberately idle in this analogue-only build.
+assign HDMI_I2C_SCL = 1'bZ;
+assign HDMI_I2C_SDA = 1'bZ;
+assign HDMI_MCLK    = 1'b0;
+assign HDMI_SCLK    = 1'b0;
+assign HDMI_LRCLK   = 1'b0;
+assign HDMI_I2S     = 1'b0;
+assign HDMI_TX_CLK  = 1'b0;
+assign HDMI_TX_DE   = 1'b0;
+assign HDMI_TX_D    = 24'd0;
+assign HDMI_TX_HS   = 1'b0;
+assign HDMI_TX_VS   = 1'b0;
 
 assign SDIO_DAT = 4'bZZZZ;
 assign SDIO_CMD = 1'bZ;
@@ -168,7 +184,7 @@ assign LED_HDD   = 1'bZ;
 assign LED_POWER = 1'bZ;
 
 // board LEDs: liveness + bring-up status
-assign LED = {2'd0, pvr_mmio_rst, pvr_busy_led, ~pll_locked, spg_underrun, hb_hdmi, hb_sys};
+assign LED = {2'd0, pvr_mmio_rst, pvr_busy_led, ~pll_locked, spg_underrun, hb_video, hb_sys};
 
 //////////////////////////////////////////////////////////////////////////
 // HPS general-purpose registers: only the loader's core-reset handshake.
@@ -272,33 +288,16 @@ sysmem_lite sysmem
 	.vbuf_read(vbuf_read)
 );
 
-//////////////////////////////////////////////////////////////////////////
-// HDMI I2C pass-through: the HPS hard I2C owns the bus; minicast's
-// setup_hdmi programs the ADV7513 through it.
-//////////////////////////////////////////////////////////////////////////
-
-wire hdmi_scl_en, hdmi_sda_en;
-assign HDMI_I2C_SCL = hdmi_scl_en ? 1'b0 : 1'bZ;
-assign HDMI_I2C_SDA = hdmi_sda_en ? 1'b0 : 1'bZ;
-
-cyclonev_hps_interface_peripheral_i2c hdmi_i2c
-(
-	.out_clk(hdmi_scl_en),
-	.scl(HDMI_I2C_SCL),
-	.out_data(hdmi_sda_en),
-	.sda(HDMI_I2C_SDA)
-);
-
 // f2h interrupts to the ARM GIC. On Cyclone V f2h_irq[n] is GIC interrupt
 // ID 72+n (SPI 40+n in device-tree terms):
-//   IRQ0 (GIC ID 72): HDMI vsync, the raw VS line
+//   IRQ0 (GIC ID 72): analog field-sync indication
 //   IRQ1 (GIC ID 73): PVR render done, a stretched pulse (see the
 //                     pvr_render_irq block below); driver/polly2 claims it
 //                     edge-triggered and forwards it to userspace as a
 //                     signal via /dev/polly2
 cyclonev_hps_interface_interrupts interrupts
 (
-	.irq({62'd0, pvr_render_irq, HDMI_TX_VS})
+	.irq({62'd0, pvr_render_irq, analog_vsync})
 );
 
 //////////////////////////////////////////////////////////////////////////
@@ -511,72 +510,62 @@ irq_stretch #(.CYCLES(64)) render_irq_stretch
 );
 
 //////////////////////////////////////////////////////////////////////////
-// Display: pll_hdmi (fixed 148.5 MHz) + SPG -> TX register stage -> pins.
-// FB is split-VRAM 16bpp RGB565: DC 32-bit-view word W at DDR byte W*8,
-// half selected by SOF bit 22.
+// Native analogue RGBs display. HDMI remains parked in this build.
 //////////////////////////////////////////////////////////////////////////
 
-wire hdmi_clk_out;
-pll_hdmi pll_hdmi
+wire clk_video, video_locked;
+pll_video pll_video
 (
 	.refclk(FPGA_CLK1_50),
 	.rst(1'b0),
-	.reconfig_to_pll(64'd0),   // fixed 148.5 MHz (1080p60), no runtime reconfig
+	.reconfig_to_pll(64'd0),
 	.reconfig_from_pll(),
-	.outclk_0(hdmi_clk_out)
+	.outclk_0(clk_video),
+	.locked(video_locked)
 );
 
-wire clk_hdmi = hdmi_clk_out;
-
-// absolute DDR byte address of the displayed frame, straight from the core's
-// FB_R_SOF1 display register (side layout: 8 bytes per DC 32-bit word; SOF
-// bit 22 is the 64-bit-half select). spg re-samples this per LINE (through
-// its stability filter), so mid-frame SOF writes land on the next line.
-wire [31:0] fb_disp_base = {pvr_vram_top, 24'd0} + {9'd0, spvr_fb_r_sof1[21:2], 3'd0};
-
-// FB_R_CTRL / VO_CONTROL display fields (quasi-static: spg latches them
-// per frame). FB-view bytes per line: (640 or, with VO_CONTROL
-// pixel_double, 320) pixels x 2/2/3/4 bytes by fb_depth.
-wire  [1:0] fb_disp_depth  = spvr_fb_r_ctrl[3:2];
+wire [31:0] fb_disp_base1 = {pvr_vram_top, 24'd0} +
+	                         {9'd0, spvr_fb_r_sof1[21:2], 3'd0};
+wire [31:0] fb_disp_base2 = {pvr_vram_top, 24'd0} +
+	                         {9'd0, spvr_fb_r_sof2[21:2], 3'd0};
+wire [1:0]  fb_disp_depth = spvr_fb_r_ctrl[3:2];
 wire        fb_disp_pixdbl = spvr_vo_control[8];
-
-// Line doubling (spg displays a half-height 640x240 source at 4x vertically):
-// either the game asks for it outright (FB_R_CTRL.fb_line_double), or the
-// DISPLAY MODE is 240p - a non-interlaced TV mode, i.e. no VGA pixel clock.
-// That second test is minicast's own resolution rule (spg.cpp CalculateSync:
-// non-interlaced with FB_R_CTRL.vclk_div renders full height, non-interlaced
-// without it renders half), so it matches the height the emulator produces.
-wire        fb_disp_vga    = spvr_fb_r_ctrl[23];    // FB_R_CTRL.vclk_div (27 MHz)
-wire        fb_disp_ilace  = spvr_spg_control[4];   // SPG_CONTROL.interlace (480i)
-wire        fb_disp_linedbl = spvr_fb_r_ctrl[1] || (!fb_disp_vga && !fb_disp_ilace);
 wire [13:0] fb_disp_str640 = (fb_disp_depth == 2'd2) ? 14'd1920
-                           : (fb_disp_depth == 2'd3) ? 14'd2560
-                                                     : 14'd1280;
-wire [13:0] fb_disp_stride = fb_disp_pixdbl ? {1'b0, fb_disp_str640[13:1]}
-                                            : fb_disp_str640;
+	                          : (fb_disp_depth == 2'd3) ? 14'd2560
+	                                                    : 14'd1280;
+wire [13:0] fb_disp_stride = fb_disp_pixdbl
+	                          ? {1'b0, fb_disp_str640[13:1]}
+	                          : fb_disp_str640;
 
-wire [23:0] hdmi_data;
-wire        hdmi_hs, hdmi_vs, hdmi_de, hdmi_vbl, hdmi_brd;
-wire        spg_underrun;
+// SPG_CONTROL: interlace bit 4, NTSC bit 6, PAL bit 7.
+// A full-resolution/VGA source is converted to interlace. A non-interlaced
+// low-resolution source remains genuine 240p/288p at the analogue pins.
+wire dc_native_interlace = spvr_spg_control[4];
+wire dc_pal = spvr_spg_control[7];
+wire dc_output_interlace = dc_native_interlace | spvr_fb_r_ctrl[23];
 
-spg spg
+wire analog_de, analog_vblank, analog_border, analog_field;
+wire [9:0] analog_src_line;
+wire analog_vblank_in, analog_vblank_out;
+wire spg_underrun;
+
+spg_sd spg_sd
 (
-	.clk         (clk_hdmi),
-	.reset       (reset_req),
-
-	.fb_base     (fb_disp_base),
+	.clk         (clk_video),
+	.reset       (reset_req | ~video_locked),
+	.fb_base1    (fb_disp_base1),
+	.fb_base2    (fb_disp_base2),
 	.fb_stride   (fb_disp_stride),
-	.fb_line_dbl (fb_disp_linedbl),      // 240p source: 4x vertical
-	.fb_pix_dbl  (fb_disp_pixdbl),       // VO_CONTROL.pixel_double (320-wide)
+	.fb_pix_dbl  (fb_disp_pixdbl),
 	.fb_split    (1'b1),
-	.fb_disp_half(spvr_fb_r_sof1[22]),
+	.fb_disp_half1(spvr_fb_r_sof1[22]),
+	.fb_disp_half2(spvr_fb_r_sof2[22]),
 	.fb_depth    (fb_disp_depth),
 	.fb_concat   (spvr_fb_r_ctrl[6:4]),
 	.fb_enable   (spvr_fb_r_ctrl[0]),
-
-	.fb_top_base (fb_top_base),
-	.fb_bot_base (fb_bot_base),
-
+	.mode_pal    (dc_pal),
+	.mode_interlace(dc_output_interlace),
+	.mode_native_interlace(dc_native_interlace),
 	.avl_clk          (clk_100m),
 	.avl_read         (vbuf_read),
 	.avl_address      (vbuf_address),
@@ -584,107 +573,63 @@ spg spg
 	.avl_waitrequest  (vbuf_waitrequest),
 	.avl_readdata     (vbuf_readdata),
 	.avl_readdatavalid(vbuf_readdatavalid),
-
-	.red   (hdmi_data[23:16]),
-	.green (hdmi_data[15:8]),
-	.blue  (hdmi_data[7:0]),
-	.hsync (hdmi_hs),
-	.vsync (hdmi_vs),
-	.de    (hdmi_de),
-	.vblank(hdmi_vbl),
-	.border(hdmi_brd),
-
-	.src_line  (),
-	.vblank_in (),
-	.vblank_out(),
-	.underrun  (spg_underrun)
-);
-
-// 2-flop IO timing stage to the ADV7513
-reg        hdmi_out_hs, hdmi_out_vs, hdmi_out_de;
-reg [23:0] hdmi_out_d;
-
-always @(posedge clk_hdmi) begin
-	reg hs, vs, de;
-	reg [23:0] d;
-
-	hs <= hdmi_hs;
-	vs <= hdmi_vs;
-	de <= hdmi_de;
-	d  <= hdmi_data;
-
-	hdmi_out_hs <= hs;
-	hdmi_out_vs <= vs;
-	hdmi_out_de <= de;
-	hdmi_out_d  <= d;
-end
-
-assign HDMI_TX_HS = hdmi_out_hs;
-assign HDMI_TX_VS = hdmi_out_vs;
-assign HDMI_TX_DE = hdmi_out_de;
-assign HDMI_TX_D  = hdmi_out_d;
-
-altddio_out
-#(
-	.extend_oe_disable("OFF"),
-	.intended_device_family("Cyclone V"),
-	.invert_output("OFF"),
-	.lpm_hint("UNUSED"),
-	.lpm_type("altddio_out"),
-	.oe_reg("UNREGISTERED"),
-	.power_up_high("OFF"),
-	.width(1)
-)
-hdmiclk_ddr
-(
-	.datain_h(1'b0),
-	.datain_l(1'b1),
-	.outclock(clk_hdmi),
-	.dataout(HDMI_TX_CLK),
-	.aclr(1'b0),
-	.aset(1'b0),
-	.oe(1'b1),
-	.outclocken(1'b1),
-	.sclr(1'b0),
-	.sset(1'b0)
+	.red         (analog_r),
+	.green       (analog_g),
+	.blue        (analog_b),
+	.hsync       (analog_csync),
+	.vsync       (analog_vsync),
+	.de          (analog_de),
+	.vblank      (analog_vblank),
+	.border      (analog_border),
+	.field       (analog_field),
+	.src_line    (analog_src_line),
+	.vblank_in   (analog_vblank_in),
+	.vblank_out  (analog_vblank_out),
+	.underrun    (spg_underrun)
 );
 
 //////////////////////////////////////////////////////////////////////////
-// Audio: MMIO AUDIO_DATA -> 2048-entry async FIFO -> I2S @ 48 kHz.
-// setup_hdmi configures the ADV7513 for 48 kHz 16-bit standard I2S;
-// audio_i2s generates the same clocking the old silent divider did
-// (24.576 MHz MCLK, /8 = 3.072 MHz bclk (64fs), /512 = 48 kHz LR) and
-// plays silence while the FIFO is empty.
+// Audio: MMIO AUDIO_DATA -> async FIFO -> 48 kHz signed stereo PCM ->
+// independent first-order pulse-density DACs at 24.576 MHz.
 //////////////////////////////////////////////////////////////////////////
 
 wire clk_audio;
 pll_audio pll_audio
 (
 	.refclk(FPGA_CLK3_50),
-	.rst(0),
+	.rst(1'b0),
 	.outclk_0(clk_audio)
 );
 
-wire aud_sclk, aud_lrclk, aud_sdata;
+wire [15:0] aud_left, aud_right;
 
-audio_i2s audio_i2s
+audio_pcm audio_pcm
 (
+	.reset(reset_req),
 	.wclk (clk_sys),
 	.wr   (aud_fifo_wr),
 	.wdata(aud_fifo_wdata),
 	.full (aud_fifo_full),
 	.level(aud_fifo_level),
-
 	.aclk (clk_audio),
-	.sclk (aud_sclk),
-	.lrclk(aud_lrclk),
-	.sdata(aud_sdata)
+	.left (aud_left),
+	.right(aud_right),
+	.sample_strobe()
 );
 
-assign HDMI_MCLK  = clk_audio;
-assign HDMI_SCLK  = aud_sclk;
-assign HDMI_LRCLK = aud_lrclk;
-assign HDMI_I2S   = aud_sdata;
+sigma_delta_dac dac_left
+(
+	.clk (clk_audio),
+	.din (aud_left ^ 16'h8000),
+	.dout(analog_audio_l)
+);
+
+sigma_delta_dac dac_right
+(
+	.clk (clk_audio),
+	.din (aud_right ^ 16'h8000),
+	.dout(analog_audio_r)
+);
 
 //////////////////////////////////////////////////////////////////////////
 // Heartbeats
@@ -692,14 +637,14 @@ assign HDMI_I2S   = aud_sdata;
 
 reg [25:0] hb_sys_cnt = 26'd0;
 always @(posedge clk_sys) hb_sys_cnt <= hb_sys_cnt + 26'd1;
-wire hb_sys = hb_sys_cnt[25];            // ~0.6-0.9 Hz depending on clk_sys
+wire hb_sys = hb_sys_cnt[25];
 
 reg [5:0] hb_vs_cnt = 6'd0;
 reg       vs_q = 1'b0;
-always @(posedge clk_hdmi) begin
-	vs_q <= hdmi_vs;
-	if (hdmi_vs & ~vs_q) hb_vs_cnt <= hb_vs_cnt + 6'd1;
+always @(posedge clk_video) begin
+	vs_q <= analog_vsync;
+	if (analog_vsync & ~vs_q) hb_vs_cnt <= hb_vs_cnt + 6'd1;
 end
-wire hb_hdmi = hb_vs_cnt[5];             // ~0.94 Hz when the raster runs
+wire hb_video = hb_vs_cnt[5];
 
 endmodule

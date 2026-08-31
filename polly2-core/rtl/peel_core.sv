@@ -777,10 +777,12 @@ module peel_core import tsp_pkg::*; #(
     localparam integer TI_AW = $clog2(TI_COPIES);   // copy-index width (2 for 4 copies)
     // htile/tsp_tag advance by plain +1 and rely on the binary wrap, so the count
     // must be a power of two (and at least 2, or producer and consumer would alias).
+`ifndef SYNTHESIS
     generate
       if ((TI_COPIES < 2) || (TI_COPIES & (TI_COPIES - 1)))
           $error("peel_core: TI_COPIES must be a power of two >= 2");
     endgenerate
+`endif
     reg [TI_AW-1:0] htile;               // ISP u_taginvw producer copy (per pass)
     reg [TI_AW-1:0] tsp_tag;             // TSP u_taginvw consumer copy (per pass)
     reg             tsp_col;             // TSP u_col blend half (per tile)

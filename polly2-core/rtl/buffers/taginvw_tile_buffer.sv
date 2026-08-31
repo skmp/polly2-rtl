@@ -102,10 +102,12 @@ module taginvw_tile_buffer import tsp_pkg::*; #(
     localparam integer TAW       = 10 - BANK_BITS;   // in-tile addr width (7 / 8)
     localparam integer CB        = (COPIES > 1) ? $clog2(COPIES) : 0;  // copy-select bits
     localparam integer AW        = CB + TAW;         // per-bank addr width
+`ifndef SYNTHESIS
     generate
       if (COPIES & (COPIES - 1))
           $error("taginvw_tile_buffer: COPIES must be a power of two");
     endgenerate
+`endif
     localparam integer TW_INVW   = 0;    // [30:0] depthBufferA (invW, sign-stripped)
     localparam integer TW_TAG    = 31;   // [31:0] tagBufferA
     localparam integer TW_VALID  = 63;   // [0]    tagStatus.valid
