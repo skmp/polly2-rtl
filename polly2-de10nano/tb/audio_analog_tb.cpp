@@ -17,6 +17,38 @@ static uint64_t next_sys = SYS_HALF, next_aud = AUD_HALF, aud_rises = 0;
 
 struct Frame { int16_t l, r; };
 static std::vector<Frame> frames;
+static std::vector<Frame> i2s_frames;
+static std::vector<int> i2s_bits;
+static int i2s_lr = -1, previous_i2s_sclk = 0;
+static bool i2s_have_left = false;
+static int16_t i2s_left = 0;
+
+static void finish_i2s_half() {
+    if (i2s_lr < 0) return;
+    if (i2s_bits.size() != 32) return; // ignore the partial half after reset
+    uint16_t value = 0;
+    for (int i = 0; i < 16; ++i)
+        value = (uint16_t)((value << 1) | i2s_bits[1 + i]);
+    if (!i2s_lr) {
+        i2s_left = (int16_t)value;
+        i2s_have_left = true;
+    } else if (i2s_have_left) {
+        i2s_frames.push_back({i2s_left, (int16_t)value});
+        i2s_have_left = false;
+    }
+}
+
+static void monitor_i2s() {
+    if (dut->i2s_sclk && !previous_i2s_sclk) {
+        if (dut->i2s_lrclk != i2s_lr) {
+            finish_i2s_half();
+            i2s_lr = dut->i2s_lrclk;
+            i2s_bits.clear();
+        }
+        i2s_bits.push_back(dut->i2s_sdata);
+    }
+    previous_i2s_sclk = dut->i2s_sclk;
+}
 
 static bool half_step() {
     bool sys_rise = false, aud_rise = false;
@@ -28,6 +60,7 @@ static bool half_step() {
         dut->clk_audio ^= 1; aud_rise = dut->clk_audio; next_aud += AUD_HALF;
     }
     dut->eval();
+    monitor_i2s();
     if (aud_rise) {
         aud_rises++;
         if (dut->sample_strobe)
@@ -75,6 +108,12 @@ static size_t find_frame(size_t at, Frame f) {
     return at;
 }
 
+static size_t find_i2s_frame(size_t at, Frame f) {
+    while (at < i2s_frames.size() &&
+           (i2s_frames[at].l != f.l || i2s_frames[at].r != f.r)) at++;
+    return at;
+}
+
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     dut = new Vaudio_analog_tb_top;
@@ -91,6 +130,8 @@ int main(int argc, char** argv) {
     run_frames(3);
     for (const auto& f : frames)
         if (f.l || f.r) { std::printf("idle not signed silence\n"); errors++; }
+    for (const auto& f : i2s_frames)
+        if (f.l || f.r) { std::printf("idle I2S not silent\n"); errors++; }
     if (avm_read(AUDIO_DATA) != 0) { std::printf("idle level != 0\n"); errors++; }
 
     uint32_t rev = avm_read(REVISION);
@@ -119,6 +160,13 @@ int main(int argc, char** argv) {
     if (frames.back().l != batch[7].l || frames.back().r != batch[7].r) {
         std::printf("last sample not repeated\n"); errors++;
     }
+    size_t bii = find_i2s_frame(0, batch[0]);
+    for (size_t k = 0; k < sizeof(batch)/sizeof(batch[0]); ++k, ++bii) {
+        if (bii >= i2s_frames.size() || i2s_frames[bii].l != batch[k].l ||
+            i2s_frames[bii].r != batch[k].r) {
+            std::printf("I2S batch frame %zu wrong\n", k); errors++; break;
+        }
+    }
 
     const int N = 2100;
     size_t drain_start = frames.size();
@@ -145,6 +193,14 @@ int main(int argc, char** argv) {
             std::printf("drain frame %d wrong\n", k); errors++; break;
         }
     }
+    size_t i2s_di = find_i2s_frame(bii, first);
+    for (int k = 0; k < N; ++k, ++i2s_di) {
+        int16_t l = (int16_t)(k + 1), r = (int16_t)~(k + 1);
+        if (i2s_di >= i2s_frames.size() || i2s_frames[i2s_di].l != l ||
+            i2s_frames[i2s_di].r != r) {
+            std::printf("I2S drain frame %d wrong\n", k); errors++; break;
+        }
+    }
     if (avm_read(AUDIO_DATA) != 0) { std::printf("level after drain != 0\n"); errors++; }
 
     const int16_t last_l = N, last_r = (int16_t)~N;
@@ -169,6 +225,8 @@ int main(int argc, char** argv) {
 	if (dut->left || dut->right) {
 		std::printf("reset did not restore signed silence\n"); errors++;
 	}
+	i2s_frames.clear(); i2s_bits.clear(); i2s_lr = -1;
+	i2s_have_left = false; previous_i2s_sclk = dut->i2s_sclk;
 	dut->reset = 0;
 	int silence_ones_l = 0, silence_ones_r = 0;
 	target = aud_rises + 65536;
@@ -184,6 +242,9 @@ int main(int argc, char** argv) {
 		std::printf("reset silence PDM density L=%d R=%d\n",
 		            silence_ones_l, silence_ones_r);
 		errors++;
+	}
+	if (i2s_frames.empty() || i2s_frames.back().l || i2s_frames.back().r) {
+		std::printf("reset I2S did not restore silence\n"); errors++;
 	}
 
     std::printf("frames=%zu stalled=%d max=%d pdm=%d/%d %s\n",

@@ -110,6 +110,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/sys_top
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/simplex_pvr_top.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/spg.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/spg_sd.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/vbuf_arbiter.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/pvr_mmio.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/hps_lw_bridge.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/audio_i2s.sv
@@ -129,5 +130,6 @@ set_global_assignment -name SYSTEMVERILOG_FILE ../../mister/sysmem.sv
 
 # ---- plls ----
 set_global_assignment -name QIP_FILE ../../polly2-de10nano/plls/pll.qip
+set_global_assignment -name QIP_FILE ../../polly2-de10nano/plls/pll_hdmi.qip
 set_global_assignment -name VERILOG_FILE ../../polly2-de10nano/plls/pll_video.v
 set_global_assignment -name QIP_FILE ../../polly2-de10nano/plls/pll_audio.qip

@@ -5,7 +5,9 @@
 //
 // A free-running /512 divider of the 24.576 MHz audio clock consumes one
 // sample at 48 kHz.  The current signed PCM channels are exposed directly
-// for the board-level sigma-delta DACs.
+// for the board-level sigma-delta DACs and serialized as standard 16-bit
+// stereo I2S for the ADV7513.  Both outputs therefore consume the same FIFO
+// sample at exactly the same frame boundary.
 //
 // One sample is popped per 48 kHz frame; an empty FIFO plays
 // last-sample repeat. Reset flushes the FIFO and restores signed-zero silence.
@@ -32,7 +34,10 @@ module audio_pcm
 	input  wire        aclk,
 	output wire [15:0] left,
 	output wire [15:0] right,
-	output reg         sample_strobe = 1'b0
+	output reg         sample_strobe = 1'b0,
+	output wire        i2s_sclk,
+	output wire        i2s_lrclk,
+	output reg         i2s_sdata = 1'b0
 );
 
 function [11:0] bin2gray(input [11:0] b);
@@ -97,11 +102,22 @@ wire [11:0] rbin_next = rbin + 12'd1;
 reg [8:0] adiv = 9'd0;
 wire [8:0] adiv_next = adiv + 9'd1;
 
+assign i2s_sclk  = adiv[2];
+assign i2s_lrclk = adiv[8];
+
 reg [31:0] rdata_q = 32'd0;   // popped RAM word
 reg        got     = 1'b0;    // rdata_q valid for the upcoming frame
 reg [31:0] sample  = 32'd0;
 assign left  = sample[15:0];
 assign right = sample[31:16];
+
+// Standard I2S: LRCLK low is left, MSB first, and slot zero is the one-bit
+// delay after each LRCLK edge.  Data changes on SCLK falling edges so the
+// ADV7513 samples it on rising edges.
+wire [4:0] i2s_slot = adiv_next[7:3];
+wire       i2s_half = adiv_next[8];
+wire [15:0] i2s_channel = i2s_half ? sample[31:16] : sample[15:0];
+wire  [4:0] i2s_bit_index = 5'd16 - i2s_slot;
 
 always @(posedge aclk) begin
 	if (reset) begin
@@ -114,6 +130,7 @@ always @(posedge aclk) begin
 		got           <= 1'b0;
 		sample        <= 32'd0;
 		sample_strobe <= 1'b0;
+		i2s_sdata     <= 1'b0;
 	end else begin
 		sample_strobe <= 1'b0;
 		wgray_a1 <= wgray;
@@ -138,6 +155,10 @@ always @(posedge aclk) begin
 			got <= 1'b0;
 			sample_strobe <= 1'b1;
 		end
+
+		if (adiv[2:0] == 3'b111)
+			i2s_sdata <= (i2s_slot >= 5'd1 && i2s_slot <= 5'd16)
+			             ? i2s_channel[i2s_bit_index[3:0]] : 1'b0;
 	end
 end
 

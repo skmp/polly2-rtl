@@ -8,8 +8,22 @@ create_clock -period "50.0 MHz"  [get_ports FPGA_CLK1_50]
 create_clock -period "50.0 MHz"  [get_ports FPGA_CLK2_50]
 create_clock -period "50.0 MHz"  [get_ports FPGA_CLK3_50]
 create_clock -period "100.0 MHz" [get_pins -compatibility_mode *|h2f_user0_clk]
+create_clock -period "10.0 MHz"  [get_pins -compatibility_mode hdmi_i2c|out_clk] -name hdmi_sck
 
 derive_pll_clocks
+
+# Quartus 17 inconsistently preserves the auto-derived name of the fractional
+# HDMI output clock between fitting seeds. Replace it with one deterministic
+# 148.5 MHz clock on the C0 counter pin so both fitter and post-fit TimeQuest
+# always analyze the HDMI pixel pipeline.
+set hdmi_derived_clks [get_clocks {pll_hdmi|pll_hdmi_inst|altera_pll_i|*[0].*|divclk}]
+if {[get_collection_size $hdmi_derived_clks] > 0} {
+    remove_clock $hdmi_derived_clks
+}
+create_clock -period 6.734006734 \
+    [get_pins -compatibility_mode {pll_hdmi|pll_hdmi_inst|altera_pll_i|*[0].*|divclk}] \
+    -name clk_hdmi
+
 derive_clock_uncertainty
 
 # ---- Decouple the clock domains (from sys/sys_top.sdc) ----
@@ -20,9 +34,11 @@ derive_clock_uncertainty
 # ~0.07 ns worst-case - unmeetable paths that wreck fitting and routing.
 set_clock_groups -exclusive \
     -group [get_clocks {pll|pll_inst|altera_pll_i|*[*].*|divclk}] \
+    -group [get_clocks {clk_hdmi}] \
     -group [get_clocks {pll_video|video_pll|auto_generated|generic_pll1~PLL_OUTPUT_COUNTER|divclk}] \
     -group [get_clocks {pll_audio|pll_audio_inst|altera_pll_i|*[0].*|divclk}] \
     -group [get_clocks {*|h2f_user0_clk}] \
+    -group [get_clocks {hdmi_sck}] \
     -group [get_clocks {FPGA_CLK1_50}] \
     -group [get_clocks {FPGA_CLK2_50}] \
     -group [get_clocks {FPGA_CLK3_50}]

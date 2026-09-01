@@ -21,6 +21,9 @@ module audio_analog_tb_top
 	output wire [15:0] left,
 	output wire [15:0] right,
 	output wire        sample_strobe,
+	output wire        i2s_sclk,
+	output wire        i2s_lrclk,
+	output wire        i2s_sdata,
 	output wire        dac_l,
 	output wire        dac_r
 );
@@ -73,7 +76,10 @@ audio_pcm audio_pcm
 	.aclk (clk_audio),
 	.left (left),
 	.right(right),
-	.sample_strobe(sample_strobe)
+	.sample_strobe(sample_strobe),
+	.i2s_sclk (i2s_sclk),
+	.i2s_lrclk(i2s_lrclk),
+	.i2s_sdata(i2s_sdata)
 );
 
 sigma_delta_dac dl(.clk(clk_audio), .din(left ^ 16'h8000), .dout(dac_l));

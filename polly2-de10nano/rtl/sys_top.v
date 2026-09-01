@@ -14,9 +14,11 @@
 //   - peel_core (simplex_pvr_top): registers/GO/RESET/VRAM base via MMIO,
 //     render reads on ram1, framebuffer writes on ram2.
 //   - Display: pll_video (27 MHz) + spg_sd, producing native
-//     480i/240p/576i/288p RGBs on the MiSTer analog pins.
+//     480i/240p/576i/288p RGBs on the MiSTer analog pins, alongside the
+//     original pll_hdmi (148.5 MHz) + spg 1080p HDMI scanout. A burst-level
+//     arbiter shares the HPS framebuffer read port between both consumers.
 //   - Audio: pll_audio (24.576 MHz) + audio_pcm: 2048-entry sample FIFO
-//     feeding independent stereo sigma-delta DACs at 48 kHz.
+//     feeding independent stereo sigma-delta DACs and HDMI I2S at 48 kHz.
 //
 //  The ARM (minicast) owns bitstream load + reset release (gp[31:30],
 //  01 -> 00 -> 10), VRAM loading via /dev/mem, and the PVR MMIO map
@@ -150,19 +152,6 @@ assign AUDIO_R     = analog_audio_r;
 assign AUDIO_SPDIF = 1'bZ;
 assign SDCD_SPDIF  = 1'bZ;
 
-// The ADV7513 is deliberately idle in this analogue-only build.
-assign HDMI_I2C_SCL = 1'bZ;
-assign HDMI_I2C_SDA = 1'bZ;
-assign HDMI_MCLK    = 1'b0;
-assign HDMI_SCLK    = 1'b0;
-assign HDMI_LRCLK   = 1'b0;
-assign HDMI_I2S     = 1'b0;
-assign HDMI_TX_CLK  = 1'b0;
-assign HDMI_TX_DE   = 1'b0;
-assign HDMI_TX_D    = 24'd0;
-assign HDMI_TX_HS   = 1'b0;
-assign HDMI_TX_VS   = 1'b0;
-
 assign SDIO_DAT = 4'bZZZZ;
 assign SDIO_CMD = 1'bZ;
 assign SDIO_CLK = 1'bZ;
@@ -184,7 +173,8 @@ assign LED_HDD   = 1'bZ;
 assign LED_POWER = 1'bZ;
 
 // board LEDs: liveness + bring-up status
-assign LED = {2'd0, pvr_mmio_rst, pvr_busy_led, ~pll_locked, spg_underrun, hb_video, hb_sys};
+assign LED = {2'd0, pvr_mmio_rst, pvr_busy_led, ~pll_locked,
+              analog_underrun | hdmi_underrun, hb_video, hb_sys};
 
 //////////////////////////////////////////////////////////////////////////
 // HPS general-purpose registers: only the loader's core-reset handshake.
@@ -243,6 +233,13 @@ wire [127:0] vbuf_readdata;
 wire        vbuf_readdatavalid;
 wire        vbuf_read;
 
+wire [27:0] analog_vbuf_address, hdmi_vbuf_address;
+wire  [7:0] analog_vbuf_burstcount, hdmi_vbuf_burstcount;
+wire        analog_vbuf_waitrequest, hdmi_vbuf_waitrequest;
+wire [127:0] analog_vbuf_readdata, hdmi_vbuf_readdata;
+wire        analog_vbuf_readdatavalid, hdmi_vbuf_readdatavalid;
+wire        analog_vbuf_read, hdmi_vbuf_read;
+
 sysmem_lite sysmem
 (
 	.reset_core_req(reset_req),
@@ -286,6 +283,46 @@ sysmem_lite sysmem
 	.vbuf_readdata(vbuf_readdata),
 	.vbuf_readdatavalid(vbuf_readdatavalid),
 	.vbuf_read(vbuf_read)
+);
+
+// Both scanout engines share the single 128-bit HPS framebuffer port. An
+// accepted Avalon burst remains owned by one engine until its final return
+// beat, so neither line buffer can receive data belonging to the other.
+vbuf_arbiter vbuf_arbiter
+(
+	.clk               (clk_100m),
+	.reset             (reset_req),
+	.m0_read           (analog_vbuf_read),
+	.m0_address        (analog_vbuf_address),
+	.m0_burstcount     (analog_vbuf_burstcount),
+	.m0_waitrequest    (analog_vbuf_waitrequest),
+	.m0_readdata       (analog_vbuf_readdata),
+	.m0_readdatavalid  (analog_vbuf_readdatavalid),
+	.m1_read           (hdmi_vbuf_read),
+	.m1_address        (hdmi_vbuf_address),
+	.m1_burstcount     (hdmi_vbuf_burstcount),
+	.m1_waitrequest    (hdmi_vbuf_waitrequest),
+	.m1_readdata       (hdmi_vbuf_readdata),
+	.m1_readdatavalid  (hdmi_vbuf_readdatavalid),
+	.s_read            (vbuf_read),
+	.s_address         (vbuf_address),
+	.s_burstcount      (vbuf_burstcount),
+	.s_waitrequest     (vbuf_waitrequest),
+	.s_readdata        (vbuf_readdata),
+	.s_readdatavalid   (vbuf_readdatavalid)
+);
+
+// HPS I2C controller used by setup_hdmi to configure the ADV7513.
+wire hdmi_scl_en, hdmi_sda_en;
+assign HDMI_I2C_SCL = hdmi_scl_en ? 1'b0 : 1'bZ;
+assign HDMI_I2C_SDA = hdmi_sda_en ? 1'b0 : 1'bZ;
+
+cyclonev_hps_interface_peripheral_i2c hdmi_i2c
+(
+	.out_clk(hdmi_scl_en),
+	.scl(HDMI_I2C_SCL),
+	.out_data(hdmi_sda_en),
+	.sda(HDMI_I2C_SDA)
 );
 
 // f2h interrupts to the ARM GIC. On Cyclone V f2h_irq[n] is GIC interrupt
@@ -510,7 +547,7 @@ irq_stretch #(.CYCLES(64)) render_irq_stretch
 );
 
 //////////////////////////////////////////////////////////////////////////
-// Native analogue RGBs display. HDMI remains parked in this build.
+// Native analogue RGBs display plus the original fixed-1080p HDMI path.
 //////////////////////////////////////////////////////////////////////////
 
 wire clk_video, video_locked;
@@ -544,10 +581,15 @@ wire dc_native_interlace = spvr_spg_control[4];
 wire dc_pal = spvr_spg_control[7];
 wire dc_output_interlace = dc_native_interlace | spvr_fb_r_ctrl[23];
 
+// The HDMI scaler expects half-height TV sources to be repeated vertically.
+wire fb_disp_vga = spvr_fb_r_ctrl[23];
+wire fb_disp_linedbl = spvr_fb_r_ctrl[1] ||
+                       (!fb_disp_vga && !dc_native_interlace);
+
 wire analog_de, analog_vblank, analog_border, analog_field;
 wire [9:0] analog_src_line;
 wire analog_vblank_in, analog_vblank_out;
-wire spg_underrun;
+wire analog_underrun;
 
 spg_sd spg_sd
 (
@@ -567,12 +609,12 @@ spg_sd spg_sd
 	.mode_interlace(dc_output_interlace),
 	.mode_native_interlace(dc_native_interlace),
 	.avl_clk          (clk_100m),
-	.avl_read         (vbuf_read),
-	.avl_address      (vbuf_address),
-	.avl_burstcount   (vbuf_burstcount),
-	.avl_waitrequest  (vbuf_waitrequest),
-	.avl_readdata     (vbuf_readdata),
-	.avl_readdatavalid(vbuf_readdatavalid),
+	.avl_read         (analog_vbuf_read),
+	.avl_address      (analog_vbuf_address),
+	.avl_burstcount   (analog_vbuf_burstcount),
+	.avl_waitrequest  (analog_vbuf_waitrequest),
+	.avl_readdata     (analog_vbuf_readdata),
+	.avl_readdatavalid(analog_vbuf_readdatavalid),
 	.red         (analog_r),
 	.green       (analog_g),
 	.blue        (analog_b),
@@ -585,12 +627,111 @@ spg_sd spg_sd
 	.src_line    (analog_src_line),
 	.vblank_in   (analog_vblank_in),
 	.vblank_out  (analog_vblank_out),
-	.underrun    (spg_underrun)
+	.underrun    (analog_underrun)
+);
+
+wire clk_hdmi;
+pll_hdmi pll_hdmi
+(
+	.refclk(FPGA_CLK1_50),
+	.rst(1'b0),
+	.reconfig_to_pll(64'd0),
+	.reconfig_from_pll(),
+	.outclk_0(clk_hdmi)
+);
+
+wire [23:0] hdmi_data;
+wire        hdmi_hs, hdmi_vs, hdmi_de, hdmi_vbl, hdmi_brd;
+wire        hdmi_underrun;
+
+spg spg
+(
+	.clk         (clk_hdmi),
+	.reset       (reset_req),
+	.fb_base     (fb_disp_base1),
+	.fb_stride   (fb_disp_stride),
+	.fb_line_dbl (fb_disp_linedbl),
+	.fb_pix_dbl  (fb_disp_pixdbl),
+	.fb_split    (1'b1),
+	.fb_disp_half(spvr_fb_r_sof1[22]),
+	.fb_depth    (fb_disp_depth),
+	.fb_concat   (spvr_fb_r_ctrl[6:4]),
+	.fb_enable   (spvr_fb_r_ctrl[0]),
+	.fb_top_base (fb_top_base),
+	.fb_bot_base (fb_bot_base),
+	.avl_clk          (clk_100m),
+	.avl_read         (hdmi_vbuf_read),
+	.avl_address      (hdmi_vbuf_address),
+	.avl_burstcount   (hdmi_vbuf_burstcount),
+	.avl_waitrequest  (hdmi_vbuf_waitrequest),
+	.avl_readdata     (hdmi_vbuf_readdata),
+	.avl_readdatavalid(hdmi_vbuf_readdatavalid),
+	.red         (hdmi_data[23:16]),
+	.green       (hdmi_data[15:8]),
+	.blue        (hdmi_data[7:0]),
+	.hsync       (hdmi_hs),
+	.vsync       (hdmi_vs),
+	.de          (hdmi_de),
+	.vblank      (hdmi_vbl),
+	.border      (hdmi_brd),
+	.src_line    (),
+	.vblank_in   (),
+	.vblank_out  (),
+	.underrun    (hdmi_underrun)
+);
+
+// Two-register I/O stage preserved from the original HDMI implementation.
+reg        hdmi_out_hs, hdmi_out_vs, hdmi_out_de;
+reg [23:0] hdmi_out_d;
+
+always @(posedge clk_hdmi) begin
+	reg hs, vs, de;
+	reg [23:0] d;
+
+	hs <= hdmi_hs;
+	vs <= hdmi_vs;
+	de <= hdmi_de;
+	d  <= hdmi_data;
+
+	hdmi_out_hs <= hs;
+	hdmi_out_vs <= vs;
+	hdmi_out_de <= de;
+	hdmi_out_d  <= d;
+end
+
+assign HDMI_TX_HS = hdmi_out_hs;
+assign HDMI_TX_VS = hdmi_out_vs;
+assign HDMI_TX_DE = hdmi_out_de;
+assign HDMI_TX_D  = hdmi_out_d;
+
+altddio_out
+#(
+	.extend_oe_disable("OFF"),
+	.intended_device_family("Cyclone V"),
+	.invert_output("OFF"),
+	.lpm_hint("UNUSED"),
+	.lpm_type("altddio_out"),
+	.oe_reg("UNREGISTERED"),
+	.power_up_high("OFF"),
+	.width(1)
+)
+hdmiclk_ddr
+(
+	.datain_h(1'b0),
+	.datain_l(1'b1),
+	.outclock(clk_hdmi),
+	.dataout(HDMI_TX_CLK),
+	.aclr(1'b0),
+	.aset(1'b0),
+	.oe(1'b1),
+	.outclocken(1'b1),
+	.sclr(1'b0),
+	.sset(1'b0)
 );
 
 //////////////////////////////////////////////////////////////////////////
-// Audio: MMIO AUDIO_DATA -> async FIFO -> 48 kHz signed stereo PCM ->
-// independent first-order pulse-density DACs at 24.576 MHz.
+// Audio: one MMIO/FIFO/PCM stream feeds both the analogue DACs and the
+// ADV7513's 16-bit standard-I2S input, without duplicating sample storage.
 //////////////////////////////////////////////////////////////////////////
 
 wire clk_audio;
@@ -602,6 +743,7 @@ pll_audio pll_audio
 );
 
 wire [15:0] aud_left, aud_right;
+wire aud_sclk, aud_lrclk, aud_sdata;
 
 audio_pcm audio_pcm
 (
@@ -614,8 +756,16 @@ audio_pcm audio_pcm
 	.aclk (clk_audio),
 	.left (aud_left),
 	.right(aud_right),
-	.sample_strobe()
+	.sample_strobe(),
+	.i2s_sclk  (aud_sclk),
+	.i2s_lrclk (aud_lrclk),
+	.i2s_sdata (aud_sdata)
 );
+
+assign HDMI_MCLK  = clk_audio;
+assign HDMI_SCLK  = aud_sclk;
+assign HDMI_LRCLK = aud_lrclk;
+assign HDMI_I2S   = aud_sdata;
 
 sigma_delta_dac dac_left
 (
