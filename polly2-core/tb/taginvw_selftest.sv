@@ -22,8 +22,12 @@ module taginvw_selftest import tsp_pkg::*; ;
     wire [31:0]       g4_tag [0:3];
     wire [30:0]       g4_invw [0:3];
 
-    taginvw_tile_buffer #(.LANES(LANES)) dut (
+    // COPIES=1: the degenerate single-image buffer (no copy-select address bits),
+    // so this test stays exactly the single-buffer test it was. Multi-copy behavior
+    // has its own tb (taginvw_copies_selftest / `make taginvw-copies`).
+    taginvw_tile_buffer #(.LANES(LANES), .COPIES(1)) dut (
         .clk(clk), .reset(reset),
+        .wr_buf(1'b0), .rd_buf(1'b0),
         .wr_valid(wr_valid), .wr_we(wr_we), .wr_y(wr_y), .wr_x(wr_x),
         .wr_tag(wr_tag), .wr_invw(wr_invw), .wr_pt(wr_pt),
         .clr_valid(clr_valid), .clr_addr(clr_addr), .clr_depth(clr_depth), .clr_tag(clr_tag),
