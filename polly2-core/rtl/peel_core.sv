@@ -777,10 +777,12 @@ module peel_core import tsp_pkg::*; #(
     localparam integer TI_AW = $clog2(TI_COPIES);   // copy-index width (2 for 4 copies)
     // htile/tsp_tag advance by plain +1 and rely on the binary wrap, so the count
     // must be a power of two (and at least 2, or producer and consumer would alias).
+`ifndef SYNTHESIS
     generate
       if ((TI_COPIES < 2) || (TI_COPIES & (TI_COPIES - 1)))
           $error("peel_core: TI_COPIES must be a power of two >= 2");
     endgenerate
+`endif
     reg [TI_AW-1:0] htile;               // ISP u_taginvw producer copy (per pass)
     reg [TI_AW-1:0] tsp_tag;             // TSP u_taginvw consumer copy (per pass)
     reg             tsp_col;             // TSP u_col blend half (per tile)
@@ -1643,6 +1645,26 @@ module peel_core import tsp_pkg::*; #(
     wire [4:0] ptc_x1 = (ptc_en && pt_bb_x1 < rp_bx1) ? pt_bb_x1 : rp_bx1;
     wire [4:0] ptc_y0 = (ptc_en && pt_bb_y0 > rp_by0) ? pt_bb_y0 : rp_by0;
     wire [4:0] ptc_y1 = (ptc_en && pt_bb_y1 < rp_by1) ? pt_bb_y1 : rp_by1;
+
+    // ---- pq READ PORT (the M10K's own registered read side) -------------------
+    // Keep the packed plane word's read in one statement, as for fq_ram above.
+    // Spelling the same read in the four FSM chaining branches prevents Quartus
+    // from using the M10K output registers: it builds a 569-bit fabric hold mux
+    // instead, with long routes from raster control into pq_rdw.  pq_rd_en_c is
+    // exactly the union of those four read conditions; every read still uses the
+    // pre-increment pq_head and pq_rdw still becomes valid one cycle later.
+    wire pq_reject_c = cr_en && !cr_seen && (cr_cnt == 5'd1)
+                     && ras_probe_reject;
+    wire pq_rd_en_c =
+           (rs_st == RS_IDLE && !pq_empty
+            && !(st == S_PEEL_BUF || st == S_PEEL_BUF_RUN
+                 || st == S_ZK_INV || st == S_PT_BUF
+                 || st == S_PT_INIT || st == S_PT_SWAP || st == S_PT_FIX))
+        || (rs_st == RS_POP && ptc_empty && ch_pop && !pq_empty)
+        || (rs_st == RS_RAS && pq_reject_c && ch_abort && !pq_empty)
+        || (rs_st == RS_RAS && !pq_reject_c && (ras_x == rbx1)
+            && (ras_y == rby1) && ch_row && !pq_empty);
+    always @(posedge clk) if (pq_rd_en_c) pq_rdw <= pq_ram[pq_head[2:0]];
 
     // consumer fully idle: entry FIFO empty, iterator authoritative-idle (it_pf_busy
     // clear: no record buffered/being read/emitted/outstanding), streamed setup
@@ -3418,7 +3440,6 @@ module peel_core import tsp_pkg::*; #(
                                         || st == S_PT_INIT || st == S_PT_SWAP
                                         || st == S_PT_FIX)) begin
                 // issue the M10K read; head advances now, data lands in pq_rdw next cyc
-                pq_rdw <= pq_ram[pq_head[2:0]];
                 pq_head <= (pq_head==PQ_N-1) ? 4'd0 : pq_head+4'd1;
                 pq_pop  = 1'b1;
                 rs_st   <= RS_POP;
@@ -3481,7 +3502,6 @@ module peel_core import tsp_pkg::*; #(
                 if (ptc_empty) begin
                     cr_issue <= 1'b0;
                     if (ch_pop && !pq_empty) begin
-                        pq_rdw  <= pq_ram[pq_head[2:0]];
                         pq_head <= (pq_head==PQ_N-1) ? 4'd0 : pq_head+4'd1;
                         pq_pop   = 1'b1;
                         rs_st   <= RS_POP;
@@ -3527,7 +3547,6 @@ module peel_core import tsp_pkg::*; #(
                         // no-ops (no coverage -> no writes). CHAIN to the next
                         // same-pass triangle if one is queued (see RS_POP note).
                         if (ch_abort && !pq_empty) begin
-                            pq_rdw  <= pq_ram[pq_head[2:0]];
                             pq_head <= (pq_head==PQ_N-1) ? 4'd0 : pq_head+4'd1;
                             pq_pop   = 1'b1;
                             rs_st   <= RS_POP;
@@ -3542,7 +3561,6 @@ module peel_core import tsp_pkg::*; #(
                             // drain: only the pass-end (empty pq) needs RS_DRAIN,
                             // for the barrier + last write-back.
                             if (ch_row && !pq_empty) begin
-                                pq_rdw  <= pq_ram[pq_head[2:0]];
                                 pq_head <= (pq_head==PQ_N-1) ? 4'd0 : pq_head+4'd1;
                                 pq_pop   = 1'b1;
                                 rs_st   <= RS_POP;

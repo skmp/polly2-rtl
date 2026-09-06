@@ -355,31 +355,27 @@ module peel_tile_buffer import tsp_pkg::*; #(
         end else if (ras_b_valid) begin            // stage B: depth-cmp write-back
             waddr = pack_addr(b_y, b_x);
             for (cw = 0; cw < NB; cw = cw + 1) begin
-                if (b_inside[cw]) begin
-                    if (b_peeling || b_fwd) begin
-                        // peel accept AND forward accept write the same fields:
-                        // zb <- invW, pb <- tag, valid <- 1; boundary/Zceil kept.
-                        if (b_peeling ? ras_pass_lp[cw] : ras_pass_fwd[cw]) begin
-                            we[cw] = 1'b1;
-                            wdata[PEEL_W*cw + PW_DEPTH  +: 31] = b_invw[31*cw +: 31];
-                            wdata[PEEL_W*cw + PW_TAG    +: 32] = b_tag;
-                            wdata[PEEL_W*cw + PW_VALID]        = 1'b1;
-                            wdata[PEEL_W*cw + PW_DEPTH2 +: 31] = f_depth2 (rdata, cw);
-                            wdata[PEEL_W*cw + PW_REFSORT+: 24] = f_refsort(rdata, cw);
-                            wdata[PEEL_W*cw + PW_ZCEIL  +: 31] = f_zceil  (rdata, cw);
-                        end
-                    end else begin
-                        if (ras_pass_op[cw]) begin // opaque: tag<-tag, depth<-invW
-                            we[cw] = 1'b1;
-                            wdata[PEEL_W*cw + PW_DEPTH  +: 31] =
-                                b_zwdis ? f_depth(rdata, cw) : b_invw[31*cw +: 31];
-                            wdata[PEEL_W*cw + PW_TAG    +: 32] = b_tag;
-                            wdata[PEEL_W*cw + PW_DEPTH2 +: 31] = f_depth2 (rdata, cw);
-                            wdata[PEEL_W*cw + PW_REFSORT+: 24] = f_refsort(rdata, cw);
-                            wdata[PEEL_W*cw + PW_ZCEIL  +: 31] = f_zceil  (rdata, cw);
-                            wdata[PEEL_W*cw + PW_VALID]        = f_valid  (rdata, cw);
-                        end
-                    end
+                if (b_peeling || b_fwd) begin
+                    // Data is don't-care when we[cw] is low. Drive it regardless
+                    // of accept so the depth comparator only feeds the M10K write
+                    // enable, not every write-data bit as an extra mux level.
+                    we[cw] = b_inside[cw]
+                           && (b_peeling ? ras_pass_lp[cw] : ras_pass_fwd[cw]);
+                    wdata[PEEL_W*cw + PW_DEPTH  +: 31] = b_invw[31*cw +: 31];
+                    wdata[PEEL_W*cw + PW_TAG    +: 32] = b_tag;
+                    wdata[PEEL_W*cw + PW_VALID]        = 1'b1;
+                    wdata[PEEL_W*cw + PW_DEPTH2 +: 31] = f_depth2 (rdata, cw);
+                    wdata[PEEL_W*cw + PW_REFSORT+: 24] = f_refsort(rdata, cw);
+                    wdata[PEEL_W*cw + PW_ZCEIL  +: 31] = f_zceil  (rdata, cw);
+                end else begin
+                    we[cw] = b_inside[cw] && ras_pass_op[cw];
+                    wdata[PEEL_W*cw + PW_DEPTH  +: 31] =
+                        b_zwdis ? f_depth(rdata, cw) : b_invw[31*cw +: 31];
+                    wdata[PEEL_W*cw + PW_TAG    +: 32] = b_tag;
+                    wdata[PEEL_W*cw + PW_DEPTH2 +: 31] = f_depth2 (rdata, cw);
+                    wdata[PEEL_W*cw + PW_REFSORT+: 24] = f_refsort(rdata, cw);
+                    wdata[PEEL_W*cw + PW_ZCEIL  +: 31] = f_zceil  (rdata, cw);
+                    wdata[PEEL_W*cw + PW_VALID]        = f_valid  (rdata, cw);
                 end
             end
         end
