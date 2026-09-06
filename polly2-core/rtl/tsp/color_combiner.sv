@@ -54,13 +54,22 @@ module color_combiner (
     reg               v1;
     reg signed [9:0]  s1_d   [0:3];    // mA - sub in [-255,255]
     reg        [7:0]  s1_sub [0:3];    // the sub endpoint (for r = sub + ...)
-    reg        [7:0]  s1_w8  [0:3];    // raw 8-bit weight
+    // WEIGHT IS THE 0..256 RESCALE, NOT THE RAW 0..255 CHANNEL. refsw2 multiplies by
+    // to_u8_256(v) = v + (v>>7), so a full-scale weight is exactly 256 and the >>8 is a
+    // unity multiply: 255*256>>8 = 255. With the raw channel it is 255*255>>8 = 254 -
+    // a 1-LSB droop on EVERY modulated pixel. That is invisible in colour, but it makes
+    // a punch-through alpha test against PT_ALPHA_REF=255 fail for every fragment, so
+    // the whole primitive disappears (jgr_car obj 6160caf4: ShadInstr=3 modulates alpha,
+    // 1555 texel alpha 255 * base alpha 255 -> 254 < 255 -> discarded).
+    reg        [8:0]  s1_w8  [0:3];    // 0..256 weight (to_u8_256 of the channel)
     reg        [7:0]  s1_t   [0:3];    // textel channel (for output mux)
     reg        [7:0]  s1_b   [0:3];    // base channel   (for output mux)
     reg        [1:0]  s1_shad;
     reg               s1_ptx, s1_pof;
     reg        [31:0] s1_base, s1_offset;
-    integer i1; reg [1:0] c1; reg [7:0] t1, b1, sub1, mA1, w81;
+    integer i1; reg [1:0] c1; reg [7:0] t1, b1, sub1, mA1; reg [8:0] w81;
+    // to_u8_256: 0..255 -> 0..256 (refsw2's rescale)
+    function [8:0] u8_256(input [7:0] v); u8_256 = {1'b0,v} + {8'b0, v[7]}; endfunction
     always @(posedge clk) begin
         if (reset) v1 <= 1'b0;
         else begin
@@ -69,8 +78,8 @@ module color_combiner (
                 c1 = i1[1:0];
                 t1 = ch(textel,c1); b1 = ch(base,c1);
                 case (shadinstr)
-                  2'd2: begin mA1=t1; sub1=(c1==2'd3)? t1 : b1; w81=ch(textel,2'd3); end // mix
-                  default: begin mA1=t1; sub1=8'd0; w81=b1; end                          // modulate
+                  2'd2: begin mA1=t1; sub1=(c1==2'd3)? t1 : b1; w81=u8_256(ch(textel,2'd3)); end // mix
+                  default: begin mA1=t1; sub1=8'd0; w81=u8_256(b1); end                          // modulate
                 endcase
                 s1_d[i1]   <= $signed({2'b0,mA1}) - $signed({2'b0,sub1});
                 s1_sub[i1] <= sub1;
@@ -94,13 +103,13 @@ module color_combiner (
     reg        [1:0]  s2_shad;
     reg               s2_ptx, s2_pof;
     reg        [31:0] s2_base, s2_offset;
-    integer i2; reg signed [8:0] w8_s;
+    integer i2; reg signed [9:0] w8_s;   // 10-bit: the weight now reaches 256
     always @(posedge clk) begin
         if (reset) v2 <= 1'b0;
         else begin
             v2 <= v1;
             for (i2=0; i2<4; i2=i2+1) begin
-                w8_s      = $signed({1'b0, s1_w8[i2]});
+                w8_s      = $signed({1'b0, s1_w8[i2]});   // 0..256, non-negative
                 s2_m[i2]  <= s1_d[i2] * w8_s;
                 s2_sub[i2]<= s1_sub[i2];
                 s2_t[i2]  <= s1_t[i2];
