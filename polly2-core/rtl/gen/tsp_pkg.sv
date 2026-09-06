@@ -129,6 +129,12 @@ package tsp_pkg;
         logic [2:0]  tag_offset;           // bits 2:0
     } core_tag_t;                          // == 32 bits
 
+    // "no fragment here" tag. ONLY the TAG_INVALID bit is set, so the sort field
+    // tag[23:0] reads as 0 and the sentinel sorts BELOW every real fragment in the
+    // composite peel key (see isp_depth_cmp_lp). A max-tag sentinel (0xFFFF_FFFF)
+    // would sort ABOVE every fragment and reject all coincident ones on pass 1.
+    localparam [31:0] TAG_INVALID_SENTINEL = 32'h8000_0000;
+
     // entry type emitted by the object-list parser
     typedef enum logic [1:0] {
         ENT_STRIP = 2'd0,   // triangle strip

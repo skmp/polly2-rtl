@@ -1,106 +1,125 @@
 //
-// isp_depth_cmp_lp - refsw2 RM_TRANSLUCENT_AUTOSORT ("layer peeling") depth/tag
-// compare, one lane, combinational.
+// isp_depth_cmp_lp - depth/tag compare for BOTH ordered resolves, one lane,
+// combinational:
+//   pt = 0  RM_TRANSLUCENT_AUTOSORT layer peeling  - walk FAR -> NEAR
+//   pt = 1  punch-through forward resolve          - walk NEAR -> FAR
 //
-// Mirrors PixelFlush_isp<RM_TRANSLUCENT_AUTOSORT> in
-// ../devcast/libswirl/rend/refsw2/refsw_tile.cpp. invW is 1/w: LARGER = CLOSER.
+// invW is 1/w: LARGER = CLOSER.
 //
-// Two depth buffers per pixel: `zb` (current pass, depthBufferA - the closest
-// fragment found so far this pass, in front of the reference) and `zb2` (the
-// reference depth from the previous peel pass, depthBufferB). Two tag buffers:
-// `pb` (this pass's pending tag) and `pb2` (last-rendered tag). A per-pixel
-// `valid` bit (tagStatus.valid) marks that this pass already staged a fragment.
+// ---------------------------------------------------------------------------
+// COMPOSITE SORT KEY
 //
-// Sort order between coincident (== depth) fragments uses the low 24 bits of the
-// tag (PARAMETER_TAG_SORT_MASK = 0x00FFFFFF); "earlier or same" => keep the one
-// already peeled.
+//     key = { depth[30:0], tag[23:0] }
 //
-// Outputs:
-//   pass  - write this fragment (caller sets zb<-nw, pb<-new_tag, valid<-1)
-//   more  - MoreToDraw: another peel pass is needed after this one
+//   * depth is the primary field.
+//   * tag[23:0] (PARAMETER_TAG_SORT_MASK) is param_offs_in_words:tag_offset, which
+//     increases with submission order.
 //
-// refsw reference:
-//   if (invW <  *zb2) reject;                                   // behind ref plane
-//   if (invW == *zb2 && sort(tag)<=sort(*pb2) && *pb2!=~0) reject;
-//   if (invW == *zb) {
-//       if (sort(tag)<=sort(*pb2) && *pb2!=~0) reject;
-//       if (valid) {
-//           if (sort(tag) > sort(*pb)) { more=1; reject; }      // later than pending
-//           // else replace (earlier)
-//       }
-//   }
-//   // accept:
-//   if (valid) more=1;                                          // displaced a staged frag
-//   // caller: *zb=invW; valid=1; *pb=tag;
+// The key is UNIQUE per fragment, so no two fragments are ever "coplanar" as far as
+// the compare is concerned. Both resolves are then just an ordered walk of that key,
+// in opposite directions, and BOTH use the same two comparisons:
 //
-// Depths are 31-bit SIGN-STRIPPED floats (always positive non-zero, sign bit
-// not stored): positive floats order like unsigned integers, so the depth
-// compares are plain unsigned operators.
+//   TR (pt=0), ascending - each pass keeps the SMALLEST key strictly above the
+//   reference, so layers come out far->near and, at equal depth, in submission order
+//   (earliest tag behind). refsw2's rule here was `invW == zb2 && tag >= tagRendered
+//   -> reject`, which peels a coplanar stack in DECREASING tag order - reverse
+//   submission, and wrong. refsw2 is not a valid reference for this.
+//
+//   PT (pt=1), descending - each pass keeps the LARGEST key strictly below the
+//   boundary, i.e. the nearest not-yet-tried candidate. The shade then alpha-tests
+//   it; if it fails, the boundary advances past it and the next pass takes the next
+//   one. With a DEPTH-ONLY boundary (the previous design) a coplanar group was
+//   skipped wholesale once the boundary landed on that depth - a failed alpha test
+//   on the first of them punched a hole through the whole plane. Carrying the tag in
+//   the boundary steps within the plane instead.
+//
+// Both walks terminate: the key is unique and the reference/boundary moves strictly
+// in one direction each pass.
+//
+//   pt=0:  k_new >  k_best  -> nearer than this pass's best; defer      (more)
+//          k_new <= k_ref   -> at or before the reference; already drawn -> reject
+//          otherwise        -> accept; displacing a staged fragment costs a pass
+//
+//   pt=1:  k_new >= k_ref   -> at or nearer than the boundary; already tried -> reject
+//          k_new <  k_best  -> farther than this pass's best; defer      (more)
+//          otherwise        -> accept; displacing a staged fragment costs a pass
+//
+// The reference tests are non-strict on the equal side in both directions: k_new ==
+// k_ref is exactly the fragment the previous pass handled, and re-accepting it would
+// not terminate.
+//
+// SEEDS (peel_tile_buffer): the "best" plane starts at the extreme the walk moves
+// away from - FLT_MAX for TR, 0 for PT - so the first candidate always wins; the
+// reference starts at the opposite extreme.
+//
+// The pb2 sort field is 24 bits, NOT a full tag: it is the only part of the reference
+// the compare needs, and during the PT phase the tag2 slot is busy parking Zceil, so
+// the boundary sort lives in its own field (PW_REFSORT).
+//
+// KNOWN HOLE (deliberate, measured): a REAL fragment whose tag[23:0] is 0 - the
+// record at param offset 0, first triangle - ties exactly with the TR "nothing
+// rendered yet" sentinel, whose sort field is also 0. If such a fragment is also
+// exactly coincident with the pass-1 reference depth (the opaque surface) it is
+// rejected and never drawn. Records at param offset 0 are NOT rare (9 of the 51
+// polly2-data dumps have them; psy2_boot 156, shenmue_menu 51, sw_ep1_menu 18), but
+// the additional exact-coincidence condition does not occur in any of the 42 golden
+// scenes - verified by rendering all of them with and without a tie-break bit
+// appended to the key. If a scene ever shows a dropped overlay, append ~tag[31] as
+// the key LSB (the sentinel then sorts strictly below every real fragment) and the
+// hole closes; depth_cmp_lp_tb pins the current behaviour either way.
+//
+// Depths are 31-bit SIGN-STRIPPED floats (always positive non-zero, sign bit not
+// stored): positive floats order like unsigned integers, so the depth compares are
+// plain unsigned operators, and so is the concatenated key.
 //
 module isp_depth_cmp_lp (
-    input      [30:0] nw,       // new depth (invW, sign-stripped) for this fragment
-    input      [31:0] tag,      // new fragment's CoreTag
-    input      [30:0] zb,       // depthBufferA (this pass, closest-so-far)
-    input      [30:0] zb2,      // depthBufferB (reference from prior pass)
-    input      [31:0] pb,       // tagBufferA   (this pass, pending tag)
-    input      [31:0] pb2,      // tagBufferB   (last-rendered tag)
-    input             valid,    // tagStatus.valid (staged this pass)
-    output reg        pass,     // write fragment (zb<-nw, pb<-tag, valid<-1)
-    output reg        more,     // MoreToDraw feedback
-    // raw comparator taps for the FORWARD (punch-through resolve) compare in
-    // peel_tile_buffer: with the PT plane mapping zb=working-best, zb2=forward
-    // boundary, these are exactly `nearer than best` and `behind boundary` - the
-    // forward accept reuses them instead of instantiating new comparators.
-    output            o_nw_gt_zb,   // nw >  zb
-    output            o_nw_lt_zb2   // nw <  zb2
+    input             pt,        // 0 = TR layer peel (ascending), 1 = PT resolve (descending)
+    input      [30:0] nw,        // new depth (invW, sign-stripped) for this fragment
+    input      [31:0] tag,       // new fragment's CoreTag
+    input      [30:0] zb,        // depthBufferA - this pass's working best
+    input      [31:0] pb,        // tagBufferA   - this pass's pending tag
+    input      [30:0] zb2,       // depthBufferB - reference (TR) / boundary (PT) depth
+    input      [23:0] pb2_sort,  // PW_REFSORT   - reference / boundary tag sort field
+    input             valid,     // tagStatus.valid (staged this pass)
+    output reg        pass,      // write fragment (zb<-nw, pb<-tag, valid<-1)
+    output reg        more       // MoreToDraw feedback
 );
-    localparam [23:0] SORT_MASK_HI = 24'hFFFFFF; // documents PARAMETER_TAG_SORT_MASK
-    // sort key = low 24 bits of the tag. `pb` (this pass's pending tag) is unused: refsw2's
-    // RM_TRANSLUCENT tie-break only compares against pb2 (the last-rendered tag at the ref
-    // plane); the invW==zb pending-tag stage a prior rework added is not in refsw2.
-    wire [23:0] s_new = tag[23:0];
-    wire [23:0] s_pb2 = pb2[23:0];
+    localparam int KW = 31 + 24;        // {depth, tag[23:0]}
 
-    wire nw_gt_zb  = (nw >  zb);            // invW >  zb   (mode-3 LESS_EQUAL pre-test)
-    wire nw_lt_zb2 = (nw <  zb2);           // invW <  zb2
-    wire nw_eq_zb2 = (nw == zb2);           // invW == zb2
-    wire pb2_valid = (pb2 != 32'hFFFFFFFF); // last-rendered tag is real
-    assign o_nw_gt_zb  = nw_gt_zb;
-    assign o_nw_lt_zb2 = nw_lt_zb2;
+    wire [KW-1:0] k_new  = { nw,  tag[23:0] };
+    wire [KW-1:0] k_best = { zb,  pb [23:0] };
+    wire [KW-1:0] k_ref  = { zb2, pb2_sort  };
+
+    // TWO comparisons for both modes. gt_best is shared (it means "defer" walking up,
+    // "accept" walking down); the reference test just changes which side is stale.
+    wire gt_best = (k_new >  k_best);
+    wire gt_ref  = (k_new >  k_ref);    // pt=0: !gt_ref  == (k_new <= k_ref)
+    wire lt_ref  = (k_new <  k_ref);    // pt=1: !lt_ref  == (k_new >= k_ref)
 
     always @* begin
         pass = 1'b0;
         more = 1'b0;
 
-        // refsw PixelFlush_isp forces mode=3 (LESS_EQUAL) for AUTOSORT and runs it
-        // BEFORE the AUTOSORT case: reject any fragment NEARER than the current best
-        // (invW > zb). This is what makes each pass keep the FARTHEST fragment >= the
-        // reference plane (peel far->near, blend back-to-front). Without it the pass
-        // climbs to the nearest fragment and farther layers are lost.
-        // EXACT mirror of refsw2 PixelFlush_isp<RM_TRANSLUCENT> (mode 3), which is:
-        //   if (invW >  *zb)  { MoreToDraw = true; return; }          // pretest (defer nearer)
-        //   if (invW <  *zb2) return;                                 // (A) behind reference
-        //   if (invW == *zb2 && tag >= (*pb2 & ~TAG_INVALID)) return; // (B) coincident, later-tag
-        //   *zb = invW;  if (*pb != INVALID) MoreToDraw = true;  *pb = tag;   // accept, last-wins
-        // The coincident tie-break is `tag >= tagRendered` (reject the LATER-or-equal tag at the
-        // reference plane), which drives the coplanar sort order. A prior rework of this block
-        // (inverted `<=` + an extra invW==zb tag-ordering stage) reversed that order and broke
-        // coplanar sorting (shenmue_menu). There is no separate invW==zb tag check in refsw2:
-        // an invW==zb fragment simply accepts (last-wins) and sets MoreToDraw on displacement.
-        if (nw_gt_zb) begin
-            // invW > zb: nearer than this pass's best -> defer to a later pass.
-            more = 1'b1;
-        end else if (nw_lt_zb2) begin
-            // (A) invW < zb2: behind the reference plane -> reject.
-        end else if (nw_eq_zb2 && pb2_valid && (s_new >= s_pb2)) begin
-            // (B) coincident with the ref-plane fragment already rendered, and this one sorts
-            // LATER-or-equal (tag >= tagRendered) -> already handled -> reject.
+        if (!pt) begin
+            // ---- TR: ascending, keep the smallest key above the reference ----
+            if (gt_best) begin
+                more = 1'b1;                    // nearer than the best -> a later pass
+            end else if (!gt_ref) begin
+                                                // at/before the reference -> already drawn
+            end else begin
+                pass = 1'b1;
+                if (valid) more = 1'b1;         // displaced a staged fragment
+            end
         end else begin
-            // accept (last-wins). If a fragment was already staged this pass, it is displaced
-            // and must be re-drawn in a later pass (refsw: *pb != INVALID -> MoreToDraw).
-            pass = 1'b1;
-            if (valid)
-                more = 1'b1;
+            // ---- PT: descending, keep the largest key below the boundary ----
+            if (!lt_ref) begin
+                                                // at/nearer than the boundary -> tried
+            end else if (!gt_best) begin
+                more = 1'b1;                    // farther than the best -> a later pass
+            end else begin
+                pass = 1'b1;
+                if (valid) more = 1'b1;         // displaced a staged fragment
+            end
         end
     end
 endmodule
