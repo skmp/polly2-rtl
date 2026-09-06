@@ -46,6 +46,7 @@ pvr_mmio mmio
 	.pvr_go           (),
 	.pvr_rst          (),
 	.vram_top         (),
+	.vram_cfg         (),
 	.clk_sel          (),
 	.pvr_done         (1'b0),
 
