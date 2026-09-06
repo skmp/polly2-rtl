@@ -93,7 +93,7 @@ module tex_mem import tsp_pkg::*; #(
 
 `else
     // ---- behavioral VRAM (Verilator), burst + latency model ----
-    // 64-bit words; addr is a 64-bit-word address {4'b0011, wordidx[24:0]}. A read
+    // 64-bit words; addr is a RAW 64-bit-word address (the arbiter decorates). A read
     // is accepted (busy) for RD_LAT dead cycles (models DDR activate/CAS), then
     // `burst` consecutive beats stream out one/cycle from incrementing addresses.
     // Bursts pay latency ONCE; single-beat reads pay it every time.

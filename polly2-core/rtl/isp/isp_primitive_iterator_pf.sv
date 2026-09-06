@@ -209,8 +209,7 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
     reg  [20:0] rd_rec_words_r;
 
     wire [24:0] rd_base_vw  = rd_base[26:2];
-    wire        rd_bank     = rd_base_vw[20];
-    wire [19:0] rd_phys     = rd_base_vw[19:0];
+    wire [20:0] rd_view     = rd_base_vw[20:0];   // 32-bit view word (bank = bit 20)
 
     reg  [5:0]  ni;                    // needed-item index
     wire        ni_isp = (ni == 6'd0);
@@ -231,12 +230,13 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
     localparam R_IDLE=2'd0, R_REQ=2'd1, R_STREAM=2'd2;
     reg [1:0]  rst;
     reg [8:0]  beat;
-    wire [31:0] beat_half = rd_bank ? dresp.dout[63:32] : dresp.dout[31:0];
+    wire [31:0] beat_half = dresp.dout32;   // the arbiter selected the half
 
     reg        dreq_rd_r; reg [28:0] dreq_addr_r; reg [7:0] dreq_burst_r;
     assign dreq.rd    = dreq_rd_r;
     assign dreq.addr  = dreq_addr_r;
     assign dreq.burst = dreq_burst_r;
+    assign dreq.w32   = 1'b1;   // 32-bit view: the arbiter shuffles + drops the half
 
     // ================= emit FSM (drains em_buf) =================
     reg        em_buf;                 // buffer emit is draining
@@ -396,7 +396,7 @@ module isp_primitive_iterator_pf import tsp_pkg::*; (
             end
             R_REQ: if (!dresp.busy) begin
                 dreq_rd_r    <= 1'b1;
-                dreq_addr_r  <= {4'b0011, 5'b0, rd_phys};
+                dreq_addr_r  <= {8'd0, rd_view}; // 32-bit view word; arbiter shuffles
                 dreq_burst_r <= rd_span_r[7:0];
                 beat         <= 9'd0;
                 ni           <= 6'd0;

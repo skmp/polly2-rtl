@@ -32,6 +32,7 @@ module peel_core import tsp_pkg::*; (
     input             wr_en,
     input      [12:0] wr_addr,
     input      [31:0] wr_data,
+    input      [31:0] vram_cfg,   // [0] VRAM_16MB (unused by the stub)
     input             go,
     output reg        done,
     output ddr_rd_req_t  ddr_req,

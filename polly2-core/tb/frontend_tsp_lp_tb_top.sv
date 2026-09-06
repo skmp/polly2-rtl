@@ -32,7 +32,7 @@ module frontend_tsp_lp_tb_top import tsp_pkg::*; #(
     peel_core #(.RAS_LANES(RAS_LANES)) u_core (
         .clk(clk), .reset(reset),
         .wr_en(wr_en), .wr_addr(wr_addr), .wr_data(wr_data),
-        .go(go), .done(done),
+        .go(go), .done(done), .vram_cfg(32'd0),  // 8 MB VRAM (dumps are 8 MB)
         .ddr_req(ddr_req), .ddr_resp(ddr_resp),
         .fbw_req(fbw_req), .fbw_resp(fbw_resp),
         .regs_out()                              // exposed PVR regs (unused by this TB)
