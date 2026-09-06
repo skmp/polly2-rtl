@@ -119,6 +119,16 @@ module simplex_pvr_top import tsp_pkg::*; (
     // case is the iterator's record read: 3 hdr + 8 verts x 11 words (xyz + 2x
     // base + 2x offset + 2x uv) = 91 beats; 128 covers it and is the Avalon
     // 8-bit-burstcount legal max.
+    //
+    // The budget is SHARED across every outstanding burst, and the texel cache is now
+    // multi-outstanding on both of its clients (peel_core TC_OUT_MAX + PF_OUT_MAX = 4+4
+    // bursts x 4 beats = up to 32 beats of texture traffic in flight). That is a STALL
+    // interaction, not the deadlock above: a big geometry burst may have to wait for
+    // budget, but every outstanding burst returns unconditionally, so rd_beats always
+    // drains and the request eventually fits. The deadlock condition is only
+    // `single burst > RD_MAX_BEATS`. If the texture caps or the largest client burst
+    // grow, re-check BOTH: largest_burst <= RD_MAX_BEATS (hard), and
+    // largest_burst + tex_concurrency_beats <= RD_MAX_BEATS (soft, for geometry latency).
     localparam integer RD_MAX_BEATS = 128;
     reg [9:0]  rd_beats   = 10'd0;  // beats accepted but not yet returned
     reg        rd_flush   = 1'b0;   // bursts orphaned by a reset: swallow their beats
