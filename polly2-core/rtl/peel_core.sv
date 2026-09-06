@@ -43,12 +43,13 @@ module peel_core import tsp_pkg::*; #(
     // -------------------- reg_file --------------------
     pvr_regs_t  regs;
     assign regs_out = regs;
-    fog_rd_req_t fog_req; fog_rd_resp_t fog_resp;
+    fog_rd_req_t fog_req; fog_rd_resp_t fog_resp;   // driven by the shader's fog_lut
     pal_rd_req_t pal_req [0:3]; pal_rd_resp_t pal_resp [0:3];   // 4 corner palette read ports
-    assign fog_req = '0;
+    wire [31:0] fog_den_f32;                        // FOG_DENSITY, pre-normalized at write
     // pal_req[*] driven by the shader's 4 palette read ports (pp_pal_addr) below.
     reg_file u_rf (.clk(clk),.reset(reset),.wr_en(wr_en),.wr_addr(wr_addr),.wr_data(wr_data),
-        .regs(regs),.fog_req(fog_req),.fog_resp(fog_resp),.pal_req(pal_req),.pal_resp(pal_resp));
+        .regs(regs),.fog_req(fog_req),.fog_resp(fog_resp),.fog_den_f32(fog_den_f32),
+        .pal_req(pal_req),.pal_resp(pal_resp));
 
     wire [26:0] region_base = regs.region_base[26:0];
     wire [26:0] param_base  = (regs.param_base[26:0] & 27'h0F00000); // PARAM_BASE & 0xF00000
@@ -941,6 +942,10 @@ module peel_core import tsp_pkg::*; #(
         .tsp(pp_tsp),.tcw(pp_tcw),.text_ctrl(regs.text_control[4:0]),
         .pal_fmt(regs.pal_ram_ctrl[1:0]),
         .pp_texture(pp_ptex),.pp_offset(pp_pofs),
+        .fog_den_f32(fog_den_f32),
+        .fog_col_ram(regs.fog_col_ram),.fog_col_vert(regs.fog_col_vert),
+        .fog_clamp_max(regs.fog_clamp_max),.fog_clamp_min(regs.fog_clamp_min),
+        .fog_req(fog_req),.fog_resp(fog_resp),
         .out_valid(pp_out_valid),.out_id(pp_out_id),.out_argb(pp_out_argb),
         .out_tsp(pp_out_tsp),
         .stall(pp_stall),

@@ -32,6 +32,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/fp/fp_add3_
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/fp/fp_add3_24_spp_ro.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/fp/fp_ge.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/fp/fp_mul16_pp.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/fp/fp_mul16_spp_ro.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/fp/fp_mul24_spp_ro.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/fp/fp_mul24_c9_spp_ro.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/fp/fp_mul_i5.sv
@@ -79,6 +80,10 @@ set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/spanner/spa
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/tsp/stage_interp.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/tsp/color_combiner.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/tsp/tsp_blend.sv
+# fog: fog_lut (1/W -> fog alpha, off reg_file's precomputed FOG_TABLE) + fog_blend
+# (colour clamp + fog blend). Both must precede tsp_shade_v2_pp, which instantiates them.
+set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/tsp/fog_lut.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/tsp/fog_blend.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/tsp/tsp_shade_v2_pp.sv
 
 # ---- texture path (tex_unit -> tex_fetch4_ob -> tex_cache_4p_1c) ----

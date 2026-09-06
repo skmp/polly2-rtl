@@ -287,7 +287,18 @@ package tsp_pkg;
     typedef struct packed { logic [9:0] raddr; } pal_rd_req_t;   // 0..1023
     typedef struct packed { logic [31:0] rdata; } pal_rd_resp_t;
     typedef struct packed { logic [6:0] raddr; } fog_rd_req_t;   // 0..127
-    typedef struct packed { logic [31:0] rdata; } fog_rd_resp_t;
+    // FOG_TABLE entries are PRECOMPUTED at write time (see reg_file): the host's
+    // 16-bit {b1,b0} pair is stored as the delta-lerp form {base255 = b1*255,
+    // delta = b0-b1} that fog_lut consumes with a single 9x8 multiply.
+    // delta is a two's-complement 9-bit value, but declared UNSIGNED here on purpose:
+    // Quartus 17.0 Standard drops the ports of a module whose port list uses a packed
+    // struct with a `signed` member (the instantiation then fails with "Port ... does
+    // not exist"). No other struct in this package has one. Consumers cast at the point
+    // of use ($signed(...)), which is what the rest of the core does anyway.
+    typedef struct packed {
+        logic [8:0]  delta;
+        logic [15:0] base255;
+    } fog_rd_resp_t;
 
     // ISP word (ISP_TSP) bit positions (LSB-first, core_structs.h:59):
     //   CacheBypass=21, UV_16b=22, Gouraud=23, Offset=24, Texture=25,
