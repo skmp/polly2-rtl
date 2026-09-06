@@ -127,6 +127,9 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
     wire [7:0] fl_alpha;
     fog_lut u_fog (
         .clk(clk),.reset(reset),.stall(stall),.in_valid(in_valid & en),
+`ifndef SYNTHESIS
+        .dbg_px(px),.dbg_py(py),
+`endif
         .invw(invw_in),.fog_den(fog_den_f32),
         .fog_req(fog_req),.fog_resp(fog_resp),
         .out_valid(fl_ov),.fog_alpha(fl_alpha));
@@ -245,6 +248,34 @@ module tsp_shade_v2_pp import tsp_pkg::*; #(
         for (s=1;s<FOGDLY;s=s+1) fog_dl[s] <= fog_dl[s-1];
     end
     wire [7:0] iv_fa = fog_dl[FOGDLY-1];
+
+`ifndef SYNTHESIS
+    // +fapx=<X> +fapy=<Y> : check the fog alpha is paired with the RIGHT fragment.
+    // The FOG_MISALIGNED assert below only compares VALID strobes, so an alpha carried
+    // one fragment out of step still satisfies it. This delays px/py by the same
+    // RCPLAT+INTERPLAT the fragment takes to reach the tex_unit issue point and prints
+    // the alpha that is about to be attached to it.
+    integer fapx = -1, fapy = -1;
+    initial begin
+        void'($value$plusargs("fapx=%d", fapx));
+        void'($value$plusargs("fapy=%d", fapy));
+    end
+    localparam integer FADLY = RCPLAT + INTERPLAT;
+    reg [10:0] fa_px [0:FADLY-1], fa_py [0:FADLY-1];
+    reg [31:0] fa_iw [0:FADLY-1];
+    integer fk;
+    always @(posedge clk) if (en) begin
+        fa_px[0] <= px; fa_py[0] <= py; fa_iw[0] <= invw_in;
+        for (fk=1; fk<FADLY; fk=fk+1) begin
+            fa_px[fk] <= fa_px[fk-1]; fa_py[fk] <= fa_py[fk-1]; fa_iw[fk] <= fa_iw[fk-1];
+        end
+    end
+    always @(posedge clk)
+        if (!reset && en && fapx >= 0 && iv_ov
+            && fa_px[FADLY-1] == fapx[10:0] && fa_py[FADLY-1] == fapy[10:0])
+            $display("[FA] (%0d,%0d) at tex-issue: fragment invw=%08x  fog_alpha=%0d  (FOGLAT=%0d FOGDLY=%0d)",
+                     fa_px[FADLY-1], fa_py[FADLY-1], fa_iw[FADLY-1], iv_fa, FOGLAT, FOGDLY);
+`endif
 `ifndef SYNTHESIS
     // The fog LUT and the RCP+INTERP front are rigid en-gated chains off the SAME accepted
     // pixel, so their valids must land together at the tex_unit issue point. A wrong FOGLAT

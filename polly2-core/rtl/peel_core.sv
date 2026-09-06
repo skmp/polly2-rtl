@@ -1001,6 +1001,25 @@ module peel_core import tsp_pkg::*; #(
                 && md_ty[md_rp[MD_AW-1:0]]==ipy[10:0]/6'd32))
             $display("[INVW] (%0d,%0d) invw=%08x tsp=%08x tcw=%08x", isx, isy, pp_invw, pp_tsp, pp_tcw);
     end
+
+    // +atx=<X> +aty=<Y> : the PUNCH-THROUGH alpha test at one pixel. Prints the SHADED
+    // alpha that reaches tsp_blend, the PT_ALPHA_REF it is compared against, and the
+    // verdict. A PT primitive that shades but never writes is invisible everywhere
+    // upstream - this is the only place the discard is observable.
+    integer atx = -1, aty = -1;
+    initial begin
+        void'($value$plusargs("atx=%d", atx));
+        void'($value$plusargs("aty=%d", aty));
+    end
+    always @(posedge clk) if (!reset && atx >= 0 && cb2_valid) begin : atr
+        reg [10:0] ax, ay;
+        ax = {md_tx[md_rp[MD_AW-1:0]], cb2_id[4:0]};
+        ay = {md_ty[md_rp[MD_AW-1:0]], cb2_id[9:5]};
+        if (ax == atx[10:0] && ay == aty[10:0])
+            $display("[AT] (%0d,%0d) src_argb=%08x  src_a=%0d  ref=%0d  at_en=%b at_pass=%b ptres=%b pt_res_bit=%b -> write=%b",
+                     ax, ay, cb_argb, cb_argb[31:24], regs.pt_alpha_ref[7:0],
+                     cb_at_en, bl_at_pass, cb2_ptres, pt_res_bit, cb_wr_en);
+    end
     always @(posedge clk) begin
         if (!reset && sd_en && pp_in_valid && !pp_stall) begin
             $fwrite(sd_fd, "%0d %0d %0d %0d %0d %0d %08x %08x %08x %02x %0d %0d",
