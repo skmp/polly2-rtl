@@ -21,7 +21,19 @@ TSP_PKG = ../polly2-core/rtl/gen/tsp_pkg.sv
 # polly2-core video-out (framebuffer write master) instantiated by simplex_pvr_top
 VO_RTL  = ../polly2-core/rtl/vo.sv
 
-all: spg-sync pvr-burst spg-loopback audio-i2s spg-bands spg-depth spg-240p fb-write render-irq
+all: spg-sync spg-sd-sync vbuf-arbiter pvr-burst spg-loopback audio-analog spg-bands spg-depth spg-240p fb-write render-irq
+
+spg-sd-sync: obj_dir/spg_sd_sync_tb
+	./obj_dir/spg_sd_sync_tb
+
+obj_dir/spg_sd_sync_tb: rtl/spg_sd.sv tb/spg_sd_sync_tb.cpp
+	$(VERILATOR) --cc --exe --build $(VFLAGS) rtl/spg_sd.sv tb/spg_sd_sync_tb.cpp -o spg_sd_sync_tb
+
+vbuf-arbiter: obj_dir/vbuf_arbiter_tb
+	./obj_dir/vbuf_arbiter_tb
+
+obj_dir/vbuf_arbiter_tb: rtl/vbuf_arbiter.sv tb/vbuf_arbiter_tb.cpp
+	$(VERILATOR) --cc --exe --build $(VFLAGS) rtl/vbuf_arbiter.sv tb/vbuf_arbiter_tb.cpp -o vbuf_arbiter_tb
 
 #   make fb-write - FB write master formats: every FB_W_CTRL packmode
 #                   (0555K/565/4444/1555/888/0888K/8888, refsw2 dither
@@ -82,18 +94,16 @@ obj_dir/spg_bands_tb: rtl/spg.sv tb/spg_bands_tb.cpp
 spg-sync: obj_dir/spg_sync_tb
 	./obj_dir/spg_sync_tb
 
-#   make audio-i2s - MMIO AUDIO_DATA -> 2048-entry async FIFO -> I2S:
-#                    framing/order/one-shot delivery, blocking-write
-#                    backpressure when full, non-audio accesses unaffected,
-#                    full-drain integrity (no loss or duplication)
-audio-i2s: obj_dir/audio_i2s_tb
-	./obj_dir/audio_i2s_tb
+#   make audio-analog - MMIO FIFO ordering/backpressure, signed PCM sample
+#                       retention/reset, stereo order and PDM average output
+audio-analog: obj_dir/audio_analog_tb
+	./obj_dir/audio_analog_tb
 
-obj_dir/audio_i2s_tb: rtl/pvr_mmio.sv rtl/audio_i2s.sv tb/audio_tb_top.sv tb/audio_i2s_tb.cpp
+obj_dir/audio_analog_tb: rtl/pvr_mmio.sv rtl/audio_pcm.sv rtl/sigma_delta_dac.sv tb/audio_analog_tb_top.sv tb/audio_analog_tb.cpp
 	$(VERILATOR) --cc --exe --build $(VFLAGS) \
-	    -Wno-PINCONNECTEMPTY --top-module audio_tb_top \
-	    rtl/pvr_mmio.sv rtl/audio_i2s.sv tb/audio_tb_top.sv tb/audio_i2s_tb.cpp \
-	    -o audio_i2s_tb
+	    -Wno-PINCONNECTEMPTY --top-module audio_analog_tb_top \
+	    rtl/pvr_mmio.sv rtl/audio_pcm.sv rtl/sigma_delta_dac.sv tb/audio_analog_tb_top.sv tb/audio_analog_tb.cpp \
+	    -o audio_analog_tb
 
 obj_dir/spg_sync_tb: rtl/spg.sv tb/spg_sync_tb.cpp
 	$(VERILATOR) --cc --exe --build $(VFLAGS) rtl/spg.sv tb/spg_sync_tb.cpp -o spg_sync_tb
@@ -127,4 +137,4 @@ obj_dir/pvr_burst_tb: rtl/simplex_pvr_top.sv $(VO_RTL) tb/peel_core_stub.sv tb/p
 clean:
 	rm -rf obj_dir
 
-.PHONY: all spg-sync pvr-burst spg-loopback audio-i2s spg-bands spg-depth spg-240p fb-write render-irq clean
+.PHONY: all spg-sync spg-sd-sync vbuf-arbiter pvr-burst spg-loopback audio-analog spg-bands spg-depth spg-240p fb-write render-irq clean

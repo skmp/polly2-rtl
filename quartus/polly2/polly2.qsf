@@ -346,14 +346,12 @@ set_global_assignment -name VERILOG_SHOW_LMF_MAPPING_MESSAGES OFF
 set_global_assignment -name TIMEQUEST_REPORT_SCRIPT_INCLUDE_DEFAULT_ANALYSIS ON
 set_instance_assignment -name MAX_NUMBER_OF_REGISTERS_FROM_UNINFERRED_RAMS 8192 -to *
 
-# ---- HDMI output pipeline: NO shift-register extraction ----
-# With the aggressive SR settings above, the spg output pipe + the sys_top TX
-# stage (a 3-4 deep, logic-free, 24-bit-wide register chain, merged across
-# the hierarchy) was implemented as an M10K altshift_taps. Its RAM-to-IO
-# clock-to-out (~7.1 ns measured) fails the 148.5 MHz scanout domain
-# (hdmi_out_de -0.31 ns, several hdmi_out_d bits negative) and glitches
-# DE/data bits on the wire - visible as a stable seam / pixel speckles.
-# Keep every flop of the video path in fabric.
+# Keep native-video alignment registers in fabric. Inferring shift RAM here
+# changes the read latency of the pixel and sync pipelines.
+set_instance_assignment -name AUTO_SHIFT_REGISTER_RECOGNITION OFF -to spg_sd|*
+
+# Keep the 148.5 MHz HDMI pixel/sync pipelines in fabric too. Inferred shift
+# RAM adds enough RAM-to-I/O delay to violate the ADV7513 interface timing.
 set_instance_assignment -name AUTO_SHIFT_REGISTER_RECOGNITION OFF -to spg|*
 set_instance_assignment -name AUTO_SHIFT_REGISTER_RECOGNITION OFF -to hs
 set_instance_assignment -name AUTO_SHIFT_REGISTER_RECOGNITION OFF -to vs
@@ -398,4 +396,5 @@ set_global_assignment -name SDC_FILE polly2.sdc
 set_global_assignment -name FITTER_AGGRESSIVE_ROUTABILITY_OPTIMIZATION ALWAYS
 set_global_assignment -name OPTIMIZATION_TECHNIQUE SPEED
 set_global_assignment -name PHYSICAL_SYNTHESIS_EFFORT EXTRA
+set_global_assignment -name SEED 7
 set_instance_assignment -name PARTITION_HIERARCHY root_partition -to | -section_id Top

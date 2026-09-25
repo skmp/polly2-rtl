@@ -109,9 +109,13 @@ set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-core/rtl/vo.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/sys_top.v
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/simplex_pvr_top.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/spg.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/spg_sd.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/vbuf_arbiter.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/pvr_mmio.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/hps_lw_bridge.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/audio_i2s.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/audio_pcm.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/sigma_delta_dac.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/clk_mux_gf.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/irq_stretch.sv
 
@@ -127,4 +131,5 @@ set_global_assignment -name SYSTEMVERILOG_FILE ../../mister/sysmem.sv
 # ---- plls ----
 set_global_assignment -name QIP_FILE ../../polly2-de10nano/plls/pll.qip
 set_global_assignment -name QIP_FILE ../../polly2-de10nano/plls/pll_hdmi.qip
+set_global_assignment -name VERILOG_FILE ../../polly2-de10nano/plls/pll_video.v
 set_global_assignment -name QIP_FILE ../../polly2-de10nano/plls/pll_audio.qip
