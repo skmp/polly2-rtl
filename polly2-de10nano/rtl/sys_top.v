@@ -554,7 +554,8 @@ wire [31:0] fb_disp_base = {pvr_vram_top, 24'd0} + {9'd0, spvr_fb_r_sof1[21:2], 
 wire  [1:0] fb_disp_depth  = spvr_fb_r_ctrl[3:2];
 wire        fb_disp_pixdbl = spvr_vo_control[8];
 
-// Line doubling (spg displays a half-height 640x240 source at 4x vertically):
+// Line doubling (spg displays a half-height 640x240 source at twice its usual
+// vertical scale - 2x at the 480p raster, 4x at SCALE=2 1080p):
 // either the game asks for it outright (FB_R_CTRL.fb_line_double), or the
 // DISPLAY MODE is 240p - a non-interlaced TV mode, i.e. no VGA pixel clock.
 // That second test is minicast's own resolution rule (spg.cpp CalculateSync:
@@ -580,7 +581,7 @@ spg spg
 
 	.fb_base     (fb_disp_base),
 	.fb_stride   (fb_disp_stride),
-	.fb_line_dbl (fb_disp_linedbl),      // 240p source: 4x vertical
+	.fb_line_dbl (fb_disp_linedbl),      // 240p source: 2x the vertical scale
 	.fb_pix_dbl  (fb_disp_pixdbl),       // VO_CONTROL.pixel_double (320-wide)
 	.fb_split    (1'b1),
 	.fb_disp_half(spvr_fb_r_sof1[22]),
