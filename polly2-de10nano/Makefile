@@ -73,14 +73,15 @@ obj_dir/spg_depth_tb: rtl/spg.sv tb/spg_depth_tb.cpp tb/spg_mode.h
 	$(VERILATOR) --cc --exe --build $(VFLAGS) $(SPGFLAGS) rtl/spg.sv tb/spg_depth_tb.cpp -o spg_depth_tb
 
 #   make spg-240p  - 240p (line-doubled) display: a 640x240 source shown at
-#                    4x vertically (four output lines per source line, last
-#                    source line 239), every fb_depth, linear + split,
-#                    composed with pixel_double, bands still 2x
+#                    twice the raster's vertical scale (2 output lines per source
+#                    line at 480p, 4 at stock 1080p - see spg-240p-1080p; last
+#                    source line 239), every fb_depth, linear + split, composed
+#                    with pixel_double, bands (where the raster has them) at SCALE
 spg-240p: obj_dir/spg_240p_tb
 	./obj_dir/spg_240p_tb
 
-obj_dir/spg_240p_tb: rtl/spg.sv tb/spg_240p_tb.cpp
-	$(VERILATOR) --cc --exe --build $(VFLAGS) rtl/spg.sv tb/spg_240p_tb.cpp -o spg_240p_tb
+obj_dir/spg_240p_tb: rtl/spg.sv tb/spg_240p_tb.cpp tb/spg_mode.h
+	$(VERILATOR) --cc --exe --build $(VFLAGS) $(SPGFLAGS) rtl/spg.sv tb/spg_240p_tb.cpp -o spg_240p_tb
 
 #   make render-irq - irq_stretch (render-done -> f2h IRQ1): a done edge
 #                     gives exactly one 64-cycle pulse (a held level does
@@ -146,8 +147,9 @@ obj_dir/spg_sync_tb: rtl/spg.sv tb/spg_sync_tb.cpp tb/spg_mode.h
 #                    `(SCALE == 2) ? <stock> : <1:1>`; this is what machine-checks the
 #                    SCALE=2 arm rather than arguing from the diff that it constant-folds
 #                    back to stock. sync/bands/depth cover geometry and the read formats;
-#                    loopback covers the fetch path and the post-reset toggle parity.
-spg-1080p: spg-sync-1080p spg-bands-1080p spg-depth-1080p spg-loopback-1080p
+#                    loopback covers the fetch path and the post-reset toggle parity;
+#                    240p covers fb_line_dbl doubling on top of the SCALE=2 arm.
+spg-1080p: spg-sync-1080p spg-bands-1080p spg-depth-1080p spg-loopback-1080p spg-240p-1080p
 
 spg-sync-1080p: obj_1080p/spg_sync_tb
 	./obj_1080p/spg_sync_tb
@@ -155,6 +157,13 @@ spg-sync-1080p: obj_1080p/spg_sync_tb
 obj_1080p/spg_sync_tb: rtl/spg.sv tb/spg_sync_tb.cpp tb/spg_mode.h
 	$(VERILATOR) --cc --exe --build $(VFLAGS) $(SPGFLAGS) --Mdir obj_1080p \
 	    $(STOCK_1080P) rtl/spg.sv tb/spg_sync_tb.cpp -o spg_sync_tb
+
+spg-240p-1080p: obj_1080p/spg_240p_tb
+	./obj_1080p/spg_240p_tb
+
+obj_1080p/spg_240p_tb: rtl/spg.sv tb/spg_240p_tb.cpp tb/spg_mode.h
+	$(VERILATOR) --cc --exe --build $(VFLAGS) $(SPGFLAGS) --Mdir obj_1080p \
+	    $(STOCK_1080P) rtl/spg.sv tb/spg_240p_tb.cpp -o spg_240p_tb
 
 spg-bands-1080p: obj_1080p/spg_bands_tb
 	./obj_1080p/spg_bands_tb
@@ -227,4 +236,5 @@ clean:
 
 .PHONY: all spg-sync pvr-burst spg-loopback spg-loopback-nobp audio-i2s spg-bands spg-depth \
         spg-240p fb-write render-irq spg-480p spg-1to1 \
-        spg-1080p spg-sync-1080p spg-bands-1080p spg-depth-1080p spg-loopback-1080p clean
+        spg-1080p spg-sync-1080p spg-bands-1080p spg-depth-1080p spg-loopback-1080p \
+        spg-240p-1080p clean
