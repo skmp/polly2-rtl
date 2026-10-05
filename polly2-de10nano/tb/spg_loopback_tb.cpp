@@ -1,22 +1,32 @@
 // Write-layout vs scanout-layout cross-check.
 //
-// The peel_core stub streams a full 640x480 frame of known pixels through
+// The peel_core stub streams a full SRC_W x SRC_H frame of known pixels through
 // simplex_pvr_top's FB write master IN TILE ORDER (the real writeback
 // pattern) into a modeled DDR byte array; spg then scans the array out and
-// every displayed pixel inside the 1280x960 window is compared against the
+// every displayed pixel inside the game window is compared against the
 // pixel that was streamed. Any bit-level mismatch between the two layouts -
 // pair order, split-VRAM half select, address arithmetic (incl. an odd
 // 64-bit start word), lane selection, 565->888 expansion - fails with exact
 // coordinates. Runs two configs: {half 0, even base} and {half 1, odd base}.
+//
+// The window and the raster come from spg.sv's own parameters (spg_mode.h) rather
+// than 1080p literals, so this follows the module's mode. It reads them through the
+// wrapper's hierarchy, since spg is instantiated as u_spg inside spg_loopback_top.
 #include "Vspg_loopback_top.h"
+#include "Vspg_loopback_top___024root.h"
 #include "verilated.h"
 #include <cstdio>
 #include <cstring>
 #include <vector>
 #include <cstdint>
 
+#define SPG_P(n) (Vspg_loopback_top___024root::spg_loopback_top__DOT__u_spg__DOT__##n)
+#include "spg_mode.h"
+using namespace spg_mode;
+
 static Vspg_loopback_top* dut;
 static int errors = 0;
+static bool g_nobp = false;   // -nobp: drop the random DDR backpressure (margin probe)
 
 static uint32_t lfsr = 0xACE1u;
 static int rnd() { lfsr = (lfsr >> 1) ^ (-(int)(lfsr & 1) & 0xB400u); return lfsr & 3; }
@@ -47,12 +57,24 @@ static void write_port_tick() {
 // ---- spg read port (16-byte-word addressed, bursts, variable latency) ----
 struct RdCmd { uint64_t addr16; uint32_t left; };
 static std::vector<RdCmd> rdq;
+
+// Completed line fetches, counted from OUTSIDE the DUT. One line fetch is a
+// back-to-back chain of bursts: the next burst is commanded on the last beat of
+// the previous one, so the port never goes fully idle (queue empty AND no command
+// asserted) inside a chain, and does for the best part of a line between chains.
+// That gap is the completion marker, and it needs no knowledge of the per-line
+// beat count. Used by prime_fetches() to set the internal done_toggle parity.
+static long g_fetches  = 0;
+static int  g_idle     = 0;
+static bool g_saw_beat = false;
+static const int FETCH_IDLE_TICKS = 8;
+
 static void read_port_tick() {
-    dut->avl_waitrequest = (rnd() == 0);
+    dut->avl_waitrequest = g_nobp ? 0 : (rnd() == 0);
     if (dut->avl_read && !dut->avl_waitrequest)
         rdq.push_back({dut->avl_address, dut->avl_burstcount});
     dut->avl_readdatavalid = 0;
-    if (!rdq.empty() && rnd() != 1) {
+    if (!rdq.empty() && (g_nobp || rnd() != 1)) {
         RdCmd& c = rdq.front();
         uint64_t byte0 = c.addr16 * 16;
         for (int w = 0; w < 4; w++) {
@@ -64,13 +86,26 @@ static void read_port_tick() {
         c.addr16++;
         if (--c.left == 0) rdq.erase(rdq.begin());
     }
+
+    if (dut->avl_readdatavalid) { g_saw_beat = true; g_idle = 0; }
+    else if (g_saw_beat && rdq.empty() && !dut->avl_read) {
+        if (++g_idle >= FETCH_IDLE_TICKS) { g_fetches++; g_saw_beat = false; g_idle = 0; }
+    }
 }
+
+// underrun is sticky, so a bare end-of-run read cannot say WHICH line starved or
+// even whether it was the settling frame rather than the checked one. Record the
+// first rising edge instead.
+static long g_tick = 0;
+static long g_ur_tick = -1;
 
 static void tick() {
     dut->clk = 0; dut->eval();
     write_port_tick();
     read_port_tick();
     dut->clk = 1; dut->eval();
+    if (dut->underrun && g_ur_tick < 0) g_ur_tick = g_tick;
+    g_tick++;
 }
 
 static void regwrite(int addr, uint32_t data) {
@@ -107,7 +142,7 @@ static void run_config(uint32_t sof, uint16_t xorpat, const char* name) {
     // ---- phase 2: scan out one full frame and compare the window ----
     // sys_top: fb_disp_base = {vram_top,24'd0} + {sof[21:2],3'd0}
     dut->fb_base      = (uint32_t)((VRAM_TOP << 24) + (((sof >> 2) & 0xFFFFF) << 3));
-    dut->fb_stride    = 1280;
+    dut->fb_stride    = (uint32_t)(SRC_W * 2);   // 565, 2 bytes/px
     dut->fb_line_dbl  = 0;
     dut->fb_split     = 1;
     dut->fb_disp_half = (sof >> 22) & 1;
@@ -115,15 +150,18 @@ static void run_config(uint32_t sof, uint16_t xorpat, const char* name) {
     dut->fb_concat    = 0;
     dut->fb_enable    = 1;
     dut->spg_reset = 0;
+    g_ur_tick = -1;                       // spg_reset clears the sticky flag
 
     // let the raster free-run one frame to settle prefetch, then align to the
     // frame start: after vsync deasserts, the next de rise is display line 0
-    long total = 2200L * 1125L;
+    long total = FRAME_CLKS;
+    long t_settle = g_tick;
     for (long i = 0; i < total + 100; i++) tick();
     long guard = 0;
     while (!dut->vsync && ++guard < 2 * total) tick();   // vsync rise
     while (dut->vsync && ++guard < 3 * total) tick();    // vsync fall
     if (guard >= 3 * total) { printf("[%s] FAIL: no vsync\n", name); errors++; return; }
+    long t_scan = g_tick;
 
     int x = 0, y = -1;       // de-relative coordinates; y=0 at first de rise
     int prev_de = 0;
@@ -132,8 +170,8 @@ static void run_config(uint32_t sof, uint16_t xorpat, const char* name) {
         tick();
         if (dut->de && !prev_de) { x = 0; y++; }
         if (dut->de) {
-            if (y >= 60 && y < 1020 && x >= 320 && x < 1600) {
-                uint32_t sx = (uint32_t)(x - 320) / 2, sy = (uint32_t)(y - 60) / 2;
+            if (y >= Y0 && y < Y1 && x >= X0 && x < X1) {
+                uint32_t sx = (uint32_t)src_x(x), sy = (uint32_t)src_y(y);
                 uint32_t pix = (sy << 11) | sx;   // the stub's {py, px} hash key
                 uint8_t er, eg, eb;
                 expect_rgb(pix, xorpat, &er, &eg, &eb);
@@ -148,18 +186,77 @@ static void run_config(uint32_t sof, uint16_t xorpat, const char* name) {
             x++;
         }
         prev_de = dut->de;
-        if (y >= 1020) break;
+        if (y >= Y1) break;
     }
-    if (checked < 1280L * 960L / 2) {  // must have covered at least a full frame's worth
+    // must have covered at least a full frame's worth (half the window is a loose
+    // lower bound - the scan can start mid-frame)
+    if (checked < (X1 - X0) * (Y1 - Y0) / 2) {
         printf("[%s] FAIL: only %ld window pixels checked\n", name, checked);
         errors++;
     }
-    if (dut->underrun) { printf("[%s] FAIL: spg underrun\n", name); errors++; }
+    if (dut->underrun) {
+        long rel = g_ur_tick - (g_ur_tick >= t_scan ? t_scan : t_settle);
+        printf("[%s] FAIL: spg underrun, first at tick %ld (%s frame, ~line %ld col %ld)\n",
+               name, g_ur_tick, g_ur_tick >= t_scan ? "checked" : "settling",
+               rel / H_TOTAL, rel % H_TOTAL);
+        errors++;
+    }
     printf("[%s] %ld window pixels checked\n", name, checked);
+}
+
+// Hold spg in reset, then release it just long enough for `n` line fetches to
+// complete before holding it again. spg's fetch-completion CDC toggle is not
+// observable from outside, but it flips once per completed fetch, so this leaves
+// it in a KNOWN PARITY relative to where it started - which is the whole point of
+// run_reset_parity below.
+static void prime_fetches(int n) {
+    dut->spg_reset = 1;
+    for (int i = 0; i < 8; i++) tick();
+    dut->spg_reset = 0;
+    g_fetches = 0; g_idle = 0; g_saw_beat = false;
+    long guard = 0;
+    while (g_fetches < n && ++guard < 8 * FRAME_CLKS) tick();
+    dut->spg_reset = 1;
+    for (int i = 0; i < 8; i++) tick();
+}
+
+// After spg_reset, `underrun` must stay clear across a clean frame - from EITHER
+// parity of the fetch-completion toggle.
+//
+// underrun compares two counters that live in different clock domains: cnt_req in
+// the video domain and cnt_done, which counts edges of the Avalon domain's
+// done_toggle through a sync chain. Both counters and the sync chain are reset;
+// if done_toggle itself is NOT, then a reset released while it happens to sit at 1
+// shifts a phantom edge through the chain and cnt_done starts one ahead of reality
+// forever. That skew reads as a false underrun on the one line per frame where
+// cnt_req does not advance (the last game line, whose lookahead is already past the
+// window), and - worse - masks a real 2-deep underrun on every other line.
+//
+// The parity at reset release is an accident of whatever ran before, so testing it
+// from one parity proves nothing. Prime both.
+static void run_reset_parity(const char* name) {
+    const int before = errors;
+    for (int par = 0; par < 2; par++) {
+        prime_fetches(par);
+        dut->spg_reset = 0;                       // clears the sticky flag
+        for (long i = 0; i < FRAME_CLKS + 200; i++) tick();
+        if (dut->underrun) {
+            printf("[%s] FAIL: spg underrun after reset, toggle parity %+d "
+                   "(no line was late - the fetch bookkeeping is skewed)\n", name, par);
+            errors++;
+        }
+    }
+    // guarded: this line was printed unconditionally, so a failing run claimed a
+    // clean frame in the same breath as the FAIL above it
+    if (errors == before)
+        printf("[%s] clean frame after reset from both toggle parities\n", name);
 }
 
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
+    for (int i = 1; i < argc; i++)
+        if (!strcmp(argv[i], "-nobp")) g_nobp = true;
+    print_mode("spg_loopback_tb");
     dut = new Vspg_loopback_top;
 
     // config A: half/bank 0 (pixels in LOW 32 bits, pvr_map32), even base word
@@ -167,6 +264,9 @@ int main(int argc, char** argv) {
     // config B: half/bank 1 (HIGH 32 bits), ODD 64-bit base word (sof byte 4
     // -> DDR byte 8 -> fb_base[3]=1, the mid-beat fetch path) + inverted pattern
     run_config(0x000004u | (1u << 22), 0x5A5A, "half1/odd");
+    // ... and, keeping config B's settings and its frame in the DDR model, the
+    // post-reset underrun check from both fetch-toggle parities
+    run_reset_parity("reset-parity");
 
     printf(errors ? "FAIL (%d errors)\n" : "PASS\n", errors);
     delete dut;

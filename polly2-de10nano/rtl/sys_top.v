@@ -14,9 +14,10 @@
 //     reset window held around a switch.
 //   - peel_core (simplex_pvr_top): registers/GO/RESET/VRAM base via MMIO,
 //     render reads on ram1, framebuffer writes on ram2.
-//   - Display: pll_hdmi (fixed 148.5 MHz) + SPG (1080p raster, 640x480
-//     split-VRAM FB doubled to 1280x960, vbuf port) -> TX register stage ->
-//     ADV7513. No OSD, no scaler, no analog output.
+//   - Display: pll_hdmi (fixed 27.000 MHz) + SPG (720x480p raster, 640x480
+//     split-VRAM FB shown 1:1, vbuf port) -> TX register stage -> ADV7513.
+//     No OSD, no scaler, no analog output. Clock and raster now match - see
+//     the instantiation below for the PLL solve.
 //   - Audio: pll_audio (24.576 MHz) + audio_i2s: 2048-entry sample FIFO
 //     fed from the MMIO AUDIO_DATA register (blocking when full), drained
 //     at 48 kHz onto the ADV7513's I2S input (16-bit, standard I2S).
@@ -511,9 +512,22 @@ irq_stretch #(.CYCLES(64)) render_irq_stretch
 );
 
 //////////////////////////////////////////////////////////////////////////
-// Display: pll_hdmi (fixed 148.5 MHz) + SPG -> TX register stage -> pins.
+// Display: pll_hdmi + SPG -> TX register stage -> pins.
 // FB is split-VRAM 16bpp RGB565: DC 32-bit-view word W at DDR byte W*8,
 // half selected by SOF bit 22.
+//
+// Clock: pll_hdmi emits 27.000 MHz, matching spg's 858 x 525 totals at
+// 720x480p (31.469 kHz / 59.940 Hz). Regenerated from the stock 148.5 MHz
+// part by Quartus' own IP solver (ip-generate reading this PLL's variation
+// file), so the resolved counters in plls/pll_hdmi/pll_hdmi_0002.v - which
+// are what actually program the silicon - were derived by the tool, not by
+// hand:
+//   50 MHz ref, N=1, M=8.1 (integer 8 + fractional 429496730/2^32),
+//   VCO 810 MHz -> 405 MHz after pll_vco_div=2, C0=15 -> 27.000 MHz exactly.
+// The charge pump (pll_cp_current=20) and loop filter (pll_bwctrl=4000) came
+// back UNCHANGED from the 148.5 MHz solve: Quartus picks the same loop
+// settings for both. That is the whole reason this retarget was safe - the
+// stability values were never ours to guess.
 //////////////////////////////////////////////////////////////////////////
 
 wire hdmi_clk_out;
@@ -521,7 +535,7 @@ pll_hdmi pll_hdmi
 (
 	.refclk(FPGA_CLK1_50),
 	.rst(1'b0),
-	.reconfig_to_pll(64'd0),   // fixed 148.5 MHz (1080p60), no runtime reconfig
+	.reconfig_to_pll(64'd0),   // fixed 27.000 MHz (stock part was 148.5), no runtime reconfig
 	.reconfig_from_pll(),
 	.outclk_0(hdmi_clk_out)
 );
@@ -540,7 +554,8 @@ wire [31:0] fb_disp_base = {pvr_vram_top, 24'd0} + {9'd0, spvr_fb_r_sof1[21:2], 
 wire  [1:0] fb_disp_depth  = spvr_fb_r_ctrl[3:2];
 wire        fb_disp_pixdbl = spvr_vo_control[8];
 
-// Line doubling (spg displays a half-height 640x240 source at 4x vertically):
+// Line doubling (spg displays a half-height 640x240 source at twice its usual
+// vertical scale - 2x at the 480p raster, 4x at SCALE=2 1080p):
 // either the game asks for it outright (FB_R_CTRL.fb_line_double), or the
 // DISPLAY MODE is 240p - a non-interlaced TV mode, i.e. no VGA pixel clock.
 // That second test is minicast's own resolution rule (spg.cpp CalculateSync:
@@ -566,7 +581,7 @@ spg spg
 
 	.fb_base     (fb_disp_base),
 	.fb_stride   (fb_disp_stride),
-	.fb_line_dbl (fb_disp_linedbl),      // 240p source: 4x vertical
+	.fb_line_dbl (fb_disp_linedbl),      // 240p source: 2x the vertical scale
 	.fb_pix_dbl  (fb_disp_pixdbl),       // VO_CONTROL.pixel_double (320-wide)
 	.fb_split    (1'b1),
 	.fb_disp_half(spvr_fb_r_sof1[22]),

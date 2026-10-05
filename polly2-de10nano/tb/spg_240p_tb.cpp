@@ -6,25 +6,35 @@
 // two on fb_line_dbl, so this tb drives that pin directly.
 //
 // What it checks, per-pixel over whole frames:
-//   - the source is 640x240 shown at 4x vertically: output line y takes
-//     source line (y-Y0)>>2, so each source line occupies FOUR output lines
-//     and line 239 is the last one displayed (a 2x mapping would run off the
-//     end of the surface at output line 540 and show source line 240+);
+//   - the source is 640x240 shown at twice the raster's vertical SCALE: output
+//     line y takes source line (y-Y0)>>(SHIFT+1), so each source line occupies
+//     2*SCALE output lines (4 at stock 1080p, 2 at 480p) and line 239 is the
+//     last one displayed (an undoubled mapping would run off the end of the
+//     surface and show source line 240+);
 //   - the source-line advance still uses one stride per SOURCE line, not per
 //     output line, in linear and split-VRAM layouts and at every fb_depth;
-//   - pixel_double composes with it (a 320x240 source at 4x both ways);
-//   - the border bands stay 2x (they are host OSD surfaces, not the game
-//     window) while the window is 4x;
+//   - pixel_double composes with it (a 320x240 source at 2*SCALE both ways);
+//   - the border bands stay at SCALE (they are host OSD surfaces, not the game
+//     window) while the window is doubled - where the raster has bands at all;
 //   - no underrun: the fetch lookahead still lands a line before it is
-//     displayed when requests are 4 output lines apart.
+//     displayed when requests are 2*SCALE output lines apart.
+//
+// The raster geometry comes from the RTL via spg_mode.h, so the same source
+// checks the 480p build (spg-240p) and a stock 1080p instantiation
+// (spg-240p-1080p).
 #include "Vspg.h"
+#include "Vspg___024root.h"
 #include "verilated.h"
+#define SPG_P(n) (Vspg___024root::spg__DOT__##n)
+#include "spg_mode.h"
 #include <cstdio>
 #include <cstdint>
 #include <deque>
 
-static const int V_ACT = 1080;
-static const int X0 = 320, X1 = 1600, Y0 = 60, Y1 = 1020;
+static const int V_ACT = (int)spg_mode::V_ACTIVE;
+static const int X0 = (int)spg_mode::X0, X1 = (int)spg_mode::X1;
+static const int Y0 = (int)spg_mode::Y0, Y1 = (int)spg_mode::Y1;
+static const int SH = spg_mode::SHIFT;              // raster -> source, undoubled
 static const int SRC_H = 240;                       // 240p: half-height source
 
 static const uint64_t TOP = 0x00600000, BOT = 0x00610000;  // band FBs (128B aligned)
@@ -95,12 +105,12 @@ static void game_rgb(int s, int n, uint8_t* r, uint8_t* g, uint8_t* b) {
 static void expect_px(int x, int y, uint8_t* r, uint8_t* g, uint8_t* b) {
     *r = *g = *b = 0;
     if (x < X0 || x >= X1) return;
-    int n = (x - X0) >> 1;
-    if (y < Y0 || y >= Y1) {                         // bands: linear 565, ALWAYS 2x
+    int n = (x - X0) >> SH;
+    if (y < Y0 || y >= Y1) {                         // bands: linear 565, ALWAYS at SCALE
         if (!g_bands) return;
         bool top = y < Y0;
         uint64_t base = top ? TOP : BOT;
-        int sy = (top ? y : y - Y1) >> 1;
+        int sy = (top ? y : y - Y1) >> SH;
         uint64_t a = base + (uint64_t)sy * 1280 + (uint64_t)n * 2;
         uint16_t p = (uint16_t)(pat(a) | (pat(a + 1) << 8));
         *r = (uint8_t)(((p >> 11) & 0x1F) << 3 | ((p >> 13) & 0x7));
@@ -108,8 +118,8 @@ static void expect_px(int x, int y, uint8_t* r, uint8_t* g, uint8_t* b) {
         *b = (uint8_t)((p & 0x1F) << 3 | ((p >> 2) & 0x7));
         return;
     }
-    // the whole point: 4 output lines per source line, 240 sources per frame
-    game_rgb((y - Y0) >> 2, g_pixdbl ? (x - X0) >> 2 : n, r, g, b);
+    // the whole point: 2*SCALE output lines per source line, 240 sources per frame
+    game_rgb((y - Y0) >> (SH + 1), g_pixdbl ? (x - X0) >> (SH + 1) : n, r, g, b);
 }
 
 // ---- DDR burst server (light random backpressure, deterministic) ----
@@ -145,13 +155,13 @@ static int  max_src = -1;
 
 static void run_frames(int n, bool check, const char* name) {
     int seen = 0;
-    long guard = 2475000L * (n + 2);
+    long guard = spg_mode::FRAME_CLKS * (n + 2);
     while (seen < n && guard-- > 0) {
         tick();
         if (dut->de) {
             if (!prev_de) {
                 cx = 0;
-                if (gap > 10000) cy = 0; else cy++;
+                if (gap > spg_mode::VBLANK_GAP_MIN) cy = 0; else cy++;
             }
             gap = 0;
             if (check && cy >= 0) {
@@ -160,7 +170,7 @@ static void run_frames(int n, bool check, const char* name) {
                 if (dut->red != er || dut->green != eg || dut->blue != eb) {
                     if (errors < 10)
                         printf("[%s] (%d,%d) src %d: got %02x%02x%02x want %02x%02x%02x\n",
-                               name, cx, cy, (cy - Y0) >> 2,
+                               name, cx, cy, (cy - Y0) >> (SH + 1),
                                dut->red, dut->green, dut->blue, er, eg, eb);
                     errors++;
                 }
@@ -194,6 +204,7 @@ static void set_surface(int depth, int split, int half, uint64_t base_fb, int co
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     dut = new Vspg;
+    spg_mode::print_mode("spg_240p_tb");
 
     dut->reset = 1;
     dut->fb_line_dbl = 1;                  // 240p for the whole run
@@ -209,12 +220,13 @@ int main(int argc, char** argv) {
         { "0555/split",     0, 1, 0, 0x00200000,     3, 0 },   // W0 even, half 0
         { "888/lin+off5",   2, 0, 0, 0x00120000 + 5, 0, 0 },
         { "0888/split-odd", 3, 1, 1, 0x00230000 + 4, 0, 0 },   // W0 odd, half 1
-        { "pd/565-split",   1, 1, 1, 0x00500000 + 4, 0, 1 },   // 320x240, 4x both ways
+        { "pd/565-split",   1, 1, 1, 0x00500000 + 4, 0, 1 },   // 320x240, doubled both ways
     };
     for (const Cfg& c : cfgs) {
         set_surface(c.depth, c.split, c.half, c.base_fb, c.concat, c.pd);
-        // the last config also turns the bands on: they must stay 2x/565
-        g_bands = (&c == &cfgs[4]);
+        // the last config also turns the bands on: they must stay at SCALE/565
+        // (a raster with no margin - 480p, Y0 == 0 - has no band lines to check)
+        g_bands = (&c == &cfgs[4]) && spg_mode::HAS_BANDS;
         dut->fb_top_base = g_bands ? TOP : 0;
         dut->fb_bot_base = g_bands ? BOT : 0;
         run_frames(2, false, c.name);      // warm: latches + both line buffers
@@ -223,8 +235,8 @@ int main(int argc, char** argv) {
         if (errors) break;
     }
 
-    // the window must consume exactly source lines 0..239 (a 2x mapping would
-    // have walked to 479 and read past the end of a 240-line surface)
+    // the window must consume exactly source lines 0..239 (an undoubled mapping
+    // would have walked to 479 and read past the end of a 240-line surface)
     if (!errors && max_src != SRC_H - 1) {
         printf("last source line displayed = %d, want %d\n", max_src, SRC_H - 1);
         errors++;
