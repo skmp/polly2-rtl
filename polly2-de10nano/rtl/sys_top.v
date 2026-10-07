@@ -578,6 +578,7 @@ spg spg
 (
 	.clk         (clk_hdmi),
 	.reset       (reset_req),
+	.mode_480p   (1'b1),                  // pll_hdmi is fixed at 27 MHz (480p) for now
 
 	.fb_base     (fb_disp_base),
 	.fb_stride   (fb_disp_stride),

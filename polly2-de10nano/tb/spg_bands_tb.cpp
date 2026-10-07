@@ -52,6 +52,7 @@ int main(int argc, char** argv) {
     }
 
     Vspg* dut = new Vspg;
+    dut->mode_480p = spg_mode::MODE_480P;   // raster under test (tb/spg_mode.h)
     int errors = 0;
 
     const uint32_t STRIDE = (uint32_t)BAND_STRIDE;

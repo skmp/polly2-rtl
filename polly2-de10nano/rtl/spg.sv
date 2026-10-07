@@ -1,20 +1,23 @@
-// spg.sv - fixed-mode display controller, loosely modelled on the Dreamcast
-// (HOLLY) spg, but generating the FINAL raster directly at the HDMI pixel
-// clock. Replaces ascal on the HDMI path:
+// spg.sv - display controller, loosely modelled on the Dreamcast (HOLLY)
+// spg, but generating the FINAL raster directly at the HDMI pixel clock.
+// Replaces ascal on the HDMI path:
 //
-//  - The raster is whatever the timing parameters below say. The default is
-//    720x480p CEA-861 VIC 2/3 (858 x 525 totals, both syncs positive); at a
-//    27 MHz pixel clock that is 31.469 kHz / 59.940 Hz, a rate a 31 kHz
-//    arcade CRT can lock. The stock configuration is 1920x1080 (2200 x 1125
-//    totals): at 148.352 MHz that is 1080p59.94 (the DC VGA field rate), at
-//    148.5 MHz exactly 60.000 Hz. It is still buildable by overriding the
-//    timing parameters together with SCALE=2 - the spg-*-1080p targets do
-//    exactly that, so the 1080p arm stays machine-checked.
-//  - The 640-wide framebuffer in DDR3 is displayed at SCALE (see below) as a
-//    SRC_W*SCALE x SRC_H*SCALE window centred in the frame: 1:1 by default
-//    (x 40..679, y 0..479), or pixel- and line-doubled (2x nearest) to a
-//    1280x960 window at 1080p (x 320..1599, y 60..1019 - the same window the
-//    stripped ascal used). fb_line_dbl displays a 640x240 source at twice
+//  - Two rasters, chosen at runtime by mode_480p (see the port list):
+//      mode_480p=0 (reset default): 1920x1080, 2200 x 1125 totals, SCALE_HD=2.
+//        At 148.5 MHz that is 1080p60 - what every HDMI TV accepts.
+//      mode_480p=1: 720x480p CEA-861 VIC 2/3, 858 x 525 totals, SCALE_SD=1.
+//        At 27 MHz that is 31.469 kHz / 59.940 Hz, a rate a 31 kHz arcade CRT
+//        behind an HDMI-to-analog DAC can lock (1080p's ~67.4 kHz cannot).
+//    Both sync polarities are positive. The pixel clock must match the mode:
+//    sys_top switches it with a glitch-free mux and holds this module in reset
+//    across the change. The two timing sets are parameters, so a testbench
+//    can read either one back (tb/spg_mode.h); every spg-* target runs in
+//    both modes (the spg-*-1080p targets drive mode_480p=0).
+//  - The 640-wide framebuffer in DDR3 is displayed at the mode's SCALE (see
+//    below) as a SRC_W*SCALE x SRC_H*SCALE window centred in the frame: 1:1
+//    at 480p (x 40..679, y 0..479), or pixel- and line-doubled (2x nearest)
+//    to a 1280x960 window at 1080p (x 320..1599, y 60..1019 - the same window
+//    the stripped ascal used). fb_line_dbl displays a 640x240 source at twice
 //    that vertically instead (FB_R_CTRL fb_line_double / the 240p menu
 //    option); fb_pix_dbl a 320-wide source at twice that horizontally
 //    (VO_CONTROL pixel_double) - the two compose.
@@ -46,9 +49,8 @@
 //    fixed at 1280 bytes) displayed line-doubled - always 2x, independent of
 //    SCALE - so they fill a 60-line margin above and below the game window,
 //    x-centred on it. That margin exists only where Y0 == 60, i.e. the 1080p
-//    configuration (lines 0..59 and 1020..1079). At the 480p default the
-//    source fills the raster, Y0 == 0, and the bands are structurally absent
-//    - see the UNSIGNED waiver at the localparam block. Bands are host OSD
+//    mode (lines 0..59 and 1020..1079). At 480p the source fills the raster,
+//    Y0 == 0, and the bands are structurally absent. Bands are host OSD
 //    surfaces: always 565 with MSB-replicated expansion, independent of the
 //    game fb_depth. fb_top_base / fb_bot_base are DDR BYTE addresses,
 //    128-byte aligned, sampled once per frame at the start of vertical
@@ -64,8 +66,8 @@
 //    starvation) is queued, not lost.
 //  - Two line buffers ("current" / "next"): while one source line is
 //    displayed (SCALE output lines), the next is burst-read into the other.
-//    Prefetch slack is one source line's display time: ~31.8 us at the 480p
-//    default (one 858-px line at 27 MHz), ~29.7 us at 1080p (two 2200-px
+//    Prefetch slack is one source line's display time: ~31.8 us at 480p
+//    (one 858-px line at 27 MHz), ~29.7 us at 1080p (two 2200-px
 //    lines at 148.352 MHz). Worst case (split 0888, misaligned) is 321
 //    beats - still no DMA engine and no tight arbiter deadline. Storage is four 32-bit banks of 512: the
 //    line's raw FB-view bytes, beat-aligned (split-mode half-selection is
@@ -84,40 +86,47 @@
 
 module spg
 #(
-	// CEA-861 VIC 2/3: 720x480p @ 59.94, 27 MHz pixel clock.
-	// Retargeted from 1080p59.94 (2200x1125 @ 148.352 MHz) so the horizontal rate is
-	// 31.47 kHz, which a 31 kHz arcade CRT can lock. 1080p is ~67.4 kHz and cannot be
-	// displayed on one. 480p is also the Dreamcast's own VGA mode, and the 640x480
-	// source maps into it 1:1 with no scaling — unlike the 2x doubling 1080p required.
-	parameter H_ACTIVE = 720,
-	parameter H_FP     = 16,
-	parameter H_SYNC   = 62,
-	parameter H_BP     = 60,    // H total 858  -> 27e6/858  = 31.469 kHz
-	parameter V_ACTIVE = 480,
-	parameter V_FP     = 9,
-	parameter V_SYNC   = 6,
-	parameter V_BP     = 30,    // V total 525  -> 31469/525 = 59.94 Hz
-	// source framebuffer (displayed at SCALE — see below)
-	parameter SRC_W    = 640,
-	parameter SRC_H    = 480,
-	// Display scale: how many raster pixels/lines each source pixel/line occupies.
-	// 1080p needed 2x to fill a 1920x1080 raster from a 640x480 source; 480p is a 1:1
-	// fit, so the game window is SRC_W x SRC_H placed directly. SCALE is honoured by
-	// the window placement below AND by the address generators: the horizontal shift
-	// (n_pre), the vertical shift (vshift), the prefetch lookahead (y_look_raw) and
-	// the underrun gate all derive from it. fb_pix_dbl / fb_line_dbl compose on top,
-	// so a 320-wide or 240-line source still fills the window at either scale.
-	//
-	// Deliberately a parameter and not a localparam: a testbench can then instantiate
-	// the stock 1080p configuration (SCALE=2 with the 1080p timings above) and
-	// machine-check that arm instead of arguing it by inspection. See the
-	// spg-*-1080p targets in the Makefile.
-	parameter SCALE    = 1
+	// mode_480p = 0: CEA-861 1080p (2200x1125 totals). 148.5 MHz -> 60.000 Hz;
+	// 148.352 MHz -> 59.94 Hz. The reset default, and what HDMI TVs accept.
+	parameter H_ACTIVE_HD = 1920,
+	parameter H_FP_HD     = 88,
+	parameter H_SYNC_HD   = 44,
+	parameter H_BP_HD     = 148,   // H total 2200
+	parameter V_ACTIVE_HD = 1080,
+	parameter V_FP_HD     = 4,
+	parameter V_SYNC_HD   = 5,
+	parameter V_BP_HD     = 36,    // V total 1125
+	parameter SCALE_HD    = 2,     // 640x480 source pixel/line-doubled to 1280x960
+	// mode_480p = 1: CEA-861 VIC 2/3, 720x480p @ 59.94, 27 MHz pixel clock.
+	// 31.47 kHz horizontal, which a 31 kHz arcade CRT can lock. 480p is also the
+	// Dreamcast's own VGA mode, and the 640x480 source maps into it 1:1.
+	parameter H_ACTIVE_SD = 720,
+	parameter H_FP_SD     = 16,
+	parameter H_SYNC_SD   = 62,
+	parameter H_BP_SD     = 60,    // H total 858  -> 27e6/858  = 31.469 kHz
+	parameter V_ACTIVE_SD = 480,
+	parameter V_FP_SD     = 9,
+	parameter V_SYNC_SD   = 6,
+	parameter V_BP_SD     = 30,    // V total 525  -> 31469/525 = 59.94 Hz
+	parameter SCALE_SD    = 1,     // 1:1
+	// source framebuffer (displayed at the mode's SCALE - see below)
+	parameter SRC_W       = 640,
+	parameter SRC_H       = 480
+	// SCALE: how many raster pixels/lines each source pixel/line occupies (1 or
+	// 2). It is honoured by the window placement below AND by the address
+	// generators: the horizontal shift (n_pre), the vertical shift (vshift), the
+	// prefetch lookahead (y_look_raw) and the underrun gate all derive from it.
+	// fb_pix_dbl / fb_line_dbl compose on top, so a 320-wide or 240-line source
+	// still fills the window in either mode.
 )
 (
-	input  wire        clk,          // pixel clock for the timings above:
-	                                 // 27 MHz at 480p, 148.352 / 148.5 at 1080p
+	input  wire        clk,          // pixel clock for the current mode:
+	                                 // 148.5 MHz at 1080p, 27 MHz at 480p
 	input  wire        reset,        // video-domain reset
+	// Raster select (see header). QUASI-STATIC: it may only change while reset
+	// is held - the counters, line buffers and fetch bookkeeping all assume
+	// one geometry for their whole run, and clk changes with it.
+	input  wire        mode_480p,
 
 	// Framebuffer location. fb_base/fb_disp_half are sampled once PER LINE
 	// (at the line's fetch request, through a 2-sample stability filter);
@@ -173,28 +182,41 @@ module spg
 // NOTE: no SystemVerilog size casts anywhere in this file - Quartus
 // Standard 17.0 does not support N'(expr).
 /* verilator lint_off WIDTHTRUNC */
-localparam [11:0] H_TOTAL  = H_ACTIVE + H_FP + H_SYNC + H_BP;
-localparam [10:0] V_TOTAL  = V_ACTIVE + V_FP + V_SYNC + V_BP;
-localparam [11:0] HS_BEG   = H_ACTIVE + H_FP;
-localparam [11:0] HS_END   = H_ACTIVE + H_FP + H_SYNC;
-localparam [10:0] VS_BEG   = V_ACTIVE + V_FP;
-localparam [10:0] VS_END   = V_ACTIVE + V_FP + V_SYNC;
-localparam [11:0] H_ACT    = H_ACTIVE;
-localparam [10:0] V_ACT    = V_ACTIVE;
-// SCALE is a module parameter (see the port list). spg-480p asserts the raster,
-// spg-1to1 the 1:1 sampling, and the spg-*-1080p targets the SCALE=2 arm.
-//
-// At SCALE=1 the 480-line source exactly fills the 480-line raster, so Y0 == 0 and there is
-// NO vertical margin left for the top/bottom border bands. Every `vcnt < Y0` / `y_look < Y0`
-// comparison therefore folds to a constant, which Verilator flags as UNSIGNED. That folding
-// is the intended behaviour — the bands are structurally impossible at 1:1 and correctly
-// disable themselves — so the warning is waived rather than worked around. If a future mode
-// restores a margin (Y0 > 0) the bands come back with no code change.
-/* verilator lint_off UNSIGNED */
-localparam [11:0] X0       = (H_ACTIVE - SRC_W*SCALE)/2;              // 40
-localparam [11:0] X1       = (H_ACTIVE - SRC_W*SCALE)/2 + SRC_W*SCALE; // 680
-localparam [10:0] Y0       = (V_ACTIVE - SRC_H*SCALE)/2;              // 0
-localparam [10:0] Y1       = (V_ACTIVE - SRC_H*SCALE)/2 + SRC_H*SCALE; // 480
+// Per-mode geometry, as localparams so a testbench can read either set back
+// (tb/spg_mode.h, via --public-params) instead of restating the arithmetic.
+localparam [11:0] H_TOTAL_HD = H_ACTIVE_HD + H_FP_HD + H_SYNC_HD + H_BP_HD;
+localparam [10:0] V_TOTAL_HD = V_ACTIVE_HD + V_FP_HD + V_SYNC_HD + V_BP_HD;
+localparam [11:0] X0_HD      = (H_ACTIVE_HD - SRC_W*SCALE_HD)/2;                 // 320
+localparam [11:0] X1_HD      = (H_ACTIVE_HD - SRC_W*SCALE_HD)/2 + SRC_W*SCALE_HD; // 1600
+localparam [10:0] Y0_HD      = (V_ACTIVE_HD - SRC_H*SCALE_HD)/2;                 // 60
+localparam [10:0] Y1_HD      = (V_ACTIVE_HD - SRC_H*SCALE_HD)/2 + SRC_H*SCALE_HD; // 1020
+localparam [11:0] H_TOTAL_SD = H_ACTIVE_SD + H_FP_SD + H_SYNC_SD + H_BP_SD;
+localparam [10:0] V_TOTAL_SD = V_ACTIVE_SD + V_FP_SD + V_SYNC_SD + V_BP_SD;
+localparam [11:0] X0_SD      = (H_ACTIVE_SD - SRC_W*SCALE_SD)/2;                 // 40
+localparam [11:0] X1_SD      = (H_ACTIVE_SD - SRC_W*SCALE_SD)/2 + SRC_W*SCALE_SD; // 680
+localparam [10:0] Y0_SD      = (V_ACTIVE_SD - SRC_H*SCALE_SD)/2;                 // 0
+localparam [10:0] Y1_SD      = (V_ACTIVE_SD - SRC_H*SCALE_SD)/2 + SRC_H*SCALE_SD; // 480
+
+// The geometry in force. mode_480p only changes under reset (and the SDC cuts
+// paths out of its source register), so these are constants for timing
+// purposes; every compare below that used to see a localparam now sees one of
+// two constants through a static mux.
+wire [11:0] H_TOTAL = mode_480p ? H_TOTAL_SD : H_TOTAL_HD;
+wire [10:0] V_TOTAL = mode_480p ? V_TOTAL_SD : V_TOTAL_HD;
+wire [11:0] H_ACT   = mode_480p ? H_ACTIVE_SD : H_ACTIVE_HD;
+wire [10:0] V_ACT   = mode_480p ? V_ACTIVE_SD : V_ACTIVE_HD;
+wire [11:0] HS_BEG  = mode_480p ? H_ACTIVE_SD + H_FP_SD : H_ACTIVE_HD + H_FP_HD;
+wire [11:0] HS_END  = mode_480p ? H_ACTIVE_SD + H_FP_SD + H_SYNC_SD
+                                : H_ACTIVE_HD + H_FP_HD + H_SYNC_HD;
+wire [10:0] VS_BEG  = mode_480p ? V_ACTIVE_SD + V_FP_SD : V_ACTIVE_HD + V_FP_HD;
+wire [10:0] VS_END  = mode_480p ? V_ACTIVE_SD + V_FP_SD + V_SYNC_SD
+                                : V_ACTIVE_HD + V_FP_HD + V_SYNC_HD;
+wire [11:0] X0      = mode_480p ? X0_SD : X0_HD;
+wire [11:0] X1      = mode_480p ? X1_SD : X1_HD;
+wire [10:0] Y0      = mode_480p ? Y0_SD : Y0_HD;
+wire [10:0] Y1      = mode_480p ? Y1_SD : Y1_HD;
+// SCALE is 1 or 2 in either mode; everything below only asks "is it 2".
+wire        scale2  = mode_480p ? (SCALE_SD == 2) : (SCALE_HD == 2);
 
 localparam        BURST_LEN = 16;        // 128-bit beats per burst (256 bytes)
 localparam [7:0]  BC_FULL   = BURST_LEN; // full burstcount
@@ -257,7 +279,7 @@ reg        bot_en_lat   = 1'b0;
 // Line shift: output lines per source line = SCALE for a 480-line source, 2*SCALE for a
 // 240p one. At SCALE=2 (1080p) that is the familiar 2 / 4; at SCALE=1 a 480-line source
 // maps one output line per source line and only fb_line_dbl still doubles.
-wire [1:0] vshift = (SCALE == 2) ? (dbl_lat ? 2'd2 : 2'd1)
+wire [1:0] vshift = scale2 ? (dbl_lat ? 2'd2 : 2'd1)
                                  : (dbl_lat ? 2'd1 : 2'd0);
 
 // Per-line base stability filter: {fb_disp_half, fb_base} originates in
@@ -305,7 +327,7 @@ initial begin line_roff[0] = 4'd0; line_roff[1] = 4'd0; end
 // Shallower leaves no fetch time. Wraps for the first fetched line of the
 // frame - the top band at SCALE=2, the first game line at SCALE=1 where
 // Y0 == 0 (V_TOTAL-SCALE -> line 0).
-wire [10:0] y_look_raw = (SCALE == 2) ? vcnt + 11'd2 : vcnt + 11'd1;
+wire [10:0] y_look_raw = scale2 ? vcnt + 11'd2 : vcnt + 11'd1;
 wire [10:0] y_look     = (y_look_raw >= V_TOTAL) ? y_look_raw - V_TOTAL
                                                  : y_look_raw;
 
@@ -614,7 +636,7 @@ assign rbuf = rbuf_r;
 // increment cone off a register slice. Overall RGB alignment vs the
 // counters is unchanged: the extra register stage is exactly absorbed by
 // the extra pixel of lookahead.
-wire  [9:0] n_pre    = (SCALE == 2) ? (pd_sel_r ? x_pre[11:2] : x_pre[10:1])
+wire  [9:0] n_pre    = scale2 ? (pd_sel_r ? x_pre[11:2] : x_pre[10:1])
                                     : (pd_sel_r ? x_pre[10:1] : x_pre[9:0]);
 reg  [11:0] b_pre_r  = 12'd0;
 always @(posedge clk) begin
@@ -742,7 +764,7 @@ always @(posedge clk or posedge reset) begin
 		// picks the first of them. At 1:1 every output line starts a new
 		// source line, so the term must go - keeping it would check only
 		// the even lines, which is half-blind rather than wrong.
-		if (img_v && hcnt == X0 - 12'd4 && ((SCALE != 2) || y_rel[0] == 1'b0)
+		if (img_v && hcnt == X0 - 12'd4 && (!scale2 || y_rel[0] == 1'b0)
 		    && (cnt_req - cnt_done) >= 2'd2) underrun <= 1'b1;
 	end
 end

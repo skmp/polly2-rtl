@@ -258,6 +258,7 @@ int main(int argc, char** argv) {
         if (!strcmp(argv[i], "-nobp")) g_nobp = true;
     print_mode("spg_loopback_tb");
     dut = new Vspg_loopback_top;
+    dut->mode_480p = spg_mode::MODE_480P;   // raster under test (tb/spg_mode.h)
 
     // config A: half/bank 0 (pixels in LOW 32 bits, pvr_map32), even base word
     run_config(0x000000u | (0u << 22), 0x0000, "half0/even");

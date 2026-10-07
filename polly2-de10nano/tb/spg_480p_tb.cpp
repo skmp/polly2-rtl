@@ -38,6 +38,7 @@
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     Vspg* dut = new Vspg;
+    dut->mode_480p = 1;   // this testbench's literals are the 480p raster
 
     dut->reset = 1;
     dut->fb_base = 0; dut->fb_stride = 1280;
