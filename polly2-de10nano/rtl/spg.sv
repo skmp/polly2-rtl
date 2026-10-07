@@ -245,20 +245,33 @@ reg [10:0] vcnt = 11'd0;
 // computed from vcnt by an adder and a wrap compare: with the geometry now a
 // runtime select, that adder/compare chain was 10 ns at 148.5 MHz.
 reg [10:0] y_look = 11'd2;
+// The display read path's lookahead pixel, hcnt + 2 - X0 (mod 4096) - see the
+// read path. Also its own counter, reloaded when hcnt wraps: subtracting the
+// mode's X0 from hcnt sat at the head of the per-pixel address cone and
+// missed 148.5 MHz by 2.3 ns.
+// Power-up value = the 1080p reset value, so it never contradicts the bits the
+// async reset sets in either mode (Quartus would otherwise ignore it, warning
+// 18010). y_look's power-up (2) is likewise its 1080p reset value.
+reg [11:0] x_pre_r = 12'd2 - X0_HD;
 
 always @(posedge clk or posedge reset) begin
 	if (reset) begin
-		hcnt   <= 12'd0;
-		vcnt   <= 11'd0;
-		y_look <= scale2 ? 11'd2 : 11'd1;
+		hcnt    <= 12'd0;
+		vcnt    <= 11'd0;
+		y_look  <= scale2 ? 11'd2 : 11'd1;
+		x_pre_r <= 12'd2 - X0;
 	end
 	else begin
 		if (hcnt == H_TOTAL - 12'd1) begin
-			hcnt   <= 12'd0;
-			vcnt   <= (vcnt   == V_TOTAL - 11'd1) ? 11'd0 : vcnt   + 11'd1;
-			y_look <= (y_look == V_TOTAL - 11'd1) ? 11'd0 : y_look + 11'd1;
+			hcnt    <= 12'd0;
+			vcnt    <= (vcnt   == V_TOTAL - 11'd1) ? 11'd0 : vcnt   + 11'd1;
+			y_look  <= (y_look == V_TOTAL - 11'd1) ? 11'd0 : y_look + 11'd1;
+			x_pre_r <= 12'd2 - X0;
 		end
-		else hcnt <= hcnt + 12'd1;
+		else begin
+			hcnt    <= hcnt + 12'd1;
+			x_pre_r <= x_pre_r + 12'd1;
+		end
 	end
 end
 
@@ -617,7 +630,7 @@ wire [10:0] d_rel   = top_v ? vcnt : bot_v ? vcnt - Y1 : y_rel;
 wire  [1:0] d_vsh   = band_v ? 2'd1 : vshift;
 /* verilator lint_off UNUSEDSIGNAL */
 wire [10:0] y_shf   = d_rel >> d_vsh;
-wire [11:0] x_pre   = hcnt + 12'd2 - X0;     // lookahead: pixel needed in 2 clks
+wire [11:0] x_pre   = x_pre_r;               // lookahead: pixel needed in 2 clks (hcnt+2-X0)
 /* verilator lint_on UNUSEDSIGNAL */
 wire  [9:0] src_cur = y_shf[9:0];
 
