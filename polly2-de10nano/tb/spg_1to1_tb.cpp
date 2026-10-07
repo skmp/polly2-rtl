@@ -111,6 +111,7 @@ struct Phase {
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     Vspg* dut = new Vspg;
+    dut->mode_480p = 1;   // this testbench's literals are the 480p raster
     int errors = 0, printed = 0, shown = 0;
 
 #define ERR(...) do { errors++; if (printed < 24) { printf("    "); printf(__VA_ARGS__); \

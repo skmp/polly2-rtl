@@ -23,6 +23,7 @@ using namespace spg_mode;
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     Vspg* dut = new Vspg;
+    dut->mode_480p = spg_mode::MODE_480P;   // raster under test (tb/spg_mode.h)
 
     print_mode("spg_sync_tb");
 

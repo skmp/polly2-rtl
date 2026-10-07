@@ -21,28 +21,19 @@ VFLAGS = -Wno-WIDTH -Wno-UNUSEDSIGNAL -j $(NJOBS) --build-jobs $(NJOBS) \
 # out of the generated model instead of hardcoding a raster - see tb/spg_mode.h.
 SPGFLAGS = --public-params
 
-# The stock 1080p configuration, as a second instantiation of the SAME spg.sv.
-# spg.sv now carries the 480p mode as its defaults and gates its address generators
-# on SCALE; without this the SCALE=2 arm would only ever be verified by reading the
-# diff. Built into its own --Mdir: the parameters differ, so the generated model
-# cannot be shared with the default-mode build.
-#
-# Written ONCE as name=value pairs and rendered two ways, because the override has to
-# reach spg through a different door depending on where spg sits in the hierarchy:
-#   -G  when spg IS the top module          (spg-sync/bands/depth-1080p)
-#   -D  when it is not, feeding the guarded defparam block in tb/spg_loopback_top.sv
-#       (spg-loopback-1080p) - -G only ever reaches the top, which there is the wrapper
-STOCK_1080P_MODE = H_ACTIVE=1920 H_FP=88 H_SYNC=44 H_BP=148 \
-                   V_ACTIVE=1080 V_FP=4  V_SYNC=5  V_BP=36  \
-                   SRC_W=640 SRC_H=480 SCALE=2
-STOCK_1080P   = $(addprefix -G,$(STOCK_1080P_MODE))
-STOCK_1080P_D = -DSPG_LB_STOCK $(addprefix -DSPG_LB_,$(STOCK_1080P_MODE))
+# spg carries both rasters and picks one at runtime (mode_480p). Every spg testbench
+# runs one mode, chosen at compile time: the default targets drive 480p, and the
+# spg-*-1080p targets rebuild the SAME testbenches with SPG_TB_480P=0 so they drive
+# mode_480p=0 and read the 1080p parameter set (tb/spg_mode.h). Built into their
+# own --Mdir so the two compiles never share objects.
+STOCK_1080P   = -CFLAGS -DSPG_TB_480P=0
+STOCK_1080P_D = $(STOCK_1080P)
 
 TSP_PKG = ../polly2-core/rtl/gen/tsp_pkg.sv
 # polly2-core video-out (framebuffer write master) instantiated by simplex_pvr_top
 VO_RTL  = ../polly2-core/rtl/vo.sv
 
-all: spg-sync pvr-burst spg-loopback audio-i2s spg-bands spg-depth spg-240p fb-write render-irq \
+all: spg-sync spg-modeswitch pvr-burst spg-loopback audio-i2s spg-bands spg-depth spg-240p fb-write render-irq \
      spg-480p spg-1to1 spg-1080p
 
 #   make fb-write - FB write master formats: every FB_W_CTRL packmode
@@ -101,6 +92,16 @@ spg-bands: obj_dir/spg_bands_tb
 
 obj_dir/spg_bands_tb: rtl/spg.sv tb/spg_bands_tb.cpp tb/spg_mode.h
 	$(VERILATOR) --cc --exe --build $(VFLAGS) $(SPGFLAGS) rtl/spg.sv tb/spg_bands_tb.cpp -o spg_bands_tb
+
+#   make spg-modeswitch - one spg model, mode_480p flipped under reset
+#                    1080p -> 480p -> 1080p -> 480p: after every release the raster
+#                    (HS/VS period, HS width, DE run, DE lines) must already be the new
+#                    mode's. The other targets each run one mode for their whole life.
+spg-modeswitch: obj_dir/spg_modeswitch_tb
+	./obj_dir/spg_modeswitch_tb
+
+obj_dir/spg_modeswitch_tb: rtl/spg.sv tb/spg_modeswitch_tb.cpp
+	$(VERILATOR) --cc --exe --build $(VFLAGS) $(SPGFLAGS) rtl/spg.sv tb/spg_modeswitch_tb.cpp -o spg_modeswitch_tb
 
 spg-sync: obj_dir/spg_sync_tb
 	./obj_dir/spg_sync_tb
@@ -234,7 +235,7 @@ obj_dir/pvr_burst_tb: rtl/simplex_pvr_top.sv $(VO_RTL) tb/peel_core_stub.sv tb/p
 clean:
 	rm -rf obj_dir obj_1080p
 
-.PHONY: all spg-sync pvr-burst spg-loopback spg-loopback-nobp audio-i2s spg-bands spg-depth \
+.PHONY: all spg-sync spg-modeswitch pvr-burst spg-loopback spg-loopback-nobp audio-i2s spg-bands spg-depth \
         spg-240p fb-write render-irq spg-480p spg-1to1 \
         spg-1080p spg-sync-1080p spg-bands-1080p spg-depth-1080p spg-loopback-1080p \
         spg-240p-1080p clean

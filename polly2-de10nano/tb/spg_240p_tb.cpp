@@ -204,6 +204,7 @@ static void set_surface(int depth, int split, int half, uint64_t base_fb, int co
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     dut = new Vspg;
+    dut->mode_480p = spg_mode::MODE_480P;   // raster under test (tb/spg_mode.h)
     spg_mode::print_mode("spg_240p_tb");
 
     dut->reset = 1;

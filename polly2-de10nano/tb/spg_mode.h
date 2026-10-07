@@ -10,8 +10,9 @@
 //
 //   Verilator's --public-params exposes every parameter and localparam of the DUT as a
 //   compile-time constant, so a testbench can read the module's OWN arithmetic - X0,
-//   X1, Y0, Y1, H_TOTAL, V_TOTAL are the localparams spg.sv computed, not a copy of the
-//   formula. Change spg.sv's mode and every testbench follows with no edit.
+//   X1, Y0, Y1, H_TOTAL, V_TOTAL are the per-mode localparams spg.sv computed (X0_SD,
+//   X0_HD, ...), not a copy of the formula. Change either mode in spg.sv and every
+//   testbench follows with no edit.
 //
 // USAGE
 //   The parameters live on the generated root class under a hierarchical name, which
@@ -37,29 +38,45 @@
 
 #include <cstdio>
 
+// WHICH RASTER. spg carries both modes and picks one at runtime from its mode_480p
+// input; a testbench runs ONE of them, chosen at compile time by SPG_TB_480P (the
+// Makefile's spg-*-1080p targets pass -DSPG_TB_480P=0). The testbench must drive
+// dut->mode_480p = spg_mode::MODE_480P before releasing reset, and everything below
+// is then read from that mode's parameter set (H_ACTIVE_SD vs H_ACTIVE_HD, ...).
+#ifndef SPG_TB_480P
+#  define SPG_TB_480P 1
+#endif
+#if SPG_TB_480P
+#  define SPG_M(n) SPG_P(n##_SD)
+#else
+#  define SPG_M(n) SPG_P(n##_HD)
+#endif
+
 namespace spg_mode {
 
+static const int  MODE_480P = SPG_TB_480P;
+
 // ---- straight from the RTL -----------------------------------------------------
-static const long H_ACTIVE = SPG_P(H_ACTIVE);
-static const long H_FP     = SPG_P(H_FP);
-static const long H_SYNC   = SPG_P(H_SYNC);
-static const long H_BP     = SPG_P(H_BP);
-static const long V_ACTIVE = SPG_P(V_ACTIVE);
-static const long V_FP     = SPG_P(V_FP);
-static const long V_SYNC   = SPG_P(V_SYNC);
-static const long V_BP     = SPG_P(V_BP);
+static const long H_ACTIVE = SPG_M(H_ACTIVE);
+static const long H_FP     = SPG_M(H_FP);
+static const long H_SYNC   = SPG_M(H_SYNC);
+static const long H_BP     = SPG_M(H_BP);
+static const long V_ACTIVE = SPG_M(V_ACTIVE);
+static const long V_FP     = SPG_M(V_FP);
+static const long V_SYNC   = SPG_M(V_SYNC);
+static const long V_BP     = SPG_M(V_BP);
 static const long SRC_W    = SPG_P(SRC_W);
 static const long SRC_H    = SPG_P(SRC_H);
-static const long SCALE    = SPG_P(SCALE);
+static const long SCALE    = SPG_M(SCALE);
 
 // spg.sv's own derived localparams - deliberately read rather than recomputed here,
 // so a testbench cannot disagree with the module about where the window is.
-static const long H_TOTAL  = SPG_P(H_TOTAL);
-static const long V_TOTAL  = SPG_P(V_TOTAL);
-static const long X0       = SPG_P(X0);
-static const long X1       = SPG_P(X1);
-static const long Y0       = SPG_P(Y0);
-static const long Y1       = SPG_P(Y1);
+static const long H_TOTAL  = SPG_M(H_TOTAL);
+static const long V_TOTAL  = SPG_M(V_TOTAL);
+static const long X0       = SPG_M(X0);
+static const long X1       = SPG_M(X1);
+static const long Y0       = SPG_M(Y0);
+static const long Y1       = SPG_M(Y1);
 
 // ---- derived for the testbenches -----------------------------------------------
 
@@ -97,9 +114,9 @@ static inline long src_x(long x) { return (x - X0) >> SHIFT; }
 static inline long src_y(long y) { return (y - Y0) >> SHIFT; }
 
 static inline void print_mode(const char* tb) {
-    printf("%s: %ldx%ld raster (%ldx%ld total), %ldx%ld source at SCALE=%ld"
+    printf("%s: mode_480p=%d, %ldx%ld raster (%ldx%ld total), %ldx%ld source at SCALE=%ld"
            " -> window x %ld..%ld, y %ld..%ld%s\n",
-           tb, H_ACTIVE, V_ACTIVE, H_TOTAL, V_TOTAL, SRC_W, SRC_H, SCALE,
+           tb, MODE_480P, H_ACTIVE, V_ACTIVE, H_TOTAL, V_TOTAL, SRC_W, SRC_H, SCALE,
            X0, X1 - 1, Y0, Y1 - 1, HAS_BANDS ? "" : ", no border bands");
 }
 
