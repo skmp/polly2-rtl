@@ -115,7 +115,7 @@ module spg
 	// SCALE: how many raster pixels/lines each source pixel/line occupies (1 or
 	// 2). It is honoured by the window placement below AND by the address
 	// generators: the horizontal shift (n_pre), the vertical shift (vshift), the
-	// prefetch lookahead (y_look_raw) and the underrun gate all derive from it.
+	// prefetch lookahead (y_look) and the underrun gate all derive from it.
 	// fb_pix_dbl / fb_line_dbl compose on top, so a 320-wide or 240-line source
 	// still fills the window in either mode.
 )
@@ -240,16 +240,23 @@ localparam [1:0] RGN_BOT  = 2'd2;
 
 reg [11:0] hcnt = 12'd0;
 reg [10:0] vcnt = 11'd0;
+// The fetch lookahead line, (vcnt + 1 source line) mod V_TOTAL - see the
+// lookahead block. Kept as its own counter, stepping with vcnt, rather than
+// computed from vcnt by an adder and a wrap compare: with the geometry now a
+// runtime select, that adder/compare chain was 10 ns at 148.5 MHz.
+reg [10:0] y_look = 11'd2;
 
 always @(posedge clk or posedge reset) begin
 	if (reset) begin
-		hcnt <= 12'd0;
-		vcnt <= 11'd0;
+		hcnt   <= 12'd0;
+		vcnt   <= 11'd0;
+		y_look <= scale2 ? 11'd2 : 11'd1;
 	end
 	else begin
 		if (hcnt == H_TOTAL - 12'd1) begin
-			hcnt <= 12'd0;
-			vcnt <= (vcnt == V_TOTAL - 11'd1) ? 11'd0 : vcnt + 11'd1;
+			hcnt   <= 12'd0;
+			vcnt   <= (vcnt   == V_TOTAL - 11'd1) ? 11'd0 : vcnt   + 11'd1;
+			y_look <= (y_look == V_TOTAL - 11'd1) ? 11'd0 : y_look + 11'd1;
 		end
 		else hcnt <= hcnt + 12'd1;
 	end
@@ -304,7 +311,7 @@ end
 // holds across region seams too (each region restarts at src 0 an even
 // number of output lines after the previous region's last line began).
 // The lookahead is counted in OUTPUT lines while the invariant it protects is
-// in SOURCE lines, so it has to track SCALE - see y_look_raw below.
+// in SOURCE lines, so it has to track SCALE - see y_look below.
 reg        req_toggle = 1'b0;
 reg        req_sof    = 1'b0;   // first line of its region: reset the render offset
 reg        req_buf    = 1'b0;
@@ -326,19 +333,33 @@ initial begin line_roff[0] = 4'd0; line_roff[1] = 4'd0; end
 // src_cur[0], and the prefetch overwrites the line being scanned out.
 // Shallower leaves no fetch time. Wraps for the first fetched line of the
 // frame - the top band at SCALE=2, the first game line at SCALE=1 where
-// Y0 == 0 (V_TOTAL-SCALE -> line 0).
-wire [10:0] y_look_raw = scale2 ? vcnt + 11'd2 : vcnt + 11'd1;
-wire [10:0] y_look     = (y_look_raw >= V_TOTAL) ? y_look_raw - V_TOTAL
-                                                 : y_look_raw;
+// Y0 == 0 (V_TOTAL-SCALE -> line 0). y_look (the counter above) holds
+// (vcnt + 2) mod V_TOTAL at SCALE=2 and (vcnt + 1) mod V_TOTAL at SCALE=1: it
+// is loaded with the offset at reset and steps and wraps with vcnt.
+//
+// Region decode, REGISTERED (stage A): y_look is line-constant, so these are
+// settled from hcnt==1 on. The region compares against the mode's Y0/Y1/V_ACT
+// would otherwise sit in series with the shift and the dedup compare below.
+reg        la_top_r  = 1'b0;
+reg        la_game_r = 1'b0;
+reg        la_bot_r  = 1'b0;
+reg [10:0] la_rel_r  = 11'd0;
+always @(posedge clk) begin
+	la_top_r  <= (y_look < Y0) && top_en_lat;
+	la_game_r <= (y_look >= Y0) && (y_look < Y1);
+	la_bot_r  <= (y_look >= Y1) && (y_look < V_ACT) && bot_en_lat;
+	// only meaningful while one of the three regions is active (look_in)
+	la_rel_r  <= (y_look < Y0) ? y_look
+	           : (y_look < Y1) ? y_look - Y0
+	                           : y_look - Y1;
+end
 
-wire        look_top  = (y_look < Y0) && top_en_lat;
-wire        look_game = (y_look >= Y0) && (y_look < Y1);
-wire        look_bot  = (y_look >= Y1) && (y_look < V_ACT) && bot_en_lat;
+wire        look_top  = la_top_r;
+wire        look_game = la_game_r;
+wire        look_bot  = la_bot_r;
 wire        look_in   = look_top || look_game || look_bot;
 wire  [1:0] look_rgn  = look_top ? RGN_TOP : look_game ? RGN_GAME : RGN_BOT;
-wire [10:0] look_rel  = look_top  ? y_look
-                      : look_game ? y_look - Y0
-                                  : y_look - Y1;
+wire [10:0] look_rel  = la_rel_r;
 wire  [1:0] look_vsh  = look_game ? vshift : 2'd1;   // bands are always 2x
 /* verilator lint_off UNUSEDSIGNAL */
 wire [10:0] look_shf = look_rel >> look_vsh;
@@ -364,13 +385,14 @@ wire  [8:0] bb_geo     = split_lat ? {bb_lin[7:0], 1'b0} : bb_lin;
 wire  [8:0] look_beats = bb_geo + {8'd0, look_roff != 4'd0};
 
 // look_* are LINE-CONSTANT (vcnt only changes when hcnt wraps): register the
-// whole lookahead cone per clock (copies are settled from hcnt==1 on) and
-// fire the request at hcnt==2 instead of hcnt==0, so the y_look_raw wrap adder /
-// region subtracts / 12-bit dedup compare never gate the req_* enables
-// combinationally (they were an STA-failing family into req_base). The two
-// pixel clocks of extra latency are nothing against the one-source-line
-// fetch-ahead margin, and the per-line config latches at hcnt==0 have
-// settled a full cycle before the registered copies are consumed.
+// whole lookahead cone per clock (stage B; settled from hcnt==2 on, stage A
+// above from hcnt==1) and fire the request at hcnt==3 instead of hcnt==0, so
+// the region compares / subtracts / 12-bit dedup compare never gate the req_*
+// enables combinationally (they were an STA-failing family into req_base).
+// The three pixel clocks of extra latency are nothing against the
+// one-source-line fetch-ahead margin, and the per-line config latches at
+// hcnt==0 (and the band enables at line V_ACT) have settled before stage A
+// samples them a second time.
 reg        look_in_r    = 1'b0;
 reg [11:0] look_key_r   = 12'hFFF;
 reg  [1:0] look_rgn_r   = 2'd0;
@@ -416,7 +438,7 @@ always @(posedge clk or posedge reset) begin
 			last_req     <= 12'hFFF;
 		end
 
-		if (hcnt == 12'd2 && look_in_r && look_key_r != last_req) begin
+		if (hcnt == 12'd3 && look_in_r && look_key_r != last_req) begin
 			req_sof    <= look_sof_r;
 			req_buf    <= look_buf_r;
 			req_region <= look_rgn_r;
