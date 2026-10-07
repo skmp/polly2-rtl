@@ -36,7 +36,8 @@
 //                            73; sys_top stretches pvr_done onto the
 //                            f2h line, forwarded to userspace by the
 //                            driver/polly2 kernel module),
-//                            4 = VRAM_CFG (16 MB VRAM select).
+//                            4 = VRAM_CFG (16 MB VRAM select),
+//                            5 = VIDEO_MODE (1080p / 480p raster select).
 //                            Writes ignored.
 //   0xFF202020  FB_TOP       RW. DDR BYTE address of a 640x30 RGB565
 //                            linear framebuffer (stride 1280 bytes),
@@ -51,7 +52,17 @@
 //                            accesses at 8 MB, the Dreamcast default), 1 = this
 //                            board has 16 MB and no mirroring is applied. Other
 //                            bits reserved, write 0. Reset value 0.
-//   0xFF20202C - 0xFF20203C  reserved (read 0, writes ignored).
+//   0xFF20202C  VIDEO_MODE   RW. [0] 480P: 0 = 1920x1080 @ 148.5 MHz (HDMI TVs;
+//                            the reset value), 1 = 720x480p @ 27 MHz (CEA VIC
+//                            2/3, 31.469 kHz - for analog monitors fed from the
+//                            HDMI port through a DAC). Other bits reserved,
+//                            write 0. sys_top re-times the switch: the pixel
+//                            clock changes through a glitch-free mux and the SPG
+//                            is held in reset across it, so the output loses a
+//                            frame or two; the PVR itself is unaffected. Like
+//                            every register here it is set only by configuration
+//                            and by writes - a RESET does not clear it.
+//   0xFF202030 - 0xFF20203C  reserved (read 0, writes ignored).
 //
 // Single clock domain (clk_sys). waitrequest is low except for AUDIO_DATA
 // writes with the FIFO full - every other access completes immediately;
@@ -96,7 +107,8 @@ module pvr_mmio
 	// SPG border band framebuffers (128-byte-aligned byte addr, 0 = off)
 	output reg  [31:0] fb_top    = 32'd0,
 	output reg  [31:0] fb_bot    = 32'd0,
-	output reg  [31:0] vram_cfg  = 32'd0     // [0] VRAM_16MB (0 = 8 MB + mirror)
+	output reg  [31:0] vram_cfg  = 32'd0,    // [0] VRAM_16MB (0 = 8 MB + mirror)
+	output reg         video_480p = 1'b0     // VIDEO_MODE[0]: 0 = 1080p, 1 = 480p
 );
 
 // no size casts (Quartus Standard 17.0)
@@ -105,10 +117,10 @@ localparam [8:0] RSTC = RST_CYCLES;
 /* verilator lint_on WIDTHTRUNC */
 
 // MMIO interface revision (REVISION reg): bump on every interface change.
-// 3 = render-done f2h IRQ1 (raised in sys_top, not here - see the
+// 5 = VIDEO_MODE (1080p / 480p); 4 = VRAM_CFG; 3 = render-done f2h IRQ1 (raised in sys_top, not here - see the
 // pvr_render_irq block there); 2 = border bands (FB_TOP/FB_BOT); 1 = audio
 // (AUDIO_DATA + REVISION added); 0 = anything older.
-localparam [31:0] REVISION = 32'd4;
+localparam [31:0] REVISION = 32'd5;
 
 wire wr32     = avs_write && (avs_byteenable == 4'b1111);
 wire sel_regs = (avs_address[20:13] == 8'd0);     // 0x0000-0x1FFF
@@ -170,6 +182,7 @@ always @(posedge clk) begin
 			4'd8: fb_top <= {avs_writedata[31:7], 7'd0};   // FB_TOP (128B aligned)
 			4'd9: fb_bot <= {avs_writedata[31:7], 7'd0};   // FB_BOT
 			4'd10: vram_cfg <= {31'd0, avs_writedata[0]};  // VRAM_CFG
+			4'd11: video_480p <= avs_writedata[0];         // VIDEO_MODE
 			default: ;                                     // STATUS/CYCLES/rsvd: RO
 		endcase
 	end
@@ -201,6 +214,7 @@ always @(posedge clk) begin
 			4'd8: avs_readdata <= fb_top;                  // FB_TOP
 			4'd9: avs_readdata <= fb_bot;                  // FB_BOT
 			4'd10: avs_readdata <= vram_cfg;               // VRAM_CFG
+			4'd11: avs_readdata <= {31'd0, video_480p};    // VIDEO_MODE
 			default: ;
 		endcase
 	end
