@@ -14,10 +14,11 @@
 //     reset window held around a switch.
 //   - peel_core (simplex_pvr_top): registers/GO/RESET/VRAM base via MMIO,
 //     render reads on ram1, framebuffer writes on ram2.
-//   - Display: pll_hdmi (fixed 27.000 MHz) + SPG (720x480p raster, 640x480
-//     split-VRAM FB shown 1:1, vbuf port) -> TX register stage -> ADV7513.
-//     No OSD, no scaler, no analog output. Clock and raster now match - see
-//     the instantiation below for the PLL solve.
+//   - Display: pll_hdmi (148.5 MHz + 27 MHz from one VCO) -> glitch-free mux
+//     -> SPG -> TX register stage -> ADV7513. The MMIO VIDEO_MODE register
+//     picks the raster: 1920x1080 (reset default, for HDMI TVs) or 720x480p
+//     (for analog monitors fed from HDMI through a DAC). 640x480 split-VRAM FB
+//     on the vbuf port. No OSD, no scaler, no analog output.
 //   - Audio: pll_audio (24.576 MHz) + audio_i2s: 2048-entry sample FIFO
 //     fed from the MMIO AUDIO_DATA register (blocking when full), drained
 //     at 48 kHz onto the ADV7513's I2S input (16-bit, standard I2S).
@@ -331,6 +332,7 @@ wire [31:0] pvr_mmio_wdata;
 wire  [7:0] pvr_vram_top;
 wire [31:0] pvr_vram_cfg;   // [0] VRAM_16MB: 16 MB board, no 8 MB mirror
 wire  [1:0] mmio_clk_sel;
+wire        mmio_video_480p;  // VIDEO_MODE[0], clk_sys domain, quasi-static
 
 wire        aud_fifo_wr, aud_fifo_full;
 wire [31:0] aud_fifo_wdata;
@@ -367,7 +369,8 @@ pvr_mmio pvr_mmio
 
 	.fb_top           (fb_top_base),
 	.fb_bot           (fb_bot_base),
-	.vram_cfg         (pvr_vram_cfg)
+	.vram_cfg         (pvr_vram_cfg),
+	.video_480p       (mmio_video_480p)
 );
 
 //////////////////////////////////////////////////////////////////////////
@@ -516,31 +519,64 @@ irq_stretch #(.CYCLES(64)) render_irq_stretch
 // FB is split-VRAM 16bpp RGB565: DC 32-bit-view word W at DDR byte W*8,
 // half selected by SOF bit 22.
 //
-// Clock: pll_hdmi emits 27.000 MHz, matching spg's 858 x 525 totals at
-// 720x480p (31.469 kHz / 59.940 Hz). Regenerated from the stock 148.5 MHz
-// part by Quartus' own IP solver (ip-generate reading this PLL's variation
-// file), so the resolved counters in plls/pll_hdmi/pll_hdmi_0002.v - which
-// are what actually program the silicon - were derived by the tool, not by
-// hand:
-//   50 MHz ref, N=1, M=8.1 (integer 8 + fractional 429496730/2^32),
-//   VCO 810 MHz -> 405 MHz after pll_vco_div=2, C0=15 -> 27.000 MHz exactly.
-// The charge pump (pll_cp_current=20) and loop filter (pll_bwctrl=4000) came
-// back UNCHANGED from the 148.5 MHz solve: Quartus picks the same loop
-// settings for both. That is the whole reason this retarget was safe - the
-// stability values were never ours to guess.
+// Clock: pll_hdmi emits BOTH pixel clocks from one VCO, and a glitch-free mux
+// picks the one VIDEO_MODE asks for:
+//   outclk_0 148.5 MHz -> 1920x1080 (2200 x 1125) = 60.000 Hz   (VIDEO_MODE 0)
+//   outclk_1  27.0 MHz ->  720x480p (858 x 525)   = 59.940 Hz,
+//                          31.469 kHz horizontal               (VIDEO_MODE 1)
+// Solved by Quartus' own IP solver (ip-generate reading this PLL's variation
+// file, number_of_clocks=2), not by hand:
+//   50 MHz ref, N=1, M=11.88 (integer 11 + fractional 3779571135/2^32),
+//   VCO 1188 MHz -> 594 MHz after pll_vco_div=2;
+//   C0=4 -> 148.5 MHz, C1=22 -> 27.000 MHz.
+// The charge pump (pll_cp_current=20) and loop filter (pll_bwctrl=4000) are the
+// stock part's: Quartus picks the same loop settings. No runtime reconfig - a
+// second counter costs nothing next to the reconfig block.
 //////////////////////////////////////////////////////////////////////////
 
-wire hdmi_clk_out;
+wire clk_hdmi_1080, clk_hdmi_480;
 pll_hdmi pll_hdmi
 (
 	.refclk(FPGA_CLK1_50),
 	.rst(1'b0),
-	.reconfig_to_pll(64'd0),   // fixed 27.000 MHz (stock part was 148.5), no runtime reconfig
+	.reconfig_to_pll(64'd0),   // fixed outputs, no runtime reconfig
 	.reconfig_from_pll(),
-	.outclk_0(hdmi_clk_out)
+	.outclk_0(clk_hdmi_1080),
+	.outclk_1(clk_hdmi_480)
 );
 
-wire clk_hdmi = hdmi_clk_out;
+// VIDEO_MODE switch, re-timed exactly like the core-clock switch above: the
+// MMIO bit is double-synced into the 50 MHz domain, and a change opens a
+// 31-cycle window with the SPG held in reset; the select itself moves at the
+// middle of it, so the mux swaps clocks and spg sees its new mode_480p while
+// nothing in the display path is running. The window (620 ns) covers the
+// mux's break-before-make dead time (~2.5 clocks of each pixel clock, worst
+// ~190 ns at 27 MHz) with room to spare.
+reg        vid_mode_sel_meta = 1'b0;
+reg        vid_mode_sel_sync = 1'b0;
+reg        vid_mode_sel      = 1'b0;   // applied mode: 0 = 1080p, 1 = 480p
+reg  [4:0] vid_switch_cnt    = 5'd0;
+
+always @(posedge FPGA_CLK2_50) begin
+	vid_mode_sel_meta <= mmio_video_480p;   // clk_sys domain -> 50 MHz, quasi-static
+	vid_mode_sel_sync <= vid_mode_sel_meta;
+
+	if (vid_switch_cnt != 5'd0) begin
+		vid_switch_cnt <= vid_switch_cnt - 5'd1;
+		if (vid_switch_cnt == 5'd16) vid_mode_sel <= vid_mode_sel_sync;
+	end
+	else if (vid_mode_sel_sync != vid_mode_sel) vid_switch_cnt <= 5'd31;
+end
+
+wire vid_switch_reset = (vid_switch_cnt != 5'd0);
+
+wire clk_hdmi;
+clk_mux_gf hdmiclk_mux
+(
+	.clks  ({1'b0, 1'b0, clk_hdmi_480, clk_hdmi_1080}),  // sel 0/1 = 148.5/27 MHz
+	.sel   ({1'b0, vid_mode_sel}),
+	.outclk(clk_hdmi)
+);
 
 // absolute DDR byte address of the displayed frame, straight from the core's
 // FB_R_SOF1 display register (side layout: 8 bytes per DC 32-bit word; SOF
@@ -577,8 +613,8 @@ wire        spg_underrun;
 spg spg
 (
 	.clk         (clk_hdmi),
-	.reset       (reset_req),
-	.mode_480p   (1'b1),                  // pll_hdmi is fixed at 27 MHz (480p) for now
+	.reset       (reset_req | vid_switch_reset),
+	.mode_480p   (vid_mode_sel),          // only changes inside vid_switch_reset
 
 	.fb_base     (fb_disp_base),
 	.fb_stride   (fb_disp_stride),

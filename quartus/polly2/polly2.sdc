@@ -21,7 +21,7 @@ derive_clock_uncertainty
 # ~0.07 ns worst-case - unmeetable paths that wreck fitting and routing.
 set_clock_groups -exclusive \
     -group [get_clocks {pll|pll_inst|altera_pll_i|*[*].*|divclk}] \
-    -group [get_clocks {pll_hdmi|pll_hdmi_inst|altera_pll_i|*[0].*|divclk}] \
+    -group [get_clocks {pll_hdmi|pll_hdmi_inst|altera_pll_i|*[*].*|divclk}] \
     -group [get_clocks {pll_audio|pll_audio_inst|altera_pll_i|*[0].*|divclk}] \
     -group [get_clocks {hdmi_sck}] \
     -group [get_clocks {*|h2f_user0_clk}] \
@@ -49,6 +49,21 @@ set_clock_groups -physically_exclusive \
 # clkselect: MMIO clk_sel reg (clk_sys) -> 50MHz sync pair -> clk_sel -> the
 # soft mux's per-domain synchronizers. All hops are synchronized; cut them.
 set_false_path -from [get_registers {*clk_sel*}]
+
+# ---- HDMI pixel clock: 2 fixed pll_hdmi outputs muxed by VIDEO_MODE ----
+# outclk_0 = 148.5 MHz (1080p), outclk_1 = 27 MHz (480p), one VCO, picked by
+# the hdmiclk_mux soft glitch-free mux. Only one reaches clk_hdmi at a time, so
+# - as for the core clocks above - they are physically exclusive: no transfer
+# between them is ever real. The 1080p slot is the one that has to close.
+set_clock_groups -physically_exclusive \
+    -group [get_clocks {pll_hdmi|pll_hdmi_inst|altera_pll_i|*[0].*|divclk}] \
+    -group [get_clocks {pll_hdmi|pll_hdmi_inst|altera_pll_i|*[1].*|divclk}]
+# VIDEO_MODE select: MMIO video_480p (clk_sys) -> 50 MHz sync pair ->
+# vid_mode_sel -> the mux's per-domain synchronizers, and into spg as
+# mode_480p, which only changes while vid_switch_reset holds spg in reset.
+# Quasi-static everywhere it lands; cut it.
+set_false_path -from [get_registers {*vid_mode_sel*}]
+set_false_path -from [get_registers {*pvr_mmio*|video_480p}]
 
 # ---- render-done f2h IRQ (sys_top render_irq_stretch) ----
 # The stretcher's output goes into the HPS interrupts atom, which the GIC
