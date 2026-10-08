@@ -55,7 +55,11 @@
 //   0xFF20202C  VIDEO_MODE   RW. [0] 480P: 0 = 1920x1080 @ 148.5 MHz (HDMI TVs;
 //                            the reset value), 1 = 720x480p @ 27 MHz (CEA VIC
 //                            2/3, 31.469 kHz - for analog monitors fed from the
-//                            HDMI port through a DAC). Other bits reserved,
+//                            HDMI port through a DAC). The value at configuration
+//                            is the VIDEO_480P_INIT parameter: 0 unless the build
+//                            defines POLLY2_VIDEO_480P_DEFAULT (see sys_top) -
+//                            which a CRT setup needs, because its monitor must
+//                            never see 1080p, not even until software runs. Other bits reserved,
 //                            write 0. sys_top re-times the switch: the pixel
 //                            clock changes through a glitch-free mux and the SPG
 //                            is held in reset across it, so the output loses a
@@ -71,7 +75,8 @@
 module pvr_mmio
 #(
 	parameter [7:0]  VRAM_TOP_INIT = 8'h32,   // 0x32000000
-	parameter        RST_CYCLES    = 256      // max 511
+	parameter        RST_CYCLES    = 256,     // max 511
+	parameter        VIDEO_480P_INIT = 1'b0   // VIDEO_MODE[0] at configuration
 )
 (
 	input  wire        clk,           // clk_sys
@@ -108,7 +113,7 @@ module pvr_mmio
 	output reg  [31:0] fb_top    = 32'd0,
 	output reg  [31:0] fb_bot    = 32'd0,
 	output reg  [31:0] vram_cfg  = 32'd0,    // [0] VRAM_16MB (0 = 8 MB + mirror)
-	output reg         video_480p = 1'b0     // VIDEO_MODE[0]: 0 = 1080p, 1 = 480p
+	output reg         video_480p = VIDEO_480P_INIT   // VIDEO_MODE[0]: 0 = 1080p, 1 = 480p
 );
 
 // no size casts (Quartus Standard 17.0)
