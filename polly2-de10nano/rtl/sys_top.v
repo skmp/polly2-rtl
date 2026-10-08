@@ -334,13 +334,28 @@ wire [31:0] pvr_vram_cfg;   // [0] VRAM_16MB: 16 MB board, no 8 MB mirror
 wire  [1:0] mmio_clk_sel;
 wire        mmio_video_480p;  // VIDEO_MODE[0], clk_sys domain, quasi-static
 
+// Raster at configuration. 1080p unless the build defines
+// POLLY2_VIDEO_480P_DEFAULT, e.g.
+//   quartus_map --set=VERILOG_MACRO=POLLY2_VIDEO_480P_DEFAULT ...
+// A CRT behind an HDMI-to-analog DAC needs that: it must never be sent 1080p's
+// ~67 kHz, and the MMIO register can only be written once minicast is up -
+// seconds after configuration. Seen on a MiSTercade V2 31 kHz chassis: ~10 s of
+// 1080p before software switched it made the monitor flicker and click its
+// relays hunting for a mode. With the macro, the bitstream comes out of
+// configuration at 480p and software can still switch it later.
+`ifdef POLLY2_VIDEO_480P_DEFAULT
+localparam VIDEO_480P_DEFAULT = 1'b1;
+`else
+localparam VIDEO_480P_DEFAULT = 1'b0;
+`endif
+
 wire        aud_fifo_wr, aud_fifo_full;
 wire [31:0] aud_fifo_wdata;
 wire [11:0] aud_fifo_level;
 
 wire [31:0] fb_top_base, fb_bot_base;
 
-pvr_mmio pvr_mmio
+pvr_mmio #(.VIDEO_480P_INIT(VIDEO_480P_DEFAULT)) pvr_mmio
 (
 	.clk              (clk_sys),
 
@@ -552,9 +567,11 @@ pll_hdmi pll_hdmi
 // nothing in the display path is running. The window (620 ns) covers the
 // mux's break-before-make dead time (~2.5 clocks of each pixel clock, worst
 // ~190 ns at 27 MHz) with room to spare.
-reg        vid_mode_sel_meta = 1'b0;
-reg        vid_mode_sel_sync = 1'b0;
-reg        vid_mode_sel      = 1'b0;   // applied mode: 0 = 1080p, 1 = 480p
+// All three start at the configured default, so no switch window - and no
+// cycle of the other pixel clock - happens at startup.
+reg        vid_mode_sel_meta = VIDEO_480P_DEFAULT;
+reg        vid_mode_sel_sync = VIDEO_480P_DEFAULT;
+reg        vid_mode_sel      = VIDEO_480P_DEFAULT;   // applied mode: 0 = 1080p, 1 = 480p
 reg  [4:0] vid_switch_cnt    = 5'd0;
 
 always @(posedge FPGA_CLK2_50) begin
