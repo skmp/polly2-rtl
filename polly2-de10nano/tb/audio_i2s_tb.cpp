@@ -144,6 +144,20 @@ int main(int argc, char** argv) {
     if (avm_write(REVISION, 0xDEADBEEF)) { printf("REVISION write stalled\n"); errors++; }
     if (avm_read(REVISION) != rev) { printf("REVISION not read-only\n"); errors++; }
 
+    // ---- VIDEO_MODE lives at 0x30 with a read-only PRESENT bit [31]; 0x2C stays free
+    // (r7 uses it for FEAT). Software detects the register by bit 31, not by REVISION. ----
+    {
+        static const uint32_t VIDEO_MODE = 0x2030, SLOT_2C = 0x202C;
+        uint32_t vm0 = avm_read(VIDEO_MODE);
+        if (!(vm0 & 0x80000000u)) { printf("VIDEO_MODE PRESENT bit not set (0x%08x)\n", vm0); errors++; }
+        avm_write(VIDEO_MODE, 1);
+        if (avm_read(VIDEO_MODE) != 0x80000001u) { printf("VIDEO_MODE write 1 -> 0x%08x\n", avm_read(VIDEO_MODE)); errors++; }
+        avm_write(VIDEO_MODE, 0xFFFFFFFEu);            // only bit 0 is writable
+        if (avm_read(VIDEO_MODE) != 0x80000000u) { printf("VIDEO_MODE reserved bits leak 0x%08x\n", avm_read(VIDEO_MODE)); errors++; }
+        avm_write(VIDEO_MODE, vm0 & 1u);               // restore
+        if (avm_read(SLOT_2C) != 0) { printf("0x2C not free (0x%08x)\n", avm_read(SLOT_2C)); errors++; }
+    }
+
     // ---- small batch: framing, order, one-shot ----
     static const Frame batch[8] = {
         {0x7FFF, (int16_t)0x8000}, {0x1234, (int16_t)0xFEDC},

@@ -588,11 +588,19 @@ end
 wire vid_switch_reset = (vid_switch_cnt != 5'd0);
 
 wire clk_hdmi;
-clk_mux_gf hdmiclk_mux
+// HARD altclkctrl 2:1 between the two pll_hdmi outputs, as skmp suggested on #69 and
+// as r7 does for clk_sys (same generated IP, plls/switch/altclkctrl). Both inputs are
+// counters of ONE pll_hdmi VCO, which is what a clkctrl dynamic select needs; a
+// clkctrl routes at most two PLL clocks, and this uses exactly two.
+// clkselect = {1'b1, sel}: inclk2x = 148.5 MHz (sel 0, 1080p), inclk3x = 27 MHz (sel 1, 480p).
+altclkctrl hdmiclk_ctrl
 (
-	.clks  ({1'b0, 1'b0, clk_hdmi_480, clk_hdmi_1080}),  // sel 0/1 = 148.5/27 MHz
-	.sel   ({1'b0, vid_mode_sel}),
-	.outclk(clk_hdmi)
+	.inclk3x  (clk_hdmi_480),
+	.inclk2x  (clk_hdmi_1080),
+	.inclk1x  (1'b0),
+	.inclk0x  (1'b0),
+	.clkselect({1'b1, vid_mode_sel}),
+	.outclk   (clk_hdmi)
 );
 
 // absolute DDR byte address of the displayed frame, straight from the core's

@@ -52,7 +52,7 @@ set_false_path -from [get_registers {*clk_sel*}]
 
 # ---- HDMI pixel clock: 2 fixed pll_hdmi outputs muxed by VIDEO_MODE ----
 # outclk_0 = 148.5 MHz (1080p), outclk_1 = 27 MHz (480p), one VCO, picked by
-# the hdmiclk_mux soft glitch-free mux. Only one reaches clk_hdmi at a time, so
+# the hdmiclk_ctrl hard altclkctrl. Only one reaches clk_hdmi at a time, so
 # - as for the core clocks above - they are physically exclusive: no transfer
 # between them is ever real. The 1080p slot is the one that has to close.
 set_clock_groups -physically_exclusive \

@@ -36,9 +36,10 @@
 //                            73; sys_top stretches pvr_done onto the
 //                            f2h line, forwarded to userspace by the
 //                            driver/polly2 kernel module),
-//                            4 = VRAM_CFG (16 MB VRAM select),
-//                            5 = VIDEO_MODE (1080p / 480p raster select).
-//                            Writes ignored.
+//                            4 = VRAM_CFG (16 MB VRAM select).
+//                            Writes ignored. (VIDEO_MODE deliberately does
+//                            NOT bump this: r7 already claims 5 for FEAT.
+//                            Detect it by VIDEO_MODE[31], below.)
 //   0xFF202020  FB_TOP       RW. DDR BYTE address of a 640x30 RGB565
 //                            linear framebuffer (stride 1280 bytes),
 //                            displayed 2x-doubled as a 1280x60 band in the
@@ -52,21 +53,26 @@
 //                            accesses at 8 MB, the Dreamcast default), 1 = this
 //                            board has 16 MB and no mirroring is applied. Other
 //                            bits reserved, write 0. Reset value 0.
-//   0xFF20202C  VIDEO_MODE   RW. [0] 480P: 0 = 1920x1080 @ 148.5 MHz (HDMI TVs;
+//   0xFF20202C  reserved (read 0, writes ignored) - left free for r7's FEAT.
+//   0xFF202030  VIDEO_MODE   RW. [0] 480P: 0 = 1920x1080 @ 148.5 MHz (HDMI TVs;
 //                            the reset value), 1 = 720x480p @ 27 MHz (CEA VIC
 //                            2/3, 31.469 kHz - for analog monitors fed from the
 //                            HDMI port through a DAC). The value at configuration
 //                            is the VIDEO_480P_INIT parameter: 0 unless the build
 //                            defines POLLY2_VIDEO_480P_DEFAULT (see sys_top) -
 //                            which a CRT setup needs, because its monitor must
-//                            never see 1080p, not even until software runs. Other bits reserved,
-//                            write 0. sys_top re-times the switch: the pixel
-//                            clock changes through a glitch-free mux and the SPG
+//                            never see 1080p, not even until software runs.
+//                            [31] PRESENT (RO, reads 1): software probes for
+//                            this register by reading bit 31, because a
+//                            bitstream without it reads the slot as 0.
+//                            Other bits reserved, write 0. sys_top re-times the
+//                            switch: the pixel clock changes through a hard
+//                            altclkctrl (glitch-free) and the SPG
 //                            is held in reset across it, so the output loses a
 //                            frame or two; the PVR itself is unaffected. Like
 //                            every register here it is set only by configuration
 //                            and by writes - a RESET does not clear it.
-//   0xFF202030 - 0xFF20203C  reserved (read 0, writes ignored).
+//   0xFF202034 - 0xFF20203C  reserved (read 0, writes ignored).
 //
 // Single clock domain (clk_sys). waitrequest is low except for AUDIO_DATA
 // writes with the FIFO full - every other access completes immediately;
@@ -122,10 +128,10 @@ localparam [8:0] RSTC = RST_CYCLES;
 /* verilator lint_on WIDTHTRUNC */
 
 // MMIO interface revision (REVISION reg): bump on every interface change.
-// 5 = VIDEO_MODE (1080p / 480p); 4 = VRAM_CFG; 3 = render-done f2h IRQ1 (raised in sys_top, not here - see the
+// 4 = VRAM_CFG (VIDEO_MODE is detected by its PRESENT bit, not a revision - see the header); 3 = render-done f2h IRQ1 (raised in sys_top, not here - see the
 // pvr_render_irq block there); 2 = border bands (FB_TOP/FB_BOT); 1 = audio
 // (AUDIO_DATA + REVISION added); 0 = anything older.
-localparam [31:0] REVISION = 32'd5;
+localparam [31:0] REVISION = 32'd4;
 
 wire wr32     = avs_write && (avs_byteenable == 4'b1111);
 wire sel_regs = (avs_address[20:13] == 8'd0);     // 0x0000-0x1FFF
@@ -187,7 +193,7 @@ always @(posedge clk) begin
 			4'd8: fb_top <= {avs_writedata[31:7], 7'd0};   // FB_TOP (128B aligned)
 			4'd9: fb_bot <= {avs_writedata[31:7], 7'd0};   // FB_BOT
 			4'd10: vram_cfg <= {31'd0, avs_writedata[0]};  // VRAM_CFG
-			4'd11: video_480p <= avs_writedata[0];         // VIDEO_MODE
+			4'd12: video_480p <= avs_writedata[0];         // VIDEO_MODE (0x30)
 			default: ;                                     // STATUS/CYCLES/rsvd: RO
 		endcase
 	end
@@ -219,7 +225,7 @@ always @(posedge clk) begin
 			4'd8: avs_readdata <= fb_top;                  // FB_TOP
 			4'd9: avs_readdata <= fb_bot;                  // FB_BOT
 			4'd10: avs_readdata <= vram_cfg;               // VRAM_CFG
-			4'd11: avs_readdata <= {31'd0, video_480p};    // VIDEO_MODE
+			4'd12: avs_readdata <= {1'b1, 30'd0, video_480p}; // VIDEO_MODE: [31] PRESENT
 			default: ;
 		endcase
 	end
