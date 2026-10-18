@@ -567,22 +567,28 @@ pll_hdmi pll_hdmi
 // nothing in the display path is running. The window (620 ns) covers the
 // mux's break-before-make dead time (~2.5 clocks of each pixel clock, worst
 // ~190 ns at 27 MHz) with room to spare.
-// All three start at the configured default, so no switch window - and no
-// cycle of the other pixel clock - happens at startup.
-reg        vid_mode_sel_meta = VIDEO_480P_DEFAULT;
-reg        vid_mode_sel_sync = VIDEO_480P_DEFAULT;
-reg        vid_mode_sel      = VIDEO_480P_DEFAULT;   // applied mode: 0 = 1080p, 1 = 480p
-reg  [4:0] vid_switch_cnt    = 5'd0;
+// The chain carries the mode XOR the build default ("flip"), never the mode itself:
+// every register here then powers up 0, which IS the configured default, so no
+// switch window - and no cycle of the other pixel clock - happens at startup.
+// Do not go back to `reg x = VIDEO_480P_DEFAULT` initialisers: with Quartus's
+// default "Power-Up Don't Care = On" they were silently dropped, and the
+// 480p-default CRT build came out of configuration at 1080p (measured on the
+// cabinet 2026-10-17: VIDEO_MODE read 0x80000000 before any software ran).
+reg        vid_flip_meta  = 1'b0;
+reg        vid_flip_sync  = 1'b0;
+reg        vid_flip       = 1'b0;              // applied mode XOR VIDEO_480P_DEFAULT
+reg  [4:0] vid_switch_cnt = 5'd0;
+wire       vid_mode_sel   = vid_flip ^ VIDEO_480P_DEFAULT;   // applied mode: 0 = 1080p, 1 = 480p
 
 always @(posedge FPGA_CLK2_50) begin
-	vid_mode_sel_meta <= mmio_video_480p;   // clk_sys domain -> 50 MHz, quasi-static
-	vid_mode_sel_sync <= vid_mode_sel_meta;
+	vid_flip_meta <= mmio_video_480p ^ VIDEO_480P_DEFAULT;   // clk_sys -> 50 MHz, quasi-static
+	vid_flip_sync <= vid_flip_meta;
 
 	if (vid_switch_cnt != 5'd0) begin
 		vid_switch_cnt <= vid_switch_cnt - 5'd1;
-		if (vid_switch_cnt == 5'd16) vid_mode_sel <= vid_mode_sel_sync;
+		if (vid_switch_cnt == 5'd16) vid_flip <= vid_flip_sync;
 	end
-	else if (vid_mode_sel_sync != vid_mode_sel) vid_switch_cnt <= 5'd31;
+	else if (vid_flip_sync != vid_flip) vid_switch_cnt <= 5'd31;
 end
 
 wire vid_switch_reset = (vid_switch_cnt != 5'd0);
