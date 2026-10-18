@@ -119,7 +119,7 @@ module pvr_mmio
 	output reg  [31:0] fb_top    = 32'd0,
 	output reg  [31:0] fb_bot    = 32'd0,
 	output reg  [31:0] vram_cfg  = 32'd0,    // [0] VRAM_16MB (0 = 8 MB + mirror)
-	output reg         video_480p = VIDEO_480P_INIT   // VIDEO_MODE[0]: 0 = 1080p, 1 = 480p
+	output wire        video_480p                     // VIDEO_MODE[0]: 0 = 1080p, 1 = 480p
 );
 
 // no size casts (Quartus Standard 17.0)
@@ -132,6 +132,13 @@ localparam [8:0] RSTC = RST_CYCLES;
 // pvr_render_irq block there); 2 = border bands (FB_TOP/FB_BOT); 1 = audio
 // (AUDIO_DATA + REVISION added); 0 = anything older.
 localparam [31:0] REVISION = 32'd4;
+
+// VIDEO_MODE is stored as "differs from the build default", so the register powers up
+// 0 - the one power-up state Cyclone V guarantees - and that decodes to VIDEO_480P_INIT.
+// An initialiser (`reg x = VIDEO_480P_INIT`) is NOT enough: Power-Up Don't Care let
+// Quartus drop it and the CRT build started at 1080p (see sys_top, 2026-10-17).
+reg  video_flip = 1'b0;
+assign video_480p = video_flip ^ VIDEO_480P_INIT;
 
 wire wr32     = avs_write && (avs_byteenable == 4'b1111);
 wire sel_regs = (avs_address[20:13] == 8'd0);     // 0x0000-0x1FFF
@@ -193,7 +200,7 @@ always @(posedge clk) begin
 			4'd8: fb_top <= {avs_writedata[31:7], 7'd0};   // FB_TOP (128B aligned)
 			4'd9: fb_bot <= {avs_writedata[31:7], 7'd0};   // FB_BOT
 			4'd10: vram_cfg <= {31'd0, avs_writedata[0]};  // VRAM_CFG
-			4'd12: video_480p <= avs_writedata[0];         // VIDEO_MODE (0x30)
+			4'd12: video_flip <= avs_writedata[0] ^ VIDEO_480P_INIT; // VIDEO_MODE (0x30)
 			default: ;                                     // STATUS/CYCLES/rsvd: RO
 		endcase
 	end
