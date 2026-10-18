@@ -47,6 +47,7 @@ pvr_mmio mmio
 	.pvr_rst          (),
 	.vram_top         (),
 	.vram_cfg         (),
+	.video_480p       (),
 	.clk_sel          (),
 	.pvr_done         (1'b0),
 

@@ -7,6 +7,7 @@ module spg_loopback_top import tsp_pkg::*; (
     input  wire        clk,
     input  wire        reset,       // core (write-side) reset
     input  wire        spg_reset,   // video-side reset
+    input  wire        mode_480p,   // spg raster select (tb/spg_mode.h MODE_480P)
 
     // peel_core_stub control (see peel_core_stub.sv)
     input  wire        wr_en,
@@ -87,6 +88,7 @@ module spg_loopback_top import tsp_pkg::*; (
     spg u_spg (
         .clk         (clk),
         .reset       (spg_reset),
+        .mode_480p   (mode_480p),
 
         .fb_base     (fb_base),
         .fb_stride   (fb_stride),

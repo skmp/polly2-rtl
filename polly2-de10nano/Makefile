@@ -17,11 +17,24 @@ NJOBS := $(shell nproc 2>/dev/null || echo 4)
 VFLAGS = -Wno-WIDTH -Wno-UNUSEDSIGNAL -j $(NJOBS) --build-jobs $(NJOBS) \
          -CFLAGS "-O3"
 
+# spg testbenches read the module's parameters (and its derived window localparams)
+# out of the generated model instead of hardcoding a raster - see tb/spg_mode.h.
+SPGFLAGS = --public-params
+
+# spg carries both rasters and picks one at runtime (mode_480p). Every spg testbench
+# runs one mode, chosen at compile time: the default targets drive 480p, and the
+# spg-*-1080p targets rebuild the SAME testbenches with SPG_TB_480P=0 so they drive
+# mode_480p=0 and read the 1080p parameter set (tb/spg_mode.h). Built into their
+# own --Mdir so the two compiles never share objects.
+STOCK_1080P   = -CFLAGS -DSPG_TB_480P=0
+STOCK_1080P_D = $(STOCK_1080P)
+
 TSP_PKG = ../polly2-core/rtl/gen/tsp_pkg.sv
 # polly2-core video-out (framebuffer write master) instantiated by simplex_pvr_top
 VO_RTL  = ../polly2-core/rtl/vo.sv
 
-all: spg-sync pvr-burst spg-loopback audio-i2s spg-bands spg-depth spg-240p fb-write render-irq
+all: spg-sync spg-modeswitch pvr-burst spg-loopback audio-i2s spg-bands spg-depth spg-240p fb-write render-irq \
+     spg-480p spg-1to1 spg-1080p
 
 #   make fb-write - FB write master formats: every FB_W_CTRL packmode
 #                   (0555K/565/4444/1555/888/0888K/8888, refsw2 dither
@@ -47,18 +60,19 @@ obj_dir/fb_write_tb: rtl/simplex_pvr_top.sv $(VO_RTL) tb/peel_core_stub.sv tb/fb
 spg-depth: obj_dir/spg_depth_tb
 	./obj_dir/spg_depth_tb
 
-obj_dir/spg_depth_tb: rtl/spg.sv tb/spg_depth_tb.cpp
-	$(VERILATOR) --cc --exe --build $(VFLAGS) rtl/spg.sv tb/spg_depth_tb.cpp -o spg_depth_tb
+obj_dir/spg_depth_tb: rtl/spg.sv tb/spg_depth_tb.cpp tb/spg_mode.h
+	$(VERILATOR) --cc --exe --build $(VFLAGS) $(SPGFLAGS) rtl/spg.sv tb/spg_depth_tb.cpp -o spg_depth_tb
 
 #   make spg-240p  - 240p (line-doubled) display: a 640x240 source shown at
-#                    4x vertically (four output lines per source line, last
-#                    source line 239), every fb_depth, linear + split,
-#                    composed with pixel_double, bands still 2x
+#                    twice the raster's vertical scale (2 output lines per source
+#                    line at 480p, 4 at stock 1080p - see spg-240p-1080p; last
+#                    source line 239), every fb_depth, linear + split, composed
+#                    with pixel_double, bands (where the raster has them) at SCALE
 spg-240p: obj_dir/spg_240p_tb
 	./obj_dir/spg_240p_tb
 
-obj_dir/spg_240p_tb: rtl/spg.sv tb/spg_240p_tb.cpp
-	$(VERILATOR) --cc --exe --build $(VFLAGS) rtl/spg.sv tb/spg_240p_tb.cpp -o spg_240p_tb
+obj_dir/spg_240p_tb: rtl/spg.sv tb/spg_240p_tb.cpp tb/spg_mode.h
+	$(VERILATOR) --cc --exe --build $(VFLAGS) $(SPGFLAGS) rtl/spg.sv tb/spg_240p_tb.cpp -o spg_240p_tb
 
 #   make render-irq - irq_stretch (render-done -> f2h IRQ1): a done edge
 #                     gives exactly one 64-cycle pulse (a held level does
@@ -76,11 +90,42 @@ obj_dir/irq_stretch_tb: rtl/irq_stretch.sv tb/irq_stretch_tb.cpp
 spg-bands: obj_dir/spg_bands_tb
 	./obj_dir/spg_bands_tb
 
-obj_dir/spg_bands_tb: rtl/spg.sv tb/spg_bands_tb.cpp
-	$(VERILATOR) --cc --exe --build $(VFLAGS) rtl/spg.sv tb/spg_bands_tb.cpp -o spg_bands_tb
+obj_dir/spg_bands_tb: rtl/spg.sv tb/spg_bands_tb.cpp tb/spg_mode.h
+	$(VERILATOR) --cc --exe --build $(VFLAGS) $(SPGFLAGS) rtl/spg.sv tb/spg_bands_tb.cpp -o spg_bands_tb
+
+#   make spg-modeswitch - one spg model, mode_480p flipped under reset
+#                    1080p -> 480p -> 1080p -> 480p: after every release the raster
+#                    (HS/VS period, HS width, DE run, DE lines) must already be the new
+#                    mode's. The other targets each run one mode for their whole life.
+spg-modeswitch: obj_dir/spg_modeswitch_tb
+	./obj_dir/spg_modeswitch_tb
+
+obj_dir/spg_modeswitch_tb: rtl/spg.sv tb/spg_modeswitch_tb.cpp
+	$(VERILATOR) --cc --exe --build $(VFLAGS) $(SPGFLAGS) rtl/spg.sv tb/spg_modeswitch_tb.cpp -o spg_modeswitch_tb
 
 spg-sync: obj_dir/spg_sync_tb
 	./obj_dir/spg_sync_tb
+
+#   make spg-480p  - asserts the 480p target raster (CEA-861 VIC 2/3, 720x480p@59.94,
+#                    27 MHz, 858x525). Written test-first: FAILS against the stock 1080p
+#                    spg.sv by design, and passes only once the parameters are retargeted.
+obj_dir/spg_480p_tb: rtl/spg.sv tb/spg_480p_tb.cpp
+	$(VERILATOR) --cc --exe --build $(VFLAGS) rtl/spg.sv tb/spg_480p_tb.cpp -o spg_480p_tb
+
+spg-480p: obj_dir/spg_480p_tb
+	./obj_dir/spg_480p_tb
+
+#   make spg-1to1  - per-pixel SAMPLING at the 480p target: source column n lands at
+#                    raster X0+n exactly once, source line m occupies exactly one output
+#                    line, no line buffer is written while it is scanned out, and
+#                    fb_pix_dbl / fb_line_dbl still give 2x. Complements spg-480p, which
+#                    asserts the raster only. Written test-first: FAILS while the address
+#                    generators still assume the 2x doubling 1080p needed.
+obj_dir/spg_1to1_tb: rtl/spg.sv tb/spg_1to1_tb.cpp
+	$(VERILATOR) --cc --exe --build $(VFLAGS) rtl/spg.sv tb/spg_1to1_tb.cpp -o spg_1to1_tb
+
+spg-1to1: obj_dir/spg_1to1_tb
+	./obj_dir/spg_1to1_tb
 
 #   make audio-i2s - MMIO AUDIO_DATA -> 2048-entry async FIFO -> I2S:
 #                    framing/order/one-shot delivery, blocking-write
@@ -95,8 +140,64 @@ obj_dir/audio_i2s_tb: rtl/pvr_mmio.sv rtl/audio_i2s.sv tb/audio_tb_top.sv tb/aud
 	    rtl/pvr_mmio.sv rtl/audio_i2s.sv tb/audio_tb_top.sv tb/audio_i2s_tb.cpp \
 	    -o audio_i2s_tb
 
-obj_dir/spg_sync_tb: rtl/spg.sv tb/spg_sync_tb.cpp
-	$(VERILATOR) --cc --exe --build $(VFLAGS) rtl/spg.sv tb/spg_sync_tb.cpp -o spg_sync_tb
+obj_dir/spg_sync_tb: rtl/spg.sv tb/spg_sync_tb.cpp tb/spg_mode.h
+	$(VERILATOR) --cc --exe --build $(VFLAGS) $(SPGFLAGS) rtl/spg.sv tb/spg_sync_tb.cpp -o spg_sync_tb
+
+#   make spg-1080p - the spg testbenches re-run against a STOCK 1080p instantiation
+#                    (SCALE=2). spg.sv's SCALE=1 and SCALE=2 arms are written
+#                    `(SCALE == 2) ? <stock> : <1:1>`; this is what machine-checks the
+#                    SCALE=2 arm rather than arguing from the diff that it constant-folds
+#                    back to stock. sync/bands/depth cover geometry and the read formats;
+#                    loopback covers the fetch path and the post-reset toggle parity;
+#                    240p covers fb_line_dbl doubling on top of the SCALE=2 arm.
+spg-1080p: spg-sync-1080p spg-bands-1080p spg-depth-1080p spg-loopback-1080p spg-240p-1080p
+
+spg-sync-1080p: obj_1080p/spg_sync_tb
+	./obj_1080p/spg_sync_tb
+
+obj_1080p/spg_sync_tb: rtl/spg.sv tb/spg_sync_tb.cpp tb/spg_mode.h
+	$(VERILATOR) --cc --exe --build $(VFLAGS) $(SPGFLAGS) --Mdir obj_1080p \
+	    $(STOCK_1080P) rtl/spg.sv tb/spg_sync_tb.cpp -o spg_sync_tb
+
+spg-240p-1080p: obj_1080p/spg_240p_tb
+	./obj_1080p/spg_240p_tb
+
+obj_1080p/spg_240p_tb: rtl/spg.sv tb/spg_240p_tb.cpp tb/spg_mode.h
+	$(VERILATOR) --cc --exe --build $(VFLAGS) $(SPGFLAGS) --Mdir obj_1080p \
+	    $(STOCK_1080P) rtl/spg.sv tb/spg_240p_tb.cpp -o spg_240p_tb
+
+spg-bands-1080p: obj_1080p/spg_bands_tb
+	./obj_1080p/spg_bands_tb
+
+obj_1080p/spg_bands_tb: rtl/spg.sv tb/spg_bands_tb.cpp tb/spg_mode.h
+	$(VERILATOR) --cc --exe --build $(VFLAGS) $(SPGFLAGS) --Mdir obj_1080p \
+	    $(STOCK_1080P) rtl/spg.sv tb/spg_bands_tb.cpp -o spg_bands_tb
+
+spg-depth-1080p: obj_1080p/spg_depth_tb
+	./obj_1080p/spg_depth_tb
+
+obj_1080p/spg_depth_tb: rtl/spg.sv tb/spg_depth_tb.cpp tb/spg_mode.h
+	$(VERILATOR) --cc --exe --build $(VFLAGS) $(SPGFLAGS) --Mdir obj_1080p \
+	    $(STOCK_1080P) rtl/spg.sv tb/spg_depth_tb.cpp -o spg_depth_tb
+
+#   make spg-loopback-1080p - the write-layout vs scanout-layout cross-check and the
+#                    post-reset toggle-parity check, at stock 1920x1080/SCALE=2. The
+#                    fetch path is the one part of spg the other -1080p targets do not
+#                    reach: they instantiate spg alone, while this one needs the FB
+#                    write master beside it. That makes it the target that shows the
+#                    done_toggle reset fix holding in the configuration upstream ships,
+#                    not only at the retargeted 480p.
+spg-loopback-1080p: obj_1080p/spg_loopback_tb
+	./obj_1080p/spg_loopback_tb
+
+obj_1080p/spg_loopback_tb: rtl/simplex_pvr_top.sv $(VO_RTL) rtl/spg.sv tb/spg_loopback_top.sv tb/peel_core_stub.sv tb/spg_loopback_tb.cpp tb/spg_mode.h $(TSP_PKG)
+	$(VERILATOR) --cc --exe --build $(VFLAGS) $(SPGFLAGS) --Mdir obj_1080p \
+	    -Wno-UNUSEDPARAM -Wno-DECLFILENAME -Wno-PINMISSING \
+	    -I../polly2-core/rtl/gen \
+	    --top-module spg_loopback_top $(STOCK_1080P_D) \
+	    $(TSP_PKG) tb/peel_core_stub.sv rtl/simplex_pvr_top.sv $(VO_RTL) rtl/spg.sv \
+	    tb/spg_loopback_top.sv tb/spg_loopback_tb.cpp \
+	    -o spg_loopback_tb
 
 pvr-burst: obj_dir/pvr_burst_tb
 	./obj_dir/pvr_burst_tb
@@ -107,8 +208,15 @@ pvr-burst: obj_dir/pvr_burst_tb
 spg-loopback: obj_dir/spg_loopback_tb
 	./obj_dir/spg_loopback_tb
 
-obj_dir/spg_loopback_tb: rtl/simplex_pvr_top.sv $(VO_RTL) rtl/spg.sv tb/spg_loopback_top.sv tb/peel_core_stub.sv tb/spg_loopback_tb.cpp $(TSP_PKG)
-	$(VERILATOR) --cc --exe --build $(VFLAGS) \
+#   make spg-loopback-nobp - the same run with the DDR model's random backpressure
+#                       removed. Diagnostic only, not part of `all`: it separates a
+#                       fetch-BANDWIDTH margin problem (passes here, fails above)
+#                       from an address/layout bug (fails both ways).
+spg-loopback-nobp: obj_dir/spg_loopback_tb
+	./obj_dir/spg_loopback_tb -nobp
+
+obj_dir/spg_loopback_tb: rtl/simplex_pvr_top.sv $(VO_RTL) rtl/spg.sv tb/spg_loopback_top.sv tb/peel_core_stub.sv tb/spg_loopback_tb.cpp tb/spg_mode.h $(TSP_PKG)
+	$(VERILATOR) --cc --exe --build $(VFLAGS) $(SPGFLAGS) \
 	    -Wno-UNUSEDPARAM -Wno-DECLFILENAME -Wno-PINMISSING \
 	    -I../polly2-core/rtl/gen \
 	    --top-module spg_loopback_top \
@@ -125,6 +233,9 @@ obj_dir/pvr_burst_tb: rtl/simplex_pvr_top.sv $(VO_RTL) tb/peel_core_stub.sv tb/p
 	    -o pvr_burst_tb
 
 clean:
-	rm -rf obj_dir
+	rm -rf obj_dir obj_1080p
 
-.PHONY: all spg-sync pvr-burst spg-loopback audio-i2s spg-bands spg-depth spg-240p fb-write render-irq clean
+.PHONY: all spg-sync spg-modeswitch pvr-burst spg-loopback spg-loopback-nobp audio-i2s spg-bands spg-depth \
+        spg-240p fb-write render-irq spg-480p spg-1to1 \
+        spg-1080p spg-sync-1080p spg-bands-1080p spg-depth-1080p spg-loopback-1080p \
+        spg-240p-1080p clean

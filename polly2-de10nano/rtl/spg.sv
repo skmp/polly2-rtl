@@ -1,16 +1,26 @@
-// spg.sv - fixed-mode display controller, loosely modelled on the Dreamcast
-// (HOLLY) spg, but generating the FINAL 1080p raster directly at the HDMI
-// pixel clock. Replaces ascal on the HDMI path:
+// spg.sv - display controller, loosely modelled on the Dreamcast (HOLLY)
+// spg, but generating the FINAL raster directly at the HDMI pixel clock.
+// Replaces ascal on the HDMI path:
 //
-//  - 1920x1080 CEA-861 timing (2200 x 1125 totals, both syncs positive).
-//    At a 148.352 MHz pixel clock this is 1080p59.94 (the DC VGA field
-//    rate); at 148.5 MHz it is exactly 60.000 Hz.
-//  - The 640-wide framebuffer in DDR3 is displayed pixel- and line-doubled
-//    (2x nearest) as a 1280x960 window centred in the frame (x 320..1599,
-//    y 60..1019 - the same window the stripped ascal used). fb_line_dbl
-//    displays a 640x240 source at 4x vertically instead (FB_R_CTRL
-//    fb_line_double / the 240p menu option); fb_pix_dbl a 320-wide source
-//    at 4x horizontally (VO_CONTROL pixel_double) - the two compose.
+//  - Two rasters, chosen at runtime by mode_480p (see the port list):
+//      mode_480p=0 (reset default): 1920x1080, 2200 x 1125 totals, SCALE_HD=2.
+//        At 148.5 MHz that is 1080p60 - what every HDMI TV accepts.
+//      mode_480p=1: 720x480p CEA-861 VIC 2/3, 858 x 525 totals, SCALE_SD=1.
+//        At 27 MHz that is 31.469 kHz / 59.940 Hz, a rate a 31 kHz arcade CRT
+//        behind an HDMI-to-analog DAC can lock (1080p's ~67.4 kHz cannot).
+//    Both sync polarities are positive. The pixel clock must match the mode:
+//    sys_top switches it with a glitch-free mux and holds this module in reset
+//    across the change. The two timing sets are parameters, so a testbench
+//    can read either one back (tb/spg_mode.h); every spg-* target runs in
+//    both modes (the spg-*-1080p targets drive mode_480p=0).
+//  - The 640-wide framebuffer in DDR3 is displayed at the mode's SCALE (see
+//    below) as a SRC_W*SCALE x SRC_H*SCALE window centred in the frame: 1:1
+//    at 480p (x 40..679, y 0..479), or pixel- and line-doubled (2x nearest)
+//    to a 1280x960 window at 1080p (x 320..1599, y 60..1019 - the same window
+//    the stripped ascal used). fb_line_dbl displays a 640x240 source at twice
+//    that vertically instead (FB_R_CTRL fb_line_double / the 240p menu
+//    option); fb_pix_dbl a 320-wide source at twice that horizontally
+//    (VO_CONTROL pixel_double) - the two compose.
 //  - All four FB_R_CTRL fb_depth read formats, with refsw2 Present()
 //    semantics (fb_concat appended below the 5/6-bit channels):
 //      0: 0555 RGB, 2 bytes/px     1: 565 RGB, 2 bytes/px
@@ -36,13 +46,15 @@
 //    overfetch - still trivial bandwidth). fb_stride stays in FB-view
 //    bytes in both modes; the DDR advance doubles internally.
 //  - Two optional border bands: 640x30 RGB565 LINEAR framebuffers (stride
-//    fixed at 1280 bytes) displayed 2x-doubled as 1280x60, exactly filling
-//    the top (lines 0..59) and bottom (lines 1020..1079) borders,
-//    x-centred like the game window. Bands are host OSD surfaces: always
-//    565 with MSB-replicated expansion, independent of the game fb_depth.
-//    fb_top_base / fb_bot_base are DDR BYTE addresses, 128-byte aligned,
-//    sampled once per frame at the start of vertical blanking (line 1080);
-//    0 disables a band (black border).
+//    fixed at 1280 bytes) displayed line-doubled - always 2x, independent of
+//    SCALE - so they fill a 60-line margin above and below the game window,
+//    x-centred on it. That margin exists only where Y0 == 60, i.e. the 1080p
+//    mode (lines 0..59 and 1020..1079). At 480p the source fills the raster,
+//    Y0 == 0, and the bands are structurally absent. Bands are host OSD
+//    surfaces: always 565 with MSB-replicated expansion, independent of the
+//    game fb_depth. fb_top_base / fb_bot_base are DDR BYTE addresses,
+//    128-byte aligned, sampled once per frame at the start of vertical
+//    blanking (line V_ACTIVE); 0 disables a band (black border).
 //  - DDR access is a 128-bit Avalon read master, intended for the vbuf
 //    port on sysmem_lite that ascal used to own (16-byte word addresses).
 //    Fetches are beat-aligned: the FB base's low 4 bits (split: bit 3
@@ -53,10 +65,11 @@
 //    behaviour seen on hardware). A request landing mid-fetch (severe
 //    starvation) is queued, not lost.
 //  - Two line buffers ("current" / "next"): while one source line is
-//    displayed (two output lines), the next is burst-read into the other.
-//    Prefetch slack is two output lines (~29.7 us) per line; worst case
-//    (split 0888, misaligned) is 321 beats - still no DMA engine and no
-//    tight arbiter deadline. Storage is four 32-bit banks of 512: the
+//    displayed (SCALE output lines), the next is burst-read into the other.
+//    Prefetch slack is one source line's display time: ~31.8 us at 480p
+//    (one 858-px line at 27 MHz), ~29.7 us at 1080p (two 2200-px
+//    lines at 148.352 MHz). Worst case (split 0888, misaligned) is 321
+//    beats - still no DMA engine and no tight arbiter deadline. Storage is four 32-bit banks of 512: the
 //    line's raw FB-view bytes, beat-aligned (split-mode half-selection is
 //    the only write-side transformation), FB 32-bit word N -> bank N[1:0],
 //    address {buffer, N[9:2]}.
@@ -73,22 +86,47 @@
 
 module spg
 #(
-	// CEA-861 1080p timing
-	parameter H_ACTIVE = 1920,
-	parameter H_FP     = 88,
-	parameter H_SYNC   = 44,
-	parameter H_BP     = 148,   // H total 2200
-	parameter V_ACTIVE = 1080,
-	parameter V_FP     = 4,
-	parameter V_SYNC   = 5,
-	parameter V_BP     = 36,    // V total 1125
-	// source framebuffer (doubled to SRC_W*2 x SRC_H*2 on screen)
-	parameter SRC_W    = 640,
-	parameter SRC_H    = 480
+	// mode_480p = 0: CEA-861 1080p (2200x1125 totals). 148.5 MHz -> 60.000 Hz;
+	// 148.352 MHz -> 59.94 Hz. The reset default, and what HDMI TVs accept.
+	parameter H_ACTIVE_HD = 1920,
+	parameter H_FP_HD     = 88,
+	parameter H_SYNC_HD   = 44,
+	parameter H_BP_HD     = 148,   // H total 2200
+	parameter V_ACTIVE_HD = 1080,
+	parameter V_FP_HD     = 4,
+	parameter V_SYNC_HD   = 5,
+	parameter V_BP_HD     = 36,    // V total 1125
+	parameter SCALE_HD    = 2,     // 640x480 source pixel/line-doubled to 1280x960
+	// mode_480p = 1: CEA-861 VIC 2/3, 720x480p @ 59.94, 27 MHz pixel clock.
+	// 31.47 kHz horizontal, which a 31 kHz arcade CRT can lock. 480p is also the
+	// Dreamcast's own VGA mode, and the 640x480 source maps into it 1:1.
+	parameter H_ACTIVE_SD = 720,
+	parameter H_FP_SD     = 16,
+	parameter H_SYNC_SD   = 62,
+	parameter H_BP_SD     = 60,    // H total 858  -> 27e6/858  = 31.469 kHz
+	parameter V_ACTIVE_SD = 480,
+	parameter V_FP_SD     = 9,
+	parameter V_SYNC_SD   = 6,
+	parameter V_BP_SD     = 30,    // V total 525  -> 31469/525 = 59.94 Hz
+	parameter SCALE_SD    = 1,     // 1:1
+	// source framebuffer (displayed at the mode's SCALE - see below)
+	parameter SRC_W       = 640,
+	parameter SRC_H       = 480
+	// SCALE: how many raster pixels/lines each source pixel/line occupies (1 or
+	// 2). It is honoured by the window placement below AND by the address
+	// generators: the horizontal shift (n_pre), the vertical shift (vshift), the
+	// prefetch lookahead (y_look) and the underrun gate all derive from it.
+	// fb_pix_dbl / fb_line_dbl compose on top, so a 320-wide or 240-line source
+	// still fills the window in either mode.
 )
 (
-	input  wire        clk,          // 1080p pixel clock (148.352 / 148.5 MHz)
+	input  wire        clk,          // pixel clock for the current mode:
+	                                 // 148.5 MHz at 1080p, 27 MHz at 480p
 	input  wire        reset,        // video-domain reset
+	// Raster select (see header). QUASI-STATIC: it may only change while reset
+	// is held - the counters, line buffers and fetch bookkeeping all assume
+	// one geometry for their whole run, and clk changes with it.
+	input  wire        mode_480p,
 
 	// Framebuffer location. fb_base/fb_disp_half are sampled once PER LINE
 	// (at the line's fetch request, through a 2-sample stability filter);
@@ -130,7 +168,7 @@ module spg
 	output reg  [7:0]  blue,
 	output reg         hsync,
 	output reg         vsync,
-	output reg         de,           // full 1920x1080 active area
+	output reg         de,           // full H_ACTIVE x V_ACTIVE active area
 	output reg         vblank,       // output-raster vertical blank (ascal o_vbl)
 	output reg         border,       // active raster but outside the image window (ascal o_brd)
 
@@ -144,18 +182,41 @@ module spg
 // NOTE: no SystemVerilog size casts anywhere in this file - Quartus
 // Standard 17.0 does not support N'(expr).
 /* verilator lint_off WIDTHTRUNC */
-localparam [11:0] H_TOTAL  = H_ACTIVE + H_FP + H_SYNC + H_BP;
-localparam [10:0] V_TOTAL  = V_ACTIVE + V_FP + V_SYNC + V_BP;
-localparam [11:0] HS_BEG   = H_ACTIVE + H_FP;
-localparam [11:0] HS_END   = H_ACTIVE + H_FP + H_SYNC;
-localparam [10:0] VS_BEG   = V_ACTIVE + V_FP;
-localparam [10:0] VS_END   = V_ACTIVE + V_FP + V_SYNC;
-localparam [11:0] H_ACT    = H_ACTIVE;
-localparam [10:0] V_ACT    = V_ACTIVE;
-localparam [11:0] X0       = (H_ACTIVE - SRC_W*2)/2;        // 320
-localparam [11:0] X1       = (H_ACTIVE - SRC_W*2)/2 + SRC_W*2; // 1600
-localparam [10:0] Y0       = (V_ACTIVE - SRC_H*2)/2;        // 60
-localparam [10:0] Y1       = (V_ACTIVE - SRC_H*2)/2 + SRC_H*2; // 1020
+// Per-mode geometry, as localparams so a testbench can read either set back
+// (tb/spg_mode.h, via --public-params) instead of restating the arithmetic.
+localparam [11:0] H_TOTAL_HD = H_ACTIVE_HD + H_FP_HD + H_SYNC_HD + H_BP_HD;
+localparam [10:0] V_TOTAL_HD = V_ACTIVE_HD + V_FP_HD + V_SYNC_HD + V_BP_HD;
+localparam [11:0] X0_HD      = (H_ACTIVE_HD - SRC_W*SCALE_HD)/2;                 // 320
+localparam [11:0] X1_HD      = (H_ACTIVE_HD - SRC_W*SCALE_HD)/2 + SRC_W*SCALE_HD; // 1600
+localparam [10:0] Y0_HD      = (V_ACTIVE_HD - SRC_H*SCALE_HD)/2;                 // 60
+localparam [10:0] Y1_HD      = (V_ACTIVE_HD - SRC_H*SCALE_HD)/2 + SRC_H*SCALE_HD; // 1020
+localparam [11:0] H_TOTAL_SD = H_ACTIVE_SD + H_FP_SD + H_SYNC_SD + H_BP_SD;
+localparam [10:0] V_TOTAL_SD = V_ACTIVE_SD + V_FP_SD + V_SYNC_SD + V_BP_SD;
+localparam [11:0] X0_SD      = (H_ACTIVE_SD - SRC_W*SCALE_SD)/2;                 // 40
+localparam [11:0] X1_SD      = (H_ACTIVE_SD - SRC_W*SCALE_SD)/2 + SRC_W*SCALE_SD; // 680
+localparam [10:0] Y0_SD      = (V_ACTIVE_SD - SRC_H*SCALE_SD)/2;                 // 0
+localparam [10:0] Y1_SD      = (V_ACTIVE_SD - SRC_H*SCALE_SD)/2 + SRC_H*SCALE_SD; // 480
+
+// The geometry in force. mode_480p only changes under reset (and the SDC cuts
+// paths out of its source register), so these are constants for timing
+// purposes; every compare below that used to see a localparam now sees one of
+// two constants through a static mux.
+wire [11:0] H_TOTAL = mode_480p ? H_TOTAL_SD : H_TOTAL_HD;
+wire [10:0] V_TOTAL = mode_480p ? V_TOTAL_SD : V_TOTAL_HD;
+wire [11:0] H_ACT   = mode_480p ? H_ACTIVE_SD : H_ACTIVE_HD;
+wire [10:0] V_ACT   = mode_480p ? V_ACTIVE_SD : V_ACTIVE_HD;
+wire [11:0] HS_BEG  = mode_480p ? H_ACTIVE_SD + H_FP_SD : H_ACTIVE_HD + H_FP_HD;
+wire [11:0] HS_END  = mode_480p ? H_ACTIVE_SD + H_FP_SD + H_SYNC_SD
+                                : H_ACTIVE_HD + H_FP_HD + H_SYNC_HD;
+wire [10:0] VS_BEG  = mode_480p ? V_ACTIVE_SD + V_FP_SD : V_ACTIVE_HD + V_FP_HD;
+wire [10:0] VS_END  = mode_480p ? V_ACTIVE_SD + V_FP_SD + V_SYNC_SD
+                                : V_ACTIVE_HD + V_FP_HD + V_SYNC_HD;
+wire [11:0] X0      = mode_480p ? X0_SD : X0_HD;
+wire [11:0] X1      = mode_480p ? X1_SD : X1_HD;
+wire [10:0] Y0      = mode_480p ? Y0_SD : Y0_HD;
+wire [10:0] Y1      = mode_480p ? Y1_SD : Y1_HD;
+// SCALE is 1 or 2 in either mode; everything below only asks "is it 2".
+wire        scale2  = mode_480p ? (SCALE_SD == 2) : (SCALE_HD == 2);
 
 localparam        BURST_LEN = 16;        // 128-bit beats per burst (256 bytes)
 localparam [7:0]  BC_FULL   = BURST_LEN; // full burstcount
@@ -179,18 +240,38 @@ localparam [1:0] RGN_BOT  = 2'd2;
 
 reg [11:0] hcnt = 12'd0;
 reg [10:0] vcnt = 11'd0;
+// The fetch lookahead line, (vcnt + 1 source line) mod V_TOTAL - see the
+// lookahead block. Kept as its own counter, stepping with vcnt, rather than
+// computed from vcnt by an adder and a wrap compare: with the geometry now a
+// runtime select, that adder/compare chain was 10 ns at 148.5 MHz.
+reg [10:0] y_look = 11'd2;
+// The display read path's lookahead pixel, hcnt + 2 - X0 (mod 4096) - see the
+// read path. Also its own counter, reloaded when hcnt wraps: subtracting the
+// mode's X0 from hcnt sat at the head of the per-pixel address cone and
+// missed 148.5 MHz by 2.3 ns.
+// Power-up value = the 1080p reset value, so it never contradicts the bits the
+// async reset sets in either mode (Quartus would otherwise ignore it, warning
+// 18010). y_look's power-up (2) is likewise its 1080p reset value.
+reg [11:0] x_pre_r = 12'd2 - X0_HD;
 
 always @(posedge clk or posedge reset) begin
 	if (reset) begin
-		hcnt <= 12'd0;
-		vcnt <= 11'd0;
+		hcnt    <= 12'd0;
+		vcnt    <= 11'd0;
+		y_look  <= scale2 ? 11'd2 : 11'd1;
+		x_pre_r <= 12'd2 - X0;
 	end
 	else begin
 		if (hcnt == H_TOTAL - 12'd1) begin
-			hcnt <= 12'd0;
-			vcnt <= (vcnt == V_TOTAL - 11'd1) ? 11'd0 : vcnt + 11'd1;
+			hcnt    <= 12'd0;
+			vcnt    <= (vcnt   == V_TOTAL - 11'd1) ? 11'd0 : vcnt   + 11'd1;
+			y_look  <= (y_look == V_TOTAL - 11'd1) ? 11'd0 : y_look + 11'd1;
+			x_pre_r <= 12'd2 - X0;
 		end
-		else hcnt <= hcnt + 12'd1;
+		else begin
+			hcnt    <= hcnt + 12'd1;
+			x_pre_r <= x_pre_r + 12'd1;
+		end
 	end
 end
 
@@ -215,8 +296,11 @@ reg [27:0] bot_base_lat = 28'd0;
 reg        top_en_lat   = 1'b0;
 reg        bot_en_lat   = 1'b0;
 
-// line-doubling shift: output lines per source line = 2 (480) or 4 (240p)
-wire [1:0] vshift = dbl_lat ? 2'd2 : 2'd1;
+// Line shift: output lines per source line = SCALE for a 480-line source, 2*SCALE for a
+// 240p one. At SCALE=2 (1080p) that is the familiar 2 / 4; at SCALE=1 a 480-line source
+// maps one output line per source line and only fb_line_dbl still doubles.
+wire [1:0] vshift = scale2 ? (dbl_lat ? 2'd2 : 2'd1)
+                                 : (dbl_lat ? 2'd1 : 2'd0);
 
 // Per-line base stability filter: {fb_disp_half, fb_base} originates in
 // another clock domain and may change mid-frame; adopt a value only after
@@ -234,11 +318,13 @@ end
 // Fetch requests (video domain -> Avalon domain)
 //////////////////////////////////////////////////////////////////////////
 
-// Two output lines ahead of the raster, decide which SOURCE line (of which
+// One SOURCE line ahead of the raster, decide which source line (of which
 // region) will be needed and request it once. Buffer parity = source line
 // LSB, so the line being written is never the line being displayed - this
 // holds across region seams too (each region restarts at src 0 an even
 // number of output lines after the previous region's last line began).
+// The lookahead is counted in OUTPUT lines while the invariant it protects is
+// in SOURCE lines, so it has to track SCALE - see y_look below.
 reg        req_toggle = 1'b0;
 reg        req_sof    = 1'b0;   // first line of its region: reset the render offset
 reg        req_buf    = 1'b0;
@@ -253,20 +339,40 @@ reg  [1:0] cnt_req    = 2'd0;
 reg  [3:0] line_roff [0:1];
 initial begin line_roff[0] = 4'd0; line_roff[1] = 4'd0; end
 
-// wraps only for the top band, whose first request lands 2 lines before
-// the raster does (V_TOTAL-2 -> line 0)
-wire [10:0] y_look_raw = vcnt + 11'd2;
-wire [10:0] y_look     = (y_look_raw >= V_TOTAL) ? y_look_raw - V_TOTAL
-                                                 : y_look_raw;
+// Exactly ONE source line of lookahead, expressed in output lines: 2 at
+// SCALE=2, 1 at SCALE=1. This is a correctness constraint, not a tuning knob.
+// Deeper is not "safer": with only two line buffers keyed on source-line
+// parity, 2 output lines at 1:1 is 2 source lines ahead, look_src[0] ==
+// src_cur[0], and the prefetch overwrites the line being scanned out.
+// Shallower leaves no fetch time. Wraps for the first fetched line of the
+// frame - the top band at SCALE=2, the first game line at SCALE=1 where
+// Y0 == 0 (V_TOTAL-SCALE -> line 0). y_look (the counter above) holds
+// (vcnt + 2) mod V_TOTAL at SCALE=2 and (vcnt + 1) mod V_TOTAL at SCALE=1: it
+// is loaded with the offset at reset and steps and wraps with vcnt.
+//
+// Region decode, REGISTERED (stage A): y_look is line-constant, so these are
+// settled from hcnt==1 on. The region compares against the mode's Y0/Y1/V_ACT
+// would otherwise sit in series with the shift and the dedup compare below.
+reg        la_top_r  = 1'b0;
+reg        la_game_r = 1'b0;
+reg        la_bot_r  = 1'b0;
+reg [10:0] la_rel_r  = 11'd0;
+always @(posedge clk) begin
+	la_top_r  <= (y_look < Y0) && top_en_lat;
+	la_game_r <= (y_look >= Y0) && (y_look < Y1);
+	la_bot_r  <= (y_look >= Y1) && (y_look < V_ACT) && bot_en_lat;
+	// only meaningful while one of the three regions is active (look_in)
+	la_rel_r  <= (y_look < Y0) ? y_look
+	           : (y_look < Y1) ? y_look - Y0
+	                           : y_look - Y1;
+end
 
-wire        look_top  = (y_look < Y0) && top_en_lat;
-wire        look_game = (y_look >= Y0) && (y_look < Y1);
-wire        look_bot  = (y_look >= Y1) && (y_look < V_ACT) && bot_en_lat;
+wire        look_top  = la_top_r;
+wire        look_game = la_game_r;
+wire        look_bot  = la_bot_r;
 wire        look_in   = look_top || look_game || look_bot;
 wire  [1:0] look_rgn  = look_top ? RGN_TOP : look_game ? RGN_GAME : RGN_BOT;
-wire [10:0] look_rel  = look_top  ? y_look
-                      : look_game ? y_look - Y0
-                                  : y_look - Y1;
+wire [10:0] look_rel  = la_rel_r;
 wire  [1:0] look_vsh  = look_game ? vshift : 2'd1;   // bands are always 2x
 /* verilator lint_off UNUSEDSIGNAL */
 wire [10:0] look_shf = look_rel >> look_vsh;
@@ -292,13 +398,14 @@ wire  [8:0] bb_geo     = split_lat ? {bb_lin[7:0], 1'b0} : bb_lin;
 wire  [8:0] look_beats = bb_geo + {8'd0, look_roff != 4'd0};
 
 // look_* are LINE-CONSTANT (vcnt only changes when hcnt wraps): register the
-// whole lookahead cone per clock (copies are settled from hcnt==1 on) and
-// fire the request at hcnt==2 instead of hcnt==0, so the vcnt+2 wrap adder /
-// region subtracts / 12-bit dedup compare never gate the req_* enables
-// combinationally (they were an STA-failing family into req_base). The two
-// pixel clocks of extra latency are nothing against the ~2-output-line
-// fetch-ahead margin, and the per-line config latches at hcnt==0 have
-// settled a full cycle before the registered copies are consumed.
+// whole lookahead cone per clock (stage B; settled from hcnt==2 on, stage A
+// above from hcnt==1) and fire the request at hcnt==3 instead of hcnt==0, so
+// the region compares / subtracts / 12-bit dedup compare never gate the req_*
+// enables combinationally (they were an STA-failing family into req_base).
+// The three pixel clocks of extra latency are nothing against the
+// one-source-line fetch-ahead margin, and the per-line config latches at
+// hcnt==0 (and the band enables at line V_ACT) have settled before stage A
+// samples them a second time.
 reg        look_in_r    = 1'b0;
 reg [11:0] look_key_r   = 12'hFFF;
 reg  [1:0] look_rgn_r   = 2'd0;
@@ -344,7 +451,7 @@ always @(posedge clk or posedge reset) begin
 			last_req     <= 12'hFFF;
 		end
 
-		if (hcnt == 12'd2 && look_in_r && look_key_r != last_req) begin
+		if (hcnt == 12'd3 && look_in_r && look_key_r != last_req) begin
 			req_sof    <= look_sof_r;
 			req_buf    <= look_buf_r;
 			req_region <= look_rgn_r;
@@ -437,6 +544,13 @@ always @(posedge avl_clk) begin : fetch_fsm
 		fetching <= 1'b0;
 		avl_read <= 1'b0;
 		pending  <= 1'b0;
+		// done_toggle is half of a toggle CDC whose other half (dt_sync,
+		// cnt_done) IS reset. Leaving it set here would present the video
+		// domain with a 0->1 transition on the first clocks after reset and
+		// cnt_done would count a completion that never happened - one that
+		// never un-counts, because these are free-running 2-bit counters.
+		// req_toggle is reset for the same reason.
+		done_toggle <= 1'b0;
 	end
 end
 
@@ -516,7 +630,7 @@ wire [10:0] d_rel   = top_v ? vcnt : bot_v ? vcnt - Y1 : y_rel;
 wire  [1:0] d_vsh   = band_v ? 2'd1 : vshift;
 /* verilator lint_off UNUSEDSIGNAL */
 wire [10:0] y_shf   = d_rel >> d_vsh;
-wire [11:0] x_pre   = hcnt + 12'd2 - X0;     // lookahead: pixel needed in 2 clks
+wire [11:0] x_pre   = x_pre_r;               // lookahead: pixel needed in 2 clks (hcnt+2-X0)
 /* verilator lint_on UNUSEDSIGNAL */
 wire  [9:0] src_cur = y_shf[9:0];
 
@@ -548,15 +662,17 @@ assign rbuf = rbuf_r;
 // (overlapping pixels) and rotates channels across the write->scanout
 // round trip (SC pre-intro: red logo showed green, teal water pink, plus
 // a 1-px comb from the odd/even split - while the core render was right).
-// /2: source pixel 0..639; pixel_double game lines: /4, source 0..319
-// (bands are always 640 wide at 2x)
+// The divide is SCALE (source pixel 0..639) or 2*SCALE on pixel_double game
+// lines (source 0..319): /2 and /4 at SCALE=2, /1 and /2 at 1:1. Bands are
+// always 640 wide at 2x, but they only exist while Y0 > 0.
 //
 // The byte address is REGISTERED (b_pre_r) with the lookahead deepened to
 // hcnt+2, so the bank RAMs' address registers see only the short bump/
 // increment cone off a register slice. Overall RGB alignment vs the
 // counters is unchanged: the extra register stage is exactly absorbed by
 // the extra pixel of lookahead.
-wire  [9:0] n_pre    = pd_sel_r ? x_pre[11:2] : x_pre[10:1];
+wire  [9:0] n_pre    = scale2 ? (pd_sel_r ? x_pre[11:2] : x_pre[10:1])
+                                    : (pd_sel_r ? x_pre[10:1] : x_pre[9:0]);
 reg  [11:0] b_pre_r  = 12'd0;
 always @(posedge clk) begin
 	b_pre_r <=
@@ -664,6 +780,10 @@ always @(posedge clk or posedge reset) begin
 		src_line   <= 10'd0;
 	end
 	else begin
+		// Sound only because done_toggle is cleared under reset too (see the
+		// fetch FSM): both ends of the CDC leave reset at 0, so the first
+		// counted edge is a real completion. cnt_req/cnt_done are 2-bit and
+		// free-running, so a single phantom edge here is permanent skew.
 		dt_sync <= {dt_sync[1:0], done_toggle};
 		if (dt_sync[2] ^ dt_sync[1]) cnt_done <= cnt_done + 2'd1;
 
@@ -673,9 +793,13 @@ always @(posedge clk or posedge reset) begin
 		vblank_out <= (vcnt == Y0 && hcnt == 12'd0);
 
 		// Just before the window pixels of the FIRST output line of each
-		// source line: the fetch for this line (issued 2 output lines ago)
+		// source line: the fetch for this line (issued one source line ago)
 		// must have completed; only the next line's fetch may be in flight.
-		if (img_v && hcnt == X0 - 12'd4 && y_rel[0] == 1'b0
+		// At SCALE=2 a source line spans two output lines and y_rel[0]
+		// picks the first of them. At 1:1 every output line starts a new
+		// source line, so the term must go - keeping it would check only
+		// the even lines, which is half-blind rather than wrong.
+		if (img_v && hcnt == X0 - 12'd4 && (!scale2 || y_rel[0] == 1'b0)
 		    && (cnt_req - cnt_done) >= 2'd2) underrun <= 1'b1;
 	end
 end

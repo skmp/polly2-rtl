@@ -14,9 +14,11 @@
 //     reset window held around a switch.
 //   - peel_core (simplex_pvr_top): registers/GO/RESET/VRAM base via MMIO,
 //     render reads on ram1, framebuffer writes on ram2.
-//   - Display: pll_hdmi (fixed 148.5 MHz) + SPG (1080p raster, 640x480
-//     split-VRAM FB doubled to 1280x960, vbuf port) -> TX register stage ->
-//     ADV7513. No OSD, no scaler, no analog output.
+//   - Display: pll_hdmi (148.5 MHz + 27 MHz from one VCO) -> glitch-free mux
+//     -> SPG -> TX register stage -> ADV7513. The MMIO VIDEO_MODE register
+//     picks the raster: 1920x1080 (reset default, for HDMI TVs) or 720x480p
+//     (for analog monitors fed from HDMI through a DAC). 640x480 split-VRAM FB
+//     on the vbuf port. No OSD, no scaler, no analog output.
 //   - Audio: pll_audio (24.576 MHz) + audio_i2s: 2048-entry sample FIFO
 //     fed from the MMIO AUDIO_DATA register (blocking when full), drained
 //     at 48 kHz onto the ADV7513's I2S input (16-bit, standard I2S).
@@ -330,6 +332,22 @@ wire [31:0] pvr_mmio_wdata;
 wire  [7:0] pvr_vram_top;
 wire [31:0] pvr_vram_cfg;   // [0] VRAM_16MB: 16 MB board, no 8 MB mirror
 wire  [1:0] mmio_clk_sel;
+wire        mmio_video_480p;  // VIDEO_MODE[0], clk_sys domain, quasi-static
+
+// Raster at configuration. 1080p unless the build defines
+// POLLY2_VIDEO_480P_DEFAULT, e.g.
+//   quartus_map --set=VERILOG_MACRO=POLLY2_VIDEO_480P_DEFAULT ...
+// A CRT behind an HDMI-to-analog DAC needs that: it must never be sent 1080p's
+// ~67 kHz, and the MMIO register can only be written once minicast is up -
+// seconds after configuration. Seen on a MiSTercade V2 31 kHz chassis: ~10 s of
+// 1080p before software switched it made the monitor flicker and click its
+// relays hunting for a mode. With the macro, the bitstream comes out of
+// configuration at 480p and software can still switch it later.
+`ifdef POLLY2_VIDEO_480P_DEFAULT
+localparam VIDEO_480P_DEFAULT = 1'b1;
+`else
+localparam VIDEO_480P_DEFAULT = 1'b0;
+`endif
 
 wire        aud_fifo_wr, aud_fifo_full;
 wire [31:0] aud_fifo_wdata;
@@ -337,7 +355,7 @@ wire [11:0] aud_fifo_level;
 
 wire [31:0] fb_top_base, fb_bot_base;
 
-pvr_mmio pvr_mmio
+pvr_mmio #(.VIDEO_480P_INIT(VIDEO_480P_DEFAULT)) pvr_mmio
 (
 	.clk              (clk_sys),
 
@@ -366,7 +384,8 @@ pvr_mmio pvr_mmio
 
 	.fb_top           (fb_top_base),
 	.fb_bot           (fb_bot_base),
-	.vram_cfg         (pvr_vram_cfg)
+	.vram_cfg         (pvr_vram_cfg),
+	.video_480p       (mmio_video_480p)
 );
 
 //////////////////////////////////////////////////////////////////////////
@@ -511,22 +530,84 @@ irq_stretch #(.CYCLES(64)) render_irq_stretch
 );
 
 //////////////////////////////////////////////////////////////////////////
-// Display: pll_hdmi (fixed 148.5 MHz) + SPG -> TX register stage -> pins.
+// Display: pll_hdmi + SPG -> TX register stage -> pins.
 // FB is split-VRAM 16bpp RGB565: DC 32-bit-view word W at DDR byte W*8,
 // half selected by SOF bit 22.
+//
+// Clock: pll_hdmi emits BOTH pixel clocks from one VCO, and a glitch-free mux
+// picks the one VIDEO_MODE asks for:
+//   outclk_0 148.5 MHz -> 1920x1080 (2200 x 1125) = 60.000 Hz   (VIDEO_MODE 0)
+//   outclk_1  27.0 MHz ->  720x480p (858 x 525)   = 59.940 Hz,
+//                          31.469 kHz horizontal               (VIDEO_MODE 1)
+// Solved by Quartus' own IP solver (ip-generate reading this PLL's variation
+// file, number_of_clocks=2), not by hand:
+//   50 MHz ref, N=1, M=11.88 (integer 11 + fractional 3779571135/2^32),
+//   VCO 1188 MHz -> 594 MHz after pll_vco_div=2;
+//   C0=4 -> 148.5 MHz, C1=22 -> 27.000 MHz.
+// The charge pump (pll_cp_current=20) and loop filter (pll_bwctrl=4000) are the
+// stock part's: Quartus picks the same loop settings. No runtime reconfig - a
+// second counter costs nothing next to the reconfig block.
 //////////////////////////////////////////////////////////////////////////
 
-wire hdmi_clk_out;
+wire clk_hdmi_1080, clk_hdmi_480;
 pll_hdmi pll_hdmi
 (
 	.refclk(FPGA_CLK1_50),
 	.rst(1'b0),
-	.reconfig_to_pll(64'd0),   // fixed 148.5 MHz (1080p60), no runtime reconfig
+	.reconfig_to_pll(64'd0),   // fixed outputs, no runtime reconfig
 	.reconfig_from_pll(),
-	.outclk_0(hdmi_clk_out)
+	.outclk_0(clk_hdmi_1080),
+	.outclk_1(clk_hdmi_480)
 );
 
-wire clk_hdmi = hdmi_clk_out;
+// VIDEO_MODE switch, re-timed exactly like the core-clock switch above: the
+// MMIO bit is double-synced into the 50 MHz domain, and a change opens a
+// 31-cycle window with the SPG held in reset; the select itself moves at the
+// middle of it, so the mux swaps clocks and spg sees its new mode_480p while
+// nothing in the display path is running. The window (620 ns) covers the
+// mux's break-before-make dead time (~2.5 clocks of each pixel clock, worst
+// ~190 ns at 27 MHz) with room to spare.
+// The chain carries the mode XOR the build default ("flip"), never the mode itself:
+// every register here then powers up 0, which IS the configured default, so no
+// switch window - and no cycle of the other pixel clock - happens at startup.
+// Do not go back to `reg x = VIDEO_480P_DEFAULT` initialisers: with Quartus's
+// default "Power-Up Don't Care = On" they were silently dropped, and the
+// 480p-default CRT build came out of configuration at 1080p (measured on the
+// cabinet 2026-10-17: VIDEO_MODE read 0x80000000 before any software ran).
+reg        vid_flip_meta  = 1'b0;
+reg        vid_flip_sync  = 1'b0;
+reg        vid_flip       = 1'b0;              // applied mode XOR VIDEO_480P_DEFAULT
+reg  [4:0] vid_switch_cnt = 5'd0;
+wire       vid_mode_sel   = vid_flip ^ VIDEO_480P_DEFAULT;   // applied mode: 0 = 1080p, 1 = 480p
+
+always @(posedge FPGA_CLK2_50) begin
+	vid_flip_meta <= mmio_video_480p ^ VIDEO_480P_DEFAULT;   // clk_sys -> 50 MHz, quasi-static
+	vid_flip_sync <= vid_flip_meta;
+
+	if (vid_switch_cnt != 5'd0) begin
+		vid_switch_cnt <= vid_switch_cnt - 5'd1;
+		if (vid_switch_cnt == 5'd16) vid_flip <= vid_flip_sync;
+	end
+	else if (vid_flip_sync != vid_flip) vid_switch_cnt <= 5'd31;
+end
+
+wire vid_switch_reset = (vid_switch_cnt != 5'd0);
+
+wire clk_hdmi;
+// HARD altclkctrl 2:1 between the two pll_hdmi outputs, as skmp suggested on #69 and
+// as r7 does for clk_sys (same generated IP, plls/switch/altclkctrl). Both inputs are
+// counters of ONE pll_hdmi VCO, which is what a clkctrl dynamic select needs; a
+// clkctrl routes at most two PLL clocks, and this uses exactly two.
+// clkselect = {1'b1, sel}: inclk2x = 148.5 MHz (sel 0, 1080p), inclk3x = 27 MHz (sel 1, 480p).
+altclkctrl hdmiclk_ctrl
+(
+	.inclk3x  (clk_hdmi_480),
+	.inclk2x  (clk_hdmi_1080),
+	.inclk1x  (1'b0),
+	.inclk0x  (1'b0),
+	.clkselect({1'b1, vid_mode_sel}),
+	.outclk   (clk_hdmi)
+);
 
 // absolute DDR byte address of the displayed frame, straight from the core's
 // FB_R_SOF1 display register (side layout: 8 bytes per DC 32-bit word; SOF
@@ -540,7 +621,8 @@ wire [31:0] fb_disp_base = {pvr_vram_top, 24'd0} + {9'd0, spvr_fb_r_sof1[21:2], 
 wire  [1:0] fb_disp_depth  = spvr_fb_r_ctrl[3:2];
 wire        fb_disp_pixdbl = spvr_vo_control[8];
 
-// Line doubling (spg displays a half-height 640x240 source at 4x vertically):
+// Line doubling (spg displays a half-height 640x240 source at twice its usual
+// vertical scale - 2x at the 480p raster, 4x at SCALE=2 1080p):
 // either the game asks for it outright (FB_R_CTRL.fb_line_double), or the
 // DISPLAY MODE is 240p - a non-interlaced TV mode, i.e. no VGA pixel clock.
 // That second test is minicast's own resolution rule (spg.cpp CalculateSync:
@@ -562,11 +644,12 @@ wire        spg_underrun;
 spg spg
 (
 	.clk         (clk_hdmi),
-	.reset       (reset_req),
+	.reset       (reset_req | vid_switch_reset),
+	.mode_480p   (vid_mode_sel),          // only changes inside vid_switch_reset
 
 	.fb_base     (fb_disp_base),
 	.fb_stride   (fb_disp_stride),
-	.fb_line_dbl (fb_disp_linedbl),      // 240p source: 4x vertical
+	.fb_line_dbl (fb_disp_linedbl),      // 240p source: 2x the vertical scale
 	.fb_pix_dbl  (fb_disp_pixdbl),       // VO_CONTROL.pixel_double (320-wide)
 	.fb_split    (1'b1),
 	.fb_disp_half(spvr_fb_r_sof1[22]),
