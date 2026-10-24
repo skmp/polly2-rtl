@@ -8,6 +8,10 @@
 #                     write burst completes under reset (a cut burst desyncs
 #                     the HPS f2sdram bridge until the fabric is reloaded),
 #                     stale read beats are swallowed without reaching the core
+#   make pvr-rd-reset - simplex_pvr_top read master vs core reset: a stalled
+#                     read is never withdrawn, reset at every phase of a read
+#                     leaves the channel exact, and a burst that never returns
+#                     no longer blocks reads until the FPGA is reprogrammed
 #   make clean
 
 VERILATOR ?= verilator
@@ -21,7 +25,7 @@ TSP_PKG = ../polly2-core/rtl/gen/tsp_pkg.sv
 # polly2-core video-out (framebuffer write master) instantiated by simplex_pvr_top
 VO_RTL  = ../polly2-core/rtl/vo.sv
 
-all: spg-sync pvr-burst spg-loopback audio-i2s spg-bands spg-depth spg-240p fb-write render-irq
+all: spg-sync pvr-burst pvr-rd-reset spg-loopback audio-i2s spg-bands spg-depth spg-240p fb-write render-irq
 
 #   make fb-write - FB write master formats: every FB_W_CTRL packmode
 #                   (0555K/565/4444/1555/888/0888K/8888, refsw2 dither
@@ -101,6 +105,9 @@ obj_dir/spg_sync_tb: rtl/spg.sv tb/spg_sync_tb.cpp
 pvr-burst: obj_dir/pvr_burst_tb
 	./obj_dir/pvr_burst_tb
 
+pvr-rd-reset: obj_dir/pvr_rd_reset_tb
+	./obj_dir/pvr_rd_reset_tb
+
 #   make spg-loopback - stream a full frame through the FB write master in
 #                       tile order, scan it out through spg, compare every
 #                       window pixel (write layout vs scanout layout)
@@ -124,7 +131,15 @@ obj_dir/pvr_burst_tb: rtl/simplex_pvr_top.sv $(VO_RTL) tb/peel_core_stub.sv tb/p
 	    $(TSP_PKG) tb/peel_core_stub.sv rtl/simplex_pvr_top.sv $(VO_RTL) tb/pvr_burst_tb.cpp \
 	    -o pvr_burst_tb
 
+obj_dir/pvr_rd_reset_tb: rtl/simplex_pvr_top.sv $(VO_RTL) tb/peel_core_stub.sv tb/pvr_rd_reset_tb.cpp $(TSP_PKG)
+	$(VERILATOR) --cc --exe --build $(VFLAGS) \
+	    -Wno-UNUSEDPARAM -Wno-DECLFILENAME -Wno-PINMISSING \
+	    -I../polly2-core/rtl/gen \
+	    --top-module simplex_pvr_top \
+	    $(TSP_PKG) tb/peel_core_stub.sv rtl/simplex_pvr_top.sv $(VO_RTL) tb/pvr_rd_reset_tb.cpp \
+	    -o pvr_rd_reset_tb
+
 clean:
 	rm -rf obj_dir
 
-.PHONY: all spg-sync pvr-burst spg-loopback audio-i2s spg-bands spg-depth spg-240p fb-write render-irq clean
+.PHONY: all spg-sync pvr-burst pvr-rd-reset spg-loopback audio-i2s spg-bands spg-depth spg-240p fb-write render-irq clean
