@@ -47,6 +47,19 @@ static void write_port_tick() {
 // ---- spg read port (16-byte-word addressed, bursts, variable latency) ----
 struct RdCmd { uint64_t addr16; uint32_t left; };
 static std::vector<RdCmd> rdq;
+
+// Completed line fetches, counted from OUTSIDE the DUT. One line fetch is a
+// back-to-back chain of bursts: the next burst is commanded on the last beat of
+// the previous one, so the port never goes fully idle (queue empty AND no command
+// asserted) inside a chain, and does for the best part of a line between chains.
+// That gap is the completion marker, and it needs no knowledge of the per-line
+// beat count. Used by prime_fetches() to set the internal done_toggle parity.
+static long g_fetches  = 0;
+static int  g_idle     = 0;
+static bool g_saw_beat = false;
+static const int FETCH_IDLE_TICKS = 8;
+static const long FRAME_CLKS = 2200L * 1125L;           // stock 1080p: H_TOTAL * V_TOTAL
+
 static void read_port_tick() {
     dut->avl_waitrequest = (rnd() == 0);
     if (dut->avl_read && !dut->avl_waitrequest)
@@ -63,6 +76,11 @@ static void read_port_tick() {
         dut->avl_readdatavalid = 1;
         c.addr16++;
         if (--c.left == 0) rdq.erase(rdq.begin());
+    }
+
+    if (dut->avl_readdatavalid) { g_saw_beat = true; g_idle = 0; }
+    else if (g_saw_beat && rdq.empty() && !dut->avl_read) {
+        if (++g_idle >= FETCH_IDLE_TICKS) { g_fetches++; g_saw_beat = false; g_idle = 0; }
     }
 }
 
@@ -158,6 +176,52 @@ static void run_config(uint32_t sof, uint16_t xorpat, const char* name) {
     printf("[%s] %ld window pixels checked\n", name, checked);
 }
 
+// Hold spg in reset, then release it just long enough for `n` line fetches to
+// complete before holding it again. spg's fetch-completion CDC toggle is not
+// observable from outside, but it flips once per completed fetch, so this leaves
+// it in a KNOWN PARITY relative to where it started - which is the whole point of
+// run_reset_parity below.
+static void prime_fetches(int n) {
+    dut->spg_reset = 1;
+    for (int i = 0; i < 8; i++) tick();
+    dut->spg_reset = 0;
+    g_fetches = 0; g_idle = 0; g_saw_beat = false;
+    long guard = 0;
+    while (g_fetches < n && ++guard < 8 * FRAME_CLKS) tick();
+    dut->spg_reset = 1;
+    for (int i = 0; i < 8; i++) tick();
+}
+
+// After spg_reset, `underrun` must stay clear across a clean frame - from EITHER
+// parity of the fetch-completion toggle.
+//
+// underrun compares two counters that live in different clock domains: cnt_req in
+// the video domain and cnt_done, which counts edges of the Avalon domain's
+// done_toggle through a sync chain. Both counters and the sync chain are reset;
+// if done_toggle itself is NOT, then a reset released while it happens to sit at 1
+// shifts a phantom edge through the chain and cnt_done starts one ahead of reality
+// forever. That skew reads as a false underrun on the one line per frame where
+// cnt_req does not advance (the last game line, whose lookahead is already past the
+// window), and - worse - masks a real 2-deep underrun on every other line.
+//
+// The parity at reset release is an accident of whatever ran before, so testing it
+// from one parity proves nothing. Prime both.
+static void run_reset_parity(const char* name) {
+    const int before = errors;
+    for (int par = 0; par < 2; par++) {
+        prime_fetches(par);
+        dut->spg_reset = 0;                       // clears the sticky flag
+        for (long i = 0; i < FRAME_CLKS + 200; i++) tick();
+        if (dut->underrun) {
+            printf("[%s] FAIL: spg underrun after reset, toggle parity %+d "
+                   "(no line was late - the fetch bookkeeping is skewed)\n", name, par);
+            errors++;
+        }
+    }
+    if (errors == before)
+        printf("[%s] clean frame after reset from both toggle parities\n", name);
+}
+
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     dut = new Vspg_loopback_top;
@@ -167,6 +231,9 @@ int main(int argc, char** argv) {
     // config B: half/bank 1 (HIGH 32 bits), ODD 64-bit base word (sof byte 4
     // -> DDR byte 8 -> fb_base[3]=1, the mid-beat fetch path) + inverted pattern
     run_config(0x000004u | (1u << 22), 0x5A5A, "half1/odd");
+    // ... and, keeping config B's settings and its frame in the DDR model, the
+    // post-reset underrun check from both fetch-toggle parities
+    run_reset_parity("reset-parity");
 
     printf(errors ? "FAIL (%d errors)\n" : "PASS\n", errors);
     delete dut;
