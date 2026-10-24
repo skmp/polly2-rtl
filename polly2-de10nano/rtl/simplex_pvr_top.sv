@@ -133,11 +133,36 @@ module simplex_pvr_top import tsp_pkg::*; (
     // grow, re-check BOTH: largest_burst <= RD_MAX_BEATS (hard), and
     // largest_burst + tex_concurrency_beats <= RD_MAX_BEATS (soft, for geometry latency).
     localparam integer RD_MAX_BEATS = 128;
-    reg [9:0]  rd_beats   = 10'd0;  // beats accepted but not yet returned
+    reg [9:0]  rd_beats   = 10'd0;  // beats of taken commands not yet returned
     reg        rd_flush   = 1'b0;   // bursts orphaned by a reset: swallow their beats
+
+    // `reset` arrives untimed: pvr_rst is false-pathed in polly2.sdc, and
+    // reset_req / clk_switch_reset come straight from the 50 MHz domain. Used
+    // directly, one reset edge could reach the bridge's read input and
+    // rd_beats in different cycles, counting a burst the bridge never took.
+    // rd_beats is never reset, so that miscount was permanent: the next reset
+    // set rd_flush for good and every read stayed blocked until the FPGA was
+    // reprogrammed. Everything below uses this one synchronized copy.
+    (* altera_attribute = {"-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS"} *)
+    reg  [1:0] rd_rst_s   = 2'b11;
+    always @(posedge clk) rd_rst_s <= {rd_rst_s[0], reset};
+    wire       rd_rst     = rd_rst_s[1];
+
+    // One command register in front of the bridge. A command taken from the core
+    // is held on DDRAM_RD/ADDR/BURSTCNT until the bridge accepts it, reset or not
+    // (Avalon: a master may not withdraw a stalled request), and its beats are
+    // counted when it is taken - so rd_beats always matches what the bridge will
+    // return, whatever reset does.
+    reg        cmd_v      = 1'b0;
+    reg  [7:0] cmd_burst  = 8'd0;
+    reg [20:0] cmd_word   = 21'd0;
+    wire       cmd_go     = cmd_v && !DDRAM_BUSY;   // bridge accepts this cycle
+    wire       cmd_free   = !cmd_v || cmd_go;
     wire       rd_cap     = ({2'd0, rd_beats} + {4'd0, ddr_req.burst}) <= 12'(RD_MAX_BEATS);
-    wire       rd_issue   = ddr_req.rd && !reset && !rd_flush && rd_cap;
-    assign DDRAM_RD       = rd_issue;
+    wire       rd_open    = cmd_free && rd_cap && !rd_rst && !rd_flush;
+    // a 0-beat burst is not a request (only a core caught mid-reset emits one)
+    wire       rd_take    = ddr_req.rd && (ddr_req.burst != 8'd0) && rd_open;
+    assign DDRAM_RD       = cmd_v;
     // peel_core's arbiter emits a FULL 16 MB word offset (bits [20:0]) and deliberately
     // does not mask or rebase. THIS is the level that knows the board: on an 8 MB board
     // (VRAM_CFG[0]=0) bit [20] is the mirror and is masked off here; on a 16 MB board it
@@ -147,35 +172,56 @@ module simplex_pvr_top import tsp_pkg::*; (
     // tag again, so the tag never actually reached DDR.)
     wire [20:0] rd_word   = vram_cfg[0] ? ddr_req.addr[20:0]        // 16 MB board
                                         : {1'b0, ddr_req.addr[19:0]}; // 8 MB: mirror
-    assign DDRAM_ADDR     = {8'd0, rd_word};
-    assign DDRAM_BURSTCNT = ddr_req.burst;
+    assign DDRAM_ADDR     = {8'd0, cmd_word};
+    assign DDRAM_BURSTCNT = cmd_burst;
 
-    wire       rd_accept  = rd_issue && !DDRAM_BUSY;
     wire       rd_beat    = DDRAM_DOUT_READY && (rd_beats != 10'd0);
 
-    // core-facing response: busy = cannot ACCEPT a command this cycle (bridge
-    // waitrequest, budget exhausted, or flushing). dready is GATED on rd_beats:
-    // a readdatavalid pulse with nothing outstanding (stray/late beat from the
-    // DDR3 bridge) must never reach the core's arbiter - an unexpected beat
-    // desyncs its order-FIFO bookkeeping and hangs the burst clients.
-    assign ddr_resp.busy   = DDRAM_BUSY || !rd_cap || rd_flush || reset;
+    // core-facing response: busy = cannot TAKE a command this cycle (command
+    // register still stalled on the bridge, budget exhausted, reset or flushing).
+    // dready is GATED on rd_beats: a readdatavalid pulse with nothing outstanding
+    // (stray/late beat from the DDR3 bridge) must never reach the core's arbiter -
+    // an unexpected beat desyncs its order-FIFO bookkeeping and hangs the burst
+    // clients.
+    assign ddr_resp.busy   = !rd_open;
     assign ddr_resp.dout   = DDRAM_DOUT;
     assign ddr_resp.dready = rd_beat && !rd_flush;
 
-    // rd_beats is deliberately NOT cleared by reset: bursts the bridge accepted
-    // before the reset still return ALL their beats afterwards (the HPS SDRAM
-    // controller executes accepted commands regardless of fabric state). Keep
-    // counting so those stale beats are consumed here instead of miscounting
-    // against the next render's first burst. A reset with beats in flight sets
-    // rd_flush: the remaining beats are counted but dready is suppressed, so the
-    // freshly-reset core's arbiter never sees a beat it didn't request. New
-    // issues stay blocked meanwhile (busy includes rd_flush/reset).
+    // rd_beats is deliberately NOT cleared by reset: bursts taken before the reset
+    // still return ALL their beats afterwards (the command register issues them, and
+    // the HPS SDRAM controller executes accepted commands regardless of fabric
+    // state). Keep counting so those stale beats are consumed here instead of
+    // miscounting against the next render's first burst. A reset with beats in
+    // flight sets rd_flush: the remaining beats are counted but dready is
+    // suppressed, so the freshly-reset core's arbiter never sees a beat it didn't
+    // request. New commands stay blocked meanwhile (busy includes rd_flush/rd_rst).
+    //
+    // Backstop: orphaned beats come back within microseconds. If a flush sees no
+    // beat for 2^16 cycles the count is wrong (e.g. a timing error in an untimed
+    // overclock slot) and no beats are coming, so give up on them instead of
+    // blocking reads until the FPGA is reprogrammed. A beat that still turns up
+    // later finds rd_beats == 0 and is dropped.
+    reg [15:0] flush_idle = 16'd0;
     always @(posedge clk) begin
-        if (reset && rd_beats != 10'd0) rd_flush <= 1'b1;
-        else if (rd_beats == 10'd0)     rd_flush <= 1'b0;
+        if (rd_take) begin
+            cmd_v     <= 1'b1;
+            cmd_burst <= ddr_req.burst;
+            cmd_word  <= rd_word;
+        end else if (cmd_go)
+            cmd_v     <= 1'b0;
 
-        rd_beats <= rd_beats + (rd_accept ? {2'd0, ddr_req.burst} : 10'd0)
-                             - (rd_beat   ? 10'd1                 : 10'd0);
+        flush_idle <= (rd_flush && !rd_beat) ? flush_idle + 16'd1 : 16'd0;
+
+        if (rd_flush && flush_idle == 16'hFFFF) begin
+            rd_beats <= 10'd0;
+            rd_flush <= 1'b0;
+        end else begin
+            if (rd_rst && rd_beats != 10'd0) rd_flush <= 1'b1;
+            else if (rd_beats == 10'd0)      rd_flush <= 1'b0;
+
+            rd_beats <= rd_beats + (rd_take ? {2'd0, ddr_req.burst} : 10'd0)
+                                 - (rd_beat ? 10'd1                 : 10'd0);
+        end
     end
 
     // ==================================================================

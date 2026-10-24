@@ -128,8 +128,9 @@ static inline int      polly2_done(void)        { return (polly2_status() & POLL
 static inline uint32_t polly2_frame_cycles(void){ return polly2_mmio_rd(POLLY2_MMIO_CYCLES); }
 
 /* 0=75, 1=90, 2=100, 3=112.5 MHz. Switching briefly pauses clk_sys and
- * pulses the core reset window; leave the MMIO alone for ~2us afterwards
- * and re-upload nothing - registers and VRAM base survive. */
+ * pulses the core reset window; leave the MMIO alone for ~2us afterwards.
+ * That reset clears the PVR registers like polly2_reset() does, so re-upload
+ * them after a switch; the VRAM base survives. */
 static inline void polly2_set_clock(unsigned sel)
 {
 	polly2_mmio_wr(POLLY2_MMIO_CLK, sel & 3u);
@@ -145,7 +146,17 @@ static inline uint32_t polly2_clock_hz(void)
 }
 
 static inline void polly2_go(void)    { polly2_mmio_wr(POLLY2_MMIO_GO, 1); }
-static inline void polly2_reset(void) { polly2_mmio_wr(POLLY2_MMIO_RESET, 1); }
+/* Runs the stretched core reset (RST_CYCLES, at most 511 clk_sys cycles =
+ * 6.8us at 75 MHz) and returns once it is over. While in reset the core
+ * clears its PVR registers and drops register writes, so upload them after
+ * this returns. The STATUS read makes sure the RESET write has landed before
+ * the wait starts. */
+static inline void polly2_reset(void)
+{
+	polly2_mmio_wr(POLLY2_MMIO_RESET, 1);
+	(void)polly2_status();
+	usleep(10);
+}
 
 /* Push one 48 kHz stereo sample. Hardware-blocking: when the FIFO is full
  * the store stalls this CPU until a slot frees (one sample = ~20.8us).
