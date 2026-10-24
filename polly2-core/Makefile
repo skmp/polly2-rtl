@@ -5,6 +5,9 @@
 #                        tex-addr / tex-uv / tex-decode / tex-filter / tex-combiner
 #   make frontendtsplp - front-end + ISP + TSP + layer peeling -> shaded_lp_<name>.bmp
 #   make golden-check   - render ALL polly2-data dump scenes, md5 vs dumps/golden.txt
+#   make sim-vs-hw     - render every scene the real Dreamcast timed and compare
+#                        sim cycles (at 100/112/125 MHz) against rendertimes.txt
+#                        -> build/simvshw/sim_vs_hw.{txt,svg}
 #   make spannerv2     - spanner_v2 standalone replay vs C++ golden
 #   make regen         - regenerate PVR register typedefs from minicast's pvr_regs.h
 #   make clean
@@ -37,7 +40,7 @@ CWD  := $(shell pwd)
 
 .PHONY: shade-drop raster-topleft coord-f32 interp depth-cmp-lp texfetchpl texmlp clean test tex tex-addr tex-uv tex-decode tex-filter tex-combiner \
         oparse region regfile regen sortcache itquad itskip taginvw taginvw-copies dense_span_buffer fog \
-        frontendtsplp frontendtsplp-build golden-check spannerv2 mulc9 mul16sppro \
+        frontendtsplp frontendtsplp-build golden-check sim-vs-hw spannerv2 mulc9 mul16sppro \
         add24sppro mulc9sppro add3sppro mul24sppro mul24c9sppro
 
 # TSP module files (package first). ISP shared FP units come from rtl/isp_min.
@@ -280,6 +283,26 @@ frontendtsplp-build: | $(BUILD)
 
 frontendtsplp: frontendtsplp-build
 	./$(BUILD)/obj_frontendtsplp/tb $(DUMP)
+
+# ---- sim-vs-hw: render every scene the real Dreamcast timed (pvr-renderer's
+# ../polly2-data/dumps/rendertimes.txt), in parallel, and tabulate the sim's
+# cycle counts as times at several candidate polly2 clocks against the measured
+# hardware times. Renders and logs land in build/simvshw/.
+#   make sim-vs-hw                      all scenes
+#   make sim-vs-hw SCENES=jgr,daytona   only those
+#   make sim-vs-hw CLOCKS=100,112,125   clocks to report (MHz)
+#   make sim-vs-hw REUSE=1              re-tabulate/replot the last run, no rendering
+#   make sim-vs-hw YSCALE=linear        plot on a linear axis instead of log
+#   make sim-vs-hw SORT=name            x-axis order: hardware (default), name, cycles
+# Outputs build/simvshw/sim_vs_hw.txt (the table) and sim_vs_hw.svg (the plot:
+# per scene, the measured hardware time and the three sim clocks).
+CLOCKS ?= 100,112,125
+
+sim-vs-hw: frontendtsplp-build
+	@ln -sfn ../../polly2-data $(BUILD)/polly2-data
+	tools/sim_vs_hw.py -j $(NJOBS) -c $(CLOCKS) \
+	  $(if $(SCENES),-s $(SCENES),) $(if $(REUSE),--reuse,) \
+	  $(if $(YSCALE),--yscale $(YSCALE),) $(if $(SORT),--sort $(SORT),)
 
 # ---- golden-check: render EVERY scene listed in ../polly2-data/dumps/golden.txt
 # (parallel, one frontendtsplp sim per scene) and compare each shaded_lp_<scene>.bmp
