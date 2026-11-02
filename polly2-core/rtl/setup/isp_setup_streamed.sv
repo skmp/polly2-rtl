@@ -269,6 +269,7 @@ module isp_setup_streamed (
     reg        area_go_r;
 
     wire [31:0] a0_y,a1_y,a2_y;
+    wire [31:0] m0_y,m1_y,m2_y,m3_y;    // M0..M3 outputs (below); A0 takes m0_y/m1_y
     fp_add24_spp_ro A0 (.clk(clk),.reset(reset),.stall(stall),.in_valid(g0v_r || area_go_r),
         .a(area_go_r ? m0_y : g0a_r), .b_in(area_go_r ? m1_y : g0b_r), .sub(1'b1),
         .out_valid(), .y(a0_y));
@@ -282,7 +283,6 @@ module isp_setup_streamed (
     // ================================================================
     reg [31:0] m0a,m0b, m1a,m1b, m2a,m2b, m3a,m3b;
     reg        m0v,m1v,m2v,m3v;
-    wire [31:0] m0_y,m1_y,m2_y,m3_y;
     fp_mul24_spp_ro M0 (.clk(clk),.reset(reset),.stall(stall),.in_valid(m0v),.a(m0a),.b(m0b),.out_valid(),.y(m0_y));
     fp_mul24_spp_ro M1 (.clk(clk),.reset(reset),.stall(stall),.in_valid(m1v),.a(m1a),.b(m1b),.out_valid(),.y(m1_y));
     fp_mul24_spp_ro M2 (.clk(clk),.reset(reset),.stall(stall),.in_valid(m2v),.a(m2a),.b(m2b),.out_valid(),.y(m2_y));

@@ -339,6 +339,12 @@ module peel_core import tsp_pkg::*; #(
     objlist_entry_t  it_entry; entry_type_e it_etype;   // combinational eq head
     reg              it_entry_pt;                       // combinational eq head list-kind (PT)
     triangle_out_t   it_trio; triangle_ack_t it_ack;
+    // sort-cache check port, wired to u_sort further down
+    wire             sc_skip_en, sc_chk_vq, sc_chk_done;
+    wire             it_chk_valid;
+    wire [31:0]      it_chk_tag;
+    wire             it_skp_pulse;
+    wire [2:0]       it_skp_cnt;
     isp_primitive_iterator_pf u_it (.clk(clk),.reset(reset),
         .intensity_shadow(regs.fpu_shad_scale.intensity_shadow),
         .param_base(param_base),
@@ -482,6 +488,19 @@ module peel_core import tsp_pkg::*; #(
     // unconditionally - no per-head verdict wait here anymore.
     assign su_in_valid = fq_out_valid && (pq_count <= 5'd4);
 
+    // tri FIFO (fq) head word + its field offsets, and the plane FIFO (pq) full
+    // flag; both FIFOs are further down
+    localparam integer FQ_W = 418;   // 13 * 32 + 1 (is_pt) + 1 (quad)
+    localparam integer FF_ISP=0,  FF_TAG=32,
+                       FF_X1=64,  FF_Y1=96,  FF_Z1=128,
+                       FF_X2=160, FF_Y2=192, FF_Z2=224,
+                       FF_X3=256, FF_Y3=288, FF_Z3=320,
+                       FF_PT=352,    // list-kind (PT) bit
+                       FF_X4=353, FF_Y4=385,   // QUAD 4th vertex (X/Y only, no Z)
+                       FF_QUAD=417;  // 1 = quad record (v4/edge-41 path active)
+    wire [FQ_W-1:0] fq_out;          // presented head entry
+    wire            pq_full;
+
     isp_setup_streamed u_isp (
         .clk(clk), .reset(reset),
         .in_valid(su_in_valid), .in_ready(su_in_ready),
@@ -553,6 +572,7 @@ module peel_core import tsp_pkg::*; #(
     // bbox) simply never samples the (moot) verdict - correct, no stale-verdict leak.
     localparam integer CR_LAT = 16;
     reg  [4:0] cr_cnt;            // per-triangle verdict countdown (0 => idle/expired)
+    reg  [5:0] cur_tx, cur_ty;    // latched tile coords (stable during lists)
     isp_raster_line #(.LANES(RAS_LANES)) u_line (
         .clk(clk), .reset(reset),
         // ABSOLUTE screen coordinates. The tile base is 32-aligned and ras_x/ras_y are
@@ -622,6 +642,36 @@ module peel_core import tsp_pkg::*; #(
     reg                    b_peeling;   // carry the peel/opaque select into stage B
     reg                    b_fwd;       // carry the FORWARD PT-resolve select into stage B
     reg                    b_which;     // per-triangle is_pt (tri_is_pt) snapshot (PT => dt_pt=1)
+
+    // ---- declared ahead of the tile buffers below, which connect them ----
+    // orchestration FSM states + state register (the FSM is further down)
+    localparam S_IDLE=0, S_RA=1, S_STATE=2,
+               S_OL_RUN=4,                 // producer: OL entries -> entry FIFO
+               S_RA_ACK=9, S_DONE=10,
+               S_DRAIN=11,                 // barrier: wait consumer idle + FIFOs empty
+               // unified PT+TL peel loop: init pb2, PeelBuffers, run, check
+               S_PEEL_INIT=28, S_PEEL_BUF=29,
+               S_OP_DONE=32,
+               // M10K bulk-op walks over the peel RAM ports (128 chunk addrs each):
+               S_CLEAR_WR=34,              // CLEAR: write {bg_depth, bg_tag} chunks
+               S_PEEL_BUF_RUN=35,          // PeelBuffers RMW walk (read A -> write B)
+               S_ZK_INV=36,                // z_keep=1 OP: invalidate htile tags (keep depth)
+               // forward punch-through resolve phase (see the pt_phase comment)
+               S_PT_BUF=39,                // wait taginvw credit; clear pt_res; prime walk
+               S_PT_INIT=40,               // seed walk: Zceil<-Zop, boundary, working
+               S_PT_SWAP=41,               // between-pass walk: advance boundary
+               S_PT_FIX=42,                // close walk: zb <- Zfinal
+               S_PT_WAIT=43,               // drain ALL handed PT shades before PT_FIX
+               S_PT_NEXT=44;               // continue/stop decision (ping-pong credit)
+    reg [5:0] st;
+    localparam integer ZR_BB = $clog2(RAS_LANES);   // lane bits of a pixel id
+    reg          cb_valid;     // blend stage CB (shade output, further down)
+    reg  [9:0]   cb_id;
+    reg  [9:0]   cb2_id;       // blend stage CC
+    reg [CHUNK_AW-1:0]  pb_rd; // PeelBuffers read-ahead chunk (1 ahead of pb_i)
+    reg        first_peel;      // this tile's FIRST PeelBuffers (seeds the reference tag:
+                                //   pb2 <- TAG_INVALID_SENTINEL instead of copying tagA)
+    wire [31*RAS_LANES-1:0]  zr_rdata;   // Zres read data (u_zres, further down)
 
     // ---- peel + color tile buffers (own the RAM ports + access-pattern enforcement) ----
     // per-lane resolved-bit slices for the forward PT compare (stage B chunk) and
@@ -729,18 +779,14 @@ module peel_core import tsp_pkg::*; #(
     // triangle tags through the check port BEFORE committing the record's DDR
     // burst, so a fully-rendered record skips its FETCH too (the old fq-head
     // check only saved setup+raster). skip_en level + check port wired at u_it.
-    wire        sc_ready, sc_chk_vq, sc_chk_done;
+    wire        sc_ready;
     // skip from the second pass on, for BOTH pass loops: the backward TL peel and
     // the forward PT resolve (its mirrored demotes come from the fwd compare's
     // b_more; consumed/occluded/resolved fragments demote nothing, so the PT skip
     // set grows as pixels resolve). Cross-phase staleness self-corrects through
     // the tag compare, and each loop's pass-1 enters prime its own tags.
-    wire        sc_skip_en   = ((peeling  && (peel_pass >= 8'd2)) ||
+    assign      sc_skip_en   = ((peeling  && (peel_pass >= 8'd2)) ||
                                 (pt_phase && (pt_pass   >= 8'd2))) && sc_ready;
-    wire        it_chk_valid;
-    wire [31:0] it_chk_tag;
-    wire        it_skp_pulse;
-    wire [2:0]  it_skp_cnt;
     wire        sc_enter     = su_in_valid && su_in_ready && (peeling || pt_phase);
     wire [RAS_LANES-1:0] sc_wr_valid = b_valid ? b_more : {RAS_LANES{1'b0}};
     wire [32*RAS_LANES-1:0] sc_wr_tag;
@@ -828,6 +874,7 @@ module peel_core import tsp_pkg::*; #(
     wire [31:0]  col_rd_argb_h [0:1];    // per-half registered read
     // blend (CA read / CB write) targets the producer half only; FLUSH read targets
     // the VO half only. gcol picks per-instance whether it is prod or vo this cycle.
+    wire         cb_wr_en;               // PT-resolve blend gate (assigned at stage CC below)
     genvar gcol;
     generate
       for (gcol = 0; gcol < 2; gcol = gcol + 1) begin : gcolbuf
@@ -982,6 +1029,7 @@ module peel_core import tsp_pkg::*; #(
     wire [319:0] ts_ddx, ts_ddy, ts_c;
     wire         sp_ready;
     wire [SPAN_AW:0] spv_sp_range_base, spv_sp_range_cnt;  // this pass's span ring range
+    reg  [12:0]  cons_seq_r;    // watermark of the last FULLY consumed span (set by the reader below)
 
     spanner_v2 #(.NSLOT(TILE_W*TILE_H), .SLOTW(10),
                  .SPAN_NSLOT(SPAN_NSLOT), .SPAN_W(SPAN_AW)) u_spanner (
@@ -1182,8 +1230,7 @@ module peel_core import tsp_pkg::*; #(
     // CC id N-2 are always distinct, so no RMW hazard from the extra stage. SH_DRAIN
     // additionally waits !cb_valid && !cb2_valid before returning so the trailing
     // blend lands before the next phase (peel pass / FLUSH) touches the color buffer.
-    reg          cb_valid;
-    reg  [9:0]   cb_id;
+    // cb_valid / cb_id: declared above the tile buffers (u_ptres_bl reads them)
     reg  [31:0]  cb_argb, cb_tsp;
     reg          cb_at_en;    // alpha-test enable snapshot (peeling && dt_pt[id])
     wire [30:0]  cb_invw;    // CB stage: pixel's invW (from the invW side RAM;
@@ -1202,6 +1249,8 @@ module peel_core import tsp_pkg::*; #(
     // never rewritten while an earlier instance is still in flight.
     // The read is presented on pp_out_valid and lands 1 cycle later, exactly when
     // cb_valid/cb_id are live: no extra stage, no realignment.
+    reg [9:0]  s2_p;          // shade-reader Stage C pixel index (y:x) (stage C is further down)
+    reg [30:0] s2_invw;       //   and its invW
     bram_sdp #(.W(31), .D(1024)) u_iwr (
         .clk(clk),
         .we(pp_in_valid && !pp_stall), .waddr(s2_p), .din(s2_invw),
@@ -1210,7 +1259,7 @@ module peel_core import tsp_pkg::*; #(
     // stage CC id/valid + the PT-resolve context that has to travel with them (the
     // blend operands themselves ride in u_blend's S1 registers).
     reg          cb2_valid;
-    reg  [9:0]   cb2_id;
+    // cb2_id: declared above the tile buffers
     reg          cb2_ptres;  // CC stage: blend belongs to a PT-resolve pass
     reg  [30:0]  cb2_invw;   // CC stage: pixel's invW
     // ---- Zres: per-pixel RESOLVED DEPTH, written by the blend when a PT pixel's
@@ -1222,11 +1271,11 @@ module peel_core import tsp_pkg::*; #(
     // This lives at stage CC, not CB: tsp_blend REGISTERS its alpha-test verdict in
     // S1, so bl_at_pass (like cb_blend_out) describes the CB operands one cycle
     // later - hence the cb2_* copies of id/ptres/invw.
-    localparam integer ZR_BB = $clog2(RAS_LANES);
+    // (ZR_BB and zr_rdata: declared above the tile buffers)
     localparam integer ZR_AW = 10 - ZR_BB;
     wire [RAS_LANES-1:0]     zr_we;
     wire [ZR_AW*RAS_LANES-1:0] zr_waddr, zr_raddr;
-    wire [31*RAS_LANES-1:0]  zr_wdata, zr_rdata;
+    wire [31*RAS_LANES-1:0]  zr_wdata;
     wire                     zr_wr = pr_set;
     genvar gzr;
     generate
@@ -1257,7 +1306,7 @@ module peel_core import tsp_pkg::*; #(
     // speculative deeper layer must never overwrite the locked color) and the
     // alpha test passed (a failing fragment writes NOTHING; the pixel keeps
     // resolving deeper, possibly all the way down to the untouched OP color).
-    wire cb_wr_en = cb2_valid && !(cb2_ptres && (pt_res_bit || !bl_at_pass));
+    assign cb_wr_en = cb2_valid && !(cb2_ptres && (pt_res_bit || !bl_at_pass));
 
     // -------------------- orchestration FSM --------------------
     // Decoupled producer / consumer (as frontend_isp_tb_top): the region->objlist
@@ -1267,25 +1316,7 @@ module peel_core import tsp_pkg::*; #(
     // rasterizes into the tile buffer. BARRIER: at every region-state boundary the
     // producer waits for both FIFOs empty AND the consumer idle so CLEAR/OP/PT/TR/
     // FLUSH stay strictly ordered on the shared tile depth/tag buffer.
-    localparam S_IDLE=0, S_RA=1, S_STATE=2,
-               S_OL_RUN=4,                 // producer: OL entries -> entry FIFO
-               S_RA_ACK=9, S_DONE=10,
-               S_DRAIN=11,                 // barrier: wait consumer idle + FIFOs empty
-               // unified PT+TL peel loop: init pb2, PeelBuffers, run, check
-               S_PEEL_INIT=28, S_PEEL_BUF=29,
-               S_OP_DONE=32,
-               // M10K bulk-op walks over the peel RAM ports (128 chunk addrs each):
-               S_CLEAR_WR=34,              // CLEAR: write {bg_depth, bg_tag} chunks
-               S_PEEL_BUF_RUN=35,          // PeelBuffers RMW walk (read A -> write B)
-               S_ZK_INV=36,                // z_keep=1 OP: invalidate htile tags (keep depth)
-               // forward punch-through resolve phase (see the pt_phase comment)
-               S_PT_BUF=39,                // wait taginvw credit; clear pt_res; prime walk
-               S_PT_INIT=40,               // seed walk: Zceil<-Zop, boundary, working
-               S_PT_SWAP=41,               // between-pass walk: advance boundary
-               S_PT_FIX=42,                // close walk: zb <- Zfinal
-               S_PT_WAIT=43,               // drain ALL handed PT shades before PT_FIX
-               S_PT_NEXT=44;               // continue/stop decision (ping-pong credit)
-    reg [5:0] st;
+    // The S_* states and `st` are declared above the tile buffers (u_peel decodes st).
 
     // consumer sub-FSM (setup is now the streamed pipeline u_isp -> pq FIFO)
     // RS_POP absorbs the 1-cycle registered-read latency of the M10K plane FIFO:
@@ -1372,10 +1403,8 @@ module peel_core import tsp_pkg::*; #(
                                  // so it renders only its OP triangles, not the background).
     reg [CHUNK_AW-1:0]  cl_i;     // CLEAR chunk-address counter 0..NCHUNK-1
     reg [CHUNK_AW-1:0]  pb_i;     // PeelBuffers chunk-address counter 0..NCHUNK-1
-    reg [CHUNK_AW-1:0]  pb_rd;    // PeelBuffers read-ahead chunk (1 ahead of pb_i)
+    // pb_rd, first_peel: declared above the tile buffers
     reg        pb_pipe;         // PeelBuffers RMW pipe primed (stage-B has valid rdata)
-    reg        first_peel;      // this tile's FIRST PeelBuffers (seeds the reference tag:
-                                //   pb2 <- TAG_INVALID_SENTINEL instead of copying tagA)
 
     // ---- single shared shade sub-phase (ONE tsp_shade_v2_pp pipeline) ----
     // Invoked as a subroutine after OP and after each peel pass. The TSP pipeline
@@ -1457,13 +1486,12 @@ module peel_core import tsp_pkg::*; #(
     reg [2:0]  cs_k;          // pixel-within-span 0..rep-1
     // Stage C: the pixel emitted last cycle -> feeds pp with fresh planes (tsg_r_* for cs_id).
     reg        s2_v;          // Stage C occupied (a pixel to feed pp this cycle)
-    reg [9:0]  s2_p;          // pixel index (y:x)
-    reg [30:0] s2_invw;
+    // s2_p / s2_invw: declared above u_iwr
     reg        s2_at;
     reg [9:0]  s2_id;         // held to re-present the tsg read on pp_stall
     reg [12:0] s2_wm;         // its span's alloc watermark (cons_seq feedback)
     reg        s2_last;       // this pixel is its span's LAST -> advance cons_seq
-    reg [12:0] cons_seq_r;    // watermark of the last FULLY consumed span (to spanner)
+    // (cons_seq_r: declared above u_spanner)
 
     reg  [MD_AW-1:0] mdp_idx; // md slot of the in-flight streaming pass (G_RUN patch)
     reg stream_en;            // +nostream: reader waits for md_fin (bisect aid)
@@ -1527,20 +1555,12 @@ module peel_core import tsp_pkg::*; #(
     // Cost of the split is one 418-bit register + a 2:1 mux in front of setup's
     // combinational inputs; the setup units have the slack for it (they hold no
     // endpoint in the top 10k failing paths).
-    localparam integer FIFO_N = 8;
-    localparam integer FQ_W = 418;   // 13 * 32 + 1 (is_pt) + 1 (quad)
-    localparam integer FF_ISP=0,  FF_TAG=32,
-                       FF_X1=64,  FF_Y1=96,  FF_Z1=128,
-                       FF_X2=160, FF_Y2=192, FF_Z2=224,
-                       FF_X3=256, FF_Y3=288, FF_Z3=320,
-                       FF_PT=352,    // list-kind (PT) bit
-                       FF_X4=353, FF_Y4=385,   // QUAD 4th vertex (X/Y only, no Z)
-                       FF_QUAD=417;  // 1 = quad record (v4/edge-41 path active)
+    localparam integer FIFO_N = 8;   // (FQ_W and the FF_* field offsets: above u_isp)
     (* ramstyle = "M10K, no_rw_check" *) reg [FQ_W-1:0] fq_ram [0:FIFO_N-1];
     reg [FQ_W-1:0] fq_ram_q;       // M10K OUTPUT REGISTER - assigned from fq_ram only
     reg [FQ_W-1:0] fq_byp_d;       // write word bypassed around the RAM (empty refill)
     reg            fq_byp_sel;     // 1 = the head word is fq_byp_d, not fq_ram_q
-    wire [FQ_W-1:0] fq_out = fq_byp_sel ? fq_byp_d : fq_ram_q;   // presented head entry
+    assign          fq_out = fq_byp_sel ? fq_byp_d : fq_ram_q;   // presented head entry
     reg            fq_out_valid;   // fq_out holds a valid head entry
     reg [3:0]  fq_head, fq_tail;   // ring indices 0..FIFO_N-1 (0..7)
     reg [4:0]  fq_count;
@@ -1602,7 +1622,7 @@ module peel_core import tsp_pkg::*; #(
     reg [3:0]  pq_head, pq_tail;
     reg [4:0]  pq_count;
     reg        pq_push, pq_pop;
-    wire pq_full  = (pq_count == PQ_N);
+    assign pq_full = (pq_count == PQ_N);
     wire pq_empty = (pq_count == 0);
 
     // assemble the push word from the retiring planes
@@ -1677,7 +1697,6 @@ module peel_core import tsp_pkg::*; #(
     integer ras_inflight;
 
     integer tri_count, cull_count, miss_count, hit_count, tri_seen;
-    reg [5:0] cur_tx, cur_ty;      // latched tile coords (stable during lists)
     integer i, l, j;
     integer ti_i;                  // loop var: per-copy u_taginvw credit arrays
 
