@@ -113,6 +113,8 @@ set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/pvr_mmi
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/hps_lw_bridge.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/audio_i2s.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/clk_mux_gf.sv
+# hard clock control for the HDMI pixel clock (148.5 / 27 MHz) - same IP as r7's clk_sys switch
+set_global_assignment -name QIP_FILE ../../polly2-de10nano/plls/switch/altclkctrl/synthesis/altclkctrl.qip
 set_global_assignment -name SYSTEMVERILOG_FILE ../../polly2-de10nano/rtl/irq_stretch.sv
 
 # ---- vendored MiSTer HPS f2sdram plumbing (sysmem_lite, instantiated by

@@ -1,27 +1,38 @@
 // Border-band check for spg.sv: models the vbuf DDR port with pattern
 // memory (16bpp pixel value = hash of its byte address), runs full frames,
 // and compares EVERY active pixel against the expected composition:
-//   lines    0..59   top band    (640x30 linear FB at TOP, 2x doubled)
-//   lines   60..1019 game window (640x480 linear FB at GAME, 2x doubled)
-//   lines 1020..1079 bottom band (640x30 linear FB at BOT, 2x doubled)
-// with x 0..319 / 1600..1919 always black (border), plus:
+//   lines          0 .. Y0-1      top band    (640x30 linear FB, SCALE-doubled)
+//   lines         Y0 .. Y1-1      game window (640x480 linear FB, SCALE-doubled)
+//   lines         Y1 .. V_ACT-1   bottom band (640x30 linear FB, SCALE-doubled)
+// with x outside X0..X1 always black (border), plus:
 //   - bands disabled from cold start show black until enabled
 //   - clearing FB_BOT-equivalent input turns the bottom band black again
 //     on the next latched frame while the top band stays up
 //   - no underrun is flagged
+//
+// Geometry comes from spg.sv's parameters (spg_mode.h), not from literals, so this
+// runs against whatever mode the module was built for.
+//
+// SKIPPED AT SCALE=1. The bands fill the margin between the game window and the
+// raster edge, and a 480-line source in a 480-line raster leaves no margin: Y0 == 0,
+// and spg.sv's `vcnt < Y0` comparisons fold to constant-false (it waives the
+// resulting UNSIGNED warning for exactly this reason). The subject of this testbench
+// is then structurally absent - so it says so and exits 0. A pass would be a lie and
+// a failure would be noise; `make spg-bands-1080p` is where it still has teeth.
 #include "Vspg.h"
+#include "Vspg___024root.h"
 #include "verilated.h"
 #include <cstdio>
 #include <cstdint>
 #include <deque>
 
-static const int H_ACT = 1920, V_ACT = 1080;
-static const int X0 = 320, X1 = 1600, Y0 = 60, Y1 = 1020;
+#define SPG_P(n) (Vspg___024root::spg__DOT__##n)
+#include "spg_mode.h"
+using namespace spg_mode;
 
 static const uint32_t GAME = 0x00100000;   // linear game FB (fb_split = 0)
 static const uint32_t TOP  = 0x00200000;
 static const uint32_t BOT  = 0x00210000;   // all 128-byte aligned
-static const uint32_t STRIDE = 1280;
 
 // deterministic DDR content: 16bpp pixel at byte address a
 static uint16_t pix(uint32_t a) {
@@ -31,8 +42,20 @@ static uint16_t pix(uint32_t a) {
 
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
+
+    print_mode("spg_bands_tb");
+    if (!HAS_BANDS) {
+        printf("SKIP: no border bands at SCALE=%ld - the %ldx%ld source fills the "
+               "%ldx%ld raster exactly (Y0 == 0), so there is no margin for them.\n",
+               SCALE, SRC_W, SRC_H, H_ACTIVE, V_ACTIVE);
+        return 0;
+    }
+
     Vspg* dut = new Vspg;
+    dut->mode_480p = spg_mode::MODE_480P;   // raster under test (tb/spg_mode.h)
     int errors = 0;
+
+    const uint32_t STRIDE = (uint32_t)BAND_STRIDE;
 
     dut->reset = 1;
     dut->fb_base = GAME; dut->fb_stride = STRIDE;
@@ -68,7 +91,7 @@ int main(int argc, char** argv) {
     for (int i = 0; i < 10; i++) tick();
     dut->reset = 0;
 
-    // reconstruct (x, y) from the de stream: a >10000-clk de gap is vblank
+    // reconstruct (x, y) from the de stream: a de gap longer than a line is vblank
     long gap = 1000000;
     int x = 0, y = -1, prev_de = 0, frame = -1;
     bool top_en = false, bot_en = false;
@@ -76,17 +99,17 @@ int main(int argc, char** argv) {
     auto expected = [&](int px_, int py, uint16_t* out, bool* band) -> bool {
         // returns false for black; out = RGB565 source pixel otherwise
         if (px_ < X0 || px_ >= X1) return false;
-        uint32_t sx = (uint32_t)(px_ - X0) >> 1;
+        uint32_t sx = (uint32_t)src_x(px_);
         if (py < Y0) {
             if (!top_en) return false;
-            *out = pix(TOP + (uint32_t)(py >> 1) * STRIDE + sx * 2);
+            *out = pix(TOP + (uint32_t)(py >> SHIFT) * STRIDE + sx * 2);
             *band = true;
         } else if (py < Y1) {
-            *out = pix(GAME + (uint32_t)((py - Y0) >> 1) * STRIDE + sx * 2);
+            *out = pix(GAME + (uint32_t)src_y(py) * STRIDE + sx * 2);
             *band = false;
         } else {
             if (!bot_en) return false;
-            *out = pix(BOT + (uint32_t)((py - Y1) >> 1) * STRIDE + sx * 2);
+            *out = pix(BOT + (uint32_t)((py - Y1) >> SHIFT) * STRIDE + sx * 2);
             *band = true;
         }
         return true;
@@ -95,13 +118,13 @@ int main(int argc, char** argv) {
     // run FRAMES full frames; check pixels only when 'check' is set
     auto run_frames = [&](int n, bool check) {
         int seen = 0;
-        long guard = 2475000L * (n + 2);
+        long guard = FRAME_CLKS * (n + 2);
         while (seen < n && guard-- > 0) {
             tick();
             if (dut->de) {
                 if (!prev_de) {
                     x = 0;
-                    if (gap > 10000) { y = 0; frame++; }
+                    if (gap > VBLANK_GAP_MIN) { y = 0; frame++; }
                     else y++;
                 }
                 gap = 0;
@@ -131,7 +154,7 @@ int main(int argc, char** argv) {
                 x++;
             } else {
                 gap++;
-                if (prev_de && y == V_ACT - 1) seen++;
+                if (prev_de && y == V_ACTIVE - 1) seen++;
             }
             prev_de = dut->de;
         }
