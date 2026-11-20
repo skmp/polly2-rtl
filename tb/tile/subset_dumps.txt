@@ -1,0 +1,36 @@
+# subset_dumps.txt: the polly2-data frames of the tile subset (PLAN 1.3 "Subsets", conventions.md 7.8): about 30 frames
+# across games and features, each one render (capture_prerender.sh dump:<scene>). The full set is every dump of
+# $POLLY2_DUMPS (every <scene>.pvrdmp and every vram_<scene>.bin with its pvr_regs_<scene>.bin).
+shenmue_intro       # punch-through chunks, translucent
+shenmue_intro2      # PT forward resolve, a translucent tie
+jgr_tree_shadows    # modifier volumes over punch-through
+jgr_tree_shadows2   # PT_MV runs, translucent shadow polygons
+jgr_car             # OpInPt
+thps2_ingame        # three entries a tile (keep Z)
+thps2_menu          # keep-Z write-out at the same tile
+sa2_ingame          # an empty punch-through list in every tile
+sa2_ingame2         # opaque volume shadows on translucent runs
+rez_ingame          # a polygon at the background's depth
+xtreme_intro        # nothing behind a background below 2^-20
+sc_ingame2          # intensity shadows, textures
+mvsc2_ingame        # coplanar autosorted translucent
+logo                # empty keep-Z entries
+menu2
+18wheel_select      # empty punch-through lists
+taxi3               # translucent runs under volumes
+doa2_kasumi
+hotd2_zombies
+daytona_front
+rayman_lights
+sonic_title
+f1wgp_driver        # PT chunks with culled primitives
+f1wgp_race
+vrally_rally4
+ff2_fight           # OpInPt from a culled PT triangle
+underdefeat_ingame  # the scaler, Y_COEFF 0x6532
+outtrigger_menu     # SupSample
+mrdriller_ingame    # SupSample
+berserk_fight       # D adjust 0
+ikaruga_stage
+soulreaver_hall
+recv_tunnel

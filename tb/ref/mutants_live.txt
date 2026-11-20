@@ -1,0 +1,16 @@
+# tb/ref/mutants_live.txt: unsound liveness masks (tb/common/isp_live.h), each of which must be caught by the self-test's
+# scramble mode (refglue_selftest --mode scramble: every dead field overwritten at every phase boundary). Run by
+# tools/gate/mutants.py (make refglue-mutants). Each makes a field dead where a later phase reads it; plan-* are the
+# rows of PLAN 1.3's first table that the tree does not bear out. A broken mask can also make the passes go on for ever
+# (a random boundary): the self-test ends such a render at 1024 passes (--max-passes) and fails it.
+# Format: <id> | <file in tb/common> | <original fragment> | <mutated fragment> | <probe> [args] | <what it breaks>
+@dir tb/common REFGLUE_COMMON_DIR
+@obj REFGLUE_OBJDIR
+@probe scramble refglue-build refglue_selftest --mode scramble --jobs 4 @build/pre/subset_cases.txt
+
+plan-res-rendered-only | isp_live.h |         if (rendered \|\| everRendered)\n            m \|= RES_TAG \| RES_DEPTH; |         if (rendered)\n            m \|= RES_TAG \| RES_DEPTH; | scramble | PLAN's "resTag, resDepth: pixels with rendered only": PT_FINAL takes an earlier chunk's resolved key
+saved-dead-in-shade | isp_live.h |     if (p == TR_SAVE \|\| p == TR_PEEL \|\| p == TR_WALK \|\| p == TR_MOD \|\| p == TR_SHADE) |     if (p == TR_SAVE \|\| p == TR_PEEL \|\| p == TR_WALK \|\| p == TR_MOD) | scramble | savedDepth dead after a translucent SHADE: RESTORE reads it
+b-dead-in-pt | isp_live.h |         m \|= DEPTH_B \| TAG_B \| DEPTH_C |         m \|= DEPTH_C | scramble | the punch-through boundary (depthB, tagB) dead between the passes
+b-dead-after-peel | isp_live.h |     if (p == TR_PEEL)\n        m \|= DEPTH_B \| TAG_B; |  | scramble | the translucent reference (depthB, tagB) dead after PEEL
+rendered-dead-after-final | isp_live.h |     if (p == PT_FINAL \|\| p == PT_MOD)\n        m \|= RENDERED; |  | scramble | `rendered` dead after PT_FINAL: PT_MV_SHADE reads it
+c-dead-in-pt | isp_live.h | DEPTH_C \| REFTAG_C \| OPTAG \| EVER_RENDERED \| RENDERED; | OPTAG \| EVER_RENDERED \| RENDERED; | scramble | depthC / refTagC dead in the passes

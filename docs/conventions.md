@@ -434,7 +434,13 @@ or `refsw_lists.cpp`, reads the globals `pvr_regs` / `emu_vram`, and needs libsw
   **[verified]**.
 - A unit testbench sets the registers it depends on in `pvr_regs` before each call (fog table, palette, TEXT_CONTROL,
   ...), exactly as the RTL unit sees them on its register inputs.
-- GAP: the glue has not been compiled yet. Validate it when the first L2 testbench is brought up.
+- As built (M5, closing the glue half of G10): two translation units, `tb/ref/refcore_glue.cpp` (refsw_tile.cpp) and
+  `tb/ref/refcore_glue_lists.cpp` (refsw_lists.cpp), because both `.cpp` files include refcore's `TexUtils.h`, which
+  has no include guard (and so the two inline exactly as refsw3-offline's two objects). The environment above was
+  complete, plus `pal_needs_update` / `fog_needs_update` (TexCache.cpp's). tb/fp's `fp-bgkey` copy cannot be compiled
+  beside `pvr_regs.h` (its macro `ISP_BACKGND_D` is the name the copy reads), so it is a third, L1 object,
+  `tb/ref/refcore_bgkey.cpp`. `make refglue-selftest` proves the build: RenderCORE_sw equal to refsw3-offline after
+  every render of the tile subset.
 
 **L3: process level.** The frame gates run `refsw3-offline` as a separate program on the same command stream
 (section 7.4). Nothing is linked.
@@ -807,5 +813,5 @@ were provably stale. When a header is wrong, fix it in the same change.
 | G7 | **TA in scope?** `p2-offline` keeps refsw3-ta in C++. TA input arriving during a render (multi-buffered frames) is not exercised: the offline render is synchronous | TA and core overlap timing | the owner's decision on a TA RTL; ta-tests (`compare_dumps.py`) would then be its gate |
 | G8 | **What SOFTRESET clears** in the core (tile buffers, the accumulation-buffer swap state, the caches), and what the power-on contents are | the reset contract of 4.4 and the `reset` command mapping in `p2-offline` | a console probe: render, SOFTRESET, then a keep-Z tile that shows the buffer |
 | G9 | Display / SPG stalls of the core (about 3 µs per line read; timemeas turns the display off) | timing of renders with the display on (the game frames) | out of the CORE's scope unless the owner says otherwise; then a probe with the display on |
-| G10 | The L2 glue (7.3) and `p2-offline`'s link are checked at the symbol level only, not yet compiled | the first L2 testbench, and `p2-offline` | the bring-up of either |
+| G10 | ~~The L2 glue (7.3) and `p2-offline`'s link are checked at the symbol level only, not yet compiled~~ **The glue half is closed by M5** (`make refglue-selftest`: compiled and linked, and its phase driver equal to refsw3-offline after every render of the tile subset); `p2-offline`'s link is still symbol-level only | `p2-offline` | its bring-up (M12) |
 | G11 | `TM_ORDER` (palette clock) needs CPU register writes timed against the render; `p2-offline` renders synchronously and has no timed-write command | the span sorter's order gate (2b) at the clock level | a `p2-offline` option of our own (env `P2_TIMED_WRITES=<file>`: clock / register / value lists); the console scenes as in G2 |

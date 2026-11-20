@@ -1,0 +1,20 @@
+# tb/ref/mutants.txt: the planted bugs of M5's phase driver (PLAN M5 "Mutants", conventions.md 7.7), run by
+# tools/gate/mutants.py (make refglue-mutants, and the last step of make refglue-selftest). Every one must be caught by
+# the self-test and the unchanged folder must pass first. The probe `frames`: refglue_selftest in drv mode on every case
+# of the tile subset the gate captured (build/pre/subset_cases.txt, written by tools/gate/gate_refglue.sh: the pages,
+# the dumps, the 200 seeds). The liveness masks' mutants are in tb/ref/mutants_live.txt (another folder: tb/common).
+#
+# Format: <id> | <file in tb/ref> | <original fragment> | <mutated fragment> | <probe> [args] | <what it breaks>
+# (\n a newline, \| a bar, \\ a backslash in a fragment).
+@dir tb/ref REFGLUE_DRV_DIR
+@obj REFGLUE_OBJDIR
+@probe frames refglue-build refglue_selftest --mode drv --jobs 4 @build/pre/subset_cases.txt
+
+# ---- PLAN M5's list: phase order swaps
+op-mod-before-op | phase_driver.cpp |         p2ref::walk(RM_OPAQUE, entry.opaque.ptr_in_words * 4, rect);\n        at(P::OP);\n        if (!entry.opaque_mod.empty) {\n            p2ref::walk(RM_MODIFIER, entry.opaque_mod.ptr_in_words * 4, rect); |         if (!entry.opaque_mod.empty)\n            p2ref::walk(RM_MODIFIER, entry.opaque_mod.ptr_in_words * 4, rect);\n        p2ref::walk(RM_OPAQUE, entry.opaque.ptr_in_words * 4, rect);\n        at(P::OP);\n        if (!entry.opaque_mod.empty) { | frames | OP_MOD before OP: the opaque volumes against the background's depth
+pt-mod-before-final | phase_driver.cpp |             p2ref::pt_final();\n            at(P::PT_FINAL);\n        }\n        if (!entry.opaque_mod.empty) {\n            p2ref::walk(RM_MODIFIER, entry.opaque_mod.ptr_in_words * 4, rect); |             if (!entry.opaque_mod.empty)\n                p2ref::walk(RM_MODIFIER, entry.opaque_mod.ptr_in_words * 4, rect);\n            p2ref::pt_final();\n            at(P::PT_FINAL);\n        }\n        if (!entry.opaque_mod.empty) { | frames | PT_MOD before PT_FINAL (the pair PT final / PT_MOD swapped): the volumes against the last pass's depths, `rendered` without the earlier chunks
+# ---- more of the order
+opinpt-after-shade | phase_driver.cpp |     p2ref::set_opinpt(!entry.puncht.empty && p2ref::list_has_prim(entry.puncht.ptr_in_words * 4));\n    p2ref::render_param_tags(RM_OPAQUE, rect.left, rect.top); |     p2ref::render_param_tags(RM_OPAQUE, rect.left, rect.top);\n    p2ref::set_opinpt(!entry.puncht.empty && p2ref::list_has_prim(entry.puncht.ptr_in_words * 4)); | frames | OpInPt set after the opaque SHADE: the opaque runs cut by the entry before's flag
+tr-mod-after-shade | phase_driver.cpp |                 if (!entry.trans_mod.empty) {\n                    p2ref::walk(RM_MODIFIER, entry.trans_mod.ptr_in_words * 4, rect);\n                    at(P::TR_MOD);\n                }\n                p2ref::render_param_tags(RM_TRANSLUCENT_AUTOSORT, rect.left, rect.top); |                 p2ref::render_param_tags(RM_TRANSLUCENT_AUTOSORT, rect.left, rect.top);\n                if (!entry.trans_mod.empty) {\n                    p2ref::walk(RM_MODIFIER, entry.trans_mod.ptr_in_words * 4, rect);\n                    at(P::TR_MOD);\n                } | frames | the translucent volumes after the pass's SHADE
+presort-no-clear | phase_driver.cpp |             p2ref::clear_status();\n            p2ref::walk(RM_TRANSLUCENT_PRESORT |             p2ref::walk(RM_TRANSLUCENT_PRESORT | frames | TR_PS without its ClearParamStatusBuffer: the opaque pixels shaded again with the first presorted triangle
+no-restore | phase_driver.cpp |             p2ref::restore_depth(); |  | frames | the depth before the sort not restored (a keep-Z entry after an autosorted one)

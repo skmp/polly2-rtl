@@ -48,7 +48,7 @@ reference for every gate.
 | level | how | used by |
 |---|---|---|
 | **L1** headers | `-std=c++17 -I$(REFCORE)`: `pvr_softfp.h`, `pvr_bits.h`, `pvr_isp_edge.h`, `pvr_isp_depth.h`, `pvr_tsp_plane.h` | M1-M4, M9, M10 |
-| **L2** glue | `tb/ref/refcore_glue.cpp` `#include`s `refsw_lists.cpp` and `refsw_tile.cpp`, compiled once into `build/ref/refcore_glue.o` with refsw3-offline's FLAGS / INC / DEF (parsed from `$(NULLDC3)/refsw3-offline/build.sh`, drift-checked) plus `-DRenderCORE=RenderCORE_sw`; linked with `pvr_mem.cpp`, `TexCache.cpp`, `threading.cpp`, `-lpthread -lz`; environment in `tb/ref/refcore_env.cpp` | M5-M12 |
+| **L2** glue | `tb/ref/refcore_glue.cpp` `#include`s `refsw_tile.cpp` and `tb/ref/refcore_glue_lists.cpp` `#include`s `refsw_lists.cpp` (two translation units, as in refsw3-offline: both `.cpp` files include refcore's `TexUtils.h`, which has no include guard; M5), compiled into `build/ref/lib/` with refsw3-offline's FLAGS / INC / DEF (parsed from `$(NULLDC3)/refsw3-offline/build.sh`) plus `-DRenderCORE=RenderCORE_sw`; linked with `pvr_mem.cpp`, `TexCache.cpp`, `threading.cpp`, `-lpthread -lz`; environment in `tb/ref/refcore_env.cpp`; the background key (tb/fp's copy `fp-bgkey`, which cannot see `pvr_regs.h`'s macros) in `tb/ref/refcore_bgkey.cpp`; the API in `tb/ref/p2ref.h` | M5-M12 |
 | **L3** process | `refsw3-offline` on the same command stream | M2, M3 (triangle extraction), M12, M13, refsw3-known |
 | copies | rules that are local lambdas, statics or template bodies no wrapper reaches, copied **verbatim** into `tb/ref/ref_copies.h` between anchor markers. `tools/check_ref_copies.sh` re-extracts and diffs them on every gate run, and fails on drift (num §7.1) | M1-M12 |
 
@@ -65,13 +65,25 @@ reference for every gate.
 | the `PixelFlush_tsp` lambdas `bumpLight`, `shade`, `mipChoose`, `fade`, and the SupSample block | tile.cpp | M10, M11 |
 | the `put` / scaler lambdas of `RenderCORE` | lists.cpp | M5, M12 |
 
+As built (M5, `tb/ref/ref_copies.h`): `core-pt-take`, `core-pt-loop`, `core-rpt` (the whole RenderParamTags body),
+`tsp-mip-k`, `tsp-lambdas` and `tsp-super` (with `tsp-head`, `tsp-texture`, `tsp-tail` and `tsp-dispatch`: the whole of
+PixelFlush_tsp in pieces), `core-put` (with `core-prev`, `core-writeout`, `core-endframe`: RenderCORE's frame around
+the entries) and `core-perp`; the M1 / M2 rows were already in `tb/fp/ref_copies.h` (`fp-bgkey`, `fp-cull`) and
+`tb/isp_edge/ref_copies_edge.h`. The self-test runs every copy but `tsp-mip-k` (M9's) on every pixel it shades.
+
 **Runtime switches are pinned** (`tools/check_ref_switches.sh`, run by every gate, result in the summary):
 - the environment has `MIP_K` and `MIP_ARITH` unset or `0` (plane.h reads both with `getenv`);
 - the glue and refsw3-offline are compiled without `-DFOG_VARIANT`, or with `0` (tile.cpp);
 - the `*HW` structs are the ones `p2_hw_pkg` was generated from (`hw-pkg-check`).
 
-**The p2ref API.** These are non-static wrappers in the glue's translation unit. Because that translation unit
-includes the two `.cpp` files, every static is in scope.
+**The p2ref API.** These are non-static wrappers in the glue's translation units. Because each includes its `.cpp`
+file, every static is in scope. As built (M5; `tb/ref/p2ref.h` is the reference, the sketch below is the plan's): the
+punch-through calls are refcore's own steps (`pt_initial`, `pt_begin(chunk size)`, `pt_chunks`, `pt_chunk_start(c)`,
+`pt_pass_start(p)`, `pt_final`; `pt_phase_copy` runs the verbatim PT loop); `begin_entry` is RenderCORE's
+`ClearFpuCache` and `tilePixelsShaded = 0`; `render_param_tags(rm)` shades through the verbatim copies of
+RenderParamTags' body and PixelFlush_tsp (`render_param_tags_core` is refcore's), with a hook a TSP testbench replaces
+(`set_pixel_hook`); spans are `SpanRec` (refcore's `Span` is a type local to refsw_tile.cpp); `reset_core` returns every
+state that outlives a render to a new process's; `set_isp_pixel` writes a pixel's state (the liveness self-test).
 
 ```
 namespace p2ref {
@@ -104,10 +116,13 @@ namespace p2ref {
 ```
 
 **The glue self-test** (`make refglue-selftest`, M5) proves that the glue is refsw3:
-- `tb/ref/phase_driver.cpp` walks a render through the p2ref calls, in RenderCORE's order.
-- It runs the write-out through the `put` / scaler copies in `ref_copies.h`.
+- `tb/ref/phase_driver.cpp` walks a render through the p2ref calls, in RenderCORE's order, with a hook at every phase
+  boundary (`tb/common/isp_live.h`'s phases).
+- It runs the write-out through the `put` / scaler copies in `ref_copies.h` (`p2ref::copy::RenderFrame`: RenderCORE's
+  frame from verbatim copies, the entries' phases the driver's).
 - Its video memory after each render must equal refsw3-offline's on the frames subset, every word. Every tile-level
-  testbench below relies on this.
+  testbench below relies on this. The same comparison runs RenderCORE_sw (the build's control), the driver with the
+  verbatim PT loop, and the driver with every dead field scrambled at every boundary (the liveness masks' proof).
 
 ### 1.2 Unit testbenches (conv §7.2)
 
@@ -145,10 +160,13 @@ namespace p2ref {
 These sit between unit and frame. They are the main bring-up tool for the ISP and the TSP.
 
 **Inputs.**
-- **Pre-render captures.** `tools/gate/capture_prerender.sh <case>` writes `build/pre/<case>/r<k>/{vram.bin,
-  pvr_regs.bin}` for each render k. Sources:
-  - a dreamcast-tests page: its PC stream, with `save` inserted *before* each render trigger;
-  - a polly2-data dump: `pvrdmp <file>; save <dir>`, or for legacy dumps `regs ...; vram ...; save`.
+- **Pre-render captures.** `tools/gate/capture_prerender.sh <case>` writes `build/pre/<case>/r<k>/{vram.bin.gz,
+  pvr_regs.bin}` for each render k, and refsw3-offline's video memory after it, `r<k>/post/vram.bin.gz` (gzipped: a
+  game frame is 3 MB that way, not 16; `p2ref::load_state` reads both forms). Sources:
+  - a dreamcast-tests page: its PC stream, with `save` inserted before and after each render trigger (readbacks
+    answered by refsw3-offline, as in run2.sh `off`);
+  - a polly2-data dump (`dump:<scene>`): `pvrdmp <file>`, or for legacy dumps `regs ...; vram ...`, then the render;
+  - a scenegen seed (`gen:<seed>`).
 - **Generated scenes.** `tb/gen/scenegen.cpp` is C++ on the refcore headers. It writes region arrays, object lists and
   parameter blocks straight into `emu_vram`, with seeded mixes of:
   - strips with masks, triangle and quad arrays, links;
@@ -166,7 +184,11 @@ These sit between unit and frame. They are the main bring-up tool for the ISP an
   dreamcast-tests class, and 200 scenegen seeds. The full set is every dump, every page, and 5000 seeds.
 
 **Liveness masks** (`tb/common/isp_live.h`). A field of `IspPix` is compared only where refsw3's value is live, so
-the RTL's storage sharing and its per-phase rules are not reported as differences:
+the RTL's storage sharing and its per-phase rules are not reported as differences. The table below is the plan's; the
+masks as built (M5) are narrower for depthB / tagB in the translucent sort (live after PEEL only), `rendered` (to
+PT_MOD) and wider for resTag / resDepth (pixels with `rendered` or `everRendered`: PT_FINAL takes the key an earlier
+chunk resolved), and the self-test's scramble mode proves them sound (`tb/ref/mutants_live.txt` has this table's
+resTag row as a mutant):
 
 | field | live |
 |---|---|
@@ -599,6 +621,34 @@ in `agents/m4/`. How it differs from the text below (which predates M2 / M3's mo
 
 ### M5. Tile-harness infrastructure
 
+**Status (2026-11-20): built, gate passing (not committed).** `make refglue-selftest` (tools/gate/gate_refglue.sh,
+`tb/mk/refglue.mk`); results and scratch in `agents/m5/`. As built, where the text below no longer matches the tree:
+- **The glue is two translation units** (`tb/ref/refcore_glue.cpp` with refsw_tile.cpp, `refcore_glue_lists.cpp` with
+  refsw_lists.cpp) plus the L1 `refcore_bgkey.cpp`: both `.cpp` files include refcore's `TexUtils.h`, which has no
+  include guard, and tb/fp's `fp-bgkey` copy reads a name `pvr_regs.h` defines as a macro (§1.1, conv §7.3). The API is
+  `tb/ref/p2ref.h` (§1.1 "As built").
+- **The phase driver** (`tb/ref/phase_driver.cpp`) runs inside `p2ref::copy::RenderFrame`, RenderCORE's frame made of
+  verbatim copies (the write-out's `put` / scaler, the region array walk, each entry's write-out); every SHADE pass goes
+  through the copies of RenderParamTags' body and PixelFlush_tsp, so the self-test proves those copies too. A hook at
+  every phase boundary (`tb/common/isp_live.h`'s 19 phases) is where M6+ compare, halt and feed.
+- **The self-test has four modes**, each every word of video memory after every render against refsw3-offline's
+  (`tb/ref/refglue_selftest.cpp`): `drv` (the driver), `core` (RenderCORE_sw: the build's control), `ptcopy` (the
+  verbatim PT loop), `scramble` (every field `isp_live.h` calls dead randomized at every boundary: the liveness masks'
+  proof; §1.3 "As built" lists where they differ from the table).
+- **Captures** are gzipped and carry refsw3-offline's video memory after each render (`r<k>/post/`); dumps are
+  `dump:<scene>`, seeds `gen:<seed>` (§1.3). `tria_extract.sh` takes the same `dump:` / `gen:` cases into
+  `build/vec/frames/` (a folder of its own: the M2-M4 testbenches read every record of `build/vec`).
+- **The tile subset** (`tb/tile/subset_tests.txt`, `subset_dumps.txt`, `subset_seeds.txt`): 69 tests at most 8 renders
+  each, 33 dumps, 200 seeds; 695 renders. Generated translucent primitives keep their depth planes in range: a fragment
+  whose stored depth is above the largest finite float is above the autosort's empty reference every other pass, and
+  refsw3's sort then never ends (scenegen.cpp says how).
+- **refsw3-known** (`tools/gate/refsw3_known.sh`) runs dreamcast-tests' run2.sh `off` and compare2.py unchanged on
+  `build/refsw3-offline`; the README's scores are `tb/ref/readme_scores.txt`. archive_check.sh is not run (its readers
+  build inside dreamcast-tests).
+- **Mutants**: `tb/ref/mutants.txt` (the phase driver's order, "PT final before PT_MOD" read as the pair swapped:
+  PT_MOD's walk before PT_FINAL) and `tb/ref/mutants_live.txt` (unsound masks, among them §1.3's own resTag row), all
+  caught.
+
 **Deliverables.**
 - `tb/ref/refcore_glue.cpp`, `refcore_env.cpp`, the p2ref API (§1.1).
 - `tb/ref/phase_driver.cpp`.
@@ -619,6 +669,8 @@ This closes conv G10 (the glue compiled for the first time).
   `708fb8cd`).
 
 **Mutants.** Phase-driver order swaps (OP_MOD before OP; PT final before PT_MOD) must be caught by the self-test.
+As built: those two (the second as PT_MOD's walk moved before PT_FINAL), OpInPt set after the opaque SHADE, the
+translucent volumes after the SHADE, TR_PS without its status clear, no RESTORE; and six unsound liveness masks.
 
 ### M6. ISP tile: list walk, fetch, opaque, modifier volumes
 

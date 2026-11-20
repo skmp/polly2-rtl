@@ -1,0 +1,82 @@
+# subset_tests.txt: the dreamcast-tests page tests of the tile subset (PLAN 1.3 "Subsets", conventions.md 7.8): one or two
+# tests a class, at most 8 renders (pages) of each in the quick gate (capture_prerender.sh --max 8). The full set is
+# every test of dreamcast-tests fit/hw (the *_races and the register-override / archived-set variants excluded), every
+# render. Classes as the dreamcast-tests README groups them; what each pins in the core, in brief.
+#
+# tile buffers, keep Z, write-out
+accbuf          # the two tile buffers trading places, keep-Z tiles
+keepz           # keep-Z entries, no-writeout entries
+fbpack          # pack modes, dither
+fb565
+scalertile      # the scaler over tiles in region-array order
+ycoeff          # the vertical filter
+sof2probe       # FB_W_SOF2, strip buffers
+# background
+bgtie           # the background's 19-bit key and tag ties
+bgneg2          # negative backgrounds
+# ISP edges, culls, rows
+raster
+cullval
+edge2_row31     # the row-31 shift
+faredge_cull
+hugepos_v6
+huge
+slivers_tsp
+sample
+# ISP depth
+depth
+depthgaps_ties
+depthgaps_mm
+depth2_denorm   # denormal depths by value
+zovf_word       # a readback test (pvrio_read32: refsw3-offline answers it)
+zovf
+zsign
+ztile
+nantr_pos
+perpmean_neg
+perpeq
+detinf
+# modifier volumes
+modvol
+volrun
+# punch-through
+ptchunk
+ptchunkcost
+ptchunklag
+ptlayers
+ptruns
+optcull
+optrun
+# translucent
+sort
+trtie
+trsort_auto
+dumprules
+ispcache
+# TSP: shading, blend, fog, textures, mipmaps, bump, SupSample
+alphatest
+alphafilt
+blend
+blendsel2
+blendpos
+offspersist
+shade
+fog
+tspw
+env
+bump
+bumplight
+texfmt
+texctl
+yuvbil
+coordfix
+mipbil
+mipdump
+trifade
+trimin
+tsp2_mipdz
+supsample
+ssvol
+halfofs2
+uvrun
+planes
