@@ -10,8 +10,12 @@ depends on them: the alpha test result and the end-of-entry buffer swap.
 
 ## 0. Sources, notation, status
 
-**Functional truth**: refsw3, nulldc3 branch `skmp/refsw3`, HEAD `2d08a440` ("the perpendicular mean to the last
-bit"), folder `refsw3/refcore`:
+**Functional truth**: refsw3, nulldc3 branch `skmp/refsw3` at `708fb8cd` ("the depth unit below zero, past 2^128
+and at its range's ends", after `6784ea3d` "the edge unit past 2^124: wrap, push and end of the edge"), folder
+`refsw3/refcore`. Transcribed at `2d08a440`; sections 4.2, 6.3, 7.1-7.2, 8.2-8.6, 9, 10.1, 13, 15-17 re-transcribed
+at `708fb8cd` (2026-11-20, spec refresh), with notes in 6.2, 10.2, 10.3, 11.2 and 11.6; the rest is unchanged by
+those two commits. Line numbers (`L123`) refer to
+`708fb8cd`; `edge.h`, `depth.h` are `pvr_isp_edge.h`, `pvr_isp_depth.h`. Evidence: dreamcast-tests at `b54c934`.
 
 | file | what this spec takes from it |
 |---|---|
@@ -282,38 +286,54 @@ See section 1. Notes:
   wherever it is still the visible tag after the opaque phase [T: timemeas — the background polygon is shaded in
   every entry without keep Z, even one that is not written out: 1035 clocks].
 
-### 4.2 Z clear and the background depth (`ClearBuffers`, refsw_lists.cpp)
+### 4.2 Z clear and the background depth (`ClearBuffers`, refsw_lists.cpp L603-653)
 
 Without `z_keep`, every pixel: `depthA = BG`, `tagA = ISP_BACKGND_T`, `stencil = 0`, `valid = 1`, `rendered = 0`.
 With `z_keep`, only `valid = rendered = 0`. The depth, tag and stencil are kept. The stencil not being cleared
 by keep Z is refsw3's reading: **GAP**.
 
-`BG` is a stored-depth word (section 9.7) made from `ISP_BACKGND_D` (`bg`, 32 bits; `field = bg[30:23]`):
+`BG` is a stored depth (the order key of 9.7) made from `ISP_BACKGND_D` (`bg`, 32 bits; `field = bg[30:23]`):
 
 ```
 if bg[31] == 0:                                  # zero or above
-    cut   = max(5, 130 - field)                  # fraction bits dropped
-    BG    = (cut > 23) ? 0 : bg & ~((1 << cut) - 1)
-else:                                            # below zero
-    q     = ((bg & 0x7FFFF0) + 0xFF) >> 8        # low 4 fraction bits cut, then the size rounded UP to 15 fraction bits
-    BG    = field < 107 ? 0
-          : field < 133 ? 0xC2FFFFFF             # one fixed word: the lowest depth of the binade of 64
-          : (bg & 0xFF800000) | (q >= 0x8000 ? 0x7FFFE0 : q << 8)
-if field == 255: BG -= 1 << 23                   # exponent field 255 becomes 254, the fraction kept
+    cut = max(5, 130 - field)                    # fraction bits dropped
+    w   = (cut > 23) ? 0 : bg & ~((1 << cut) - 1)
+    if field == 255: w -= 1 << 23                # exponent field 255 becomes 254, the fraction kept
+    BG  = Bits(w)
+else:                                            # below zero: a flat plane of that depth whose block exponent is >= 6
+    f   = (field == 255) ? 254 : field
+    E   = max(f - 126, 6)                        # the block exponent (9.7 Neg)
+    m   = (0x800000 | bg[22:0]) >> 4             # its 20 bits (a start's): the depth is -m 2^(f - 146)
+    t   = (f < 107) ? 0 : m 2^(f - 120 - E)      # on the block's grid 2^(E - 26), toward zero (0 once shifted 64 or more)
+    BG  = (t == 0) ? key 0 : Neg(E, -ceil(t / 2^10))      # M on 2^(E - 16), the value rounded down (the size up)
 ```
 
-What this means: above zero, a float with 19 significant bits whose smallest exponent is that of 0.25 (field 125).
-Below field 125 it is a denormal of that exponent, so the smallest step is 2^-20, and anything below 2^-20 is 0.
-+-infinity is +-2^127, which ties with an overflowing polygon (`Saturated`, 9.7). Positive NaNs stay above it. Below
-zero: under 2^-20 in size 0; from 2^-20 to under 64 the single word 0xC2FFFFFF (not cut); from 64 up its own value
-on the negative polygon grid (16 bits, rounded up in size, no carry into the exponent).
+What this means. Above zero: a float with 19 significant bits whose smallest exponent is that of 0.25 (field 125);
+below field 125 it is a denormal of that exponent, so the smallest step is 2^-20 (the grid 2^(E - 26) of a block
+exponent of at least 6), and anything below 2^-20 is 0. +-infinity is +-2^127, which ties with an overflowing
+polygon (`Saturated`, 9.7). Positive NaNs stay above it. Below zero the background is stored as the depth unit
+stores a flat plane of that depth whose block exponent E is at least 6: its 20 bits on the block's grid 2^(E - 26),
+toward zero, then M on 2^(E - 16), rounded down (the size up):
+- from 32 on (field 132 and up): E is its own exponent, `f - 126`. The background is itself, its low 4 fraction bits
+  cut, then its size rounded up to a multiple of 0x100 in the word; one that would round up to the next power of two
+  stays at the fraction 0x7FFFE0 (the window of 9.7, no carry). -infinity and -NaN are field 254 with their fraction.
+- from 2^-20 to under 32 (fields 107 .. 131): E is 6. Its 20 bits go onto the grid 2^-20 toward zero (`t` above),
+  then `M = -ceil(t / 2^10)` on 2^-10 (so 2^-10 + 2^-21 is M = -1). That lies above the window of E 6: between field
+  132's top word and field 133's lowest, ordered by M.
+- under 2^-20 (field 106 and below): nothing is left on the 2^-20 grid: 0.
 
 [T: bgdepth — 32 background depths 2^-20 .. 1e6 against 300 probes each; bgtie — a polygon at 0.5 ties with a
 background of 0.5 + 2^-20 (a float, not fixed point); dumprules pages 2-7 / xtreme_intro — below 2^-20 it is 0,
-nothing is behind it; trtie pages 12-15 / rez_ingame; bgspec (2560 regions), bgbig (2^127 ties, 1.5 * 2^126 below,
-1.5 * 2^127 and the largest float above), bgneg, bgneg2 (the 0xC2FFFFFF word); depthgaps_bglow (300 regions),
-_bglow2 (27), _bglow3 (51) — the 16-bit round-up and the 0x7FFFE0 case below zero.] **GAP**: whether a negative
-background of 64 and more loses its low 5 fraction bits as a positive one does (bgspec "Left").
+nothing is behind it; trtie pages 12-15 / rez_ingame; bgspec (2560 regions; -2^-21, -2^-149, -0 as 0), bgbig (2^127
+ties, 1.5 * 2^126 below, 1.5 * 2^127 and the largest float above), bgneg, bgneg2 (from 64 on itself);
+depthgaps_bglow, depthgaps_bglow2 (backgrounds W + L, L = 0 .. 31, against flat polygons at W: L 0 .. 15 tie with
+W, 16 .. 31 are below it, for W = -64, -100, -2^20, -2^100, -2^127; with W of fraction 0x7FFFE0 all 32 tie),
+depthgaps_bglow3 (16 .. 31 tie with W + 0x20, which a flat polygon stores as W + 0x100; -inf + L and -NaN
+0xFFFFFFE0 + L as field 254 with that fraction); depthgaps_bgpin (a ramp of E 6 stepping by 2^-10 across -1 and
+across 0, Greater, Equal, Less: -1 and -1 - 2^-23 tie with the ramp's -1 (M -1024), -2^-20 with its -2^-10 (M -1:
+rounded up, not to 0), -0.5 between its -1009 2^-10 and -16 2^-10, -31.99998, -32, -63.75, -63.99999 below its
+-1040 2^-10); depthgaps_ties (-1 against ramps of E 6 and 7)]. Before `708fb8cd` refsw3 had every background from
+-2^-20 to -63.75 as one word, 0xC2FFFFFF: bgneg's probes (-64 .. -100.75) are above all of them either way.
 
 ### 4.3 Several entries for one tile (accumulation)
 
@@ -394,55 +414,110 @@ widths are template constants in `EdgeHW` and `DepthHW`. All of them have been m
 | `cut_n`, `cutBelow_k`, `top` | section 0 |
 | `FloorScaled(v, s)` | `floor(v * 2^s)` as an integer, clamped to `[-2^40, 2^40]` |
 
-Exponents are not limited in the edge unit (c reaches 2^245 [T: hugepos]). With inputs between 2^-149 and 2^128, an
-internal exponent of about 10 bits with sign covers both units (products 2^-298 .. 2^256).
+The edge unit has no range rules: its products reach 2^256 before the swamp (8.3) replaces everything from 2^128 by
++-2^200. With inputs between 2^-149 and 2^128, an internal exponent of about 10 bits with sign covers both units
+(products 2^-298 .. 2^256; the depth unit's unranged slopes `a * inv` up to 2^254).
 
-### 6.3 Range rules (depth unit only; `DepthHW::range = 1`)
+### 6.3 Range rules and the zero rule (depth unit only; `DepthHW::range = 1`)
 
-Applied after every `Mul` and `Add` of the depth unit's plane setup (the lambdas `mul`, `add`, `limit` in
-`DepthTileT::Setup`):
+The depth setup's own operations, the lambdas `limit`, `mul`, `add`, `sub` of `DepthTileT::Setup` (depth.h
+L324-371). They make every product and sum of the plane (9.2), the tile's start (9.3) and the mean (9.4b):
 
-- a result with `|r| >= 2^128` becomes infinity (`bad`, sign of r);
-- a result with `|r| < 2^-126` becomes zero (+0 for a sum, sign of r for a product);
-- `bad * x`: zero if x is a non-bad zero (sign xor), otherwise infinity (sign xor);
-- `bad + bad` of opposite signs: +0; `bad + finite` or `bad + bad` of the same sign: infinity with the bad
-  operand's sign.
+```
+limit(r, sum):  r == 0:            r
+                |r| >= 2^128:      an infinity (bad) with r's sign
+                |r| <  2^-126:     a zero: +0 for a sum, r's sign for a product
+mul(p, q):      p or q bad:        a zero (sign xor) if the other one is a zero that is not bad, else an infinity (sign xor)
+                else:              limit(Mul(p, q, 24), product)
+add(p, q):      p or q bad:        both bad with opposite signs: +0; else an infinity of the bad one's sign (p's if both)
+                one of p, q a zero (z), the other (v) not, 2^-126 <= |v| < 1.5 * 2^-126, sign(v) != sign(z):  +0
+                else:              r = limit(Add(p, q, 24, 25), sum); a zero r is +0
+sub(p, q) = add(p, -q)
+```
 
-[T: huge — 250 of 250 regions with these rules (228 without), including the quads at 2^127 / infinity / NaN of which
-a console draws one triangle only; zspec, zovf, nantr_* (section 9.5)]. **Note [R]**: refsw3 applies these rules to
-`a`, `b`, `c`, `det` and to the tile start used for the overflow decision (`first0`). The main path (9.3) recomputes
-the start and the slopes `A`, `B` with the **unranged** operations and afterwards only flushes `|v| < 2^-126` to
-zero. The two differ only for intermediate values below 2^-126, or for a slope `a * inv` of 2^128 or more with finite
-`a`, `b`, `c` and start. The RTL must follow refsw3 there. **GAP**: no test isolates either case.
+What this gives, with its tests:
+- **2^128 is checked at every product and every sum where it is made**, after the 24-bit truncation. The adder's
+  reach does not decide it: a reach of 40 changes no zovf test. [T: zovf_lim — a term of the constant at 2^128 -
+  2^104, 2^128, 2^128 + 2^105 .. 1.5 * 2^128, as a product with the others beyond the adder's reach, as a sum of two
+  products below 2^128, a product past 2^128 whose sum comes back below it: 4984 of 4984 regions; zovf_c (the constant
+  alone at +-(1 + 2^-22 .. 1 + 2^-2) 2^128, 352 regions); zovf_ps (it is zovf_ps that pins the check of a product at
+  exactly 2^128: 2^128 - 2^104 is not one); zovf (the six cells with the constant exactly 2^128); zovf_sum (the
+  start's last sum and last product alone; the last sum's order); zovf_far; zovf_ab (13 x 13 slope values from 0 to
+  2^132 of both signs); huge — 250 of 250 regions (228 without the range), including the quads at 2^127 / infinity /
+  NaN of which a console draws one triangle only]
+- **Infinities**: infinity - infinity is +0, infinity times 0 is 0. In a product a NaN is an infinity of its sign,
+  its fraction does not count [T: depthgaps_nanprod — NaNs and infinities whose terms of a slope have opposite
+  signs, every pixel read: the words of +inf +inf 1 where the terms cancel to +0, 16 of 16 regions; zword — a TL
+  corner bad, (-inf - inf) + inf, starts at 0].
+- **The zero rule.** A zero (an input of exponent field 0, a product below 2^-126 with its sign, or a sum) added to a
+  number of 2^-126 .. 1.5 * 2^-126 in size whose sign is not the zero's gives +0. Added to any other number it gives
+  that number, to the bit. Every zero sum is +0, -0 + -0 too. [T: depthgaps_zadd — 32 slivers read out to the bit,
+  nothing else near 2^-126: the slope's last addition +0 + t3 with t3 = -2^-126, -1.25 * 2^-126, -(1.5 - 2^-22) *
+  2^-126 gives a slope of 0, with -1.5, -1.75, -(2 - 2^-22) and +1 .. +1.75 (2^-126) the numbers themselves
+  exactly; -0 + -0 is +0; the first addition: -0 + 1.25 * 2^-126 is +0, +0 + 1.25 and -0 + 1.75 are kept; the tile's
+  start +0 + c with c = -(1 .. 1.5 - 2^-10) 2^-126 starts at 0, with -(1.5 .. 2 - 2^-9) and +1 .. +1.75 at c / det
+  exactly: 109 of 109 regions (a zero as a zero 84; the TSP planes' rule, tsp §4.1, 76; -0 + -0 = -0 108);
+  depthgaps_field1 — 1000 of zexfil's flat probes at depths of exponent fields 0 .. 5: 2000 of 2000 orders (a zero as
+  a zero 1642, the TSP's last-addition rule 1944, -0 + -0 = -0 1972, without the rule in the first additions
+  1996)]. The rule reads the values and the zero's sign only. An input zero's fraction bits are gone at `FromSingle`,
+  unlike in the TSP's mean (tsp §4.4). **GAP**: the rule sits in the setup's shared adder, so refsw3 also applies it
+  to the coordinate differences and the determinant; only the depth products' sums were measured. **[R]** refsw3
+  tests `|v| < 1.5 * 2^-126` as "the bit under the leading one is 0", which is a shift by -1 for a one-bit mantissa
+  (`v = 2^-126` as `{mant 1, exp -126}`, a sum can be that). The value rule is what is meant (num §8 D2).
+- **Underflow** [T: zspec pages 3-6 — a plane from 2^-124 to -2^-124 over a cell is its start everywhere, one from
+  2^-126 to -2^-126 is 0; detinf 480 of 480].
+
+Ranged: every operation of 9.2, the tile's start `first0` (9.3), and the mean (9.4b). Since `708fb8cd`, `first0`
+is also the start the block form steps from [T: depthgaps_tinyramp — a ramp with a corner at the tile's start a
+denormal, read as zero, slopes of about 2^-126: 16 pixels along the zero crossing are below zero on the console,
+above it with the start taken in plain arithmetic and only then cut to the range; 14 regions pixel for pixel].
+Unranged (the plain arithmetic of 6.2): `Recip(det, 24)`; the slopes `A = Mul(a, inv, 24)`, `B = Mul(b, inv, 24)`
+(9.4a); the register steps `Mul(a or b, inv, 24)` (9.5). After the slopes, values below 2^-126 become zero with
+their sign kept (`under`, depth.h L596). A slope after the division can reach 2^254 and steps as a number
+[T: depthgaps_edges — a top right corner of (2 - 2^-23) 2^124 with legs 8: `a` just under 2^128, 2^122 a pixel;
+legs 12 at 2^118 a pixel: they step from a start of 0]. **GAP**: no test isolates a slope of 2^128 or more after
+the division (a determinant below 1 with finite `a`, `b`).
 
 ## 7. Triangle setup: determinant, bad corners, culling, perpendicular
 
 Per primitive, before any tile work (`RasterizeTriangle`, `TriangleCulled`).
 
-### 7.1 Determinant and winding (`pvrisp::Winding`, edge unit arithmetic)
+### 7.1 Determinant and winding (`pvrisp::EdgeWinding`; bad corners from `pvrisp::Winding`)
 
-Corners 1, 2, 3 in rasterizer order (3.4); for quads the first three. With `EdgeHW` (24-bit products, 24-bit sums,
-reach 25), unranged, `FromBits` inputs:
+Corners 1, 2, 3 in rasterizer order (3.4); for quads the first three. `EdgeHW` arithmetic (24-bit products, 24-bit
+sums, reach 25), unranged, `FromBits` inputs. refsw3 computes two determinants (refsw_tile.cpp L778-779; L752-755
+for the chunk counter's `TriangleCulled`):
 
 ```
-e1  = Sub(Mul(x2, y3), Mul(x3, y2))
-e2  = Sub(Mul(x3, y1), Mul(x1, y3))
-e3  = Sub(Mul(x1, y2), Mul(x2, y1))
-det = Add(Add(e1, e2), e3)                       # (e1 + e2) + e3
+plain (Winding, edge.h L83):        e(j,k) = Sub(Mul(xj, yk), Mul(xk, yj))
+                                    det_p  = Add(Add(e1, e2), e3)           e1 = e(2,3), e2 = e(3,1), e3 = e(1,2)
+                                    bad    = det_p.bad: an x or y of corners 1-3 is an infinity or a NaN
+swamped (EdgeWinding, edge.h L110): sw(v)  = |v| >= 2^128 ? +-2^200 (v's sign) : v            # the swamp (8.3)
+                                    e(j,k) = sw(Sub(sw(Mul(xj, yk)), sw(Mul(xk, yj))))
+                                    det    = sw(Add(sw(Add(e1, e2)), e3))
 winding: sgn = +1 if det < 0 (nonzero), else -1 (det >= 0, a zero counts as positive)
 ```
 
-[T: covmeas rule 2 and 9 — the console follows the setup's determinant, not the exact area: 1,041 sliver triangles
+The winding and both culls (7.2) use the swamped `det`. The plain one only reports bad corners. The two are equal
+while every product and sum stays below 2^128. +-2^200 is beyond every adder's reach of a finite operand (top 201
+against at most 128), so a swamped term drops every finite one. A swamped term less one of the same sign (or plus
+one of the other sign) is exactly +0, and the sum of two of one sign is swamped again.
+
+[T: faredge_m131 pages 6-15 — 1,878 slivers whose two long edges run to a corner at y +-2^127 .. +-2^127 (1 + 3/32):
+with the plain determinant 296 tiles of the test are wrong, with the swamped one 0; they are triangles whose plain
+and swamped determinants differ in sign, drawn as the swamped one turns them; held out: faredge_ecap pages 6-15
+(1,957 such slivers: plain 1,007 tiles wrong, swamped 0), faredge_walk (647 against 0), faredge_far32 (408 against
+0); covmeas rule 2 and 9 — the console follows the setup's determinant, not the exact area: 1,041 sliver triangles
 with the opposite sign, ~5,500 with det exactly 0 taking the positive winding; hugepos b — exact area 0 in double
 from 2^62, the setup's det draws what the console draws; precision / zmeas — the (e1 + e2) + e3 order]
 
-**Bad corners**: if any x or y of the 3 corners (4 for a quad) is infinity or NaN, the primitive draws nothing. It
-is not "culled" (that matters for PT chunk counting, 11.4) [T: huge — infinity or NaN in one coordinate: nothing
-drawn].
+**Bad corners**: if any x or y of the 3 corners (4 for a quad: the fourth is checked on its own) is infinity or NaN,
+the primitive draws nothing. It is not "culled" (that matters for PT chunk counting, 11.4) [T: huge — infinity or
+NaN in one coordinate: nothing drawn].
 
-### 7.2 Culling (`CulledBySize`, `CulledByFacing`)
+### 7.2 Culling (`CulledBySize`, `CulledByFacing`, refsw_tile.cpp L722, L734)
 
-Only with `CullMode != 0`, and only when no corner is bad:
+Only with `CullMode != 0`, and only when no corner is bad. `det` is the swamped determinant of 7.1:
 
 ```
 culled = CulledBySize(det) || CulledByFacing(CullMode, det)
@@ -456,9 +531,14 @@ CulledByFacing(mode, det):
     mode 2: det < 0;  mode 3: det > 0
 ```
 
-[T: cullval — 16 pages, FPU_CULL_VAL 1, -1, 2, -2, 0.5, -0.5, +0, -0, +-inf, NaN, -NaN, sNaN, +-2^-149, 1e30: only the
-size counts, every NaN culls like +inf, 2^-149 culls nothing, 4800 of 4800 regions; raster page 4 — legs of 1 pixel
-at 1.0: equal is culled; covmeas degen — with any culling mode degenerate triangles draw nothing]. A culled
+So a swamped determinant (+-2^200) is never culled by size, and one whose swamped products cancel to +0 always is.
+[T: faredge_cull — 300 triangles, the same on four pages with CullMode none, small, negative, positive; in 240 the
+plain and the swamped determinants have opposite signs: every one is culled by the swamped determinant's facing (12
+negative by the negative mode, 14 positive by the positive mode), and the 214 whose swamped products cancel to 0 by
+size, in modes 1-3 alike; the 60 controls as before; with the plain determinant 484 of the test's 1,200 regions are
+wrong; cullval — 16 pages, FPU_CULL_VAL 1, -1, 2, -2, 0.5, -0.5, +0, -0, +-inf, NaN, -NaN, sNaN, +-2^-149, 1e30:
+only the size counts, every NaN culls like +inf, 2^-149 culls nothing, 4800 of 4800 regions; raster page 4 — legs of
+1 pixel at 1.0: equal is culled; covmeas degen — with any culling mode degenerate triangles draw nothing]. A culled
 primitive costs the ISP 15 clocks (section 14).
 
 ### 7.3 FPU_PERP_VAL (`pvrfp::Perpendicular`)
@@ -488,7 +568,7 @@ Triangle (corners 1, 2, 3): E12 = 1->2, E23 = 2->3, E31 = 3->1. Quad (corners 1,
 corners 1-3 for a quad as well) [T: covmeas sprite14, sprite15 — "four edges, winding from the first three corners",
 0 misses].
 
-### 8.2 The unit's numbers (`EdgeHW`)
+### 8.2 The unit's numbers (`EdgeHW`, edge.h L41)
 
 | constant | value | meaning |
 |---|---|---|
@@ -503,51 +583,63 @@ corners 1-3 for a quad as well) [T: covmeas sprite14, sprite15 — "four edges, 
 | `startAdd` | 1 | ... or top(start) + 1 if that is more |
 | `zeroShift` | 21 | "zero": `\|v\| <= 2^(E - 21)` |
 | `tieShift` | 21 | the column step counts as zero for a row starting at zero when `\|sx\| <= 2^(E - 21)` |
-| `overflowExp` | 128 | the start saturates when the first sum or the start reaches 2^128 ... |
-| `saturateExp` | 127 | ... to +-2^127 |
+| `overflowExp` | 128 | a product or a sum of the start (and of the winding's determinant, 7.1) that reaches 2^128 swamps every other operand (8.3) |
+| `saturateExp` | 127 | the start then saturates to +-2^127; a coordinate difference of 2^128 or more steps as +-2^127 |
 | `lastColumnByStep` | true | a zero pixel in column 31 is inside iff the column step is positive |
+| `blockMax` | 129 | E is at most 129; an edge whose E was cut is "big" and is walked down the tile (8.4b) |
+| `walkExp` | 131 | the walk holds R and R + 16 sx in [-2^131, 2^131) (blockMax + 2), and 32 sx below 2^131 |
 
 [T: covmeas — 98 archived sets, 55 M pixels, 0 differences; every single change of a parameter is worse (tie
 threshold 63: 30 pixels, 32: 375, 128: 246; reach 24: 3, 26: 34; zero zone 63: 1122, 65: 32); hugepos;
-precision page 5 / raster 1040 of 1040]
+precision page 5 / raster 1040 of 1040; faredge 1,340 of 1,340 and faredge_cmax, _k132, _m131, _ecap, _walk, _cull,
+_far32 for the last four rows (8.3, 8.4b)]
 
-### 8.3 Edge setup per tile (`EdgeTile::Setup`)
+### 8.3 Edge setup per tile (`EdgeTile::Setup`, edge.h L153)
 
-Inputs: corners `a = (xa, ya)`, `b = (xb, yb)` (FromBits), `sgn`, and the tile's first sample point
-`x0 = left + h/2`, `y0 = top + h/2`, `h = HALF_OFFSET[0]` (1: pixel centres, 0: pixel corners).
+Inputs: corners `a = (xa, ya)`, `b = (xb, yb)` (FromBits), `sgn` (7.1, the swamped determinant's), and the tile's
+first sample point `x0 = left + h/2`, `y0 = top + h/2`, `h = HALF_OFFSET[0]` (1: pixel centres, 0: pixel corners).
 
 ```
-c     = Sub(Mul(xb, ya), Mul(xa, yb))                   # 24/24, reach 25
-dx    = Sub(xa, xb);   dy = Sub(ya, yb)                 # 24, reach 25
-first = Add(Mul(dx, y0), -Mul(dy, x0))                  # products 24; sum exact, cut 24; reach 25
-if |first| >= 2^128:
-    start = +-2^127 (sign of first)
-else:
-    start = Add(first, c)                               # exact, cut 24, reach 25
-    if |start| >= 2^128:
-        if |dy| >= 2^127: start = (+-2^132) - first     # sign of start; 62-bit sum (effectively exact)
-        else:             start = +-2^127               # sign of start
-sy = cut20(dx)                                          # row step
-sx = cut20(-dy)                                         # column step
-ep = max(top(dx), top(dy));  es = top(start)
-if ep == NoExp and es == NoExp: CONSTANT, INSIDE        # a -> b is a point: zero everywhere counts as inside
+if xa, ya, xb or yb is bad: CONSTANT, nothing inside   # unreachable: a bad corner ends the primitive first (7.1)
+sw(v)  = |v| >= 2^128 ? +-2^200 (v's sign) : v          # the swamp: {mant 1, exp 200}, beyond every adder's reach
+sat(v) = |v| >= 2^128 ? +-2^127 (v's sign) : v
+c     = sw(Sub(sw(Mul(xb, ya)), sw(Mul(xa, yb))))      # 24/24, reach 25
+dx    = Sub(xa, xb);  dy = Sub(ya, yb)                 # 24, reach 25; |dx|, |dy| < 2^129
+first = sw(Add(sw(Mul(sw(dx), y0)), -sw(Mul(sw(dy), x0))))   # products 24; sum exact, cut 24; reach 25
+start = sat(Add(first, c))                             # exact, cut 24, reach 25
+dx, dy = sat(dx), sat(dy)                              # the steps: a difference past 2^128 steps by +-2^127
+sy = cut20(dx)                                         # row step
+sx = cut20(-dy)                                        # column step
+ep = max(top(dx), top(dy));  es = top(start)           # ep <= 128, es <= 128
+if ep == NoExp and es == NoExp: CONSTANT, INSIDE       # a -> b is a point: zero everywhere counts as inside
 s20 = cut20(start)
-if sgn < 0: s20, sx, sy = -s20, -sx, -sy                # turn the edge so that inside is positive
-if ep == NoExp: CONSTANT, inside = (s20 >= 0)           # (unreachable in practice: dx = dy = 0 forces c = 0)
+if sgn < 0: s20, sx, sy = -s20, -sx, -sy               # turn the edge so that inside is positive
+if ep == NoExp: CONSTANT, inside = (s20 >= 0)          # (unreachable in practice: dx = dy = 0 forces c = 0)
 E    = max(ep + 6, es + 1)        (es + 1 only if start != 0)
-unit = ep - 21                                           # exponent of the steps' last kept bit
-if E - unit > 56: CONSTANT, inside = (s20 >= 0)          # [R] refsw3's cap; see 8.5 for the hardware-sized one
+big  = E > 129;  if big: E = 129                       # big <=> ep >= 124: a step of 2^123 or more
+unit = ep - 21                                         # exponent of the steps' last kept bit
+if E - unit > 56: CONSTANT, inside = (s20 >= 0)        # [R] refsw3's cap; never for a big edge (E - unit = 150 - ep)
+sx', sy' = sx, sy                                      # kept for the walk
 sx = cutBelow_unit(sx);  sy = cutBelow_unit(sy)
 t0    = 2 * floor(s20 / 2^unit) + (s20 not a whole multiple of 2^unit ? 1 : 0)   # half units of 2^unit
 tx    = 2 * sx / 2^unit;   ty = 2 * sy / 2^unit                                 # exact, even
-zero2 = 2^(E - 21 - unit + 1)                                                    # half units; = 2^(E-21) in value
-tie2  = zero2                                                                    # tieShift == zeroShift
+zero2 = 2^(E - 20 - unit)                                                       # half units; = 2^(E - 21) in value
+tie2  = zero2                                                                   # tieShift == zeroShift
+if big:                                                # the walk's values (8.4b): half units of 2^fine
+    fine = unit - 6                                    # = ep - 27
+    f0   = 2 * floor(s20 / 2^fine) + (s20 not a whole multiple of 2^fine ? 1 : 0)
+    fx   = 2 * cutBelow_fine(sx') / 2^fine;  fy = 2 * cutBelow_fine(sy') / 2^fine   # toward zero, exact after the cut
+    H    = 2^(132 - fine)                              # = 2^131 in value (walkExp)
+    Z    = 2^(E - 20 - fine) = 2^(136 - ep)            # = 2^108 in value (ZERO at E = 129)
+    walk the tile from row 0 (8.4b); the row range sets the first row and the walk is redone (8.6)
 ```
 
 The edge function is `F(x, y) = c + dx*y - dy*x` (zero on the line through a and b, `F` stepping `-dy` per column,
 `dx` per row). The values above are `F` at the tile's first sample point and its two steps, in block form, turned so
 that the triangle's inside is positive. `t0`'s lowest bit marks "the start has bits below the grid" (it then lies
-strictly between two grid values).
+strictly between two grid values). `big` and "E was cut" are the same thing: `es + 1 <= 129` always, so only `ep + 6`
+can pass 129. (edge.h's prose says "a step of 2^124 or more"; its test, `E > blockMax`, is `top(step) >= 124`, a step
+of 2^123 or more.)
 
 Rules and their tests:
 - the constant `c` from absolute coordinates, `c = T(xb ya) - T(xa yb)` [T: covmeas rule 1 — forms from coordinate
@@ -555,26 +647,48 @@ Rules and their tests:
 - the start at the tile's first sample point, kept as a 20-bit float; the first sum drops an operand 25 exponents
   below the other (first tile column / row, where x0 or y0 is 0.5) [T: covmeas rule 3];
 - the steps as 20-bit floats sharing the larger one's 21-bit grid [T: covmeas rule 4];
-- saturation at 2^127 [T: hugepos a — the console's pixels exactly at 2^118 .. 2^124: 15,019, 705, 15, 2]; the
-  +-2^132 - first rule for a column step of 2^127 or more [T: faredge pages 12-35 — K 127 vertical triangles' crossings
-  19 to 24 pixels into the tile; modvol — the garbage polygon's edge, 192 of 192 cells]. **GAP**: faredge page 4's
-  first-column strip (far corner up, the first product the one past 2^128) keeps 2^127 on the console, and page 1's
-  control strip (K 122, dy x0 at 2^128) draws 9 pixels wider. faredge 1330 of 1340: which rule the hardware takes
-  when is not known.
+- **the swamp, per product**: a product of the start (`xb ya`, `xa yb`, `dx y0`, `dy x0`), or the sum `c` or `first`,
+  that reaches 2^128 swamps every other operand, so that the start saturates to +-2^127 with its sign. It is the
+  product that counts, not `c` or the start [T: faredge_cmax — 16 pages, one edge per tile, 4,800 of 4,800 tiles;
+  group A, 4,446 tiles, among them 755 where one product is exactly 2^128 and the other takes 2^105 from `c`: `c`
+  and the start below 2^128, saturated all the same; faredge page 4's first-column strip (`xa yb` = 2^128.23, the
+  start 2^127.68: saturated, the strip not drawn) and page 1's control strip (`xb ya` = 2^128.12, the start
+  2^125.62: 2^127, the edge 18 pixels into the tile); hugepos]. Two swamped values of one sign cancel exactly
+  [T: faredge_cmax page 11 (`c`'s products 2^128.5 and 2^128.0 of one sign: the start is `first` alone, its sign
+  changing with the row at y = 181 as `first`'s does), pages 14 and 15 (`c` = -2^139.7 and `dx y0` = +2^128.05 in the
+  tile's first row: 0, the row decided by the column step); faredge_k132's RV tiles (4,560: near-vertical edges with
+  |far y| past 2^127, `c`'s product and `dy x0` past 2^128 with opposite signs: the start 0, the rows j dx)]. So
+  `first` past 2^128 gives the start its sign, `c` past 2^128 its own (as hugepos had it).
+- **saturation at 2^127** [T: hugepos a — the console's pixels exactly at 2^118 .. 2^124: 15,019, 705, 15, 2];
+- **a coordinate difference of 2^128 or more** swamps in the start's products but steps by +-2^127 [T: hugepos_v4,
+  _v5, _v6 (as an infinite step 68,397 / 67,565 pixels of v5 / v6 wrong), hugepos_cov pages 6-9 and 26-29,
+  hugepos_sw2 pages 7-10, 18-21 and 29-32, hugepos_rules page 8 (|dx| or |dy| of 2^128 .. 1.75 * 2^128; hugepos's
+  triangles a and c are not drawn, a at 2^125 with dx = -2^128 exactly has its 4 pixels in row 0 only)];
+- **E at most 129** [T: faredge_m131 pages 0-5, columns 1-19 — edges with the column step -(2^127 + d 2^108) and a
+  start of 0, rows R = j dx: R from 2^112 up is not ZERO, pixel 0 is drawn (E = 134 made rows up to 2^113 ZERO:
+  1,165 of the 1,800 tiles wrong, 0 with the cut); faredge_k132's RV tiles (2^108 exactly is ZERO, 2^108 + 2^104
+  not); faredge_ecap pages 0-5 (1,440 edges with |far y| in [2^123, 2^127), E 130 .. 133 before the cut, the rows
+  R = j dx crossing 2^107 .. 2^112 in row 4, 8 or 16): 129 gives every tile, 130 has 1,424 wrong, 131, 132 or no
+  cut 1,440; hugepos_rules pages 0-3 (1,200 tiles of the H family: with a row step of 2^124 or more and a small
+  column step it is the walk that shows it)].
 
-### 8.4 The inside decision (`EdgeTile::Inside`)
+### 8.4 The inside decision (`EdgeTile::Inside`, edge.h L403)
+
+`Inside(i, j)` is the constant answer for a CONSTANT edge, row j's mask bit i for a big edge (8.4b), and the
+ordinary decision (8.4a) otherwise.
+
+#### 8.4a Ordinary edges (`InsideOrdinary`, L291)
 
 For pixel (i, j) of the tile:
 
 ```
-if CONSTANT: return constantInside
 r = t0 + ty * j                                  # the row's value at the tile's FIRST column
 if |r| <= zero2:                                 # the row starts at zero: the whole row of this tile gets one answer
     return (|tx| <= tie2) ? (ty > 0) : (tx > 0)
 v = r + tx * i
 if v >  zero2: return true
 if v < -zero2: return false
-if i == 31:    return tx > 0                     # the last column has no next pixel
+if i == 31:    return tx > 0                     # the last column has no next pixel (lastColumnByStep)
 return v + tx >= -zero2                          # a zero pixel is inside if the next pixel to its right is not negative
 ```
 
@@ -594,30 +708,103 @@ triangles, the translucent and PT lists, HALF_OFFSET 6 and 1, corners 29,212 pix
   tile's rows within the row range [T: covmeas degen40 — 234 of 234 point triangles, 11,456 pixels]; a repeated
   corner or three collinear corners draw nothing (two real edges disagree on every tie) [T: degen40, degen41].
 
-`EdgeTile::RowOutside(j)` (`r < -zero2 && r + 31 tx < -zero2`, or the row-zero rule giving false) skips rows that
-no pixel can be inside. It is exact (the values are linear in i) and only saves time **[R]**.
+`EdgeTile::RowOutside(j)` (`r < -zero2 && r + 31 tx < -zero2`, or the row-zero rule giving false; for a big edge
+"row j's mask is 0") skips rows that no pixel can be inside. It is exact (the values are linear in i) and only saves
+time **[R]**.
 
-### 8.5 Widths for the RTL (derived, checked against refsw3)
+#### 8.4b Big edges: the walk down the tile (`EdgeTile::Walk` L362, `RowMask` L307, `SetFirstRow` L282)
 
-Let `d = E - unit` (27..56 in refsw3).
-- If **d >= 30**, the whole tile has the start's sign: `inside = (s20 >= 0)` for every pixel. (`|t0| >= 2^29`,
-  while 62 steps add less than 2^28 half units.)
+Each row j of a big edge gets a 32-bit mask, computed down the tile from the polygon's first row `s` in it (8.6;
+`s = 0` until the row range sets it, and for modifier volume triangles):
+
+```
+wrap(v)  = v mod 2H, taken in [-H, H)                       # R held in [-2^131, 2^131): mod 2^132
+far32    = fx > 0 ? (32 fx) mod H : 0                       # 32 sx, its bits from 2^131 up lost
+rowmask(r):                                                 # the ordinary rule in fine units, without the tie step
+    if |r| <= Z: all 32 pixels if fx > 0, else none
+    per column i: v = r + fx i;  v > Z: in;  v < -Z: out;  i == 31: in iff fx > 0;  else in iff v + fx >= -Z
+dead = false;  wasAbove = false
+for j = 0 .. 31:
+    ord = row j by the ordinary rule (8.4a: t0, tx, ty, zero2, tie2 on the unit grid)
+    if j < s:   mask[j] = ord;  continue                     # above the first row (the row range removes them)
+    if dead:    mask[j] = 0;    continue
+    R  = f0 + fy j;  Rw = wrap(R)                            # the row's value at column 0
+    above    = Rw + far32 > 0                                # the row's largest value is above 0
+    endsHere = j > s and wasAbove and not above;   wasAbove = above
+    if |Rw| <= Z:
+        mask[j] = (Rw == R) ? ord : (fx > 0 ? all : fx == 0 ? (fy > 0 ? all : none) : none)
+    elif fx == 0 or (Rw > 0) == (fx > 0):                    # R and the column step of one sign
+        mask[j] = (Rw == R) ? ord : (Rw > 0 ? all : none)
+    else:
+        M = Rw + 16 fx                                       # the row's value at pixel 16
+        if M >= H or M < -H:  mask[j] = rowmask(Rw + (Rw > 0 ? 2H : -2H))     # the push: R + sign(R) 2^132
+        else:                 mask[j] = (Rw == R) ? ord : rowmask(Rw)
+    if endsHere: dead = true                                 # this row as decided; every later row outside
+```
+
+What it means, with its tests (faredge_walk: 16 pages, 3,537 tiles, one triangle per tile, generated where the
+alternatives differ; all of faredge_*, hugepos_* scored together: 104 of 100,912 tiles wrong, the GAP below):
+- **R wraps by 2^132** into [-2^131, 2^131) [T: hugepos_rules pages 0-3 — the H family's long edges, a column step
+  of 0 and rows R = start + j dx of -2^131 .. -2^132 inside, as R + 2^132; faredge_m131 page 11 tile (1, 9) — rows
+  with R past +-2^132 drawn as R -+ 2^132; faredge_walk pages 8-11 — a polygon whose first row in the tile has R past
+  2^131 is wrapped like any other]. Unwrapped (`Rw == R`) the row is decided by the ordinary rule.
+- **R and the column step of one sign** (or a zero step): a wrapped row is all on R's side [T: faredge's K 127: the
+  far edge, R = 2^127 and the step of one sign, stays inside].
+- **The push**: otherwise the row's value at pixel 16 is held in [-2^131, 2^131) too; a row where it is out of range
+  is evaluated as R + sign(R) 2^132 [T: faredge_k132 group K — 240 tiles, the switch row where |R + 16 sx| reaches
+  2^131; faredge_m131 pages 0-5 — 1,800 tiles: -2^131 exactly is not pushed, +2^131 is; faredge's K 127 vertical
+  triangles; modvol's garbage polygon]. Since R is wrapped first, only a column step past 2^127 takes R + 16 sx out
+  of range.
+- **The end**: the edge ends when its far value falls from above 0 to 0 or below. The far value is the row's largest
+  value: R + (32 sx mod 2^131) with a column step above zero, else R. For an ordinary edge (32 sx < 2^131) that is
+  only the row going outside to its end, which a later row cannot undo; with a column step of 2^126 or more it ends
+  the edge early [T: faredge_m131 pages 6-15 — 32 sx = 2^132 + rho, the far value R + rho, at most 0 there: the rows
+  after it dark, 9,694 of 9,708 rows, the 14 others in slivers that start inside the tile, which count from their
+  own first row; hugepos_rules page 11 and hugepos_v3 page 6 — slivers whose line ends after the row whose value at
+  pixel 32 is at most 2^131 (32 sx = 2^131 + rho); faredge_walk pages 4-7 (32 sx past 3 * 2^131); hugepos_sw3 pages 36
+  and 37 — two edges wrapped past 2^131 that keep a one-pixel line between them when rho is just above the size of
+  the wrapped R, against pages 0 and 9 (32 sx of 2^132 and 3 * 2^131, rho 0); hugepos_rules page 0 tile (0, 0) — R
+  falls from +2^127 to 0: outside after it, not wrapped back past -2^131].
+- **From the polygon's first row**, not from row 0 [T: counted from row 0, 1,462 tiles of all sets wrong
+  (faredge_walk 1,351)].
+- Alternatives the sets reject: 32 sx kept whole (no mod 2^131) 15,863 tiles wrong; 0 counting as above 7,869.
+- **GAP**: hugepos_rules page 11 (10 tiles: a pixel at either end of slivers with a column step of 0.3 * 2^127, a
+  tie on the ordinary path) and hugepos_v5 (1 tile, 79 pixels) are refsw3's own console misses; the walk's fine
+  units 2^(unit - 6) are refsw3's (only the decisions are measured); the end rule with sx < 0 is taken as R alone.
+
+### 8.5 Widths for the RTL (derived, checked against refsw3 `708fb8cd`)
+
+Let `d = E - unit`.
+
+Ordinary edges (not big): d is 27..56.
+- If **d >= 30**, the whole tile has the start's sign: `inside = (s20 >= 0)` for every pixel. (Then `E = es + 1`,
+  `|t0| >= 2^29`, while 62 steps add less than 2^28 half units.)
 - If d <= 29, every value the decision looks at (`r`, `v`, `v + tx`) fits a **31-bit signed** integer in half
   units of 2^unit: `|t0| < 2^29`, `|tx|, |ty| < 2^22`.
 
-Checked with refsw3's own `EdgeTile` on 400,000 random edges (wide exponent mix, pixel-grid and ulp-perturbed
-corners, both windings and sample offsets): 0 mismatches of the d >= 30 rule, largest magnitude below d = 30 is
-2^29.52 (`polly2-rtl/agents/spec-isp/widths.cpp`, 0.5 s). So the edge per tile is: a 20-bit float start, two
-20-bit float steps on a shared 21-bit grid, E, and a 31-bit accumulator per edge (or per edge and pixel column when
-a line is done at once).
+Big edges: `d = 150 - ep` is 22..26 (never CONSTANT), `zero2 = 2^(d - 20)`. In fine half units: `|f0| <= 2^32 + 1`,
+`|fx|, |fy| < 2^28`, `H` = 2^31 .. 2^35, `Z` = 2^8 .. 2^12. Every value the walk forms is below 2^34.4 in size:
+`|R| <= |f0| + 31 |fy| < 2^33.6`; `R + 16 sx` (opposite signs) below 2^33.6; a push needs `16 |fx| >= H + |Rw|`,
+so only `H = 2^31` pushes and the pushed value is below 3 * 2^31; the rowmask values below 2^33.6; `Rw + far32`
+below 2^34.4. A **36-bit signed** row accumulator holds them.
 
-### 8.6 Row range (`pvrisp::RowRange`)
+Checked with refsw3's own `EdgeTile` (`polly2-rtl/agents/spec-refresh/widths708.cpp`, 10 s): 299,962 random edges
+(pixel-grid and ulp-perturbed corners, a wide exponent mix, one in three of the far class: one corner near the tile,
+the other with a coordinate of 2^118 .. 2^127; both windings, both sample offsets), 102,632 of them big. `big`
+exactly when `ep >= 124`; ordinary d 27..56; 91,018 tiles with d >= 30, every pixel of the start's sign; the
+largest ordinary value below d = 30 2^29.48; big d 22..26, `|f0|` 2^31.98, `|fx|, |fy|` below 2^28, H 2^31 .. 2^35,
+Z 2^8 .. 2^12; R 2^33.29, R + 16 sx 2^33.26, a pushed row 2^32.58, the rowmask values 2^33.00; and the walk as 8.4b
+writes it against `EdgeTile::Inside` at every pixel for first rows 0 .. 31: 0 differences.
+
+### 8.6 Row range (`pvrisp::RowRange`, edge.h L127; refsw_tile.cpp L811-835)
 
 For every primitive that is not a modifier volume triangle:
 
 ```
 rowFirst = min over corners of floor(y)
 rowLast  = max over corners of floor(y + 1/2)          # = (floor(2y) + 1) >> 1 (arithmetic shift); FloorScaled, clamp 2^40
+if rowFirst == top + 31 and an edge of the primitive is big:  rowFirst -= 1      # row 31: a row earlier
+every big edge: SetFirstRow(clamp(rowFirst - top, 0, 31))                        # the walk starts there (8.4b)
 a row Y (screen row, top + j) is rasterized only if rowFirst <= Y <= rowLast
 ```
 
@@ -626,9 +813,20 @@ rule 10 / sliver mixes — 0 of 635 accepted pixels above the top corner's row a
 row after the bottom corner's exactly when frac(ymax) >= 0.5 (72 of 72 / 0 of 70); sliver35 with HALF_OFFSET 6;
 zprobe — outside the range the depth is not written either; sliver36 — modifier volume triangles have no range]
 
+**Row 31**: a polygon whose first row is the tile's last starts a row earlier in that tile, the walk of its edges as
+well, but only when one of its edges is big [T: faredge_walk pages 0-3 — slivers to a far corner whose top corner is
+in row 28 .. 31 of the tile; their pushed edges draw in the row above the top corner when the row range lets them:
+with the plain range 366 of the test's 3,537 tiles wrong, with this 0; rows 30 and 31 both a row earlier 272, a top
+corner in the last quarter of its row 892; held out, faredge_far32: 390, 0, 36, 440; faredge_m131 page 6 tile (17, 8),
+page 11 tile (2, 10), faredge_ecap page 9 tile (7, 7): row 30 drawn]. **GAP**: whether an ordinary sliver with its
+top corner in row 31 (which can have a pixel in row 30 its edge functions accept) starts a row earlier too: no
+console test has one; why row 31 is not known.
+
+Modifier volume triangles have neither the range nor the row-31 rule; their big edges are walked from row 0.
+
 ## 9. The depth unit (`pvr_isp_depth.h`)
 
-### 9.1 The unit's numbers (`DepthHW`)
+### 9.1 The unit's numbers (`DepthHW`, depth.h L41)
 
 | constant | value | meaning |
 |---|---|---|
@@ -636,236 +834,363 @@ zprobe — outside the range the depth is not written either; sliver36 — modif
 | `sumBits` | 24 | every sum truncated to 24 bits |
 | `reach` | 25 | adder alignment reach (measured on the edge unit) |
 | `recipBits` | 24 | 1 / det truncated to 24 bits |
-| `coefBits` | 24 | `a*inv`, `b*inv`, `c*inv`, `start*inv`, the mean's `sum * 1/3` truncated to 24 bits |
-| `startBits` | 20 | the tile's start kept as a 20-bit float (truncate) |
+| `coefBits` | 24 | `a*inv`, `b*inv`, `c*inv`, the register steps' `a*inv`, `b*inv` truncated to 24 bits |
+| `startBits` | 20 | the tile's start kept as a 20-bit float (truncate); also a negative flat depth's first cut (9.7) |
 | `slopeBits` | 20 | the slopes as 20-bit floats (truncate) |
 | `pairBits` | 21 | both slopes cut to 21 bits under the larger one's exponent |
 | `tileBits` | 26 | the stepping grid: 26 bits under the block exponent |
-| `storedBits` | 19 | a depth is stored with 19 significant bits (truncate) |
-| `storedNegBits` | 16 | a depth below zero in the block's top binade: 16 bits, size rounded up |
+| `storedBits` | 19 | a depth above zero is stored with 19 significant bits (truncate) |
 | `startOnSlopes` | 1 | the start is cut to the slopes' 21-bit grid too, whatever its sign |
-| `range` | 1 | the range rules of 6.3 |
+| `range` | 1 | the range rules and the zero rule of 6.3 |
+
+(`2d08a440`'s `storedNegBits` is gone: a depth below zero is stored by `StoredDepth::Neg`, 9.7.)
 
 [T: zmeas — 13 sets, 89,801 brackets, 0 missed (with zstart's rule), every one-bit change of a width breaks 50 to
 1,800; zblock 59,220 / 59,220 (a 19-bit stored mantissa on the pixel's own exponent, not the tile's); ztile 11,280 /
 11,280 (the start and its exponent are taken again at every tile); zstart 49,152 / 49,152 (any start is cut to the
-slopes' grid); zexfil — 64 dumps x 307,200 depths read out, all the console's]
+slopes' grid); zexfil — 64 dumps x 307,200 depths read out, all the console's; the range: 6.3]
 
-### 9.2 Plane setup (per primitive)
+### 9.2 Plane setup (per primitive; depth.h L372-383)
 
-Corners 1, 2, 3 in rasterizer order, `FromSingle` (ranged) inputs, every operation `mul` / `add` with 24 bits, reach
-25 and the range rules (6.3):
+Corners 1, 2, 3 in rasterizer order, `FromSingle(., 1)` inputs, every operation the ranged `mul`, `add`, `sub` of
+6.3 (24 bits, reach 25, the 2^128 limit at each, the zero rule):
 
 ```
-e1  = x2*y3 - x3*y2;  e2 = x3*y1 - x1*y3;  e3 = x1*y2 - x2*y1        # each: (product) - (product)
-a   = ( z1*(y2 - y3) + z2*(y3 - y1) ) + z3*(y1 - y2)                 # (t1 + t2) + t3
-b   = ( z1*(x3 - x2) + z2*(x1 - x3) ) + z3*(x2 - x1)                 # (t1 + t2) + t3
-c   = ( z1*e1 + z3*e3 ) + z2*e2                                      # (t1 + t3) + t2
-det = ( e1 + e2 ) + e3
-if Perpendicular(det): det = 0                                       # 7.3
+e1  = sub(mul(x2, y3), mul(x3, y2));  e2 = sub(mul(x3, y1), mul(x1, y3));  e3 = sub(mul(x1, y2), mul(x2, y1))
+a   = add(add(mul(z1, sub(y2, y3)), mul(z2, sub(y3, y1))), mul(z3, sub(y1, y2)))      # (t1 + t2) + t3
+b   = add(add(mul(z1, sub(x3, x2)), mul(z2, sub(x1, x3))), mul(z3, sub(x2, x1)))      # (t1 + t2) + t3
+c   = add(add(mul(z1, e1), mul(z3, e3)), mul(z2, e2))                                  # (t1 + t3) + t2
+det = add(add(e1, e2), e3)
+if Perpendicular(det): det = +0                                                        # 7.3
 ```
 
 The plane is in determinant form: the depth is `(a x + b y + c) / det`. [T: precision / "The setup unit's
 arithmetic" (59,220 of 59,220); zmeas item 1 — the sum orders, 5,417 -> 7,043 of 7,091 from the order alone, exactly
-one of 384 combinations fits]
+one of 384 combinations fits; zovf_sum — the start's last sum's order; the limits and the zero rule: 6.3]
 
-### 9.3 Per tile: the regimes
+### 9.3 Per tile: the regimes (`DepthTileT::Setup`, depth.h L305)
 
-`(x0, y0) = (left + 1/2, top + 1/2)`: **always the first pixel's centre**, whatever HALF_OFFSET (9.4 handles the
-corner sampling). In this order:
+`(x0, y0) = (left + 1/2, top + 1/2)`: **always the first pixel's centre**, whatever HALF_OFFSET (9.6 handles the
+corner sampling). Each primitive and tile starts from a clean state (`*this = DepthTileT{}`: nothing of a previous
+triangle's register or block). In this order:
 
-1. **det infinite** (`det` bad): every pixel stores 0. **GAP** [R]: not measured (huge cannot tell; modvol's one
-   pixel is behind 0.75).
-2. **det nonzero, finite**: `inv0 = Recip(det, 24)`; `first0 = ((a*x0 + b*y0) + c) * inv0` (ranged). If `first0`,
-   `a`, `b` or `c` is infinite, the plane **overflows** (9.5). Otherwise continue with 4.
-3. **det zero** (or perpendicular): if all three z are finite, **the mean** (9.4b). If a z is infinite or NaN, every
-   pixel stores **z1's bits as given** (the first corner's word, not even cut). **GAP**: detinf's flat probe quads at
-   +infinity cannot tell this from +-2^127.
-4. **The ordinary plane** (9.4a).
+```
+1. det infinite:                     CONST, key 0
+2. det nonzero (finite):             inv0   = Recip(det, 24)
+                                     first0 = mul(add(add(mul(a, x0), mul(b, y0)), c), inv0)       # ranged (6.3)
+   a. a or b infinite:               REG (9.5)
+   b. else first0 or c infinite:
+        a == 0 and b == 0:           CONST, Saturated(sign of first0)        # first0 is always infinite here
+        else:                        BLOCK from a forced start: first = first0 infinite ? +-2^127 (its sign) : first0
+   c. else:                          BLOCK from first = first0
+3. det zero (or perpendicular):      CONST, flat(mean) (9.4b)
+```
 
-### 9.4a The ordinary plane: block floating point per tile
+The names CONST, REG and BLOCK are this document's; refsw3 has `valid = false`, `ovf = 2` and `block = true`.
+
+- **Step 1, det infinite**: every pixel stores 0. **GAP [R]**: not measured (huge cannot tell: its triangles of that
+  size are drawn whatever their depth; modvol's one pixel, a garbage polygon deciding whether it is in a volume, has
+  it behind 0.75).
+- **Step 2b, the constant overflowed** (it holds the corners' x y: from about z = 2^114 .. 2^117 on the screen) but
+  the slopes did not: the slopes step as in any other plane (9.4a), from the start these numbers give at the tile's
+  first pixel:
+  - 0 where `a x0 + b y0` overflows with the other sign and cancels the constant (then `first0 = 0`) [T: zword — the
+    tile's first pixel 0, every other one below the block's window; depthgaps_infstart — 8 triangles with a corner
+    from 2^118 to 2^120 of either sign, against backgrounds of +-2^127, 2^126, 0 on 10 pages: 0 at the first pixel,
+    at the others below the window (6, slopes below zero) or above 0 (2); depthgaps_regb — planes whose constant
+    overflows, read out: a start of +0 stepping normally];
+  - +2^127 where the start is +infinity [T: depthgaps_infstart's 2 such triangles; zovf's six cells where `c` is
+    exactly 2^128 at the left of the screen: the first pixel exactly 2^127, the others stepped down from it, between
+    2^126 and 2^127; zovf_sat, zovf_word, zovf_satw, zovf_satw2 — the words of a start saturated to +-2^127 stepped
+    toward zero, up to and past zero];
+  - -2^127 where it is -infinity [T: depthgaps_edges N — corners of -2^118 and -2^116 at the left edge, 7 pages:
+    the first pixel equal to a background of -2^127, the others above it and below 0, stored as a block of E 128
+    above its window; depthgaps_bigpos — stepping up from -2^127 by 2^123 .. 2^126 a pixel past 0 and 2^128 (Big,
+    9.7); from +2^127 down past -2^128, a block of E 128 below its window];
+  - the same where `a x0 + b y0` overflows alone [T: depthgaps_final X — corners (0, 160) 0.5, (640, 160) +-2^112,
+    (0, 800) 0.5, `c` finite: from x = 128 on +2^127 at every pixel (steps of 2^102.7 under its last bit), -2^127 at
+    each tile's first pixel and below it at the others; ordinary to the left; 6 pages, 20 tiles each].
+
+  A plane of zero slopes with an infinite start stores +-2^127 at every pixel [T: bgbig]. This replaces
+  `2d08a440`'s "ovf 1" (the first pixel 0, every other a fixed word).
+- **Step 3, det zero**: the mean, whatever the corners' depths, infinite or NaN ones included (`2d08a440` stored the
+  first corner's word as given there).
+
+### 9.4a BLOCK: block fixed point per tile (depth.h L581-657)
 
 ```
 inv   = Recip(det, 24)
-A     = Mul(a, inv, 24);  B = Mul(b, inv, 24)                         # unranged (6.3 note)
-first = Mul( Add( Add(Mul(a, x0, 24), Mul(b, y0, 24), 24, 25), c, 24, 25 ), inv, 24 )    # ((a x0 + b y0) + c) * inv
-A, B, first: |v| < 2^-126 -> 0
-pair  = max(top(A), top(B))                                           # NoExp if both zero
-if first == 0 and pair == NoExp: every pixel stores 0
-e     = (first == 0) ? pair + 5 : top(first)
+A     = Mul(a, inv, 24);  B = Mul(b, inv, 24)                # unranged (6.3); C = Mul(c, inv, 24) feeds nothing (below)
+A, B: |v| < 2^-126 -> mant 0 (sign kept)                     # under(); first (9.3) is already in range
+pair  = max(top(A), top(B))                                  # NoExp if both zero
+if first == 0 and pair == NoExp: CONST, key 0
 start = cut20(first)
-if pair != NoExp: start = cutBelow_(pair - 21)(start)                 # onto the slopes' grid, toward zero, either sign
-negE  = max(e, pair + 5)                                              # the block exponent
-G     = 2^(negE - 26)                                                 # the stepping grid
-step(V) = cutBelow_G( cutBelow_(pair - 21)( cut20(V) ) )              # for V = A, B
-S, DX, DY = start / G, step(A) / G, step(B) / G                       # integers, exact
+if pair != NoExp: start = cutBelow_(pair - 21)(start)        # onto the slopes' grid, toward zero, either sign
+e     = (first == 0 or start == 0) ? pair + 5 : top(first)
+unit  = e - 26
+step(V) = V == 0 ? 0 : cutBelow_unit( cutBelow_(pair - 21)( cut20(V) ) )        # V = A, B
+d0 = 2 * start / 2^unit;  dx = step(A) / 2^unit;  dy = step(B) / 2^unit         # integers, exact
+E  = clamp(max(e, pair + 5), -122, 128)                      # the block exponent of a depth below zero (9.6)
 ```
 
-refsw3 keeps these in units of `2^unit`, `unit = e - 26`, which is G or finer. The values are always multiples of G,
-so an RTL can use G directly. [Derived. Checked with refsw3's `DepthTileT` on 300,000 random triangles: d0, dx, dy
-were multiples of G in every block plane (`agents/spec-isp/widths.cpp`).]
+Per pixel (i, j), refsw3 forms `tu = d0 + (2i + h) dx + (2j + h) dy`, half units of 2^unit, with `h = 0` when the ISP
+samples centres (`HALF_OFFSET[0] = 1`) and `h = -1` when it samples corners. The value is exact (fixed point, no
+rounding while stepping) and is then stored (9.6).
 
-Per pixel (i, j), with `h = 0` when the ISP samples centres (`HALF_OFFSET[0] = 1`) and `h = -1` when it samples
-corners:
+**The G form.** Let `gexp = max(e, pair + 5) - 26` (E before the clamp, less 26) and `G = 2^gexp`. The start and
+both steps are multiples of G: when `top(first) >= pair + 5`, `G = 2^unit`; otherwise the start was cut onto
+`2^(pair - 21) = G` (or to zero, and then `unit = pair - 21` too) and the steps lie on that grid. In half units of G:
 
 ```
-t = 2*S + (2i + h)*DX + (2j + h)*DY             # half units of G: value = t * 2^(negE - 27)
+S = d0 / 2^(gexp - unit);  DX = dx / 2^(gexp - unit);  DY = dy / 2^(gexp - unit)    # |S| < 2^27; |DX|, |DY| < 2^21
+t = S + (2i + h) DX + (2j + h) DY                                                   # value t * 2^(gexp - 1); |t| < 2^29
 ```
 
-`|t| < 2^29` always (`|S| < 2^26`, `|DX|, |DY| < 2^21`), so the stepping is a **30-bit signed** accumulator in half-G
-units (checked: largest 2^28.52 over 300,000 triangles). The value is exact (fixed point, no rounding while
-stepping) and is then stored (9.6). [T: zmeas items 2-3 — the start is `((a x0 + b y0) + c) * inv`, the plane before
-its division, evaluated at the first pixel centre (14,289 of 14,291); the two slopes share the larger one's 21-bit
-grid and are cut to the tile's grid (28,686 of 28,686); "Mix reach" — the stepping holds at least 29 powers of two
-above the start, a start of exactly zero is stepped on the slopes' grid (30 of 30, 22 before); zstart — the start
-cut to the slopes' grid, any sign (pages 0-2, 49,152 of 49,152; positive-only or negative-only cuts miss 117 and 4);
-zblock / ztile — the exponent is the polygon's own and is taken again at every tile, even where the polygon does
-not cover the tile's first pixel]
+So the stepping is a **30-bit signed** accumulator in half-G units. [Checked with refsw3's own `DepthTileT` at
+`708fb8cd` (`polly2-rtl/agents/spec-refresh/widths708.cpp`, 300,000 random planes: ordinary, below zero, crossing
+zero, around 2^-126 and 2^100 .. 2^127, any word as a corner, a zero determinant now and then, FPU_PERP_VAL 1/128
+one time in ten; 172,629 in the block form): every one on the G grid; the largest `|t|` 2^28.51 half-G units over
+every pixel and both `h`; and the G form stored as 9.6 writes it against `DepthTileT::At`'s key at every pixel: 0
+differences.]
 
-**GAP [R]**: refsw3 abandons the block form when `pair - 21 + 24 - unit > 100` (slopes over ~2^71 times the start)
-and evaluates `(A*X + B*Y) + C` in 24-bit floating point per pixel (`C = Mul(c, inv, 24)`, X, Y the sample point),
-stored `cut19`. This is a refsw3 implementation limit (its i128). In the G form above the block form never
-overflows. No console test covers it. Testbenches should flag such planes.
+refsw3's **float form** (`block == false` with a valid plane: `pair - 21 + 24 - unit > 100`, every pixel evaluated in
+24-bit floating point) is **unreachable** with `startOnSlopes = 1`: a nonzero start cut onto the slopes' grid has
+`top(first) >= pair - 20`, which makes the left side at most 49, and a zero one has `unit = pair - 21`, which makes it
+3 [run: 0 of 300,000]. `C = Mul(c, inv, 24)` feeds only the float form. In refsw3's units `tu` has at most 54 bits
+(`|t| < 2^29` times `2^(gexp - unit) <= 2^25`; 50 in the run), so `At`'s truncation to 64 bits never acts.
+
+[T: zmeas items 2-3 — the start is `((a x0 + b y0) + c) * inv`, the plane before its division, evaluated at the first
+pixel centre (14,289 of 14,291); the two slopes share the larger one's 21-bit grid and are cut to the tile's grid
+(28,686 of 28,686); "Mix reach" — the stepping holds at least 29 powers of two above the start, a start of exactly
+zero is stepped on the slopes' grid (30 of 30, 22 before); zstart — the start cut to the slopes' grid, any sign
+(pages 0-2, 49,152 of 49,152; positive-only or negative-only cuts miss 117 and 4); depthgaps_flt — a start that the
+cut to the slopes' grid makes zero is stepped from the slopes' grid too (planes z = C + A (x - y) whose start at tile
+(0, 0) is C exactly, C from 2^-100 to 2^-60, slopes 2^-10 .. 2, every pixel of the tile read out: the depths below
+zero stored as a block from the slopes; 9 planes, 1024 pixels each; refsw3 had the float form there);
+depthgaps_tinyramp — the start in the setup's range (6.3); depthgaps_edges — a large slope after the division steps
+as a number; zblock / ztile — the exponent is the polygon's own and is taken again at every tile, even where the
+polygon does not cover the tile's first pixel; E's limits: depthgaps_neggrid (flat polygons at negative depths of
+field 2, E -124, tie in groups of 0x400 of the word: the grid 2^-138 of a block of E -122, 0x12340 with every one
+from 0x121C0 to 0x12400, not 0x12420; field 5, E -121, in groups of 0x100 as everywhere above), depthgaps_tinymean
+(-122); depthgaps_bigslope (14 small triangles at the origin, corners 0 and +-2^123 .. 1.9375 * 2^126, every pixel
+inside read by a binary search with the background, 67 depths: those below zero between -2^127 and 0 as a block of
+128 above its window has them, and a start of -2^127 stepping by -2^123 a pixel exactly -2^127, -(2^127 + 2^123),
+-(2^127 + 2^124): the window of 128), depthgaps_bigpair (slopes giving 129, 130, 131 and a block of 128, three to
+ten pixels over each other: ordered as their values only as blocks of 128) (128)]
 
 **GAP**: the depth sample point with `HALF_OFFSET[0] = 0` (the start computed at the centre and stepped back half a
 pixel, `h = -1`) is refsw3's model. halfofs's sloped-depth cells are built so that a half-pixel shift does not
 change them. Coverage at corners is measured (covmeas half20-23); the depth's sample point there is not. Every game
 dump but one ("mipmap") samples centres.
 
-### 9.4b The determinant-zero (perpendicular) mean
+### 9.4b The determinant-zero (perpendicular) mean (depth.h L568-578)
 
 ```
-sum  = add(add(z1, z2), z3)                     # ranged; z3 = the third corner in rasterizer order, added last
-mean = Mul(sum, 0xAAAAAB * 2^-25, 24)           # 1/3 rounded UP to 24 bits, product truncated to 24
-if 0 < |mean| < 2^-126: mean = 0
-if mean is infinite: every pixel stores Saturated(sign)          # a sum of 2^128 or more: +-2^127
-elif mean == 0:      every pixel stores 0
-else:                a flat block plane: S = cut20(mean) on G = 2^(top(mean) - 26), DX = DY = 0, negE = top(mean)
+frac(k) = (z_k[30:23] == 255) ? z_k[22:0] : 0                 # the corner's raw word
+addInf(p, fp, q, fq) = (p, q infinite, opposite signs, fp != fq) ? the infinity of the larger fraction's sign
+                     : add(p, q)                              # 6.3
+sum  = addInf(addInf(z1, frac(1), z2, frac(2)), 0, z3, frac(3))   # z3 the third corner sent; a sum's fraction is 0
+mean = mul(sum, OneThird)                                     # OneThird = 0xAAAAAB * 2^-25 (pvr_softfp.h L331), ranged
+key  = flat(mean)                                              # 9.7
 ```
 
-So above zero the stored word is `cut19(cut20(mean))`, and below zero the 16-bit round-up of `cut20(mean)` (9.6).
+So: `(z1 + z2) + z3` in the setup's adder (24 bits, toward zero, reach 25, the zero rule), times 1/3 rounded up to 24
+bits, the product cut to 24 bits and below 2^-126 zero. Above zero the stored word is `cut19(mean)`. Below zero the
+mean is cut to the start's 20 bits, then stored on the block of its own exponent (at least -122): 16 bits, the
+size rounded up. An infinity or a NaN among the corners' depths makes the sum an infinity and the mean +-2^127
+(`Saturated`). A corner of exponent field 255 adds as an infinity of its sign. Two of opposite signs give the
+larger 23-bit fraction's infinity, and +0 when the fractions are equal (+infinity and -infinity, a NaN against a NaN
+of the same fraction). A sum is an infinity of fraction 0, so a NaN does not go on.
+
 [T: covmeas degen / tiny / sliver with zprobe — every pixel of a det-0 triangle at the mean of the corners (11,456 +
-1,344 + 53 pixels); perpmean_word — 16,384 stored words of 16,384 (other sum orders, a rounding adder, no reach, or
-0xAAAAAA miss 1,618); perpmean_neg (11,258 means below zero), perpmean_bg (136 words; 3 x 2^127 -> 2^127),
-perpmean_strip (8,192 words: the third corner sent is added last, strips, odd strip triangles, sprites),
-perpmean_tiny (336 regions around 2^-126)]. **GAP**: dividing by 3 and multiplying by 0xAAAAAB give the same 19 bits
-for every 24-bit sum, so which one the hardware does is not visible. The TSP's 1/w mean has a rule for a zero
-depth against an opposite-sign depth in [2^-126, 2^-125) (README covmeas "Its color..."). Whether the ISP's mean
-has the same rule is not measured (refsw3: no).
+1,344 + 53 pixels); perpmean_word — 16,384 stored words of 16,384 (other sum orders, a wider or rounding adder, no
+reach, or 0xAAAAAA miss: 1,618 words wrong); perpmean_neg — 11,258 means below zero (the adds toward minus
+infinity: 242 wrong; without the 20-bit cut before the 16-bit round-up: 557); perpmean_bg — 136 words; 3 x 2^127,
+the largest float, 2^127 + 2^127 - 2^127, and the same below zero: +-2^127, 36 of 36; perpmean_strip — 8,192 words:
+the third corner sent is added last, strips, odd strip triangles, sprites; perpmean_tiny — 336 regions around
+2^-126, a quotient below 2^-126 is zero; depthgaps_detneg — 62 triangles, three corners at a point that draws a whole
+row: 100, 1.5, 100 + 2^-12 as themselves; -(100 + 2^-12), -64 (1 + 2^-18) and the means of -1 -2 -4, -64 -64 -65,
+-1000 500 100, -0.1 -0.2 -0.3, -300 -300 -300.5 rounded up in size onto the word's 0x100 grid; -100 - d ulp as -100
+for d = 1 .. 15, as -100 - 0x100 ulp for d = 16 .. 0x10F (the 20-bit cut first); and with infinite corners
+(-100.123 +inf +inf, 100.123 100 +inf above every probe; -64 (1 + 2^-23) -inf 0 between -2^118 and 0);
+depthgaps_dzinf — 74 triples, each as three corners at one point and 31 as a perpendicular triangle at FPU_PERP_VAL
+0.75, against backgrounds of +-2^127, 1.5 * 2^127, -1.5 * 2^126: 48 of 48 regions (with the fraction not counting,
+a NaN against an infinity of the other sign +0: 29 of 48); depthgaps_tinymean — the mean -2^-125 below a flat quad
+at -2^-126 (the block floor of -122), 336 of 336 regions]. **GAP**: dividing by 3 and multiplying by 0xAAAAAB give
+the same 19 bits for every 24-bit sum, so which one the hardware does is not visible. The mean's adds have the
+depth unit's zero rule (6.3); the TSP's mean has its own (tsp §4.4).
 
-### 9.5 Overflowing planes (regimes ovf 1 and ovf 2)
+### 9.5 REG: a slope that overflowed (refsw3 `ovf = 2`; depth.h L405-484, `RegDepth` L700)
 
-Entered from 9.3 step 2 (`first0`, `a`, `b` or `c` infinite):
-
-```
-if a or b is infinite:    ovf 2, the wrapping register:
-    sa = a bad ? (a.neg != det.neg ? -1 : +1) : 0;   sb likewise from b
-    r0 = first0 infinite ? +-2^25 (sign of first0)
-       : first0 == 0     ? 0
-       : trunc(cut20(first0) / 2^102)                # in units of 2^102, toward zero (GAP for a negative start)
-    pixel (i, j): r = r0 + (sa*i + sb*j) * 2^25       # units of 2^102; 2^25 units = 2^127 = one step; no half-pixel offset
-                  word = (r mod 2^25 != 0) ? WrapWord(r) : kWrap[(r >> 25) & 31]
-elif a or b is nonzero:   ovf 1, only the constant overflowed:
-    invS = Recip(det, 24); As = Mul(a, invS, 24); Bs = Mul(b, invS, 24)
-    eS   = max(top(As), top(Bs)) + 5
-    pixel (0, 0): 0;  every other pixel: (As < 0 or (As == 0 and Bs < 0) ? 0x80000000 : 0) | (eS + 127) << 23 | 0x7FFFFF
-else (a == b == 0, c or the start infinite):
-    every pixel stores Saturated(sign of first0) if first0 is infinite, else FromFp(cut19(first0))
-```
-
-`kWrap[32]` (the word at a whole number of steps, m = (r / 2^127) mod 32):
+Entered from 9.3 step 2a (`a` or `b` infinite). The depth is a register in units of 2^102 (2^25 units = 2^127 = one
+step), two's complement with its sign at 2^131, so it wraps every 32 steps:
 
 ```
-m  0- 7: 00000000 7f000000 7fffffff 7fffffff 7fffffff 7fffffff 7fffffff 7fffffff
-m  8-15: 7fffffff 7fffffff 7fffffff 7fffffff 7fffffff 7fffffff 7fffffff 7fffffff
-m 16-23: 807fffff fdffffff fe7fffff fe7fffff feffffff feffffff feffffff feffffe0
-m 24-31: ff7fffff ff7fffff ff7fffff ff7fffff ff7fffff ff7fffff ff7fffe0 ff000000
+sa = a infinite ? (sign(a) != sign(det) ? -1 : +1) : 0;   sb likewise from b
+rstep(v) = (v infinite or v == 0) ? 0
+         : q = cutBelow_102(cut20(Mul(v, inv0, 24)))            # unranged Mul; the slope's 20 bits, toward zero
+           q == 0 ? 0 : sign(q) * ((|q| / 2^102) mod 2^30)
+fa = rstep(a);  fb = rstep(b)                                   # the slope that did not overflow
+r0 = first0 infinite ? +-2^25 (its sign)                        # one step; a NaN's payload does not count
+   : first0 == 0     ? 0
+   : sign(first0) * trunc(|cut20(first0)| / 2^102)              # its 20 bits, toward zero onto the grid 2^102
+pixel (i, j), from the tile's first pixel, no half-pixel offset:
+    key = RegDepth(r0 + (sa i + sb j) 2^25 + i fa + j fb)
+RegDepth(r):
+    r = ((r + 2^29) mod 2^30) - 2^29                            # 30 bits: the sign at 2^131
+    r == 0:   key 0
+    r >  0:   r >= 2^26 (2^128 and up): Big(cut19(r 2^102))        # 9.7
+              else: Bits(the word of cut19(r 2^102))  =  (p + 229) << 23 | (r normalised to bit 23) & 0x7FFFE0,  p = BL(r) - 1
+    r <  0:   u = r + 2^29                                       # the bits under the sign
+              u == 0 (r = -2^131): Bits(0x807FFFFF), the lowest word there is
+              p = BL(u) - 1;  Neg(E = p + 100, M = floor((u 2^(28 - p) - 2^29) / 2^10))      # 9.7
 ```
 
-`WrapWord(r)` (r in units of 2^102, a two's complement register with its sign at 2^131, wrapping every 32 steps):
+Below zero, RegDepth is a negative depth's store (Neg) of the register shifted left past the zeros under its sign
+bit, the bits that are left as a block of E 128 has them. At whole steps (m = r / 2^25 mod 32, a 5-bit two's
+complement number) this gives: m = 0: 0; 1: 2^127 (0x7F000000); 2 .. 15: Big, above every float word; 16:
+0x807FFFFF; 17: E 125, M = -8 * 2^15; 18, 19: E 126, M = -8, -4 (* 2^15); 20 .. 23: E 127, M = -8, -6, -4, -2 (23 is
+the word 0xFEFFFFE0); 24 .. 31: E 128, M = (m - 32) * 2^15 (30 is 0xFF7FFFE0, 31 is 0xFF000000). Ordered -16 < -15
+< .. < -1 < 0 < 1 < .. < 15, no two equal.
+
+[T: zovf — the three regimes and their sign maps; zword — every word at whole steps to 19 bits (binary search with
+the background as the probe), the same for +inf, NaN and 2^127 corners at every place tried, and the mirror, word for
+word: 1 equal to 2^127, 2 .. 15 above every probe (the largest positive 0x7F7FFFE0), 16 below every probe, 23 and 30
+equal to the bottoms of fields 253, 254, 31 -2^127, the others between the fields as Neg puts them; depthgaps_mm —
+zword's triangle with legs 64 over its mirror, every pair of the 32 values at one pixel, Equal, Greater, Less, at
+three places: strictly ordered; depthgaps_edges M — 16 below -2^-100 and -1.5 * 2^-126 too; nantr_pos — 300 cells,
+every corner bad in turn, both orientations, NaNs 7FC00000 7FA00000 7F800001 7FFFFFFF FFC00000 FFFFFFFF, +-inf,
++-max, 2^127, 2^123; 2700 of 2700 regions, 70 cells start at +-1 step (the start (a x0 + b y0) + c with the
+infinities' rules: TL bad, (-inf - inf) + inf, is 0; a TR / BL corner facing the diagonal starts at the sign of c);
+depthgaps_phase — 105 triangles against three backgrounds, the start fitted per triangle: 33 with c finite start at
++-1 step, the one with c an infinity of the slopes' sign at -1, the 71 where the infinities cancel at 0; nantr_word,
+nantr_fin (16 starts: 2^120 .. the largest float as themselves, 2^120 as 2^120 - 2^102, 0.5 and 2^100 as 0),
+nantr_fin2, nantr_wreg — the words between whole steps (2^127 + 2^110 as itself, -(2^127 + 2^110) as 0xFF000100,
+2^119 - 9 steps as 0xFEFF0000, 1/8 - 9 steps as 0xFEE00100, 1/8 - 2 steps as 0xFF700100; -8.125, -8.0625, -8.09375,
+-12.125, -12.09375 steps not above -8 and -12; -2^119 and 2^119 - 1 step between -2^127 and 0.25); depthgaps_rstart
+— a finite start below zero toward zero onto 2^102 (-2^101 .. -0.5 start at 0; -(2^119 + 2^100) one step down as
+-(2^127 + 2^119), 0xFF008000, not 0xFF008100; 20 pages, 60 depths); depthgaps_rcut — cut to the start's 20 bits first
+(32 of 32 regions); zovf_creg — the finite slope steps the register: 50 single pixels, registers at 0, +1 and -1
+step, the other slope from 1.5 * 2^99 to 1.5 * 2^122 of either sign (j 2^116 as itself; 2^127 + 1.5 * 2^110 as
+0x7F000060; a slope of 7 * 2^101 as 6 * 2^101; slopes of 1.5 * 2^101 and 1.5 * 2^100 as 0; with a determinant of 32
+2^102 and 3 * 2^102 kept, not a pair grid of 2^103 (43 of 50 with it); 2^122 + 7 * 2^102 as 2^122 + 6 * 2^102, the
+slope's 20 bits (48 of 50 without them); without these steps 9 of 50), zovf_ab (518 of 676 regions without them),
+zovf_slope (154 of 252), zovf_wrap (104 of 128; W2: a slope below zero toward zero, the console keeps 0, 124 of 128
+rounded down); zbad 4080 / 4080, zbadbg 3480 / 3480, zbadk; zspec 1040 / 1040; bgbig — an overflowing polygon ties
+with a background of 2^127]. **GAPs**: where the words between fields (m 2 .. 15, 17 .. 22, 24 .. 29) and the
+values between whole steps lie among OTHER planes' depths in the same intervals: zword, depthgaps_mm and nantr_*
+pin them against float words and each other only, and other depths do come there (an ordinary sliver of E 127 has
+pixels below its window between m = 22 and 23; depthgaps_bigpos's Big pixels lie among m = 2 .. 15, its pages 8 / 9's
+pixels from a forced start above m = 24 .. 29): the order there is this representation's (RegDepth = Neg / Big), a
+choice. A slope of 2^128 or more after the division (a determinant below 1), taken mod 2^132; an off-grid slope
+below zero of 2^102 or more (a block of E 128 stores on a grid of 2^112, which hides the difference); the register
+with `HALF_OFFSET[0] = 0`.
+
+Underflow: the range rule makes `A`, `B` and the start zero below 2^-126. A plane from 2^-124 to -2^-124 over a cell
+is its start everywhere; one from 2^-126 to -2^-126 is 0 [T: zspec pages 3-6; detinf 480 of 480].
+
+### 9.6 Storing a depth (`DepthTileT::At` L723, `NegWord` L663)
 
 ```
-r = ((r + 2^29) mod 2^30) - 2^29                     # 30-bit wrap
-if r == 0: 0
-if r > 0:  if r >= 2^26: 0x7FFFFFFF
-           p = bitlength(r) - 1; m = r normalised so its leading one is bit 23
-           return (p + 229) << 23 | (m & 0x7FFFE0)   # r itself, cut to 19 bits
-u = r + 2^29                                          # the bits under the sign
-if u == 0: 0x807FFFFF
-p = bitlength(u) - 1; if p > 18: clear the low (p - 18) bits of u   # u cut to 19 bits
-v = ((u << 26) >> p) - 7 * 2^24 - 1;  e = p + 226
-v < -1:      0x80000000 | e << 23 | 0x7FFFFF
-v == -1:     0x80000000 | e << 23 | 0x7FFFE0
-v >= 2^23:   0x80000000 | (e + 1) << 23 | 0x7FFFFF
-else:        0x80000000 | e << 23 | (~v & 0x7FFFFF)
+REG:    RegDepth (9.5)
+CONST:  the key of 9.3
+BLOCK:  tu = d0 + (2i + h) dx + (2j + h) dy                  # half units of 2^unit (9.4a)
+        tu >= 0:  s = cut19(tu 2^(unit - 1));  top(s) - 1 >= 128 ? Big(s) : FromFp(s)        # 9.7
+        tu <  0:  sh = E - 15 - unit                          # 2^(E - 16) in half units of 2^unit
+                  0 <= sh <= 120:  Neg(E, floor(tu / 2^sh))   # M rounded down: the size up
+                  otherwise:       Bits(0x80000000 | (E + 126) << 23)        # = 0xFF000000 (E is 128 there)
 ```
 
-[T: zovf — the three regimes and their sign maps; zword — the words at whole steps by binary search (kWrap), the
-same for +inf, NaN and 2^127 corners and mirrored; nantr_pos — 300 cells, every corner bad in turn, six NaN payloads,
-+-inf, +-max, 2^127, 2^123, 2700 of 2700 regions (70 start at +-1 step); nantr_word, nantr_fin, nantr_fin2,
-nantr_wreg — the words between steps (WrapWord); zbad 4080 / 4080, zbadbg 3480 / 3480, zbadk; zspec 1040 / 1040;
-bgbig — an overflowing polygon ties with a background of 2^127]. **GAPs** (from the code comments): ovf 1's sign
-(measured only below zero with slopes below zero) and its low 5 bits; kWrap entries where zword's probes leave the
-low 5 bits open (m 17..22, 24..29: taken as ones), m 2..15 beyond the largest float (taken as 0x7FFFFFFF), m 16
-(the lowest word); WrapWord between -1 step and 0 (exponent field 255); a negative finite start's rounding onto the
-2^102 grid; zovf's six cells where the constant is exactly 2^128 (refsw3 overflows, a console does not: its switch
-is where `a x0 + b y0` reaches 2^128).
+In the G form (9.4a), with `nsh = E - 15 - gexp`: `M = floor(t / 2^nsh)` for `nsh >= 0` and `M = t * 2^-nsh`, exact,
+for `nsh < 0`. `nsh` is 11 unless E was clamped: 12 .. 14 at the -122 floor, below 11 at the 128 ceiling, and below
+0 when `gexp > 113`. With `nsh < 0` and a start that is not zero, refsw3's `sh = 139 - top(first) >= 11`; with a start
+cut to zero (`gexp == unit`) `sh = nsh < 0`, and that is the fallback word. `sh > 120` is unreachable (`nsh <= 14`).
+**[R]** refsw3 marks the fallback "not reached (startOnSlopes 1)". `At` does return it, at pixels of planes with
+slopes of 2^134 and more a pixel whose start was cut to zero, but at no covered pixel in the run below. [Run
+(widths708.cpp): `nsh` -15 .. 14 over the pixels below zero; the fallback at 26,404 pixels, `nsh < 0` with a start at
+25,924, `|M| > 2^23` at 126,894 (the largest 2^34.1), none of them at a pixel the triangle covers (its own edges and
+row range, as RasterizeTriangle has them).]
 
-Underflow: the range rule makes `A`, `B`, `first` zero below 2^-126. A plane from 2^-124 to -2^-124 over a cell is
-its start everywhere; one from 2^-126 to -2^-126 is 0 [T: zspec pages 3-6; detinf 480 of 480].
+So a stored depth is:
+- above zero: the IEEE single of `cut19(v)`, **19 significant bits on the pixel's own exponent** (low 5 fraction bits
+  zero); below 2^-126 a float denormal (a depth there has at most 19 bits on a grid of 2^-145 or coarser, so it never
+  rounds); from 2^128 `Big` (9.7);
+- zero: key 0 (+0 and -0 alike);
+- below zero: the block's exponent E and `M = floor(value / 2^(E - 16))`, the value rounded down (its size up),
+  stored by `Neg` (9.7): the float's word inside the block's top binade, between two fields' words outside it.
 
-### 9.6 Storing a depth (`DepthTileT::At`, `StoredDepth::Store`, `StoredDepth::FromFp`)
+[T: zblock, precision — 19 bits on the pixel's own exponent; depthgaps_edges — a ramp from 2^-124 in steps of -1.75
+and +1 2^-126: 2^-128 and 2^-127 above 0 and below 2^-126 at every pixel, 0 where the plane is 0; depthgaps_tiny —
+flat quads at +-2^-126, +-1.5 * 2^-126, +-2^-125: above / below 0; depthgaps_bigpos — triangles whose start is -2^127
+stepping by 1.9375 * 2^123 .. 2^126 a pixel, every pixel read with the background as the probe: from 1.07 * 2^128 to
+13 * 2^127 above every probe, 0x7F7FFFE0 included, those below 2^128 the floats, 20 of 20 regions (refsw3 had 2^127);
+depthgaps_bigord — two such triangles over each other, Greater, Equal, Less: ordered by value from 1.02 * 2^128 to
+12 * 2^127; slopes 2^112 apart (2^116.7 at the pixel) are, 2^100 apart (2^104.7) equal: a grid between those, taken
+as 19 bits; above a flat triangle at the largest float or at +infinity; 33 of 33 regions; below zero: 9.7].
+**GAPs**: the order of denormal depths among each other (2^-128 against 2^-127 against 1.5 * 2^-127: only that they
+lie above 0 and below 2^-126); Big's grid (any cut of about 13 to 23 bits fits depthgaps_bigord; 19 is taken).
 
-For a block-form pixel value `v = t * 2^(negE - 27)` (exact):
+### 9.7 The stored depth and its order (`StoredDepth`, depth.h L110)
 
-```
-if v >= 0 (or zero):                word = FromFp(cut19(v))
-elif top(v) == negE:                word = Store(v): 16 bits, size rounded up        # below zero, the block's top binade
-else:                               word = FromFp(cut19(v))                          # below zero elsewhere: GAP
-```
-
-`Store` below zero: `n = bitlength(mant)`. If `n > 16`, shift right by `n - 16`; if any bit was lost, add 1 to the
-mantissa. If that carries to 2^16, the mantissa becomes the binade's largest on the **19-bit** grid instead
-(`2^19 - 1` at 3 positions lower: fraction `0x7FFFE0`, no carry into the exponent). Then `FromFp`.
-
-`FromFp(v)`: `bad` -> `Saturated`; zero -> the sign bit alone (0 or 0x80000000); round to nearest, ties to even, to 24
-bits or, below 2^-126, to the denormal grid 2^-149 (after a 19-bit cut only the denormal case rounds); `>= 2^128`
-after rounding -> `Saturated`; then the IEEE single encoding (denormal for `top <= -126`).
-`Saturated(neg) = (neg ? 0x80000000 : 0) | 0x7F000000` (+-2^127).
-
-So a stored depth is an IEEE-single-format word with **19 significant bits** above zero (low 5 fraction bits zero),
-and 16 significant bits rounded up in size (low 8 fraction bits zero, or the 0x7FFFE0 case) for a negative depth in
-its block's top binade. The flat cases (a flat plane, the mean, a flat 2x2 quad) are always in the top binade.
-
-[T: zblock, precision — 19 bits on the pixel's own exponent; perpmean_bg page 3 (24 flat quads below zero),
-perpmean_negstore page 0 (64 flat quads: 0xc2ffffe0 ties), perpmean_negedge pages 0, 2, perpmean_neg (zexfil's own
-negative probes), depthgaps_negpp (360 of 360 regions: flat polygons below zero tie in groups of 0x100)]. **GAPs**: a
-negative depth outside the top binade is neither this nor the 19-bit cut (perpmean_negslope, perpmean_negstore pages
-1-3, perpmean_negedge page 1, depthgaps_negladder, _negramp, _uwmat, _ties: the depthgaps hunt); sizes below about
-2^-122 (perpmean_tiny's first version: a mean of -2^-125 is below a flat quad at -2^-126 on the console, refsw3 puts
-it above); a positive depth of 2^128 or more (taken as Saturated); the denormal range as the depth buffer's own.
-
-**Pending, not in refsw3 HEAD**: the depthgaps hunt (`fpgadc/agents/nulldc3/hunt/depthgaps`, uncommitted
-`patch_round2_final.diff`) proposes that a negative depth from the depth unit's steps is stored as its block
-exponent with a fixed-point value, ordered 32 bits finer than the word (`StoredDepth::Neg`, `k`), and that positive
-depths below 2^-126 are stored and ordered as denormals (depthgaps_edges, _tiny). If it lands in refsw3, the depth
-buffer entry for negative depths is wider than a 32-bit word. Keep the stored-depth format behind one module
-boundary until that settles.
-
-### 9.7 The depth order (`StoredDepth::key`)
-
-The ISP compares stored words, not floats:
+The ISP compares **order keys**, not floats and not words. A stored depth is a 64-bit signed key `k`: the order of
+the IEEE word, 32 bits finer, so that the depths the unit makes below zero outside a block's top binade, and above
+zero from 2^128, have places between neighbouring words. (refsw3 keeps a 32-bit `bits` beside `k` for logs and the
+probes only: for `Between` keys a stand-in word, the float of the value cut to 24 bits for `Neg`, 0x7FFFFFFF for
+`Big`.)
 
 ```
-key(w) = (w == 0x80000000) ? 0 : (int32)(w ^ (w[31] ? 0x007FFFFF : 0))       # compare as signed 32-bit integers
+key32(w)      = (w == 0x80000000) ? 0 : (int32)(w ^ (w[31] ? 0x007FFFFF : 0))      # the word's order
+Bits(w):        k = key32(w) * 2^32
+Between(w, o):  k = key32(w) * 2^32 + o,  1 <= o <= 2^32 - 1          # after w, before the next word in key32 order
+Saturated(neg)= Bits((neg ? 0x80000000 : 0) | 0x7F000000)            # +-2^127
+FromFp(v):      v infinite: Saturated(v's sign);  v == 0: Bits(sign bit alone)
+                round to nearest, ties to even, to 24 bits or, below 2^-126, to the denormal grid 2^-149
+                (after a 19-bit cut only the denormal case rounds); 2^128 or more after rounding: Saturated
+                else: Bits(the IEEE single encoding, denormal for top <= -126)
+Big(v):         v >= 2^128, at most 19 bits: f = top(v) + 126 (>= 255), frac = v's 23 bits under its leading one
+                Between(0x7F800000, ((f - 255) << 23 | frac) + 1)
+Neg(E, M):      M < 0, the value M * 2^(E - 16), E in -122 .. 128:
+    -2^16 <= M <= -2^15:  Bits(0x80000000 | (E + 126) << 23 | (M == -2^16 ? 0x7FFFE0 : (-M - 2^15) << 8))
+                          # the window, the block's top binade (sizes 2^(E-1) .. 2^E): 16 bits, its bottom 2^E with
+                          # the fraction 0x7FFFE0 (no carry into the exponent)
+    M > -2^15:            Between(0x80000000 | (E + 126) << 23, M + 2^15)        # above the window (nearer zero)
+    M < -2^16:            Between(0x80000000 | (E + 125) << 23, 2^31 + max(M + 2^30, 0))   # below the window
+flat(v):        v infinite: Saturated(v's sign);  v == 0: key 0;  v > 0: FromFp(cut19(v))
+                v < 0:  s = cut20(v);  E = clamp(top(s), -122, 128);  Neg(E, -ceil(|s| / 2^(E - 16)))
 ```
 
-So positive depths order as floats (bigger = nearer, depth is 1/w), every negative depth is below zero, of two
-negative depths **the one with the larger exponent is larger** (-2 > -1 > -1.5 > -0.5 > -0.75), within one exponent
-the float order holds, a NaN is an ordinary number (positive NaNs above +infinity), and -0 equals +0. [T: zsign —
-every pair of 20 depths from -2^100 to 2^100, Greater and Less; bgspec, bgneg, bgneg2; zneg 1200 of 1200 (blind below
-zero, hence zsign)]. Depths below zero are drawn like any other [T: uvmeas wneg — 780,000 texels read off such
-polygons; README "The TSP's numbers at their limits"].
+What the order is:
+- **Positive depths order as floats** (bigger = nearer, depth is 1/w). From 2^128 (`Big`) a depth is above every
+  float word, ordered as a float of 19 bits whose exponent field goes on past 254. (Positive NaN words lie above it
+  in key32's order, but no stored depth is one: the background turns field 255 into 254, 4.2.)
+- **-0 equals +0**, every negative depth is below zero, of two negative words the one with the larger exponent field
+  is larger, and within one field the float's own order holds (-2 > -1 > -1.5 > -0.5 > -0.75) [T: zsign — every pair
+  of 20 depths from -2^100 to 2^100, Greater and Less; bgspec, bgneg, bgneg2; zneg 1200 of 1200 (blind below zero,
+  hence zsign)].
+- **Below zero, in the window**: the float word on the 16-bit grid, a multiple of 0x100 in the word, the binade's
+  bottom with the fraction 0x7FFFE0 [T: perpmean_bg (the words of 136 means below zero and 24 flat 2x2 quads: every
+  one on the 16-bit grid, one step above in size wherever the value had bits below it); perpmean_neg;
+  perpmean_negstore page 0 (flat quads at -0x42FFFFFF and a start just over -2^14 tie with the backgrounds 0xC2FFFFE0
+  and 0xC67FFFE0; a carry to the next power of two puts the probes out of order); perpmean_negedge pages 0, 2;
+  depthgaps_negpp (360 of 360 regions: flat polygons below zero tie in groups of 0x100); depthgaps_neggrid (35 depths
+  of fields 5 .. 227 tie in groups of 0x100, the top group with 0x7FFFE0; positive ones do not); zovf_neg, zovf_neg2].
+- **Below zero, outside the window**: above the window, the depth lies after every word of field E + 126 and before
+  field E + 127's lowest, ordered by M; below it, after every word of field E + 125 (and after the depths of block
+  E - 1 above its window, which share that gap) and before field E + 126's lowest, ordered by M (every `M <= -2^30`
+  at the same place) [T: depthgaps_negladder and depthgaps_search (a ramp from a start of exactly 0, A = -0.71,
+  B = -0.05 a pixel, every pixel of tile (0, 0) read out: E = 5, the 326 pixels in [16, 32) stored rounded up, the 697
+  below 16 above every probe of field 131 and below field 132's last); depthgaps_negconv (12 planes read out: starts
+  of -100, -1000, -96, -64, -127, -3, +-10 with slopes from 2^-12 to 2; E from the start (7, 10) or from the slopes
+  (6 for a start of -9.25 with slopes of 1; 2 for -0.04 with 0.075): the window, above and below it at every
+  pixel); depthgaps_ties and depthgaps_uwmat (ramps against ramps: depths above the window of E 6 and below the
+  window of E 7, both between fields 132 and 133, ordered by M in each, every one of E 6 below every one of E 7; 10
+  pairs of ramps, every pair of 32 depths strictly ordered as their values); depthgaps_final G (a ramp 2^-10 above
+  another, E 6, above its window, is above it at all 32 x 32 pixels, 2^-11 equal; E 7 below its window: 2^-9 above,
+  2^-10 equal: 2^(E - 16) on both sides); depthgaps_negramp; perpmean_negslope, perpmean_negstore pages 1-3,
+  perpmean_negedge page 1 (pixels of sloped planes below zero outside the start's binade: neither the 16-bit round-up
+  nor the 19-bit cut of their own binades)].
+- Depths below zero are drawn like any other [T: uvmeas wneg — 780,000 texels read off such polygons; README "The
+  TSP's numbers at their limits"].
 
 ## 10. Depth compare and the per-pixel update (`PixelFlush_isp`)
 
@@ -873,25 +1198,27 @@ polygons; README "The TSP's numbers at their limits"].
 
 | buffer | width (refsw3) | content |
 |---|---|---|
-| `depthA` | 32-bit stored word | opaque: the depth; PT passes: this pass's best, then what each pixel resolved to; TR sort: this pass's best |
-| `depthB` | 32-bit stored word | the reference: PT boundary (last key shaded), TR sort (layer drawn last) |
-| `depthC` | 32-bit stored word | PT: the opaque depth, or what an earlier chunk resolved |
+| `depthA` | stored depth (9.7: a 64-bit order key) | opaque: the depth; PT passes: this pass's best, then what each pixel resolved to; TR sort: this pass's best |
+| `depthB` | stored depth | the reference: PT boundary (last key shaded), TR sort (layer drawn last) |
+| `depthC` | stored depth | PT: the opaque depth, or what an earlier chunk resolved |
 | `tagA` | 29-bit tag | the visible primitive (opaque, background, PT best / resolved, TR best) |
 | `tagB` | 32 bits (29-bit tag or TAG_BELOW) | the reference's tag |
 | `stencil` | 3 bits | bit 0: in a volume (summary); bit 1: parity of the current volume; bit 2: touched since the last summary |
 | `valid` | 1 bit | the pixel has a fragment to shade in this pass |
 | `rendered` | 1 bit | PT: resolved (passed the alpha test) |
-| PT extra | opTag (29), refTagC (29), resTag (29), resDepth (32), resolved-last-pass (1), everRendered (1) | 11.4 |
-| TR extra | savedDepth (32) | 11.6 |
+| PT extra | opTag (29), refTagC (29), resTag (29), resDepth (stored depth), resolved-last-pass (1), everRendered (1) | 11.4 |
+| TR extra | savedDepth (stored depth) | 11.6 |
 
-All 32 x 32. This is refsw3's state. The hardware's storage is not known beyond "depth about 28 bits (8-bit
-exponent, 19-bit mantissa), tag + stencil bits" [I] (PIPELINE_SHAPE "Storage"). The RTL may store less where the
-values allow it (e.g. resolved-last-pass instead of refsw3's `resPass` integer), but every compare below must give
-the same answer.
+All 32 x 32. This is refsw3's state. A stored depth is refsw3's `StoredDepth::k`, a 64-bit key (9.7): since
+`708fb8cd` a depth below zero keeps its block exponent and a fixed-point M, and one above 2^128 has a place above
+every word, so a 32-bit word no longer holds every depth. The hardware's storage is not known beyond "depth about 28
+bits (8-bit exponent, 19-bit mantissa), tag + stencil bits" [I] (PIPELINE_SHAPE "Storage"). The RTL may store less
+where the values allow it (e.g. resolved-last-pass instead of refsw3's `resPass` integer, or any encoding of the key
+that keeps its order), but every compare below must give the same answer.
 
 ### 10.2 The compare (`DepthMode`)
 
-`new` = the fragment's stored word (9.6), `old = depthA`; compares in key order (9.7); the fragment **passes** when:
+`new` = the fragment's stored depth (9.6), `old = depthA`; compares of the keys (9.7); the fragment **passes** when:
 
 | mode | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
 |---|---|---|---|---|---|---|---|---|
@@ -916,13 +1243,13 @@ greater); timemeas — failing, passing or writing all cost the same 16 clocks a
 
 ### 10.3 The fragment key and `KeyAbove`
 
-The sorted walks (PT passes, TR sort) order fragments by one key: the stored depth word (key order), then the tag's
+The sorted walks (PT passes, TR sort) order fragments by one key: the stored depth (its key, 9.7), then the tag's
 sort bits (bits 23:0, i.e. list order). No two fragments are ever equal (the tag differs), so nothing is "coplanar".
 A larger key is nearer, or as near and later in the list.
 
 ```
 KeyAbove(aW, aTag, bW, bTag):          # is key a above key b?
-    if aW != bW:            return aW > bW                         # key order (9.7)
+    if aW != bW:            return aW > bW                         # the stored depths' keys (9.7)
     if bTag == TAG_BELOW:   return aTag != TAG_BELOW
     return aTag != TAG_BELOW && (aTag & 0xFFFFFF) > (bTag & 0xFFFFFF)
 ```
@@ -966,7 +1293,7 @@ Where the volume lists are walked, and against which depth:
 |---|---|---|---|
 | opaque | OP_MOD (only with an OP pointer) | the final opaque depth (`depthA` after the opaque list) | 0 (Z clear) or the previous entry's (keep Z) |
 | PT_MOD (with a PT pointer) | OP_MOD again | the final PT depth: `depthA` after PT final (resolved PT depth, else opaque) | 0 (cleared at PT start) |
-| TR sorted, every peeling pass | TR_MOD | this pass's best `depthA` (pixels with nothing this pass hold 0x7F7FFFFF, so nothing is in front of them) | 0 (cleared at every peel) |
+| TR sorted, every peeling pass | TR_MOD | this pass's best `depthA` (pixels with nothing this pass hold the key of 0x7F7FFFFF, the largest finite float, so only a depth of 2^128 or more, `Big` 9.7, is in front of them) | 0 (cleared at every peel) |
 | TR pre-sorted | none (TR_MOD ignored) | | whatever the opaque or PT_MOD phase left |
 
 [T: modvol (opaque, cheap shadow: one sheet in front, behind, two, three, front plus behind, two volumes, exclusion
@@ -1105,7 +1432,7 @@ page 0 TR cells]
 savedDepth = depthA                                          # SaveDepth
 do:
     MoreToDraw = false
-    per pixel: depthB, tagB = depthA, tagA; depthA = 0x7F7FFFFF; valid = 0; rendered = 0; stencil = 0     # PeelBuffers
+    per pixel: depthB, tagB = depthA, tagA; depthA = Bits(0x7F7FFFFF); valid = 0; rendered = 0; stencil = 0     # PeelBuffers
     walk the TR list, fragments through the sort rule below
     if TR_MOD pointer: walk the TR_MOD list (11.2) against depthA
     SHADE pass (12); per shaded pixel: savedDepth = depthA   # the layer just drawn
@@ -1182,11 +1509,14 @@ pass clears `valid` per shaded pixel. `tilePixelsShaded` counts every pixel of e
 |---|---|
 | per render | `perpVal` |
 | per entry | `OpInPt`; PT: chunk count, current chunk, pass number, fill / prevQuad / culled counters; `MoreToDraw` |
-| per primitive | det, sgn, cull result; depth plane a, b, c, det, inv, A, B (tile independent); vertex x, y, z |
-| per primitive per tile | per edge: s20, sx, sy, E, unit (or the constant answer); depth: regime, S, DX, DY, negE (or the overflow register r0, sa, sb, the ovf 1 word, or a constant word) |
+| per primitive | the swamped det (7.1), sgn, cull result; depth plane a, b, c, det, inv, A, B (tile independent); vertex x, y, z |
+| per primitive per tile | per edge: s20, sx, sy, E, unit (or the constant answer); a big edge also f0, fx, fy, H, Z and its 32 row masks from the first row (8.4b, 8.6); depth: CONST (a key), REG (r0, sa, sb, fa, fb) or BLOCK (d0, dx, dy, unit, E; in the G form S, DX, DY, gexp, E and whether the start is zero) |
 | per pixel (persists across entries) | depthA, tagA, stencil |
 | per pixel (per entry / pass) | valid, rendered, depthB, tagB, depthC, refTagC, opTag, resTag, resDepth, resolved-last-pass, everRendered, savedDepth |
 | between entries | prevWrittenOut, havePrev, previous tile (4.4) |
+
+Every depth here (depthA, depthB, depthC, resDepth, savedDepth, the background) is a stored depth: refsw3's 64-bit
+order key (9.7).
 
 ## 14. Timing anchors and races (for the cycle model)
 
@@ -1216,19 +1546,22 @@ Behaviour that depends on the clock (refsw3 does not model it, the RTL will prod
 
 ## 15. Consolidated GAPs and refsw3-only choices
 
+The row numbers are those of the `2d08a440` transcription, kept so that references stay valid. Rows that refsw3
+`6784ea3d` / `708fb8cd` closed say so; the open questions they left are in their row or from #24 on.
+
 | # | what | refsw3 does | evidence / status |
 |---|---|---|---|
-| 1 | edge start past 2^128: 2^127 or +-2^132 - first | +-2^132 - first iff \|dy\| >= 2^127 | faredge 1330 / 1340; page 4 strip, page 1 control strip open |
-| 2 | depth constant exactly 2^128 | overflows | zovf: six cells, the console's switch is `a x0 + b y0` reaching 2^128 |
-| 3 | negative depth outside its block's top binade | cut19 | depthgaps hunt open; uncommitted patch changes the stored format (9.6) |
-| 4 | negative stored sizes below ~2^-122 | as any | perpmean_tiny first version, 335 / 336 |
-| 5 | positive depth >= 2^128; the denormal range of the buffer | Saturated; float denormals | not measured (patch: denormals measured) |
-| 6 | ovf 1 sign and low bits; kWrap / WrapWord unpinned low bits, m 2..16, field 255; negative finite start onto 2^102 | as 9.5 | zword / nantr leave them open |
+| 1 | the edge unit past 2^128 | the swamp, the walk (8.3, 8.4b) | **closed** by `6784ea3d` (faredge 1,340 of 1,340). Left: hugepos_rules page 11 (10 tiles) and hugepos_v5 (1 tile, 79 pixels), refsw3's own console misses and the regression's only known ones (104 of 100,912 tiles of all faredge / hugepos sets) |
+| 2 | depth constant exactly 2^128 | the limit at every product and sum (6.3) | **closed** by `708fb8cd` (zovf 1,080 of 1,080) |
+| 3 | negative depth outside its block's top binade | `Neg` (9.7) | **closed** by `708fb8cd` (the depthgaps hunt) |
+| 4 | negative stored sizes below ~2^-122 | E at least -122 (9.4a) | **closed** by `708fb8cd` (depthgaps_tinymean 336 of 336) |
+| 5 | positive depth >= 2^128; positive denormal depths | `Big`; float denormals | `Big` measured (depthgaps_bigpos, _bigord); left: Big's grid (13 .. 23 bits fit, 19 taken) and the denormals' order among each other (only above 0, below 2^-126: depthgaps_edges, _tiny) |
+| 6 | the overflow register's words | REG (9.5) | ovf 1, kWrap / WrapWord's open bits and a negative start are **closed** (the forced start, RegDepth, depthgaps_rstart). Left: its words between fields among other planes' depths; a slope of 2^128 or more after the division (mod 2^132); an off-grid slope below zero of 2^102 or more; REG with HALF_OFFSET[0] = 0 |
 | 7 | infinite determinant | depth 0 | not measured |
-| 8 | det 0 / perpendicular with an infinite or NaN corner depth | z1's word | detinf cannot tell |
-| 9 | the ISP's mean: x 0xAAAAAB or / 3; the TSP's zero rule | x 0xAAAAAB; no zero rule | invisible / not measured |
-| 10 | slopes > ~2^71 x the start | float form per pixel | refsw3 limit; the block form in G units is the likely hardware |
-| 11 | unranged main path (intermediates < 2^-126, a*inv >= 2^128) | as 6.3 note | not isolated |
+| 8 | det 0 / perpendicular with an infinite or NaN corner depth | the mean with infinities (9.4b) | **closed** by `708fb8cd` (depthgaps_dzinf 48 of 48) |
+| 9 | the ISP's mean: x 0xAAAAAB or / 3 | x `OneThird` | invisible (the same 19 bits for every 24-bit sum). The mean's zero rule is **closed** (6.3, depthgaps_zadd) |
+| 10 | slopes > ~2^71 x the start | the block form | **closed**: refsw3's float form is unreachable (9.4a) |
+| 11 | unranged slopes: `a * inv` of 2^128 or more with finite a, b (a determinant below 1) | stepped as numbers | not isolated (depthgaps_edges reaches 2^122 a pixel). The start is ranged since `708fb8cd` (depthgaps_tinyramp) |
 | 12 | denormal x, y in the edge unit | exact denormals | not measured |
 | 13 | depth sample point with HALF_OFFSET[0] = 0 | centre start, stepped back half a pixel | halfofs not sensitive |
 | 14 | PARAM_BASE not 1 MB aligned; parameters past 8 MB / below PARAM_BASE's page | mask on the ISP side, none on the TSP side; wraps | console draws nothing (zexfil) |
@@ -1241,23 +1574,41 @@ Behaviour that depends on the clock (refsw3 does not model it, the RTL will prod
 | 21 | translucent cache size < 64, discard mode, SB_ISTERR | not modelled | ispcache |
 | 22 | translucent modifier volumes in general; pre-sorted background skip | sorted only; ignored in pre-sort | TODO C6, timemeas |
 | 23 | the races of section 14 | not modelled | *_races tests |
+| 24 | the walk's fine units; its end rule with a column step below zero | 2^(unit - 6); R alone | only the decisions are measured (8.4b) |
+| 25 | row 31 a row earlier: why; an ordinary sliver (no big edge) with its top corner in row 31 | only with a big edge | faredge_walk, faredge_far32; no test has the ordinary case (8.6) |
+| 26 | the zero rule in the depth setup's coordinate differences and determinant | applied (one shared adder) | only the depth products' sums measured (depthgaps_zadd, _field1; 6.3) |
+| 27 | NegWord's fallback word (a start cut to zero, slopes of 2^134 and more) | 0x80000000 \| (E + 126) << 23 | [R] marked "not reached"; `At` returns it at uncovered pixels only (9.6) |
 
 ## 16. Test index (dreamcast-tests pvr-tests/)
 
 | test | ISP rule(s) it pins |
 |---|---|
 | covmeas (98 sets) | edge arithmetic, zero zone, row rule, tie rule, last column, winding from det, det 0 positive, row range, degenerate rows, strips / sprites / modvol coverage, HALF_OFFSET coverage |
-| hugepos | winding from det, start saturation at 2^127 |
-| faredge | the +-2^132 rule |
+| hugepos; hugepos_a, _b, _all, _odd_*, _cov, _sw1-4, _val1, _v3-v6, _rules | winding from det, the swamp, the start's saturation at 2^127, a difference of 2^128 stepping by 2^127, E at most 129, the walk (wrap, end) |
+| faredge; faredge_cmax, _k132 | the swamp per product, two of one sign cancelling, the push |
+| faredge_m131, _ecap, _walk, _far32 | EdgeWinding, E at most 129, the walk (wrap, push, end, first row), row 31 |
+| faredge_cull | culling on the swamped determinant |
 | raster, precision | coverage, shared edges, small-polygon cull, edge resolution |
 | cullval | cull by size: register size only, NaN = +inf, equal culls |
 | perpval, perpeq, perpmean_* | FPU_PERP_VAL, the mean's arithmetic and storage |
 | zmeas (13 sets), zblock, ztile, zstart | the depth plane, block stepping, 19-bit storage, start cut |
 | zexfil | the whole depth buffer read out (calibration, 64 dumps) |
 | zsign, zneg, bgspec, bgneg, bgneg2, bgbig | the depth order, negative and huge depths, saturation |
-| zspec, zbad, zbadbg, zbadk, zovf, zword, nantr_* | underflow, the overflow regimes, kWrap / WrapWord |
+| zspec, zbad, zbadbg, zbadk, zovf, zword, nantr_* | underflow, REG and its words |
+| zovf_lim, _c, _ps, _sum, _far, _ab | the 2^128 limit at every product and sum |
+| zovf_creg, _slope, _wrap | REG: the finite slope's steps |
+| zovf_sat, _word, _satw, _satw2 | the forced start (a start infinite on one side) and its words |
+| zovf_neg, _neg2 | negative depths in the block form (Neg's window) |
+| depthgaps_zadd, _field1 | the zero rule; every zero sum +0 |
+| depthgaps_negpp, _neggrid, _negladder, _search, _negconv, _negramp, _ties, _uwmat, _final, _tinymean | Neg: the window, the places between fields, E's floor of -122 |
+| depthgaps_bigpos, _bigord, _bigslope, _bigpair | Big; E's ceiling of 128 |
+| depthgaps_infstart, _edges, _regb, _final | the forced start; denormal depths; a large slope after the division |
+| depthgaps_phase, _rstart, _rcut, _mm | REG: its start; the order of its 32 whole-step words |
+| depthgaps_flt, _tinyramp | a start cut to zero stepped on the slopes' grid; the start in the setup's range |
+| depthgaps_detneg, _dzinf, _nanprod | the mean's cuts and infinities; a NaN in a product |
+| depthgaps_tiny | denormal depths |
 | detinf, huge | infinite determinants, range rules, bad corners |
-| bgdepth, bgtie, dumprules p2-7, depthgaps_bglow* | the background depth word |
+| bgdepth, bgtie, dumprules p2-7, depthgaps_bglow, _bglow2, _bglow3, _bgpin | the background depth |
 | depth | DepthMode per list, depth write, PT ignores the mode |
 | dumprules, zsource | modvol strictly greater, PT/TR plane order, ZWriteDis per list, PT leaves its ISP depth |
 | trtie, sort | the key order, first reference = what is there, ties with the background |
@@ -1266,14 +1617,24 @@ Behaviour that depends on the clock (refsw3 does not model it, the RTL will prod
 | ptlayers, ptruns | PT pass membership, run-only pixels, re-shading only where a later pass draws |
 | keepz, accbuf, timemeas | keep Z, end-of-entry, background shading, timing |
 | uvspan, spansortcfg, timemeas order | runs and their order |
-| perpmean_negstore / _negedge / _neg / _bg, depthgaps_negpp | the negative 16-bit store |
+| perpmean_negstore / _negedge / _neg / _bg / _negslope | the negative store (window and outside it) |
 
 ## 17. Lockstep points in refsw3
 
-For per-unit testbenches (polly2-rtl `tb/`), these functions take plain inputs and are header-only: `pvrisp::Winding`,
-`pvrisp::EdgeTile::Setup / Inside`, `pvrisp::RowRange`, `pvrisp::DepthTileT<DepthHW>::Setup / At`,
-`pvrisp::StoredDepth::{key, FromFp, Store, Saturated}`, `pvrfp::{Mul, Add, Recip, Perpendicular}` (include
-`refsw3/refcore/pvr_isp_edge.h`, `pvr_isp_depth.h`; no other dependency; `widths.cpp` in agents/spec-isp is an
-example). `KeyAbove`, `PixelFlush_isp`, `CulledBySize`, `CulledByFacing` are file-static in `refsw_tile.cpp`;
-whole-frame comparisons go through refsw3-offline, whose `log <file> [x,y ...]` command writes the per-tile trace
-(`TILE`, `OBJECT`, `TRIA`/`TRIC`, `ISP`, `ZFAIL*`, `RENDERED`, `STENCIL`, `CULLED`, `PASS`, `SPAN`, `TSP`, ...).
+For per-unit testbenches (polly2-rtl `tb/`), these functions take plain inputs and are header-only (include
+`refsw3/refcore/pvr_isp_edge.h`, `pvr_isp_depth.h`; no other dependency; `agents/spec-refresh/widths708.cpp` is an
+example):
+- `pvrisp::Winding` (bad corners), `pvrisp::EdgeWinding` (sgn and the culls' det), `pvrisp::RowRange`;
+- `pvrisp::EdgeTile::Setup / SetFirstRow / Inside / InsideOrdinary / RowMask / Walk / RowOutside` (its fields
+  `t0`, `tx`, `ty`, `zero2`, `tie2`, `big`, `f0`, `fx`, `fy`, `h`, `z`, `rowMask` are public);
+- `pvrisp::DepthTileT<DepthHW>::Setup / At / NegWord / RegDepth` (its state `valid`, `block`, `ovf`, `sa`, `sb`,
+  `r0`, `fa`, `fb`, `first_z`, `d0`, `dx`, `dy`, `unit`, `E`, `A`, `B` is public; `Setup` resets it);
+- `pvrisp::StoredDepth::{Key32, Bits, Between, Neg, Flat, Big, FromFp, Saturated, key}`;
+- `pvrfp::{Mul, Add, Recip, Perpendicular, OneThird}`.
+
+The depth setup's `limit`, `mul`, `add`, `sub` and the mean's `addInf` (`addBad`) are lambdas inside
+`DepthTileT::Setup`, and the background word is inside `RenderCORE` (refsw_lists.cpp): copy them (num §7.1).
+`KeyAbove`, `PixelFlush_isp`, `CulledBySize`, `CulledByFacing` are file-static in `refsw_tile.cpp` (`TriangleCulled`
+is not, but reads the registers). Whole-frame comparisons go through refsw3-offline, whose `log <file> [x,y ...]`
+command writes the per-tile trace (`TILE`, `OBJECT`, `TRIA`/`TRIC`, `ISP`, `ZFAIL*`, `RENDERED`, `STENCIL`, `CULLED`,
+`PASS`, `SPAN`, `TSP`, ...).

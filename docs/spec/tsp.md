@@ -2,7 +2,9 @@
 
 polly2-rtl, unit spec "TSP" (texture and shading processor, the tile colour buffers and the write-out).
 Written 2026-11-20 from refsw3 (nulldc3 branch `skmp/refsw3`, commit 2d08a440, `refsw3/refcore`) and the console
-tests of dreamcast-tests (commit f7cb4e5). refsw3 is the functional truth: it is the console, bit for bit, on every
+tests of dreamcast-tests (commit f7cb4e5); checked against refsw3 `708fb8cd` the same day: `pvr_tsp_plane.h` changed
+only by taking its 1/3 from `pvrfp::OneThird()`, the constant the ISP's depth mean shares (4.4, 20), so no TSP rule
+moved. Sections 4.4, 20 and 22 item 2 now also say how the ISP's depth adds treat a zero. refsw3 is the functional truth: it is the console, bit for bit, on every
 regression test and on all 786 polly2-data dumps with a console frame. Everything below is what refsw3 does; each
 rule names the console test that pins it. Where refsw3 does something no test has measured, it is marked **GAP**.
 
@@ -347,7 +349,7 @@ and |det| <= |perpVal| (**equal counts** [M perpeq 1800 of 1800]); an infinite d
 Then every plane of the primitive is flat:
 
     A = B = +0
-    third = 0xAAAAAB x 2^-25                  // the single nearest 1/3, a hair above (24 bits)
+    third = OneThird() = 0xAAAAAB x 2^-25     // the single nearest 1/3, a hair above (24 bits); pvr_softfp.h
     first = Z0 + Z1 (an ordinary add), except the zero rule below
     mean  = mul( lastadd(first, Z2), third )  // (z1 + z2) + z3, the last addition with its zero-as-2^-127 rule
     1/w plane:       C = cut16(mean)
@@ -359,6 +361,13 @@ other, p, has top - 1 == -126 (2^-126 <= |p| < 2^-125) **and the opposite sign**
 (1 + m 2^-23) 2^-127 with its sign; if p + that is below 2^-126 (or 0) the sum is +0, otherwise the sum is p
 unchanged. Otherwise a zero is nothing. [M slivers_dzzero 9,600 of 9,600 (831 exactly on the boundary keep the
 depth; the alternatives 6,711 .. 7,564)]. **GAP**: the same question in the last addition (beyond the planes' rule).
+
+The ISP's depth mean (isp §9.4b) uses the same `OneThird()` and the same sum order, but its additions are the depth
+setup's (isp §6.3): in **every** addition a zero added to a number of 2^-126 .. 1.5 * 2^-126 of the other sign gives
++0 and to any other number that number exactly, and every zero sum is +0. Its zero has no fraction (field 0 is a
+zero at `FromSingle`), so its threshold is 1.5 * 2^-126 where this rule's is (1.5 + m 2^-24) 2^-126, and it never
+adds a zero as ±2^-127 as the planes' last addition does (4.1) [depthgaps_zadd: 109 of 109 regions with the ISP's
+rule, 76 with the planes' last-addition rule; depthgaps_field1]. The two units do not share the rule.
 
 Pins: the mean, not the third corner's depth [M slivers_tsp 3600 cells: 42 differ with z3; slivers_detzero 9,600
 of 9,600, against 8,143 with 0xAAAAAA, 9,474 with 25-bit sums, 9,413 / 9,379 other orders, 9,373 exact;
@@ -1090,7 +1099,7 @@ A run-only pixel still has the side effects of shading: it counts for `offsKept`
 | twiddle | logic | bit interleave, section 9.2 | layout |
 | fog table | 128 x 16 bits | FOG_TABLE registers | software |
 | palette | 1024 x 32 bits | PALETTE_RAM registers | software |
-| 1/3 | 24 bits | 0xAAAAAB x 2^-25 | measured [slivers_detzero, perpmean_*] |
+| 1/3 | 24 bits | 0xAAAAAB x 2^-25 (`pvrfp::OneThird()`, shared with the ISP's depth mean) | measured [slivers_detzero, perpmean_*] |
 | length constant | 24 bits | 0x95F612 x 2^-24 | measured [mipk4] |
 
 `gentable.h` / `gentable.py`: dispatch only (section 2.4).
@@ -1161,7 +1170,8 @@ per divided attribute a table reciprocal and a 16x17 multiplier; setup and run s
 ## 22. GAP list (refsw3 behaviour no console test pins)
 
 1. PARAM_BASE with bits below 20 set (TSP fetch base vs the ISP's).
-2. Last-addition zero rule's upper limit 2^-125 vs 2^-124; the determinant-zero mean's zero rule in the last addition.
+2. Last-addition zero rule's upper limit 2^-125 vs 2^-124; the determinant-zero mean's zero rule in the last addition
+   (the ISP's depth mean has its own rule in both additions, measured: isp §6.3, 4.4).
 3. Mip K: DCalcCtrl 1 adder reach 53; "first vertex" of an odd strip triangle; perpendicular triangles; the -1-unit 1/w pixel.
 4. Mipmapped texture declared taller than wide at large d with fraction bits.
 5. TEXT_CONTROL stride 0; bank bit 4 / reads past 8 MB; a code book within 2 KB of 8 MB.

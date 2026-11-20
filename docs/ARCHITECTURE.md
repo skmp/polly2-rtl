@@ -41,18 +41,32 @@ spec and refsw3 disagree, **refsw3 wins** and the spec is wrong (conv §1).
 - **[A]** an architecture choice. No console fact tells the alternatives apart, and **neither the functional result
   nor any clock** depends on the choice. A choice that can move a clock is [G], not [A].
 
-### 0.1 Where the specs are behind refsw3 `708fb8cd`
+### 0.1 Where the specs were behind refsw3 `708fb8cd` (done)
 
-The specs were transcribed at `2d08a440`. On the points below refsw3 has moved, and this document follows refsw3.
-The spec readers must re-transcribe them (`OPEN_ITEMS.md`).
+The specs were transcribed at `2d08a440`. On the points below refsw3 moved, and this document followed refsw3. **All
+of them are re-transcribed** (spec refresh, 2026-11-20): isp.md, numerics.md and tsp.md are pinned at `708fb8cd` now,
+which supersedes the `2d08a440` pin in the inputs list above. The "now in" column says where each rule is.
 
-| spec section | superseded by | what changed |
-|---|---|---|
-| isp §7.1, §7.2 | `6784ea3d` edge.h `EdgeWinding` | the edge sign and both culls use the **swamped** determinant; plain `Winding` only reports bad corners |
-| isp §8.2-8.5, num §3 EdgeHW, num H7a, num §8 A1 (edge site), num G3, isp §15 #1 | `6784ea3d` edge.h `EdgeTile::Setup`, `Walk` | products and sums at 2^128 swamp; the start saturates to 2^127 (the 2^132 rule is gone); E capped at `blockMax` 129; an edge with a step of 2^123 or more ("big") is walked down the tile (§3.4.5) |
-| isp §8.6 | `6784ea3d` tile.cpp `RasterizeTriangle` | a polygon whose first row is the tile's row 31 starts at row 30 when any edge is big |
-| isp §9.3-9.7, num H14, num §4 (depth flavour), num §8 A3, isp §15 #2-#6, #8, #10 | `708fb8cd` depth.h | the stored depth is an order key 32 bits finer than the word (`StoredDepth::k`); negative depths are a block exponent and a fixed point (`Neg`); positive depths from 2^128 lie above every word (`Big`); `RegDepth` replaces kWrap / WrapWord; the constant's overflow (old ovf 1) steps as a block from a forced start; the float form is unreachable; new zero rule in the depth adds; the determinant-zero mean handles infinite corners; new background word below zero |
-| tsp (all) | — | `708fb8cd` only factors out `pvrfp::OneThird()`; no functional change |
+| spec section (at `2d08a440`) | superseded by | what changed | status: now in |
+|---|---|---|---|
+| isp §7.1, §7.2 | `6784ea3d` edge.h `EdgeWinding` | the edge sign and both culls use the **swamped** determinant; plain `Winding` only reports bad corners | done: isp §7.1, §7.2; num §2.12, §5.1 |
+| isp §8.2-8.5, num §3 EdgeHW, num H7a, num §8 A1 (edge site), num G3, isp §15 #1 | `6784ea3d` edge.h `EdgeTile::Setup`, `Walk` | products and sums at 2^128 swamp; the start saturates to 2^127 (the 2^132 rule is gone); E capped at `blockMax` 129; an edge with a step of 2^123 or more ("big") is walked down the tile (§3.4.5) | done: isp §8.2, §8.3, §8.4a, §8.4b (the walk), §8.5 (widths re-checked), §15 #1, #24; num §3.1, H7a (`fp_swamp`), §8 (A1, G3, G10, G13) |
+| isp §8.6 | `6784ea3d` tile.cpp `RasterizeTriangle` | a polygon whose first row is the tile's row 31 starts at row 30 when any edge is big | done: isp §8.6, §15 #25 |
+| isp §9.3-9.7, num H14, num §4 (depth flavour), num §8 A3, isp §15 #2-#6, #8, #10 | `708fb8cd` depth.h | the stored depth is an order key 32 bits finer than the word (`StoredDepth::k`); negative depths are a block exponent and a fixed point (`Neg`); positive depths from 2^128 lie above every word (`Big`); `RegDepth` replaces kWrap / WrapWord; the constant's overflow (old ovf 1) steps as a block from a forced start; the float form is unreachable; new zero rule in the depth adds; the determinant-zero mean handles infinite corners; new background word below zero | done: isp §4.2 (background), §6.3 (limits, zero rule), §9.1-9.7, §10.1, §13, §15 #2-#11, #26, #27 (row numbers kept), §16, §17; num §1.2-1.4, §3.2, §3.5, §4, §5.2, H10-H12, H14 (a-i), §7, §8 (A2, A3 closed, A5, D2, G4-G7, G12) |
+| tsp (all) | — | `708fb8cd` only factors out `pvrfp::OneThird()`; no functional change | done: tsp header, §4.4 (with the ISP's own zero rule beside the TSP's), §20, §22 #2 |
+
+Found while re-transcribing, for this document (it is not edited here; the spec sections named are the reference):
+- **`nsh` can be negative.** `nsh = E - 15 - gexp` is below 0 when E is clamped at 128 with `gexp > 113` (-15 .. 14 in
+  the run). With a nonzero start `M = t * 2^-nsh` (a left shift); with a start cut to zero refsw3 stores its fallback
+  word 0xFF000000 (isp §9.6, num A5). Neither happened at a covered pixel in 300,000 random planes
+  (`agents/spec-refresh/widths708.cpp`), but `At` returns them, so a lockstep over every lane meets them. §2.4's
+  5-bit unsigned `nsh` does not hold them.
+- **M can exceed 2^23** at such pixels (2^34.1 in the run, bounded by 2^43; never above 2^23 at a covered pixel).
+  §2.1's "`|M| < 2^23` in the 30-bit form" holds for covered pixels only.
+- **The TR peel's reset `bits(0x7F7FFFFF)` is not above every depth**: a `Big` depth (2^128 and up) is above it
+  (isp §11.2).
+- **The depth zero rule** reads "the bit under the leading one", which refsw3 computes with a shift by -1 for a
+  one-bit mantissa (num D2); H10 implements the value rule `|v| < 1.5 * 2^-126`.
 
 ### 0.2 Rules this architecture follows
 
