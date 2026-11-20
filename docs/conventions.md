@@ -265,6 +265,8 @@ This is the owner's rule for shrike4 rtl/v1, and it applies here because "cycle 
 |---|---|---|---|
 | `rtl/v1/pkg/p2_hw_pkg.sv` | `tools/gen/gen_hw_pkg.cpp`: C++ that `#include`s the refcore headers and prints one localparam per member of `pvrisp::EdgeHW`, `pvrisp::DepthHW`, `pvrtsp::PlaneHW` and any further `*HW` struct. Example: `localparam int P2_ISP_DEPTH_STORED_BITS = 19;` | refcore `*HW` structs (`static constexpr pvrfp::C<N>`) | `make hw-pkg-check`: regenerate into `build/gen/` and `cmp` against the checked-in file |
 | `rtl/v1/pkg/p2_regs_pkg.sv` | `tools/gen/gen_regs.py`: text munging, adapted from polly2-rtl-lite `tools/gen_pvr_regs.py`. C bitfields become SV packed structs, MSB first; register offsets become localparams | nulldc3 `libswirl/hw/pvr/pvr_regs.h`, refcore `core_structs.h`, `refsw_lists_regtypes.h` | `make regs-pkg-check` |
+| `rtl/v1/lib/fp/p2_fp_recip_rom.sv` | `tools/gen/gen_recip_rom.cpp`: reads the 512 c digits from the text of `RecipTable`'s string, computes `t` and `n` by the formula, checks both against the compiled `pvrtsp::RecipTable`, prints a case ROM of `{t - 65536, n}` | refcore `pvr_tsp_plane.h` `RecipTable` (num H13) | `make roms-check` (the fp-c and fp gates run it) |
+| `rtl/v1/lib/rom/p2_rom_bm_sin.sv`, `p2_rom_bm_cos.sv`, `p2_rom_dither.sv` | `tools/gen/gen_table_roms.cpp`: reads the brace list after each table's declaration (decimal entries only, the exact count) and prints a case ROM | refcore `refsw_tile.cpp` `BM_HW_SIN`, `BM_HW_COS`; `refsw_lists.cpp` `ditherAdd` (tsp 12, 17.3, appendix B) | `make roms-check` |
 
 - The widths in `p2_hw_pkg.sv` are refsw3's measured precisions. The RTL takes widths from this package and nowhere
   else.

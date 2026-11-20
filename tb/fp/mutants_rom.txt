@@ -1,0 +1,16 @@
+# tb/fp/mutants_rom.txt: the planted bugs of the measured-table ROMs, rtl/v1/lib/rom (PLAN M1c, conventions.md 7.7), run
+# by tools/gate/mutants.py (make fp-c-mutants, fp-mutants). The ROMs live outside rtl/v1/lib/fp, so this file copies
+# rtl/v1/lib/rom and points the fp builds' ROM_DIR at the copy (tb/mk/fp.mk). Every one must be caught by its probe in
+# quick mode; the unchanged ROMs must pass first. A mutant edits a generated file: roms-check would catch it too, but
+# here the testbench must (the ROM against refsw3's own table).
+#
+# Format: <id> | <file in rtl/v1/lib/rom> | <original fragment> | <mutated fragment> | <probe> [args] | <what it breaks>
+# (\n a newline, \| a bar, \\ a backslash in a fragment).
+@dir rtl/v1/lib/rom ROM_DIR
+@obj FP_OBJDIR
+@probe rom fp-rom-build rom/tb
+
+rom-sin-entry | p2_rom_bm_sin.sv | 8'd100: v = 8'd149; | 8'd100: v = 8'd150; | rom | SIN[100] one up (bumpfn: every S under fourteen lights)
+rom-cos-entry | p2_rom_bm_cos.sv | 8'd37:  v = 8'd246; | 8'd37:  v = 8'd245; | rom | COS[37] one down (bumpfn)
+rom-sin0-2 | p2_rom_bm_sin.sv | 8'd0:   v = 8'd0; | 8'd0:   v = 8'd2; | rom | SIN[0] = 2: beyond the freedom bumpfn leaves (0 or 1)
+rom-dither-transposed | p2_rom_dither.sv | case ({y, x}) | case ({x, y}) | rom | the dither table's rows as x (fbpack: rows are y)

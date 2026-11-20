@@ -35,3 +35,19 @@ lint_off -rule UNUSEDSIGNAL -file "*/p2_fp_halfline_tb_top.sv" -match "*'b_bad'*
 lint_off -rule UNUSEDSIGNAL -file "*/p2_fp_floor_tb_top.sv" -match "*'v_bad'*"
 lint_off -rule UNUSEDSIGNAL -file "*/p2_fp_floor_tb_top.sv" -match "*'fs_frac'*"
 lint_off -rule UNUSEDSIGNAL -file "*/p2_fp_floor_tb_top.sv" -match "*'fu_frac'*"
+// ---- M1c
+// the exponent arithmetic's top bits, as above (the 10-bit field holds every reachable value; the testbench asserts it)
+lint_off -rule UNUSEDSIGNAL -file "*/p2_fp_den_seen.sv" -match "*'e16'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_fp_div_quot.sv" -match "*'oe'*"
+// p2_fp_den_seen, p2_fp_div_den: norm16 reads the top 16 bits of the left-justified mantissa (a shift right truncates)
+lint_off -rule UNUSEDSIGNAL -file "*/p2_fp_den_seen.sv" -match "*'lj'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_fp_div_den.sv" -match "*'lj'*"
+// p2_fp_div_den: denominator_seen's sign is dropped (the quotient has the numerator's; a zero den is mapped first)
+lint_off -rule UNUSEDSIGNAL -file "*/p2_fp_div_den.sv" -match "*'s_neg'*"
+// p2_fp_recip_mant: D's bit 15 is set in the domain (the ROM index is D[14:6]); 64 t - 1 - n f lies in [2^22, 2^23)
+// and r drops its low 7 bits (RecipTable::Mantissa's >> 7)
+lint_off -rule UNUSEDSIGNAL -file "*/p2_fp_recip_mant.sv" -match "*'d'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_fp_recip_mant.sv" -match "*'x'*"
+// p2_fp_color_round: below the clamp (top - SE <= 30) twice < 2^31 fills w's low 31 bits only, and v <= MAX <= 65535
+lint_off -rule UNUSEDSIGNAL -file "*/p2_fp_color_round.sv" -match "*'w'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_fp_color_round.sv" -match "*'v'*"

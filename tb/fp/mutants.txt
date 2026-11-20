@@ -28,6 +28,8 @@
 @probe floor    fp-floor-build    floor/tb
 @probe value    fp-value-build    value/tb
 @probe zblock   fp-zblock-build   zblock/tb
+@probe div      fp-div-build      div/tb
+@probe colour   fp-colour-build   colour/tb
 
 # ---- the M1 table: H6
 add-reach24 | p2_fp_add.sv | localparam int REACH = R; | localparam int REACH = R - 1; | add | reach 25 to 24: an operand 24 tops below is dropped (covmeas point 3, uvmeas reach1)
@@ -105,3 +107,30 @@ zblock-fallback-off | p2_fp_depth_block.sv | end else if (fbk) begin | end else 
 zblock-neg-trunc | p2_fp_depth_block.sv | m = 31'(TW'(t >>> nsh)); | m = 31'(TW'(t >>> nsh)) + 31'((t[TW-1] && (t & ~({TW{1'b1}} << nsh)) != '0) ? 1 : 0); | zblock | M toward zero instead of down (NegWord: an arithmetic shift)
 zblock-stored-20 | p2_fp_depth_block.sv | localparam int SB  = P2_ISP_DEPTH_STORED_BITS; | localparam int SB  = P2_ISP_DEPTH_STORED_BITS + 1; | zblock | the stored depth with 20 bits (19: zmeas, zblock)
 zblock-lshift-nosat | p2_fp_depth_block.sv | end else if (ls > 6'd31 \|\| wide < MLOW) begin | end else if (ls > 6'd31) begin | zblock | the left-shifted M not saturated at -2^30 (it wraps)
+
+# ==== M1c (PLAN M1 round c) ====
+# The ROMs of rtl/v1/lib/rom (SIN, COS, dither) have their mutants in tb/fp/mutants_rom.txt (another folder). The
+# reciprocal ROM is generated into this folder (p2_fp_recip_rom.sv), so its mutant is here.
+# Equivalent mutants left out:
+#   - p2_fp_color_round's last clamp after the rounding (refsw3's `v > max ? max : v` in place of `twice > 2 max`):
+#     twice > 2 MAX <=> (twice + 1) >> 1 > MAX, so either one alone is the rule.
+#   - p2_fp_color_round's clamp from top - SE > 31: there twice >= 2^31 > 2 MAX, and the second clamp gives MAX too.
+#   - p2_fp_div_quot's exponent and mantissa in its zero branch: a zero's exponent is not compared (num 1.3) and the
+#     product of a zero mantissa is 0 anyway; only the sign is the rule (div-num0-neg).
+# ---- the M1 table: H13
+div-c-digit | p2_fp_recip_rom.sv | 9'd100: v = {17'd44120, 9'd180};   // t 109656, c 1 | 9'd100: v = {17'd44120, 9'd179};   // t 109656, c 0 | div | one c digit flipped (c[100] 1 to 0: uvmeas recipscan pins all 512)
+div-floor16 | p2_fp_div_quot.sv | localparam int QF = 17; | localparam int QF = 16; | div | the 17-bit floor to 16 (uvmeas item 8, reciprow: 17 fractional bits)
+# ---- one or more a mechanism of the rest of H13 and H15
+div-floor-trunc | p2_fp_div_quot.sv | assign q    = p[PW-1 -: QF] + QF'(n_neg && lost); | assign q    = p[PW-1 -: QF]; | div | a negative quotient toward zero (uvmeas item 3: toward minus infinity, half a unit high)
+div-num0-neg | p2_fp_div_quot.sv | if (n_mant == '0) begin\n      o_neg  = 1'b0; | if (n_mant == '0) begin\n      o_neg  = n_neg; | div | 0 / den keeps a negative numerator's sign (hugepos c: +0)
+div-den0-127 | p2_fp_div_den.sv | ed = P2_FP_XW'(ZEXP + 1); | ed = P2_FP_XW'(ZEXP + 2); | div | a den of 0 read as 2^-127 (wzero2: 2^-128)
+seen-no-negate | p2_fp_den_seen.sv | assign neg15 = {1'b1, 15'(16'd0 - m16)}; | assign neg15 = m16; | div | a negative den read as its size (wneg: the 15 bits under the leading one negated)
+seen-m143-norm | p2_fp_den_seen.sv | end else if (top < P2_FP_XW'(TINY)) begin | end else if (1'b0) begin | div | -2^-143 normalized and negated like the others (texfar_m1: 0xFFFF 2^-143)
+recip-no-minus1 | p2_fp_recip_mant.sv | assign t64 = {t, 6'd0} - 24'd1; | assign t64 = {t, 6'd0}; | div | 64 t[i] without the -1 (uvmeas: 1 / 1.0 is 65535 / 65536)
+recip-slope-off | p2_fp_recip_mant.sv | assign x   = t64 - {9'd0, nf}; | assign x   = t64 - {9'd0, nf} + {9'd0, n, 6'd0}; | div | the slope one step late (the linear step over D's low 6 bits from f + 1)
+# ---- the M1 table: H15
+colour-trunc | p2_fp_color_round.sv | assign v     = (twice + TW'(1)) >> 1; | assign v     = twice >> 1; | colour | half-up to truncate (cmeas: floor(v + 1/2))
+colour-neg | p2_fp_color_round.sv | else if (q_neg \|\| q_mant == '0) | else if (q_mant == '0) | colour | a quotient below zero by its size (cmeas: 0)
+colour-fallback | p2_fp_color_round.sv | o = {8'd0, fallback}; | o = '0; | colour | a flagged quotient black (huge: the vertex's colour)
+colour-half-even | p2_fp_color_round.sv | assign v     = (twice + TW'(1)) >> 1; | assign v     = (twice + TW'(twice[1])) >> 1; | colour | ties to even (cmeas: half way up)
+

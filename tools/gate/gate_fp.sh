@@ -1,8 +1,8 @@
 #!/bin/bash
 # gate_fp.sh: the M1 gates (PLAN M1; docs/spec/numerics.md 7), run by make fp-a / fp-a-full / fp-a-mutants, make fp-b /
-# fp-b-full / fp-b-mutants and make fp / fp-full / fp-mutants.
+# fp-b-full / fp-b-mutants, make fp-c / fp-c-full / fp-c-mutants and make fp / fp-full / fp-mutants (the whole M1).
 #
-#   tools/gate/gate_fp.sh <round> [--full | --mutants]     round: a (M1a), b (M1b), all (every round so far)
+#   tools/gate/gate_fp.sh <round> [--full | --mutants]     round: a (M1a), b (M1b), c (M1c), all (every round)
 #
 #   quick (gate fp-a, fp)            check_ref_copies, check_ref_switches, the round's testbenches built (make -j), lint-fp,
 #                                    then every testbench in quick mode, one step each (seconds each; under a minute)
@@ -10,7 +10,9 @@
 #                                    ways by tools/gate/run_shards.sh; a few minutes, under /tmp/polly2-rtl-gate.lock
 #   --mutants (fp-a-mutants, ...)    tools/gate/mutants.py tb/fp/mutants.txt on the mutants whose probe is a testbench
 #                                    of the round, and for M1b also tb/fp/mutants_zword.txt (the mutants of
-#                                    rtl/v1/pkg/p2_zword_pkg.sv, which lives outside lib/fp); under the lock
+#                                    rtl/v1/pkg/p2_zword_pkg.sv, which lives outside lib/fp), for M1c also
+#                                    tb/fp/mutants_rom.txt (the measured-table ROMs in rtl/v1/lib/rom); under the lock
+#   M1c and all (every mode) also run roms-check: the generated ROMs are what refcore gives (tb/mk/gen.mk)
 #
 # Ends with "<gate>: PASS" or "<gate>: FAIL" (exit code to match); build/gate/<gate>/summary.txt with the revision
 # header and, under each testbench's step, its checks / failures line. Environment: FP_J (make -j, 12), FP_SHARDS (12),
@@ -18,23 +20,25 @@
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 
-# the testbenches of each round (tb/mk/fp.mk FP_A_PRIMS, FP_B_PRIMS)
+# the testbenches of each round (tb/mk/fp.mk FP_A_PRIMS, FP_B_PRIMS, FP_C_PRIMS)
 ROUND_a="lzc cut cutbelow in mul add recip cmp range"
 ROUND_b="swamp halfline minor floor value zblock zword"
+ROUND_c="div colour rom"
 
 round=${1:-}
 mode=${2:-quick}
 case "$round" in
   a)   prims=$ROUND_a; gate=fp-a ;;
   b)   prims=$ROUND_b; gate=fp-b ;;
-  all) prims="$ROUND_a $ROUND_b"; gate=fp ;;
-  *)   echo "usage: gate_fp.sh <a | b | all> [--full | --mutants]"; exit 2 ;;
+  c)   prims=$ROUND_c; gate=fp-c ;;
+  all) prims="$ROUND_a $ROUND_b $ROUND_c"; gate=fp ;;
+  *)   echo "usage: gate_fp.sh <a | b | c | all> [--full | --mutants]"; exit 2 ;;
 esac
 case "$mode" in
   quick)     ;;
   --full)    gate=$gate-full ;;
   --mutants) gate=$gate-mutants ;;
-  *)         echo "usage: gate_fp.sh <a | b | all> [--full | --mutants]"; exit 2 ;;
+  *)         echo "usage: gate_fp.sh <a | b | c | all> [--full | --mutants]"; exit 2 ;;
 esac
 
 # the long ones run one at a time on the box (PLAN 0 rule 3)
@@ -60,15 +64,21 @@ tb_step() {   # tb_step <step name> <command ...>
 gate_begin "$gate"
 gate_step check_ref_copies   bash tools/check_ref_copies.sh
 gate_step check_ref_switches bash tools/check_ref_switches.sh
+case "$round" in c|all) gate_step roms-check $MAKE -s roms-check ;; esac
 if [ "$mode" = --mutants ]; then
   tb_step mutants python3 tools/gate/mutants.py tb/fp/mutants.txt --jobs "${FP_MUT_JOBS:-6}" --probes "${prims// /,}"
   grep -E 'caught|SURVIVED|ERROR|control' "$GATE_DIR/mutants.log" | sed 's/^/    /'
   while IFS= read -r l; do GATE_LINES+=("    $l"); done < <(grep -E ' (caught|SURVIVED|ERROR)' "$GATE_DIR/mutants.log")
-  if [ "$round" != a ]; then
+  case "$round" in b|all)
     tb_step mutants-zword python3 tools/gate/mutants.py tb/fp/mutants_zword.txt --jobs "${FP_MUT_JOBS:-6}"
     grep -E 'caught|SURVIVED|ERROR|control' "$GATE_DIR/mutants-zword.log" | sed 's/^/    /'
     while IFS= read -r l; do GATE_LINES+=("    $l"); done < <(grep -E ' (caught|SURVIVED|ERROR)' "$GATE_DIR/mutants-zword.log")
-  fi
+  esac
+  case "$round" in c|all)
+    tb_step mutants-rom python3 tools/gate/mutants.py tb/fp/mutants_rom.txt --jobs "${FP_MUT_JOBS:-6}"
+    grep -E 'caught|SURVIVED|ERROR|control' "$GATE_DIR/mutants-rom.log" | sed 's/^/    /'
+    while IFS= read -r l; do GATE_LINES+=("    $l"); done < <(grep -E ' (caught|SURVIVED|ERROR)' "$GATE_DIR/mutants-rom.log")
+  esac
 else
   targets=""
   for p in $prims; do targets="$targets fp-$p-build"; done
