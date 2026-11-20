@@ -374,7 +374,7 @@ The whole of num §6 and §7, in three rounds, with H7a and H14 taken from refsw
 
 ### M2. ISP edge path
 
-**Status (2026-11-20): implemented, not committed.** `rtl/v1/isp/` (p2_isp_edge_setup, _det, _line, _cross, _block,
+**Status (2026-11-20): done.** `rtl/v1/isp/` (p2_isp_edge_setup, _det, _line, _cross, _block,
 p2_isp_rowrange, p2_isp_edge_raster, _row and the p2_isp_fadd / fmul / fsw wrappers), `tb/isp_edge/` (lockstep with
 refsw3 `4f3efe15`; directed literals including the console pages of faredge_*, hugepos_a, edge2_* compared pixel by
 pixel), `tools/gate/gate_isp_edge.sh`, `tria_extract.sh`, `tria_conv.cpp`; `make isp-edge`, `isp-edge-full` and
@@ -443,6 +443,16 @@ Results in `agents/m2r2/`.
 - dx / dy at 2^128 stepping as the swamp value instead of 2^127.
 
 ### M3. ISP depth path
+
+**Status (2026-11-20): done.** `rtl/v1/isp/` (p2_isp_depth_plane, _tile, _setup, _lane, _raster
+and the p2_isp_zadd / zmul wrappers; `p2_pkg::p2_ztile_t` at its 4f3efe15 form, `nsh` signed, `fbw`), `tb/isp_depth/`
+(lockstep with refsw3 `4f3efe15`, the plane through the verbatim copy `ref_copies_depth.h`), `tools/gate/gate_isp_depth.sh`;
+`tria_conv` writes the depth records `build/vec/<test>.trz` beside the `.tri`, and `tria_extract` answers a test's
+readbacks itself (zeros) and renders a repeated scene once (zword, zexfil's probes: thousands of renders otherwise).
+Notes from the run: refsw3's REG start reaches `|r0| < 2^26` (a finite `first0` up to 2^128), not 2^25; the 13 `.zme`
+files hold 89,765 brackets (export_z.py leaves out the 36 quad-diagonal pixels of the 89,801); NegWord's fallback word does
+reach covered pixels of random planes (650 of 79.3M fallback pixels in the full run, none on the console pages),
+unlike widths4f3d's 0: still equal to refsw3, reported, not gated. Results in `agents/m3/`.
 
 **Deliverables.** The depth datapath at refsw3 **`4f3efe15`** semantics (isp §6.3, §9; num §4, §5.2, H10, H12b,
 H14; ARCHITECTURE §0.1b, §2.4 `p2_ztile_t`, §3.4.4 steps 6-7, §3.4.5 depth lanes), as a fixed-latency unit (the

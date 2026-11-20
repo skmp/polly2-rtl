@@ -1,0 +1,56 @@
+# tb/isp_depth/mutants.txt: the planted bugs of the ISP depth path in rtl/v1/isp (PLAN M3 "Mutants", conventions.md 7.7),
+# run by tools/gate/mutants.py (make isp-depth-mutants). Every one must be caught by its probe and the unchanged folder
+# must pass first. The probes: `depth`, the testbench's directed, random (20,000 planes) and rdesc sections; `tria`, the
+# console pages' primitives (quick: one record in eight). The mutants of the M1 library and of p2_zword_pkg that the
+# depth path's own rules sit in are in tb/isp_depth/mutants_lib.txt and mutants_zword.txt (other folders).
+#
+# Format: <id> | <file in rtl/v1/isp> | <original fragment> | <mutated fragment> | <probe> [args] | <what it breaks>
+# (\n a newline, \| a bar, \\ a backslash in a fragment).
+#
+# How PLAN M3's list is planted:
+#   - DepthHW's numbers (tileBits, pairBits) at their use in p2_isp_depth_tile (p2_hw_pkg is generated and shared);
+#   - "the sample point swapped": the start at the other sample point; "708fb8cd's corner model": the start at the
+#     centre whatever HALF_OFFSET[0] says, and with HALF_OFFSET[0] = 0 the block's S stepped back half a pixel (h = -1:
+#     t = S + (2i - 1) DX + (2j - 1) DY), REG at the centre's start;
+#   - "an infinite determinant not 0" as the mean's key (refsw3 708fb8cd stored the first corner's word; the tile does
+#     not see the corners, any key that is not 0 is the bug);
+#   - "the forced start not stepped": the overflowed start's plane as CONST 0 (revision 1's ovf 1 had 0 at the first
+#     pixel and one word elsewhere; either is not stepped);
+#   - "a finite slope below zero rounded down" one unit of 2^102 down whatever the cut dropped (the RTL keeps no
+#     "dropped" flag; on the grid both agree only where nothing was cut).
+@dir rtl/v1/isp ISP_DIR
+@obj ISP_DEPTH_OBJDIR
+@probe depth isp-depth-build tb --only directed,random,rdesc --n 20000
+@probe tria isp-depth-build tb --only tria
+
+# ---- DepthHW's numbers
+tile-bits-25 | p2_isp_depth_tile.sv | localparam int TILE_BITS   = P2_ISP_DEPTH_TILE_BITS; | localparam int TILE_BITS   = P2_ISP_DEPTH_TILE_BITS - 1; | depth | tileBits 26 to 25: the block's grid twice as coarse (zmeas: 50 .. 1,800 brackets a bit)
+pair-bits-20 | p2_isp_depth_tile.sv | localparam int PAIR_BITS   = P2_ISP_DEPTH_PAIR_BITS; | localparam int PAIR_BITS   = P2_ISP_DEPTH_PAIR_BITS - 1; | depth | pairBits 21 to 20: the slopes' shared grid twice as coarse (zmeas 28,686 slopes)
+start-on-slopes-off | p2_isp_depth_tile.sv | assign st = pair_v ? st_c : f20; | assign st = f20; | depth | startOnSlopes 0: the start not cut to the slopes' grid (zstart 49,152; depthgaps_flt)
+one-third-aaaaaa | p2_isp_depth_plane.sv | third.mant = 24'hAAAAAB; | third.mant = 24'hAAAAAA; | depth | OneThird as the reciprocal unit's 0xAAAAAA (perpmean_word: 1,618 words; depthgaps_detneg 100 + 2^-12)
+# ---- the sample point (0de9776b)
+sample-swapped | p2_isp_depth_tile.sv | x00.mant = 24'({tile_x, 5'd0, half});\n    y00      = '0;\n    y00.exp  = -10'sd1;\n    y00.mant = 24'({tile_y, 5'd0, half}); | x00.mant = 24'({tile_x, 5'd0, !half});\n    y00      = '0;\n    y00.exp  = -10'sd1;\n    y00.mant = 24'({tile_y, 5'd0, !half}); | depth | the start at the centre with HALF_OFFSET[0] = 0 and at the corner with 1 (widths4f3d: 18,495 of 37,500 planes)
+corner-708fb8cd | p2_isp_depth_tile.sv | x00.mant = 24'({tile_x, 5'd0, half});\n    y00      = '0;\n    y00.exp  = -10'sd1;\n    y00.mant = 24'({tile_y, 5'd0, half}); | x00.mant = 24'({tile_x, 5'd0, 1'b1});\n    y00      = '0;\n    y00.exp  = -10'sd1;\n    y00.mant = 24'({tile_y, 5'd0, 1'b1}); | depth | 708fb8cd's corner model, its start: at the centre whatever HALF_OFFSET[0] (depth2_halfc: zword TL +inf at 0, not +1 step)
+corner-708fb8cd-h | p2_isp_depth_tile.sv | z.S      = S; | z.S      = half ? S : S - P2_ZT_S_BITS'(gstep(ag, gexp)) - P2_ZT_S_BITS'(gstep(bg, gexp)); | depth | 708fb8cd's corner model, its steps: with HALF_OFFSET[0] = 0 the block stepped half a pixel back from the start (h = -1; depth2_halfo 16 / 16)
+# ---- the zero rule (0de9776b): the expected values are refsw3's own DepthTileT<DepthHW>; DepthTileT<DepthConfig> with
+#      the switch at 0 changes 1,988 / 1,115 of 30,000 planes of the zcoord / zedge class (widths4f3d)
+zero-rule-coords-off | p2_isp_depth_plane.sv | localparam bit RULE_COORDS = P2_ISP_DEPTH_ZERO_RULE_COORDS != 0; | localparam bit RULE_COORDS = 1'b0; | depth | zeroRuleCoords 0: no zero rule in the coordinate differences (depth2_zcoord 2,599 pixels)
+zero-rule-edges-off | p2_isp_depth_plane.sv | localparam bit RULE_EDGES  = P2_ISP_DEPTH_ZERO_RULE_EDGES != 0; | localparam bit RULE_EDGES  = 1'b0; | depth | zeroRuleEdges 0: no zero rule in the edges and the determinant (depth2_zedge 160 pixels)
+# ---- the determinant's limit (4f3efe15)
+det-limit-off | p2_isp_depth_tile.sv | if (det.bad \|\| det_big) begin | if (det.bad) begin | depth | a determinant of 2^126 or more keeps its reciprocal (708fb8cd; trsort_recip: 24 of 160 regions, trsort_auto 144,629 pixels)
+det-limit-above | p2_isp_depth_tile.sv | (ftop(det.exp, det.mant) - XW'(1) >= XW'(DET_HIGH)); | ((ftop(det.exp, det.mant) - XW'(1) > XW'(DET_HIGH)) \|\| (ftop(det.exp, det.mant) - XW'(1) == XW'(DET_HIGH) && (det.mant & (det.mant - 24'd1)) != '0)); | depth | exactly 2^126 kept (the limit above 2^126: trsort_recip's f = 1, page 3)
+det-limit-127 | p2_isp_depth_tile.sv | localparam int DET_HIGH    = P2_FP_RECIP_DET_HIGH; | localparam int DET_HIGH    = P2_FP_RECIP_DET_HIGH + 1; | depth | the limit at 2^127 (trsort_recip f = 1 .. 2)
+det-inf-not-zero | p2_isp_depth_tile.sv | if (det.bad \|\| det_big) begin\n      z.regime = P2_Z_CONST;                    // the reciprocal is zero: 0 at every pixel\n      z.key    = '0; | if (det.bad \|\| det_big) begin\n      z.regime = P2_Z_CONST;                    // the reciprocal is zero: 0 at every pixel\n      z.key    = det.bad ? mean_key : '0; | depth | an infinite determinant not 0 (trsort_recip page 10, trsort_auto)
+# ---- the start
+first-unranged | p2_isp_depth_tile.sv | p2_isp_zmul #(.RANGED(1'b1)) u_ax (.a(a), .b(x00), .o(ax));\n  p2_isp_zmul #(.RANGED(1'b1)) u_by (.a(b), .b(y00), .o(by)); | p2_isp_zmul #(.RANGED(1'b0)) u_ax (.a(a), .b(x00), .o(ax));\n  p2_isp_zmul #(.RANGED(1'b0)) u_by (.a(b), .b(y00), .o(by)); | depth | the ranged and unranged chains swapped at first: a x0, b y0 in plain arithmetic (depthgaps_tinyramp: 16 pixels)
+first-unranged-mul | p2_isp_depth_tile.sv | p2_isp_zmul #(.RANGED(1'b1)) u_first (.a(s_abc), .b(inv0), .o(first0)); | p2_isp_zmul #(.RANGED(1'b0)) u_first (.a(s_abc), .b(inv0), .o(first0)); | depth | the start's last product in plain arithmetic (no 2^128 / 2^-126 limit: depthgaps_tinyramp, zovf_sum)
+e-max-off | p2_isp_depth_tile.sv | localparam int E_MAX       = 128; | localparam int E_MAX       = 255; | depth | E not clamped at 128 (depthgaps_bigslope, depthgaps_bigpair)
+e-min-off | p2_isp_depth_tile.sv | localparam int E_MIN       = -122; | localparam int E_MIN       = -255; | depth | E not clamped at -122 (depthgaps_neggrid, depthgaps_tinymean)
+forced-not-stepped | p2_isp_depth_tile.sv | end else if (forced_flat) begin | end else if (fbad && !forced_flat) begin\n      z.regime = P2_Z_CONST;\n      z.key    = '0;\n    end else if (forced_flat) begin | depth | the forced start not stepped (revision 1's ovf 1; depthgaps_infstart, zovf, depthgaps_bigpos)
+# ---- REG
+reg-no-finite-steps | p2_isp_depth_tile.sv | assign fa = rstep(cap_a, a.mant == '0, qa);\n  assign fb = rstep(cap_b, b.mant == '0, qb); | assign fa = '0;\n  assign fb = '0; | depth | REG without the finite slope's steps, fa = fb = 0 (zovf_creg 9 of 50; zovf_ab 518 of 676)
+reg-start-down | p2_isp_depth_tile.sv | r0 = first0.neg ? P2_ZT_REG_BITS'(64'd0 - m) : P2_ZT_REG_BITS'(m); | r0 = first0.neg ? P2_ZT_REG_BITS'(64'd0 - m - ((sh < 0 && sh > XW'(-64) && (64'(rs.mant) & ((64'd1 << 6'(XW'(0) - sh)) - 64'd1)) != '0) \|\| (sh <= XW'(-64) && rs.mant != '0) ? 64'd1 : 64'd0)) : P2_ZT_REG_BITS'(m); | depth | REG's negative start rounded down, not toward zero (depthgaps_rstart: -2^101 .. -0.5 start at 0)
+reg-start-no-cut20 | p2_isp_depth_tile.sv | rs.exp  = f0_20.exp;\n    rs.mant = 24'(f0_20.mant); | rs.exp  = first0.exp;\n    rs.mant = first0.mant; | depth | r0 without the cut to 20 bits (depthgaps_rcut: 32 of 32 regions)
+reg-slope-down | p2_isp_depth_tile.sv | return q.neg ? 31'sd0 - $signed({1'b0, m}) : $signed({1'b0, m}); | return q.neg ? 31'sd0 - $signed({1'b0, m}) - 31'sd1 : $signed({1'b0, m}); | depth | a finite slope below zero rounded down (zovf_wrap W2: 124 of 128; depth2_cneg)
+# ---- the mean
+mean-inf-first-word | p2_isp_depth_plane.sv | assign mean_key = p2_zword_pkg::flat(mean); | assign mean_key = (Z[0].bad \|\| Z[1].bad \|\| Z[2].bad) ? p2_zword_pkg::bits(z_bits[0]) : p2_zword_pkg::flat(mean); | depth | the mean's infinite corners as z1's word (revision 1; depthgaps_dzinf 48 of 48)

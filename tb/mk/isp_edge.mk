@@ -34,9 +34,9 @@ isp-edge-build:
 isp-edge-tb: isp-edge-build
 	$(ISP_EDGE_OBJDIR)/tb
 
-$(TRIA_CONV): tools/gate/tria_conv.cpp tb/isp_edge/tri_rec.h tb/common/p2tb.h
+$(TRIA_CONV): tools/gate/tria_conv.cpp tb/isp_edge/tri_rec.h tb/isp_depth/triz_rec.h tb/common/p2tb.h
 	@mkdir -p $(dir $@)
-	$(HOSTCXX) -std=c++17 -O2 -Wall -Wextra -Itb/common -Itb/isp_edge $< -o $@
+	$(HOSTCXX) -std=c++17 -O2 -Wall -Wextra -Itb/common -Itb/isp_edge -Itb/isp_depth $< -o $@
 
 refsw3-offline:
 	@bash $(NULLDC3)/refsw3-offline/build.sh $(CWD)/$(BUILD)/refsw3-offline

@@ -1,0 +1,19 @@
+// isp_depth_lint.vlt: verilator -Wall waivers for make lint-isp-depth (conventions.md 4.8): rtl/v1/isp's depth units
+// (PLAN M3) and the tb/isp_depth top. Each waiver names its file and its reason.
+`verilator_config
+// the shared packages and the M1 library, as tb/fp/fp_lint.vlt (they are linted there; here they are only compiled in)
+lint_off -rule UNUSEDPARAM -file "*/p2_hw_pkg.sv"
+lint_off -rule UNUSEDPARAM -file "*/p2_regs_pkg.sv"
+lint_off -rule UNUSEDPARAM -file "*/p2_pkg.sv"
+lint_off -rule UNUSEDPARAM -file "*/p2_fp_pkg.sv"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_zword_pkg.sv" -match "*'v'[31:30]*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_zword_pkg.sv" -match "*'r'[31:30]*"
+lint_off -rule UNUSEDSIGNAL -file "*lib/fp/p2_fp_*.sv"
+lint_off -rule PINCONNECTEMPTY -file "*lib/fp/p2_fp_*.sv"
+// p2_isp_depth_tile: the bad flags of the 20-bit cuts of finite values (the slopes and the start: a, b, inv0 and first
+// are finite where they are read; refsw3's cut / cutBelow carry the flag and nobody reads it there)
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_depth_tile.sv" -match "*'q'[30]*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_depth_tile.sv" -match "*'st'[30]*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_depth_tile.sv" -match "*'v'[30]*"
+// p2_isp_depth_tile: the register's start rs is read for its exponent and mantissa (its sign and flag are first0's)
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_depth_tile.sv" -match "*'rs'[35:34]*"

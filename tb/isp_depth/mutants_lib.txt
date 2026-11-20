@@ -1,0 +1,12 @@
+# tb/isp_depth/mutants_lib.txt: the planted bugs of the M1 library (rtl/v1/lib/fp) that the depth path's own rules sit in
+# (PLAN M3 "Mutants": the zero rule "as before", Big's 19 bits), caught by the depth testbench (make isp-depth-mutants runs
+# this file after tb/isp_depth/mutants.txt).
+@dir rtl/v1/lib/fp FP_DIR
+@obj ISP_DEPTH_OBJDIR
+@probe depth isp-depth-build tb --only directed,random,rdesc --n 20000
+
+zero-rule-off | p2_fp_rng_add.sv | assign zrule  = (depth \|\| tsp) && (az != bz) && v_small && (z_neg != v_neg) && | assign zrule  = 1'b0 && (az != bz) && v_small && (z_neg != v_neg) && | depth | the zero rule off everywhere (depthgaps_zadd 109 / 109, depthgaps_field1 2,000 / 2,000)
+zero-rule-inclusive | p2_fp_rng_add.sv | (v_just < {2'b11, {(W - 2){1'b0}}}); | (v_just <= {2'b11, {(W - 2){1'b0}}}); | depth | the zero rule at 1.5 2^-126 inclusive (depthgaps_zadd: -1.5 2^-126 kept)
+zero-sum-minus | p2_fp_rng_add.sv | if ((depth \|\| tsp) && !l_bad && l_mant == '0) o_neg = 1'b0; | if (1'b0) o_neg = 1'b0; | depth | a zero sum keeping -0 (depthgaps_zadd: -0 + -0 is +0, 108 of 109)
+big-cut-18 | p2_fp_depth_block.sv | key = p2_zword_pkg::big(s); | key = p2_zword_pkg::big(s.mant[18] ? {s.neg, s.bad, s.exp + P2_FP_EW'(1), s.mant >> 1} : s); | depth | Big cut to 18 bits (depth2_biggrid: 129 pixel pairs)
+stored-bits-20 | p2_fp_depth_block.sv | localparam int SB  = P2_ISP_DEPTH_STORED_BITS; | localparam int SB  = P2_ISP_DEPTH_STORED_BITS + 1; | depth | 20 stored bits, Big's too (depth2_biggrid: 105 pairs; zblock, precision)

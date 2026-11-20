@@ -183,7 +183,7 @@ package p2_pkg;
   } p2_fb_t;
 
   // ---------------------------------------------------------------------------------------------------------------
-  // 2.4 ISP setup to rasterizer descriptor, per primitive per tile (edge.h EdgeTile at 4f3efe15, depth.h DepthTileT at 708fb8cd)
+  // 2.4 ISP setup to rasterizer descriptor, per primitive per tile (edge.h EdgeTile and depth.h DepthTileT at 4f3efe15)
   // ---------------------------------------------------------------------------------------------------------------
   // one edge in one tile (edge.h EdgeTile at refsw3 4f3efe15; ARCHITECTURE 2.4, isp 8.3-8.5). Values in half units of
   // 2^unit (unit = ep - 21, or E - cutUnitBits = 102 for a big edge). The widths are isp 8.5's bounds; M2's
@@ -208,26 +208,36 @@ package p2_pkg;
 
   // the depth plane's regime (ARCHITECTURE 2.4; the names are the architecture's)
   typedef enum logic [1:0] {
-    P2_Z_CONST = 2'd0,   // one key for the whole tile
+    P2_Z_CONST = 2'd0,   // one key for the whole tile (refsw3 valid = false)
     P2_Z_REG   = 2'd1,   // a or b infinite (refsw3 ovf = 2): regdepth of a 30-bit register
-    P2_Z_BLOCK = 2'd2    // a block-exponent fixed point t = S + (2i + h) DX + (2j + h) DY
+    P2_Z_BLOCK = 2'd2    // a block-exponent fixed point t = S + 2i DX + 2j DY (refsw3 block = true)
   } p2_zregime_t;
 
-  // the depth plane per tile (depth.h DepthTileT::Setup)
+  // the depth plane per tile (depth.h DepthTileT::Setup at refsw3 4f3efe15; ARCHITECTURE 2.4, isp 9.3-9.6). Every start
+  // (r0, S) is the plane at the tile's first sample point, (left, top) + HALF_OFFSET[0] / 2 (0de9776b), and every pixel
+  // whole steps from it: no field depends on HALF_OFFSET. Built by p2_isp_depth_setup (M3), read by
+  // p2_isp_depth_raster; M3's testbench (tb/isp_depth) asserts the widths on refsw3's own values.
+  localparam int P2_ZT_S_BITS    = 28;   // S: |S| < 2^27 half units of G (isp 9.4a)
+  localparam int P2_ZT_STEP_BITS = 23;   // DX, DY: |DX|, |DY| < 2^21 units of G
+  localparam int P2_ZT_T_BITS    = 30;   // the lanes' t = S + 2i DX + 2j DY: |t| < 2^29 (isp 9.4a; widths4f3d 2^28.45)
+  localparam int P2_ZT_NSH_BITS  = 5;    // nsh = E - 15 - gexp: -14 .. 14 wherever a start is left (isp 9.6)
+  localparam int P2_ZT_REG_BITS  = 30;   // the REG register r mod 2^30 (units of 2^102, its sign at 2^131)
   typedef struct packed {
-    p2_zregime_t        regime;
-    p2_zkey_t           key;    // CONST
-    logic signed [29:0] r0;     // REG: units of 2^102
-    logic signed [1:0]  sa;     // REG: -1 / 0 / +1
-    logic signed [1:0]  sb;
-    logic signed [30:0] fa;     // REG: the finite slope's step on the 2^102 grid, mod 2^30
-    logic signed [30:0] fb;
-    logic signed [27:0] S;      // BLOCK: d0 in half units of G
-    logic signed [22:0] DX;     // BLOCK: units of G
-    logic signed [22:0] DY;
-    logic signed [9:0]  gexp;   // BLOCK: G = 2^gexp
-    logic signed [8:0]  E;      // BLOCK: the clamped block exponent, -122 .. 128
-    logic [4:0]         nsh;    // BLOCK: E - 15 - gexp
+    p2_zregime_t                        regime;
+    p2_zkey_t                           key;    // CONST: the key of every pixel
+    logic signed [P2_ZT_REG_BITS-1:0]   r0;     // REG: the start in units of 2^102 (|r0| < 2^26)
+    logic signed [1:0]                  sa;     // REG: the overflowed slopes' steps, -1 / 0 / +1 (units of 2^25)
+    logic signed [1:0]                  sb;
+    logic signed [30:0]                 fa;     // REG: the finite slope's step on the 2^102 grid, +-(0 .. 2^30 - 1)
+    logic signed [30:0]                 fb;
+    logic signed [P2_ZT_S_BITS-1:0]     S;      // BLOCK: d0 in half units of G
+    logic signed [P2_ZT_STEP_BITS-1:0]  DX;     // BLOCK: units of G
+    logic signed [P2_ZT_STEP_BITS-1:0]  DY;
+    logic signed [9:0]                  gexp;   // BLOCK: G = 2^gexp = 2^(max(e, pair + 5) - 26)
+    logic signed [8:0]                  E;      // BLOCK: the clamped block exponent, -122 .. 128
+    logic signed [P2_ZT_NSH_BITS-1:0]   nsh;    // BLOCK: E - 15 - gexp (saturated where fbw)
+    logic                               fbw;    // BLOCK: the start was cut to zero and E - 15 - gexp < 0: every pixel
+                                                // below zero is NegWord's fallback word (num A5)
   } p2_ztile_t;
 
   typedef enum logic [1:0] {

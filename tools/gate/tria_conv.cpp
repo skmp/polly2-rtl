@@ -1,7 +1,11 @@
 // tria_conv: refsw3-offline's render log (refcore refsw_lists.cpp RENDLOG lines) to build/vec/<test>.tri, the unit
 // vectors of the console pages' own primitives (PLAN 1.2, M2 gate item 3; tools/gate/tria_extract.sh runs it).
 //
-//   refsw3-offline ... | tria_conv <regs folder> <out.tri>
+//   refsw3-offline ... | tria_conv <regs folder> <out.tri> [<out.trz>]
+//
+// With <out.trz> (M3) every TRIA line also becomes a depth record (tb/isp_depth/triz_rec.h: the three corners' x, y, z,
+// HALF_OFFSET and FPU_PERP_VAL at 0x84 of the render's registers), quads included, once per tile over all the renders
+// (the same primitive under another probe is the same depth job).
 //
 // The log arrives on standard input, every render of the test one after the other (BGTAG starts one). Per render the
 // registers are in <regs folder>/r<k>.regs (tria_extract's `regdump 0 40` before each STARTRENDER: FPU_CULL_VAL at
@@ -18,13 +22,16 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 #include "p2tb.h"
 #include "tri_rec.h"
+#include "triz_rec.h"
 
 using p2tri::TriRec;
+using p2tri::TriZRec;
 
 static uint32_t fbits(float f)
 {
@@ -35,15 +42,19 @@ static uint32_t fbits(float f)
 
 int main(int argc, char** argv)
 {
-    if (argc != 3) {
-        fprintf(stderr, "usage: tria_conv <regs folder> <out.tri> < log\n");
+    if (argc != 3 && argc != 4) {
+        fprintf(stderr, "usage: tria_conv <regs folder> <out.tri> [<out.trz>] < log\n");
         return 2;
     }
     const std::string regsDir = argv[1];
+    const bool depth = argc == 4;
     std::vector<TriRec> out;
+    std::vector<TriZRec> outZ;
     std::unordered_set<std::string> seen;          // per tile
+    std::unordered_map<int, std::unordered_set<std::string>> seenZt;   // depth records: per tile, over the renders
+    long dupsZ = 0;
     int render = -1;
-    uint32_t cullVal = 0, halfOffset = 0;
+    uint32_t cullVal = 0, halfOffset = 0, perpVal = 0;
     int tileX = 0, tileY = 0;
     uint32_t trModAddr = 0;
     bool trModValid = false, modvol = false, inTrAs = false, pendingQuad = false;
@@ -73,6 +84,7 @@ int main(int argc, char** argv)
             fclose(f);
             cullVal = w[0x78 / 4];
             halfOffset = w[0x80 / 4];
+            perpVal = w[0x84 / 4];
         } else if (!strncmp(l, "TILE:", 5)) {
             uint32_t base, ctl, op, opm, tr, trm, pt;
             if (sscanf(l + 5, "%x %x %x %x %x %x %x", &base, &ctl, &op, &opm, &tr, &trm, &pt) != 7) {
@@ -111,6 +123,31 @@ int main(int argc, char** argv)
             float v[15];
             for (int k = 0; k < 15; k++)
                 v[k] = strtof(p, &p);
+            if (depth) {
+                TriZRec q = {};
+                for (int c = 0; c < 3; c++) {
+                    q.x[c] = fbits(v[5 * c]);
+                    q.y[c] = fbits(v[5 * c + 1]);
+                    q.z[c] = fbits(v[5 * c + 2]);
+                }
+                q.isp = isp;
+                q.perpVal = perpVal;
+                q.halfOffset = halfOffset;
+                q.render = (uint16_t)render;
+                q.tileX = (uint8_t)tileX;
+                q.tileY = (uint8_t)tileY;
+                q.quad = pendingQuad;
+                q.modvol = modvol;
+                // once per tile and test: the same primitive in another render (a probe page, a search step) is the
+                // same depth job; the record keeps the first render's number
+                TriZRec qk = q;
+                qk.render = 0;
+                std::string key((const char*)&qk, sizeof qk);
+                if (seenZt[tileX | tileY << 8].insert(key).second)
+                    outZ.push_back(q);
+                else
+                    dupsZ++;
+            }
             if (pendingQuad) {
                 quads++;
                 pendingQuad = false;
@@ -141,6 +178,12 @@ int main(int argc, char** argv)
         fprintf(stderr, "tria_conv: cannot write %s\n", argv[2]);
         return 1;
     }
+    if (depth && !p2tb::VecFile::write(argv[3], p2tri::kTriZMagic, sizeof(TriZRec), outZ.data(), outZ.size())) {
+        fprintf(stderr, "tria_conv: cannot write %s\n", argv[3]);
+        return 1;
+    }
+    if (depth)
+        printf("tria_conv: %zu depth records (%ld repeats dropped)\n", outZ.size(), dupsZ);
     printf("tria_conv: %zu records, %d renders, %ld repeats dropped, %ld quads skipped, %ld bad lines\n", out.size(),
            render + 1, dups, quads, bad);
     return bad ? 1 : 0;

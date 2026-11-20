@@ -1,0 +1,8 @@
+# tb/isp_depth/mutants_zword.txt: the planted bug of p2_zword_pkg (rtl/v1/pkg) that the depth path's stored words rest on
+# (PLAN M3 "Mutants": denormal depths as one word), caught by the depth testbench (make isp-depth-mutants runs this file
+# last).
+@dir rtl/v1/pkg ZW_DIR
+@obj ISP_DEPTH_OBJDIR
+@probe depth isp-depth-build tb --only directed,random,rdesc --n 20000
+
+denorm-one-word | p2_zword_pkg.sv | w = {v.neg, 31'(32'(m) << (e + 12'sd149))}; | w = {v.neg, 31'd1}; | depth | positive denormal depths as one word, not ordered by value (depth2_denorm: 1,930 pixel pairs)
