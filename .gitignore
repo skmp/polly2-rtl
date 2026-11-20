@@ -3,3 +3,10 @@ obj_dir/
 *.o
 *.vcd
 *.fst
+__pycache__/
+agents/*/scratch/
+db/
+incremental_db/
+output_files/
+*.qws
+*.rpt
