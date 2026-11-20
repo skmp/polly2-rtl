@@ -10,12 +10,19 @@ depends on them: the alpha test result and the end-of-entry buffer swap.
 
 ## 0. Sources, notation, status
 
-**Functional truth**: refsw3, nulldc3 branch `skmp/refsw3` at `708fb8cd` ("the depth unit below zero, past 2^128
-and at its range's ends", after `6784ea3d` "the edge unit past 2^124: wrap, push and end of the edge"), folder
-`refsw3/refcore`. Transcribed at `2d08a440`; sections 4.2, 6.3, 7.1-7.2, 8.2-8.6, 9, 10.1, 13, 15-17 re-transcribed
-at `708fb8cd` (2026-11-20, spec refresh), with notes in 6.2, 10.2, 10.3, 11.2 and 11.6; the rest is unchanged by
-those two commits. Line numbers (`L123`) refer to
-`708fb8cd`; `edge.h`, `depth.h` are `pvr_isp_edge.h`, `pvr_isp_depth.h`. Evidence: dreamcast-tests at `b54c934`.
+**Functional truth**: refsw3, nulldc3 branch `skmp/refsw3`, folder `refsw3/refcore`. The edge unit (sections 6.1,
+6.3's note on the edge unit, 7.1-7.2, 8, the edge rows of 15-17) is at **`4f3efe15`** (spec sync 2026-11-20: `1040c4aa`
+"the big-edge walk in units of 2^102; end against ZERO; row 31 for every polygon"; `0de9776b`'s zero rule in the
+coordinates and edges checked against the edge unit: it is the depth unit's only, 6.3). Everything else is at
+`708fb8cd` ("the depth unit below zero, past 2^128 and at its range's ends", after `6784ea3d` "the edge unit past
+2^124: wrap, push and end of the edge"): transcribed at `2d08a440`; sections 4.2, 6.3, 7.1-7.2, 8.2-8.6, 9, 10.1, 13,
+15-17 re-transcribed at `708fb8cd` (2026-11-20, spec refresh), with notes in 6.2, 10.2, 10.3, 11.2 and 11.6.
+**Not yet transcribed** (depth and TSP sync, ARCHITECTURE §0.1): `0de9776b` (the depth start at the tile's first
+sample point, the corner with HALF_OFFSET[0] clear; the zero rule in the depth setup's coordinate differences, edge
+sums and determinant), `2bee80f2` (TSP only) and `4f3efe15` (a depth determinant of 2^126 or more has a reciprocal
+of zero). Where sections 6.3, 9, 15 disagree with those commits, refsw3 `4f3efe15` is the reference. Line numbers
+(`L123`) of `edge.h`, and of `refsw_tile.cpp` in sections 7 and 8, refer to `4f3efe15`, the others to `708fb8cd`; `edge.h`,
+`depth.h` are `pvr_isp_edge.h`, `pvr_isp_depth.h`. Evidence: dreamcast-tests at `a932980` (edge2_*, depth2_*, tsp2_*, trsort_* added there; `b54c934` before).
 
 | file | what this spec takes from it |
 |---|---|
@@ -415,7 +422,14 @@ widths are template constants in `EdgeHW` and `DepthHW`. All of them have been m
 | `FloorScaled(v, s)` | `floor(v * 2^s)` as an integer, clamped to `[-2^40, 2^40]` |
 
 The edge unit has no range rules: its products reach 2^256 before the swamp (8.3) replaces everything from 2^128 by
-+-2^200. With inputs between 2^-149 and 2^128, an internal exponent of about 10 bits with sign covers both units
++-2^200. It has **no zero rule** either: `Winding`, `EdgeWinding` and `EdgeTile::Setup` use `pvrfp::Add` / `Sub`
+(6.2) at `4f3efe15`. The zero rule that `0de9776b` extended to the coordinate differences, the edges `x_j y_k - x_k
+y_j` and the determinant is the **depth** setup's own (`DepthHW::zeroRuleCoords`, `zeroRuleEdges`, depth.h `subC`,
+`addE`): the depth unit computes those values itself (9.2), and the edge unit's `c`, `dx`, `dy` and determinant are
+not changed by it. No console test isolates a zero rule in the edge unit; with none there, every region of
+depth2_zcoord and depth2_zedge (triangles near the origin with signed-zero and +-(1 .. 1.5) 2^-126 coordinates) and
+of the whole regression is exact (dreamcast-tests README "r8 round 1"). The RTL keeps the edge flavour (num §4.2)
+free of it. With inputs between 2^-149 and 2^128, an internal exponent of about 10 bits with sign covers both units
 (products 2^-298 .. 2^256; the depth unit's unranged slopes `a * inv` up to 2^254).
 
 ### 6.3 Range rules and the zero rule (depth unit only; `DepthHW::range = 1`)
@@ -460,8 +474,9 @@ What this gives, with its tests:
   depthgaps_field1 — 1000 of zexfil's flat probes at depths of exponent fields 0 .. 5: 2000 of 2000 orders (a zero as
   a zero 1642, the TSP's last-addition rule 1944, -0 + -0 = -0 1972, without the rule in the first additions
   1996)]. The rule reads the values and the zero's sign only. An input zero's fraction bits are gone at `FromSingle`,
-  unlike in the TSP's mean (tsp §4.4). **GAP**: the rule sits in the setup's shared adder, so refsw3 also applies it
-  to the coordinate differences and the determinant; only the depth products' sums were measured. **[R]** refsw3
+  unlike in the TSP's mean (tsp §4.4). The rule in the depth setup's coordinate differences, edge sums and
+  determinant was a GAP here; `0de9776b` measured it (depth2_zcoord, depth2_zedge) and splits it into
+  `zeroRuleCoords` / `zeroRuleEdges` (both 1): not yet transcribed (section 0), and not the edge unit's (6.2). **[R]** refsw3
   tests `|v| < 1.5 * 2^-126` as "the bit under the leading one is 0", which is a shift by -1 for a one-bit mantissa
   (`v = 2^-126` as `{mant 1, exp -126}`, a sum can be that). The value rule is what is meant (num §8 D2).
 - **Underflow** [T: zspec pages 3-6 — a plane from 2^-124 to -2^-124 over a cell is its start everywhere, one from
@@ -485,14 +500,14 @@ Per primitive, before any tile work (`RasterizeTriangle`, `TriangleCulled`).
 ### 7.1 Determinant and winding (`pvrisp::EdgeWinding`; bad corners from `pvrisp::Winding`)
 
 Corners 1, 2, 3 in rasterizer order (3.4); for quads the first three. `EdgeHW` arithmetic (24-bit products, 24-bit
-sums, reach 25), unranged, `FromBits` inputs. refsw3 computes two determinants (refsw_tile.cpp L778-779; L752-755
+sums, reach 25), unranged, `FromBits` inputs. refsw3 computes two determinants (refsw_tile.cpp L782-783; L756-759
 for the chunk counter's `TriangleCulled`):
 
 ```
-plain (Winding, edge.h L83):        e(j,k) = Sub(Mul(xj, yk), Mul(xk, yj))
+plain (Winding, edge.h L86):        e(j,k) = Sub(Mul(xj, yk), Mul(xk, yj))
                                     det_p  = Add(Add(e1, e2), e3)           e1 = e(2,3), e2 = e(3,1), e3 = e(1,2)
                                     bad    = det_p.bad: an x or y of corners 1-3 is an infinity or a NaN
-swamped (EdgeWinding, edge.h L110): sw(v)  = |v| >= 2^128 ? +-2^200 (v's sign) : v            # the swamp (8.3)
+swamped (EdgeWinding, edge.h L113): sw(v)  = |v| >= 2^128 ? +-2^200 (v's sign) : v            # the swamp (8.3)
                                     e(j,k) = sw(Sub(sw(Mul(xj, yk)), sw(Mul(xk, yj))))
                                     det    = sw(Add(sw(Add(e1, e2)), e3))
 winding: sgn = +1 if det < 0 (nonzero), else -1 (det >= 0, a zero counts as positive)
@@ -515,7 +530,7 @@ from 2^62, the setup's det draws what the console draws; precision / zmeas — t
 the primitive draws nothing. It is not "culled" (that matters for PT chunk counting, 11.4) [T: huge — infinity or
 NaN in one coordinate: nothing drawn].
 
-### 7.2 Culling (`CulledBySize`, `CulledByFacing`, refsw_tile.cpp L722, L734)
+### 7.2 Culling (`CulledBySize`, `CulledByFacing`, refsw_tile.cpp L726, L738)
 
 Only with `CullMode != 0`, and only when no corner is bad. `det` is the swamped determinant of 7.1:
 
@@ -568,7 +583,7 @@ Triangle (corners 1, 2, 3): E12 = 1->2, E23 = 2->3, E31 = 3->1. Quad (corners 1,
 corners 1-3 for a quad as well) [T: covmeas sprite14, sprite15 — "four edges, winding from the first three corners",
 0 misses].
 
-### 8.2 The unit's numbers (`EdgeHW`, edge.h L41)
+### 8.2 The unit's numbers (`EdgeHW`, edge.h L42)
 
 | constant | value | meaning |
 |---|---|---|
@@ -587,14 +602,15 @@ corners 1-3 for a quad as well) [T: covmeas sprite14, sprite15 — "four edges, 
 | `saturateExp` | 127 | the start then saturates to +-2^127; a coordinate difference of 2^128 or more steps as +-2^127 |
 | `lastColumnByStep` | true | a zero pixel in column 31 is inside iff the column step is positive |
 | `blockMax` | 129 | E is at most 129; an edge whose E was cut is "big" and is walked down the tile (8.4b) |
+| `cutUnitBits` | 27 | an edge whose E was cut keeps its start and steps in units of 2^(E - 27) = 2^102, cut toward zero (8.3) |
 | `walkExp` | 131 | the walk holds R and R + 16 sx in [-2^131, 2^131) (blockMax + 2), and 32 sx below 2^131 |
 
 [T: covmeas — 98 archived sets, 55 M pixels, 0 differences; every single change of a parameter is worse (tie
 threshold 63: 30 pixels, 32: 375, 128: 246; reach 24: 3, 26: 34; zero zone 63: 1122, 65: 32); hugepos;
 precision page 5 / raster 1040 of 1040; faredge 1,340 of 1,340 and faredge_cmax, _k132, _m131, _ecap, _walk, _cull,
-_far32 for the last four rows (8.3, 8.4b)]
+_far32 for the last five rows (8.3, 8.4b); edge2_walk pages 3-5 for `cutUnitBits` (8.3)]
 
-### 8.3 Edge setup per tile (`EdgeTile::Setup`, edge.h L153)
+### 8.3 Edge setup per tile (`EdgeTile::Setup`, edge.h L156)
 
 Inputs: corners `a = (xa, ya)`, `b = (xb, yb)` (FromBits), `sgn` (7.1, the swamped determinant's), and the tile's
 first sample point `x0 = left + h/2`, `y0 = top + h/2`, `h = HALF_OFFSET[0]` (1: pixel centres, 0: pixel corners).
@@ -617,29 +633,30 @@ if sgn < 0: s20, sx, sy = -s20, -sx, -sy               # turn the edge so that i
 if ep == NoExp: CONSTANT, inside = (s20 >= 0)          # (unreachable in practice: dx = dy = 0 forces c = 0)
 E    = max(ep + 6, es + 1)        (es + 1 only if start != 0)
 big  = E > 129;  if big: E = 129                       # big <=> ep >= 124: a step of 2^123 or more
-unit = ep - 21                                         # exponent of the steps' last kept bit
-if E - unit > 56: CONSTANT, inside = (s20 >= 0)        # [R] refsw3's cap; never for a big edge (E - unit = 150 - ep)
-sx', sy' = sx, sy                                      # kept for the walk
-sx = cutBelow_unit(sx);  sy = cutBelow_unit(sy)
-t0    = 2 * floor(s20 / 2^unit) + (s20 not a whole multiple of 2^unit ? 1 : 0)   # half units of 2^unit
+unit = big ? E - 27 : ep - 21                          # exponent of the steps' last kept bit; 2^102 for a big edge
+if E - unit > 56: CONSTANT, inside = (s20 >= 0)        # [R] refsw3's cap; never for a big edge (E - unit = 27)
+sx = cutBelow_unit(sx);  sy = cutBelow_unit(sy)        # toward zero
+t0    = big ? 2 * trunc(s20 / 2^unit)                                           # a big edge: cut toward zero, no half unit
+            : 2 * floor(s20 / 2^unit) + (s20 not a whole multiple of 2^unit ? 1 : 0)   # half units of 2^unit
 tx    = 2 * sx / 2^unit;   ty = 2 * sy / 2^unit                                 # exact, even
 zero2 = 2^(E - 20 - unit)                                                       # half units; = 2^(E - 21) in value
 tie2  = zero2                                                                   # tieShift == zeroShift
-if big:                                                # the walk's values (8.4b): half units of 2^fine
-    fine = unit - 6                                    # = ep - 27
-    f0   = 2 * floor(s20 / 2^fine) + (s20 not a whole multiple of 2^fine ? 1 : 0)
-    fx   = 2 * cutBelow_fine(sx') / 2^fine;  fy = 2 * cutBelow_fine(sy') / 2^fine   # toward zero, exact after the cut
-    H    = 2^(132 - fine)                              # = 2^131 in value (walkExp)
-    Z    = 2^(E - 20 - fine) = 2^(136 - ep)            # = 2^108 in value (ZERO at E = 129)
+if big:                                                # the walk's values (8.4b) are these: one grid, 2^102
+    f0, fx, fy = t0, tx, ty
+    H    = 2^30                                        # = 2^131 in value (walkExp): 2 << (131 - 102)
+    Z    = zero2 = 2^7                                 # = 2^108 in value (ZERO at E = 129)
     walk the tile from row 0 (8.4b); the row range sets the first row and the walk is redone (8.6)
 ```
 
 The edge function is `F(x, y) = c + dx*y - dy*x` (zero on the line through a and b, `F` stepping `-dy` per column,
 `dx` per row). The values above are `F` at the tile's first sample point and its two steps, in block form, turned so
 that the triangle's inside is positive. `t0`'s lowest bit marks "the start has bits below the grid" (it then lies
-strictly between two grid values). `big` and "E was cut" are the same thing: `es + 1 <= 129` always, so only `ep + 6`
-can pass 129. (edge.h's prose says "a step of 2^124 or more"; its test, `E > blockMax`, is `top(step) >= 124`, a step
-of 2^123 or more.)
+strictly between two grid values; never for a big edge, whose start is cut toward zero onto the grid). `big` and
+"E was cut" are the same thing: `es + 1 <= 129` always, so only `ep + 6`
+can pass 129; refsw3's `big = cut && ep >= 124` (L285) is the cut. (edge.h's prose says "a step of 2^124 or more";
+its test, `E > blockMax`, is `top(step) >= 124`, a step of 2^123 or more.) Before `1040c4aa` a big edge kept two
+grids: `2^(ep - 21)` for the ordinary rows and a finer `2^(ep - 27)` for the walk, with the start floored; both are
+gone.
 
 Rules and their tests:
 - the constant `c` from absolute coordinates, `c = T(xb ya) - T(xa yb)` [T: covmeas rule 1 — forms from coordinate
@@ -671,13 +688,25 @@ Rules and their tests:
   R = j dx crossing 2^107 .. 2^112 in row 4, 8 or 16): 129 gives every tile, 130 has 1,424 wrong, 131, 132 or no
   cut 1,440; hugepos_rules pages 0-3 (1,200 tiles of the H family: with a row step of 2^124 or more and a small
   column step it is the walk that shows it)].
+- **a big edge's grid is 2^(E - 27) = 2^102**, the steps and the start cut toward zero onto it, for the ordinary rows
+  as for the walk (edge.h L233-243, L273-277) [T: edge2_walk pages 3-5 — 900 tiles, one triangle per tile, a
+  near-horizontal edge to a far corner at x 2^124 .. 2^128, its column step with bits below 2^104 and near zero in a
+  row of the tile, kept where the alternatives differ: 2^(E - 27) every tile; 2^(E - 26) 240 wrong, 2^(E - 28) 428,
+  2^(ep - 25) 435, 2^(ep - 26) 478, 2^(ep - 27) 557, the steps floored 135, `708fb8cd`'s 2^(ep - 21) for the rows and
+  2^(ep - 27) for the walk 339; faredge_m131 alone allows 2^101 .. 2^103, and the hugepos_* and faredge_* sets are
+  exact with it. hugepos_rules page 11 (10 tiles, refsw3's residual at `708fb8cd`) was this: its slivers' column step
+  629,145 2^106 (0.3 2^127) lost its last bit on 2^(ep - 21) = 2^107, and pixel 7 of row 2 came out +2^109, inside;
+  it is +2^106, in the ZERO band, a tie the next pixel (negative) makes outside]. The start toward zero, no half
+  unit [T: edge2_walk pages 3-5 — 5 tiles with a start just below zero, -120.x units, whose pixel at -64.x units,
+  just outside ZERO when floored, is drawn: in the band as -64; floored, with or without the half unit, 5 tiles
+  wrong, cut toward zero 0].
 
-### 8.4 The inside decision (`EdgeTile::Inside`, edge.h L403)
+### 8.4 The inside decision (`EdgeTile::Inside`, edge.h L440)
 
 `Inside(i, j)` is the constant answer for a CONSTANT edge, row j's mask bit i for a big edge (8.4b), and the
 ordinary decision (8.4a) otherwise.
 
-#### 8.4a Ordinary edges (`InsideOrdinary`, L291)
+#### 8.4a Ordinary edges (`InsideOrdinary`, L306)
 
 For pixel (i, j) of the tile:
 
@@ -712,24 +741,27 @@ triangles, the translucent and PT lists, HALF_OFFSET 6 and 1, corners 29,212 pix
 "row j's mask is 0") skips rows that no pixel can be inside. It is exact (the values are linear in i) and only saves
 time **[R]**.
 
-#### 8.4b Big edges: the walk down the tile (`EdgeTile::Walk` L362, `RowMask` L307, `SetFirstRow` L282)
+#### 8.4b Big edges: the walk down the tile (`EdgeTile::Walk` L397, `RowMask` L322, `SetFirstRow` L297)
 
 Each row j of a big edge gets a 32-bit mask, computed down the tile from the polygon's first row `s` in it (8.6;
-`s = 0` until the row range sets it, and for modifier volume triangles):
+`s = 0` until the row range sets it, and for modifier volume triangles). Every value is in half units of 2^102, the
+edge's own grid (8.3), so `f0 = t0`, `fx = tx`, `fy = ty`, `Z = zero2`:
 
 ```
 wrap(v)  = v mod 2H, taken in [-H, H)                       # R held in [-2^131, 2^131): mod 2^132
-far32    = fx > 0 ? (32 fx) mod H : 0                       # 32 sx, its bits from 2^131 up lost
-rowmask(r):                                                 # the ordinary rule in fine units, without the tie step
+far32    = fx > 0 ?                    (32 fx) mod H         # 32 sx, its bits from 2^131 up lost
+         : fx < 0 and (32 fx) mod H == 0 ? H                 # a column step below zero, a multiple of 2^126: 2^131
+         : 0
+rowmask(r):                                                 # the ordinary rule without the tie step
     if |r| <= Z: all 32 pixels if fx > 0, else none
     per column i: v = r + fx i;  v > Z: in;  v < -Z: out;  i == 31: in iff fx > 0;  else in iff v + fx >= -Z
 dead = false;  wasAbove = false
 for j = 0 .. 31:
-    ord = row j by the ordinary rule (8.4a: t0, tx, ty, zero2, tie2 on the unit grid)
+    ord = row j by the ordinary rule (8.4a: t0, tx, ty, zero2, tie2)
     if j < s:   mask[j] = ord;  continue                     # above the first row (the row range removes them)
     if dead:    mask[j] = 0;    continue
     R  = f0 + fy j;  Rw = wrap(R)                            # the row's value at column 0
-    above    = Rw + far32 > 0                                # the row's largest value is above 0
+    above    = Rw + far32 > Z                                # the row's far value is above ZERO
     endsHere = j > s and wasAbove and not above;   wasAbove = above
     if |Rw| <= Z:
         mask[j] = (Rw == R) ? ord : (fx > 0 ? all : fx == 0 ? (fy > 0 ? all : none) : none)
@@ -743,7 +775,9 @@ for j = 0 .. 31:
 ```
 
 What it means, with its tests (faredge_walk: 16 pages, 3,537 tiles, one triangle per tile, generated where the
-alternatives differ; all of faredge_*, hugepos_* scored together: 104 of 100,912 tiles wrong, the GAP below):
+alternatives differ; with edge2_walk, edge2_end and edge2_mult the 43,612 tiles of the sets of one triangle per tile
+all exact, and every faredge_* / hugepos_* set exact in the regression, hugepos_rules 3,600 of 3,600 and hugepos_v5
+2,400 of 2,400 included; edge.h L344-396):
 - **R wraps by 2^132** into [-2^131, 2^131) [T: hugepos_rules pages 0-3 — the H family's long edges, a column step
   of 0 and rows R = start + j dx of -2^131 .. -2^132 inside, as R + 2^132; faredge_m131 page 11 tile (1, 9) — rows
   with R past +-2^132 drawn as R -+ 2^132; faredge_walk pages 8-11 — a polygon whose first row in the tile has R past
@@ -755,24 +789,44 @@ alternatives differ; all of faredge_*, hugepos_* scored together: 104 of 100,912
   2^131; faredge_m131 pages 0-5 — 1,800 tiles: -2^131 exactly is not pushed, +2^131 is; faredge's K 127 vertical
   triangles; modvol's garbage polygon]. Since R is wrapped first, only a column step past 2^127 takes R + 16 sx out
   of range.
-- **The end**: the edge ends when its far value falls from above 0 to 0 or below. The far value is the row's largest
-  value: R + (32 sx mod 2^131) with a column step above zero, else R. For an ordinary edge (32 sx < 2^131) that is
-  only the row going outside to its end, which a later row cannot undo; with a column step of 2^126 or more it ends
-  the edge early [T: faredge_m131 pages 6-15 — 32 sx = 2^132 + rho, the far value R + rho, at most 0 there: the rows
-  after it dark, 9,694 of 9,708 rows, the 14 others in slivers that start inside the tile, which count from their
-  own first row; hugepos_rules page 11 and hugepos_v3 page 6 — slivers whose line ends after the row whose value at
-  pixel 32 is at most 2^131 (32 sx = 2^131 + rho); faredge_walk pages 4-7 (32 sx past 3 * 2^131); hugepos_sw3 pages 36
-  and 37 — two edges wrapped past 2^131 that keep a one-pixel line between them when rho is just above the size of
-  the wrapped R, against pages 0 and 9 (32 sx of 2^132 and 3 * 2^131, rho 0); hugepos_rules page 0 tile (0, 0) — R
-  falls from +2^127 to 0: outside after it, not wrapped back past -2^131].
+- **The end**: the edge ends when its far value falls from above ZERO to ZERO or below. The far value is
+  R + (32 sx mod 2^131) with a column step above zero (the row's value at pixel 32, 32 sx held below 2^131),
+  R + 2^131 with a column step below zero that is a multiple of 2^126, else R. For an ordinary edge (32 sx < 2^131)
+  that is only the row going outside to its end, which a later row cannot undo; with a column step of 2^126 or more
+  it ends the edge early [T: faredge_m131 pages 6-15 — 32 sx = 2^132 + rho, the far value R + rho, at most 0 there:
+  the rows after it dark, 9,694 of 9,708 rows, the 14 others in slivers that start inside the tile, which count from
+  their own first row; hugepos_rules page 11 and hugepos_v3 page 6 — slivers whose line ends after the row whose
+  value at pixel 32 is at most 2^131 (32 sx = 2^131 + rho); faredge_walk pages 4-7 (32 sx past 3 * 2^131);
+  hugepos_sw3 pages 36 and 37 — two edges wrapped past 2^131 that keep a one-pixel line between them when rho is
+  just above the size of the wrapped R, against pages 0 and 9 (32 sx of 2^132 and 3 * 2^131, rho 0); hugepos_rules
+  page 0 tile (0, 0) — R falls from +2^127 to 0: outside after it, not wrapped back past -2^131].
+  - **Against ZERO, not 0** [T: edge2_walk pages 3-5 — 12 tiles, an edge with a start of 0 and a column step of one
+    unit, R + 32 sx = 2^107 in its first row: it does not end in the next row; with "above 0" the 12 are wrong].
+  - **sx < 0: R alone** [T: 482 tiles of these sets need the end there; R + sx (pixel 1) 54 of them wrong, R + 32 sx
+    623; edge2_end page 3 — 66 tiles with -2^127 (1 +- 2^-19 .. 2^-8): R alone (R + 2^131 within 2^117 of -2^127: 66
+    wrong); page 4 — 66 where +2^127 ends with R alone (R + 2^131 with +2^127 too: 66 wrong)].
+  - **sx < 0 a multiple of 2^126** (32 sx = 0 mod 2^131: -2^126, -2^127, -1.5 2^127, a saturated difference or
+    not): **R + 2^131**, so the edge ends only where R falls to -2^131 + ZERO or below [T: edge2_walk pages 0-1 —
+    600 tiles, two far corners on opposite sides in y, |dy| from 2^128, a saturated column step of -2^127 — and page
+    2 — 61 tiles, a far corner at y = +-2^127 exactly: every one goes on after the row where R falls from +15.x 2^127
+    to -15.x 2^127 (R alone: all 661 wrong; hugepos_v5 page 0 tile (0, 7), 79 pixels, refsw3's residual at
+    `708fb8cd`, was one); faredge_ecap pages 7 and 9 tiles (0, 4) and (0, 9), where R reaches -2^131 exactly, do end
+    (no end at all: 2 tiles wrong); edge2_end — 280 tiles, all as modelled: page 0, 56 with -2^127 (R alone: 56
+    wrong); page 1, 37 whose R reaches -2^131 exactly or nearly (no end at all: 37 wrong; R alone 4); page 2, 55
+    with -2^126 and -1.5 2^127 (R + 2^131 for -2^127 alone: 55 wrong)]. **Odd multiples of 2^125 and 2^124 end with R
+    alone** [T: edge2_mult — 58 tiles, -2^125, -3, -5, -7 2^125 and -1 .. -15 2^124: R + 2^131 for every multiple
+    of 2^125 29 wrong, of 2^124 58].
+  - A reading of the mechanism (edge.h L389-394, not a rule of its own: the same function of sx, so no test can
+    separate the two): 32 sx reaches the far value's adder as a sign and its bits below 2^131; a negative one is made
+    two's complement by invert + 1 on those bits, which the sign then gates off, while the carry out of the + 1
+    (there exactly when the bits are all zero) is not gated and lands at 2^131.
 - **From the polygon's first row**, not from row 0 [T: counted from row 0, 1,462 tiles of all sets wrong
   (faredge_walk 1,351)].
 - Alternatives the sets reject: 32 sx kept whole (no mod 2^131) 15,863 tiles wrong; 0 counting as above 7,869.
-- **GAP**: hugepos_rules page 11 (10 tiles: a pixel at either end of slivers with a column step of 0.3 * 2^127, a
-  tie on the ordinary path) and hugepos_v5 (1 tile, 79 pixels) are refsw3's own console misses; the walk's fine
-  units 2^(unit - 6) are refsw3's (only the decisions are measured); the end rule with sx < 0 is taken as R alone.
+- The walk's units are the edge's own (8.3: edge2_walk pages 3-5). `708fb8cd`'s GAPs here (the fine units
+  2^(unit - 6), the end rule with sx < 0, the residuals hugepos_rules page 11 and hugepos_v5) are closed.
 
-### 8.5 Widths for the RTL (derived, checked against refsw3 `708fb8cd`)
+### 8.5 Widths for the RTL (derived, checked against refsw3 `4f3efe15`)
 
 Let `d = E - unit`.
 
@@ -782,28 +836,37 @@ Ordinary edges (not big): d is 27..56.
 - If d <= 29, every value the decision looks at (`r`, `v`, `v + tx`) fits a **31-bit signed** integer in half
   units of 2^unit: `|t0| < 2^29`, `|tx|, |ty| < 2^22`.
 
-Big edges: `d = 150 - ep` is 22..26 (never CONSTANT), `zero2 = 2^(d - 20)`. In fine half units: `|f0| <= 2^32 + 1`,
-`|fx|, |fy| < 2^28`, `H` = 2^31 .. 2^35, `Z` = 2^8 .. 2^12. Every value the walk forms is below 2^34.4 in size:
-`|R| <= |f0| + 31 |fy| < 2^33.6`; `R + 16 sx` (opposite signs) below 2^33.6; a push needs `16 |fx| >= H + |Rw|`,
-so only `H = 2^31` pushes and the pushed value is below 3 * 2^31; the rowmask values below 2^33.6; `Rw + far32`
-below 2^34.4. A **36-bit signed** row accumulator holds them.
+Big edges: `d = 27` (unit 2^102, never CONSTANT), `zero2 = Z = 2^7`, `H = 2^30` half units, all fixed. `|t0| =
+|f0| < 2^27` (the start below 2^128), `|tx|, |ty| < 2^27` (the steps below 2^128). Every value is below 2^32.4 in
+size:
+- the walk: `|R| <= |f0| + 31 |fy| < 2^32`; `|Rw| <= 2^30`; `R + 16 sx` (opposite signs) below 2^31; a pushed value
+  below 3 * 2^30; the rowmask values below 3 * 2^30 + 32 |fx| < 2^31.6; `Rw + far32` below 2^31; `far32` in
+  [0, 2^30];
+- the ordinary rule on the rows the walk takes it for (`Rw == R`, so `|r| <= 2^30`): `r + tx i`, `r + tx (i + 1)`
+  below 2^30 + 32 * 2^27 < 2^32.4. (Rows the walk does not take it for, above the first row or wrapped, are never
+  used; refsw3's `InsideOrdinary` computes them, up to 2^33.)
 
-Checked with refsw3's own `EdgeTile` (`polly2-rtl/agents/spec-refresh/widths708.cpp`, 10 s): 299,962 random edges
+A **34-bit signed** row accumulator and lane holds every value used. In half units of 2^102, `wrap` is the low 31 bits
+of R read as two's complement; the push is "`Rw + 16 fx` overflows 31 bits"; `far32` is `(fx mod 2^25) << 5` for
+`fx > 0`, `2^30` for `fx < 0` with `fx mod 2^25 = 0`, else 0.
+
+Checked with refsw3's own `EdgeTile` (`polly2-rtl/agents/spec-sync-edge/widths4f3.cpp`, 3 s): 299,962 random edges
 (pixel-grid and ulp-perturbed corners, a wide exponent mix, one in three of the far class: one corner near the tile,
 the other with a coordinate of 2^118 .. 2^127; both windings, both sample offsets), 102,632 of them big. `big`
-exactly when `ep >= 124`; ordinary d 27..56; 91,018 tiles with d >= 30, every pixel of the start's sign; the
-largest ordinary value below d = 30 2^29.48; big d 22..26, `|f0|` 2^31.98, `|fx|, |fy|` below 2^28, H 2^31 .. 2^35,
-Z 2^8 .. 2^12; R 2^33.29, R + 16 sx 2^33.26, a pushed row 2^32.58, the rowmask values 2^33.00; and the walk as 8.4b
-writes it against `EdgeTile::Inside` at every pixel for first rows 0 .. 31: 0 differences.
+exactly when `ep >= 124`, with `t0 = f0`, `tx = fx`, `ty = fy`, `zero2 = z = 2^7`, `h = 2^30` on every big edge;
+ordinary d 27..56; 91,018 tiles with d >= 30, every pixel of the start's sign; the largest ordinary value below
+d = 30 2^29.48; big d 27, `|f0|` 2^26.998, `|fx|, |fy|` below 2^27; R 2^31.98, wrapped R 2^30, R + 16 sx 2^31.00, a
+pushed row and the rowmask values 2^31.58, the far value 2^30.99, the ordinary rule on unwrapped rows 2^32.31; and
+the walk as 8.4b writes it against `EdgeTile::Inside` at every pixel for first rows 0 .. 31: 0 differences.
 
-### 8.6 Row range (`pvrisp::RowRange`, edge.h L127; refsw_tile.cpp L811-835)
+### 8.6 Row range (`pvrisp::RowRange`, edge.h L130; refsw_tile.cpp L815-847)
 
 For every primitive that is not a modifier volume triangle:
 
 ```
 rowFirst = min over corners of floor(y)
 rowLast  = max over corners of floor(y + 1/2)          # = (floor(2y) + 1) >> 1 (arithmetic shift); FloorScaled, clamp 2^40
-if rowFirst == top + 31 and an edge of the primitive is big:  rowFirst -= 1      # row 31: a row earlier
+if rowFirst == top + 31:  rowFirst -= 1                                         # row 31: a row earlier, every polygon
 every big edge: SetFirstRow(clamp(rowFirst - top, 0, 31))                        # the walk starts there (8.4b)
 a row Y (screen row, top + j) is rasterized only if rowFirst <= Y <= rowLast
 ```
@@ -813,14 +876,21 @@ rule 10 / sliver mixes — 0 of 635 accepted pixels above the top corner's row a
 row after the bottom corner's exactly when frac(ymax) >= 0.5 (72 of 72 / 0 of 70); sliver35 with HALF_OFFSET 6;
 zprobe — outside the range the depth is not written either; sliver36 — modifier volume triangles have no range]
 
-**Row 31**: a polygon whose first row is the tile's last starts a row earlier in that tile, the walk of its edges as
-well, but only when one of its edges is big [T: faredge_walk pages 0-3 — slivers to a far corner whose top corner is
-in row 28 .. 31 of the tile; their pushed edges draw in the row above the top corner when the row range lets them:
-with the plain range 366 of the test's 3,537 tiles wrong, with this 0; rows 30 and 31 both a row earlier 272, a top
-corner in the last quarter of its row 892; held out, faredge_far32: 390, 0, 36, 440; faredge_m131 page 6 tile (17, 8),
-page 11 tile (2, 10), faredge_ecap page 9 tile (7, 7): row 30 drawn]. **GAP**: whether an ordinary sliver with its
-top corner in row 31 (which can have a pixel in row 30 its edge functions accept) starts a row earlier too: no
-console test has one; why row 31 is not known.
+**Row 31**: a polygon whose first row is the tile's last starts a row earlier in that tile, the walk of its big
+edges as well; **every polygon**, with or without a big edge (since `1040c4aa`; `6784ea3d` had it only with a big
+edge) [T: faredge_walk pages 0-3 — slivers to a far corner whose top corner is in row 28 .. 31 of the tile; their
+pushed edges draw in the row above the top corner when the row range lets them: with the plain range 366 of the
+test's 3,537 tiles wrong, with this 0; rows 30 and 31 both a row earlier 272, a top corner in the last quarter of its
+row 892; held out, faredge_far32: 390, 0, 36, 440; faredge_m131 page 6 tile (17, 8), page 11 tile (2, 10),
+faredge_ecap page 9 tile (7, 7): row 30 drawn; edge2_walk page 6 — points (three equal corners, whose edges are
+inside everywhere) and triangles of corners 1/1024 apart at y = row + 0, 1/4, 1/2, 3/4, 1023/1024 of rows 28 .. 31
+of their tile: with the top corner in row 31 rows 30 and 31 are filled (25 points, 18 tiny triangles: 43 tiles wrong
+with the rule for big edges only, 0 with it for every polygon); in rows 28 .. 30 none starts earlier (225 tiles);
+edge2_row31 — 300 of 300 tiles, the same probes with no user tile clip, with the clip of their own tile and with
+one of the 3x3 tiles around it: in each, the 13 points with the top corner in row 31 fill rows 30 and 31, and 9, 9,
+10 of the 12 tiny triangles there draw in row 30; none of the 75 in rows 28 .. 30 starts earlier: the user tile clip
+has no part in it]. A tiny triangle draws in row 30 only where its edge functions accept a pixel there (the 12
+triangles: 9 or 10 do). **GAP**: why row 31 (not known; refsw_tile.cpp L838).
 
 Modifier volume triangles have neither the range nor the row-31 rule; their big edges are walked from row 0.
 
@@ -1510,7 +1580,7 @@ pass clears `valid` per shaded pixel. `tilePixelsShaded` counts every pixel of e
 | per render | `perpVal` |
 | per entry | `OpInPt`; PT: chunk count, current chunk, pass number, fill / prevQuad / culled counters; `MoreToDraw` |
 | per primitive | the swamped det (7.1), sgn, cull result; depth plane a, b, c, det, inv, A, B (tile independent); vertex x, y, z |
-| per primitive per tile | per edge: s20, sx, sy, E, unit (or the constant answer); a big edge also f0, fx, fy, H, Z and its 32 row masks from the first row (8.4b, 8.6); depth: CONST (a key), REG (r0, sa, sb, fa, fb) or BLOCK (d0, dx, dy, unit, E; in the G form S, DX, DY, gexp, E and whether the start is zero) |
+| per primitive per tile | per edge: s20, sx, sy, E, unit (or the constant answer); a big edge also its 32 row masks from the first row (8.4b, 8.6; its walk values are t0, tx, ty, zero2 on the 2^102 grid, H fixed); depth: CONST (a key), REG (r0, sa, sb, fa, fb) or BLOCK (d0, dx, dy, unit, E; in the G form S, DX, DY, gexp, E and whether the start is zero) |
 | per pixel (persists across entries) | depthA, tagA, stencil |
 | per pixel (per entry / pass) | valid, rendered, depthB, tagB, depthC, refTagC, opTag, resTag, resDepth, resolved-last-pass, everRendered, savedDepth |
 | between entries | prevWrittenOut, havePrev, previous tile (4.4) |
@@ -1547,23 +1617,25 @@ Behaviour that depends on the clock (refsw3 does not model it, the RTL will prod
 ## 15. Consolidated GAPs and refsw3-only choices
 
 The row numbers are those of the `2d08a440` transcription, kept so that references stay valid. Rows that refsw3
-`6784ea3d` / `708fb8cd` closed say so; the open questions they left are in their row or from #24 on.
+`6784ea3d` / `708fb8cd` / `1040c4aa` closed say so; the open questions they left are in their row or from #24 on.
+The depth rows (#2-#11, #13, #26, #27) are at `708fb8cd`; rows that `0de9776b` / `4f3efe15` changed say so and point
+to the depth sync (section 0).
 
 | # | what | refsw3 does | evidence / status |
 |---|---|---|---|
-| 1 | the edge unit past 2^128 | the swamp, the walk (8.3, 8.4b) | **closed** by `6784ea3d` (faredge 1,340 of 1,340). Left: hugepos_rules page 11 (10 tiles) and hugepos_v5 (1 tile, 79 pixels), refsw3's own console misses and the regression's only known ones (104 of 100,912 tiles of all faredge / hugepos sets) |
+| 1 | the edge unit past 2^128 | the swamp, the walk (8.3, 8.4b) | **closed** by `6784ea3d` (faredge 1,340 of 1,340); its residuals, hugepos_rules page 11 (10 tiles) and hugepos_v5 (1 tile, 79 pixels), **closed** by `1040c4aa` (the units 2^102 and the sx < 0 end rule: hugepos_rules 3,600 of 3,600, hugepos_v5 2,400 of 2,400; the regression has no known miss left) |
 | 2 | depth constant exactly 2^128 | the limit at every product and sum (6.3) | **closed** by `708fb8cd` (zovf 1,080 of 1,080) |
 | 3 | negative depth outside its block's top binade | `Neg` (9.7) | **closed** by `708fb8cd` (the depthgaps hunt) |
 | 4 | negative stored sizes below ~2^-122 | E at least -122 (9.4a) | **closed** by `708fb8cd` (depthgaps_tinymean 336 of 336) |
 | 5 | positive depth >= 2^128; positive denormal depths | `Big`; float denormals | `Big` measured (depthgaps_bigpos, _bigord); left: Big's grid (13 .. 23 bits fit, 19 taken) and the denormals' order among each other (only above 0, below 2^-126: depthgaps_edges, _tiny) |
 | 6 | the overflow register's words | REG (9.5) | ovf 1, kWrap / WrapWord's open bits and a negative start are **closed** (the forced start, RegDepth, depthgaps_rstart). Left: its words between fields among other planes' depths; a slope of 2^128 or more after the division (mod 2^132); an off-grid slope below zero of 2^102 or more; REG with HALF_OFFSET[0] = 0 |
-| 7 | infinite determinant | depth 0 | not measured |
+| 7 | infinite determinant | depth 0 | measured since `4f3efe15` (trsort_recip page 10, trsort_auto), with a determinant of 2^126 or more giving depth 0 too: depth sync pending (section 0) |
 | 8 | det 0 / perpendicular with an infinite or NaN corner depth | the mean with infinities (9.4b) | **closed** by `708fb8cd` (depthgaps_dzinf 48 of 48) |
 | 9 | the ISP's mean: x 0xAAAAAB or / 3 | x `OneThird` | invisible (the same 19 bits for every 24-bit sum). The mean's zero rule is **closed** (6.3, depthgaps_zadd) |
 | 10 | slopes > ~2^71 x the start | the block form | **closed**: refsw3's float form is unreachable (9.4a) |
 | 11 | unranged slopes: `a * inv` of 2^128 or more with finite a, b (a determinant below 1) | stepped as numbers | not isolated (depthgaps_edges reaches 2^122 a pixel). The start is ranged since `708fb8cd` (depthgaps_tinyramp) |
 | 12 | denormal x, y in the edge unit | exact denormals | not measured |
-| 13 | depth sample point with HALF_OFFSET[0] = 0 | centre start, stepped back half a pixel | halfofs not sensitive |
+| 13 | depth sample point with HALF_OFFSET[0] = 0 | centre start, stepped back half a pixel (`708fb8cd`) | changed by `0de9776b`: the start at the tile's corner (depth2_halfc, depth2_halfo); depth sync pending (section 0) |
 | 14 | PARAM_BASE not 1 MB aligned; parameters past 8 MB / below PARAM_BASE's page | mask on the ISP side, none on the TSP side; wraps | console draws nothing (zexfil) |
 | 15 | object list type 110 | ignored | not measured |
 | 16 | VolumeMode 3..7; "outside" summary on untouched pixels | as 0; bit 0 kept | modvol arrangements only |
@@ -1574,9 +1646,9 @@ The row numbers are those of the `2d08a440` transcription, kept so that referenc
 | 21 | translucent cache size < 64, discard mode, SB_ISTERR | not modelled | ispcache |
 | 22 | translucent modifier volumes in general; pre-sorted background skip | sorted only; ignored in pre-sort | TODO C6, timemeas |
 | 23 | the races of section 14 | not modelled | *_races tests |
-| 24 | the walk's fine units; its end rule with a column step below zero | 2^(unit - 6); R alone | only the decisions are measured (8.4b) |
-| 25 | row 31 a row earlier: why; an ordinary sliver (no big edge) with its top corner in row 31 | only with a big edge | faredge_walk, faredge_far32; no test has the ordinary case (8.6) |
-| 26 | the zero rule in the depth setup's coordinate differences and determinant | applied (one shared adder) | only the depth products' sums measured (depthgaps_zadd, _field1; 6.3) |
+| 24 | the walk's fine units; its end rule with a column step below zero | 2^102 (one grid with the ordinary rows), cut toward zero; R alone, R + 2^131 for a multiple of 2^126; against ZERO | **closed** by `1040c4aa` (edge2_walk, edge2_end, edge2_mult; 8.3, 8.4b). Left: the mechanism of the 2^131 (a reading only, 8.4b) |
+| 25 | row 31 a row earlier: why; an ordinary polygon (no big edge) with its top corner in row 31 | every polygon (`1040c4aa`) | the ordinary case **closed** (edge2_walk page 6, edge2_row31; 8.6). Left: why row 31 |
+| 26 | the zero rule in the depth setup's coordinate differences and determinant | applied (one shared adder) | measured by `0de9776b` (depth2_zcoord, depth2_zedge: `zeroRuleCoords`, `zeroRuleEdges` 1), depth sync pending; not in the edge unit (6.2) |
 | 27 | NegWord's fallback word (a start cut to zero, slopes of 2^134 and more) | 0x80000000 \| (E + 126) << 23 | [R] marked "not reached"; `At` returns it at uncovered pixels only (9.6) |
 
 ## 16. Test index (dreamcast-tests pvr-tests/)
@@ -1587,6 +1659,8 @@ The row numbers are those of the `2d08a440` transcription, kept so that referenc
 | hugepos; hugepos_a, _b, _all, _odd_*, _cov, _sw1-4, _val1, _v3-v6, _rules | winding from det, the swamp, the start's saturation at 2^127, a difference of 2^128 stepping by 2^127, E at most 129, the walk (wrap, end) |
 | faredge; faredge_cmax, _k132 | the swamp per product, two of one sign cancelling, the push |
 | faredge_m131, _ecap, _walk, _far32 | EdgeWinding, E at most 129, the walk (wrap, push, end, first row), row 31 |
+| edge2_walk, _end, _mult | a big edge's grid 2^102 and its start toward zero; the end against ZERO; the far value with sx < 0 (R alone, R + 2^131 for a multiple of 2^126) |
+| edge2_walk page 6, edge2_row31 | row 31 a row earlier for every polygon; the user tile clip has no part in it |
 | faredge_cull | culling on the swamped determinant |
 | raster, precision | coverage, shared edges, small-polygon cull, edge resolution |
 | cullval | cull by size: register size only, NaN = +inf, equal culls |
@@ -1622,11 +1696,12 @@ The row numbers are those of the `2d08a440` transcription, kept so that referenc
 ## 17. Lockstep points in refsw3
 
 For per-unit testbenches (polly2-rtl `tb/`), these functions take plain inputs and are header-only (include
-`refsw3/refcore/pvr_isp_edge.h`, `pvr_isp_depth.h`; no other dependency; `agents/spec-refresh/widths708.cpp` is an
-example):
+`refsw3/refcore/pvr_isp_edge.h`, `pvr_isp_depth.h`; no other dependency; `agents/spec-refresh/widths708.cpp` and
+`agents/spec-sync-edge/widths4f3.cpp` are examples):
 - `pvrisp::Winding` (bad corners), `pvrisp::EdgeWinding` (sgn and the culls' det), `pvrisp::RowRange`;
 - `pvrisp::EdgeTile::Setup / SetFirstRow / Inside / InsideOrdinary / RowMask / Walk / RowOutside` (its fields
-  `t0`, `tx`, `ty`, `zero2`, `tie2`, `big`, `f0`, `fx`, `fy`, `h`, `z`, `rowMask` are public);
+  `t0`, `tx`, `ty`, `zero2`, `tie2`, `big`, `f0`, `fx`, `fy`, `h`, `z`, `rowMask` are public; since `1040c4aa` `f0`,
+  `fx`, `fy`, `z` equal `t0`, `tx`, `ty`, `zero2` on a big edge);
 - `pvrisp::DepthTileT<DepthHW>::Setup / At / NegWord / RegDepth` (its state `valid`, `block`, `ovf`, `sa`, `sb`,
   `r0`, `fa`, `fb`, `first_z`, `d0`, `dx`, `dy`, `unit`, `E`, `A`, `B` is public; `Setup` resets it);
 - `pvrisp::StoredDepth::{Key32, Bits, Between, Neg, Flat, Big, FromFp, Saturated, key}`;

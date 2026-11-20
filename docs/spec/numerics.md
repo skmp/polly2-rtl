@@ -12,7 +12,13 @@ edge unit at 2^128: the swamp, the walk of a big edge) and `708fb8cd` (the depth
 the zero rule, the limit at every operation, the mean's infinities, `pvrfp::OneThird`). They rewrote sections 0,
 1.2-1.4, 2.6, 2.12, 3, 4, 5.1, 5.2, 5.5, H7a, H9-H12, H14, 7 and 8; elsewhere only line numbers moved
 (`pvr_softfp.h` +11 from L326, `pvr_tsp_plane.h` -2 from L249, `refsw_tile.cpp` +22 from L836, `refsw_lists.cpp` +8
-from L615). **Evidence:** dreamcast-tests at `b54c934`, `README.md` (the section is named with each rule; the edge
+from L615). **Edge unit at `4f3efe15`** (spec sync, 2026-11-20): `1040c4aa` changed the edge arithmetic (a big
+edge's grid 2^102, its start toward zero, the walk's end against ZERO and its far value with a column step below
+zero, row 31 for every polygon): sections 3.1, 4.2 (the edge column), 5.1, 5.4 (tile.cpp row range), the `unitsAt`
+row of H11 and G13 follow it, with `pvr_isp_edge.h` line numbers and `refsw_tile.cpp` L815-847 at `4f3efe15`. The
+depth and TSP changes of `0de9776b`, `2bee80f2` and `4f3efe15` are not transcribed yet (ARCHITECTURE §0.1b); none of
+them touches the edge unit's primitives (`0de9776b`'s zero rule in the coordinates and edges is the depth setup's,
+`isp.md` 6.2). **Evidence:** dreamcast-tests at `b54c934` (`a932980` for edge2_*), `README.md` (the section is named with each rule; the edge
 and depth rules of `708fb8cd` are in "refsw3 without float: the number formats at their edges") and `TODO.md`.
 
 **Scope.** This document covers every number format and arithmetic operation of the CORE's setup and evaluation
@@ -58,7 +64,7 @@ the timing specification.
    is an infinity; one below 2^-126 is a zero; input field 0 is zero and field 255 is infinity; `inf * 0 = 0`;
    `inf - inf = +0`; a sum below the range is `+0`; the TSP's last addition has a rule for zero operands, and every
    addition of the depth setup has its own (a zero added to [2^-126, 1.5 * 2^-126) of the other sign is `+0`, every
-   zero sum is `+0`). The edge unit instead **swamps**: a product or sum of 2^128 or more becomes ±2^200, which drops
+   zero sum is `+0`; the edge unit has no zero rule, `isp.md` 6.2). The edge unit instead **swamps**: a product or sum of 2^128 or more becomes ±2^200, which drops
    every finite operand of the adds, and the start and the steps saturate to ±2^127.
 6. The TSP divider is a 16-bit table reciprocal (512 entries of `(t, n)` and a 6-bit linear step), times the
    numerator, floored at 17 fractional bits. A negative denominator is read with its 15 bits under the leading one
@@ -282,7 +288,7 @@ them once the last-addition rule was in)]
 ### 2.6 `atLeastPow2(e)` (L247)
 
 `mant != 0 && top > e`, that is `|v| >= 2^e`. It is used by the edge unit's swamp and saturation, every one at
-`>= 2^128` (H7a: edge L113 in `EdgeWinding`; L181, L190-191, L196 in `EdgeTile::Setup`). `2d08a440`'s `|dy| >=
+`>= 2^128` (H7a: edge L116 in `EdgeWinding`; L184, L193-194, L199 in `EdgeTile::Setup`, at `4f3efe15`). `2d08a440`'s `|dy| >=
 2^127` test is gone.
 
 ### 2.7 `Mul(a, b, N)` (L341)
@@ -433,10 +439,10 @@ twins are plain `int`s for the probes and have the same defaults; the code is te
 column gives the test and what it showed. Where the dreamcast-tests probes scanned a parameter one step either
 way, the numbers are pixels or readings wrong: with the measured value they are 0.
 
-### 3.1 `EdgeHW` (`pvr_isp_edge.h` L41)
+### 3.1 `EdgeHW` (`pvr_isp_edge.h` L42)
 
 Evidence: covmeas (98 archived sets, 0 differences), hugepos, and for the last four rows faredge (1,340 of 1,340)
-with its sets faredge_cmax, _k132, _m131, _ecap, _walk, _cull, _far32. The scan is `model/covprobe --scan` summed over
+with its sets faredge_cmax, _k132, _m131, _ecap, _walk, _cull, _far32, and edge2_walk for `cutUnitBits`. The scan is `model/covprobe --scan` summed over
 30 runs, from the README section "model: one implementation in soft floating point".
 
 | constant | value | use | evidence |
@@ -456,6 +462,7 @@ with its sets faredge_cmax, _k132, _m131, _ecap, _walk, _cull, _far32. The scan 
 | `saturateExp` | 127 | the start then saturates to ±2^127; a coordinate difference of 2^128 or more steps as ±2^127 | hugepos (triangle a at 2^118 .. 2^124, the console's pixels exactly); hugepos_v4, _v5, _v6 (as an infinite step: 68,397 / 67,565 pixels wrong) |
 | `lastColumnByStep` | true | a zero pixel in column 31 goes by the column step's sign | 0: 246 |
 | `blockMax` | 129 | E at most 129; an edge whose E was cut (`ep >= 124`, a step of 2^123 or more) is walked (`isp.md` 8.4b) | faredge_ecap: 129 all of 1,440 edges, 130: 1,424 wrong, 131, 132 or none: 1,440; faredge_m131 (134: 1,165 of 1,800 tiles wrong) |
+| `cutUnitBits` | 27 | an edge whose E was cut keeps its start and steps in units of 2^(E - 27) = 2^102, cut toward zero (since `1040c4aa`) | edge2_walk pages 3-5, 900 tiles: 26: 240 wrong, 28: 428; 2^(ep - 25 .. 27): 435 .. 557; `708fb8cd`'s two grids: 339 |
 | `walkExp` | 131 | the walk holds R and R + 16 sx in [-2^131, 2^131) (mod 2^132), and 32 sx below 2^131 | faredge_walk 3,537 tiles; faredge_m131 pages 0-5 (-2^131 not pushed, +2^131 pushed); faredge_k132 group K; hugepos_rules pages 0-3 (the wrap) |
 
 ### 3.2 `DepthHW` (`pvr_isp_depth.h` L41)
@@ -517,7 +524,7 @@ These `PlaneHW` constants select experiments; the HW value is 0 and the experime
 | `Mul(., ., 62)` | TSP L326, L363; mip L646, L674, L686, L759 | exact for these operand widths (≤ 48 bits) |
 | `Mul(., ., 24)`, `Recip(., 24)` | mip L610, L619, L623, L641, L706, L745 | literal 24 = `PlaneHW` widths |
 | `Mul(., ., 8)`, `.cut(8)` | mip L762, L773, L779, L782 | 8-bit mip arithmetic |
-| `Pow2(OE + 72)`, `Pow2(saturateExp)` | edge L113, L181; L190-191, L197 | the swamp value 2^200 and the saturation 2^127 (H7a) |
+| `Pow2(OE + 72)`, `Pow2(saturateExp)` | edge L116, L184; L193-194, L200 (`4f3efe15`) | the swamp value 2^200 and the saturation 2^127 (H7a) |
 | `.cut(slopeBits).cutBelow(102)`, `cut(startBits)` onto 2^102 | depth L436, L479-482 | the REG steps and start (H11) |
 
 ### 3.5 Constants
@@ -526,7 +533,7 @@ These `PlaneHW` constants select experiments; the HW value is 0 and the experime
 |---|---|---|---|
 | 1/3, rounded up | `0xAAAAAB * 2^-25` (`0x3EAAAAAB`) | `pvrfp::OneThird()` (softfp L331): depth mean L569, TSP flat L246 | perpmean_word 16,384 of 16,384 (0xAAAAAA: 1,618 wrong); slivers_detzero 9,600 of 9,600 (0xAAAAAA: 8,143); perpmean_uv 8,192 |
 | 2 - sqrt(2), less 8 units | `0x95F612 * 2^-24` (`0x3F15F612`) | mip L684 | mipk4 / mipk3 lenfit 3,920 cells, mipk2 2,401 of 2,401 |
-| edge swamp value | `±2^200` (`{mant 1, exp 200}`) | edge L113, L181 | faredge_cmax, faredge_k132 (any value beyond every adder's reach of a finite operand does the same) |
+| edge swamp value | `±2^200` (`{mant 1, exp 200}`) | edge L116, L184 (`4f3efe15`) | faredge_cmax, faredge_k132 (any value beyond every adder's reach of a finite operand does the same) |
 | saturated edge start and steps | `±2^127` | edge L190-191, L196-197 | hugepos, hugepos_v4-v6 |
 | evaluator zero / infinity | `+-2^-127`, `+-2^-128` | TSP L312-313 | uvmeas wexp, whuge: 4875 of 4875 |
 | value of -1 unit | `-2^-143` | TSP L381 | wzero1 (below 2^-130); GAP G8 |
@@ -573,7 +580,7 @@ _ab; depthgaps_zadd, _field1, _nanprod, _tinyramp; huge, zspec], with its own ze
 |---|---|---|---|---|
 | input | `FromBits` | `FromSingle(., 1)` | `FromSingle(., 1)` | the planes' sums; DCalcCtrl 1: `FromSingle(., 1)` |
 | product | `Mul 24`, no range; ≥ 2^128 swamps (H7a) | `mul` | `mul` | `kind`, `rmul` |
-| sum | `Add 24/25`, no range; ≥ 2^128 swamps | `add_d`: `limit(., true)`, the zero rule, every zero `+0` | `addTerm(., ., false)` | `radd`: **reach 53** |
+| sum | `Add 24/25`, no range, no zero rule; ≥ 2^128 swamps | `add_d`: `limit(., true)`, the zero rule, every zero `+0` | `addTerm(., ., false)` | `radd`: **reach 53** |
 | `sum3` | `(e1 + e2) + e3` | `add_d(add_d(p, q), r)`; the mean: `addInf` | `addTerm(addTerm(p, q, false), r, true)` | none |
 | reciprocal | none | `Recip 24`, **unranged** | `det.bad ? zero(det.neg) : Recip 24`, then below 2^-126 → `zero(sign)` | `det.bad ? +0 : Recip 24`, then below → `+0` |
 | coefficients | | `A`, `B`: `Mul(., inv, 24)`, **unranged**, then `under()`: below 2^-126 → mant 0, **sign kept**; the start: the ranged `first0` | `mul(., inv)` ranged, then `cut_16` | `Mul(best, inv2, 24)`, then range |
@@ -674,37 +681,38 @@ cd nulldc3/refsw3/refcore && grep -n -E '(\b(Add|Sub|Mul|Recip|FloorScaled|Floor
 
 The `op` column names the primitive of section 6. `N/R` gives the width and the reach.
 
-### 5.1 `pvr_isp_edge.h` (`EdgeHW`; inputs `FromBits`; no range; the swamp)
+### 5.1 `pvr_isp_edge.h` (`EdgeHW`; inputs `FromBits`; no range; the swamp) — at `4f3efe15`
 
-`Winding` and `EdgeWinding` run once per triangle (`refsw_tile.cpp` L752-755 for the chunk counter's
-`TriangleCulled`, L778-779 for drawing). `EdgeTile::Setup` runs per edge per tile (L797-800); `c`, `dx` and `dy` do
-not depend on the tile. `SetFirstRow` walks a big edge again once the row range is known (L830-834). Algorithm:
+`Winding` and `EdgeWinding` run once per triangle (`refsw_tile.cpp` L756-759 for the chunk counter's
+`TriangleCulled`, L782-783 for drawing). `EdgeTile::Setup` runs per edge per tile (L801-804); `c`, `dx` and `dy` do
+not depend on the tile. `SetFirstRow` walks a big edge again once the row range is known (L842-846). Algorithm:
 `isp.md` 7.1, 8.3-8.6.
 
 | line | expression | op | N/R | notes |
 |---|---|---|---|---|
-| 85-89 | `Winding`: `e(j,k) = Sub(Mul(x_j, y_k, 24), Mul(x_k, y_j, 24), 24, 25)`; `det = Add(Add(e1, e2), e3)` | H5, H6 | 24; 24/25 | only `det.bad` is used: a bad corner |
-| 113 | `swamp(v) = v.atLeastPow2(128) ? Pow2(200, v.neg) : v` | H7a | | in `EdgeWinding` |
-| 114-118 | `EdgeWinding`: `e(j,k) = sw(Sub(sw(Mul(x_j, y_k, 24)), sw(Mul(x_k, y_j, 24)), 24, 25))`; `det = sw(Add(sw(Add(e1, e2)), e3))` | H5, H6, H7a | 24; 24/25 | `e1 = e(1,2)`, `e2 = e(2,0)`, `e3 = e(0,1)`; `x_j y_k` is the minuend; **order `(e1 + e2) + e3`**; winding = `+1` iff `det < 0` and `det != 0`; also feeds `CulledBySize` and `CulledByFacing` |
-| 131 | `FloorScaled(y_k, 0)`, `(FloorScaled(y_k, 1) + 1) >> 1` | H11 | clamp 2^40 | row range `floor(ymin) .. floor(ymax + 1/2)`; not for modifier volumes |
-| 181-182 | `c = sw(Sub(sw(Mul(xb, ya, 24)), sw(Mul(xa, yb, 24)), 24, 25))` | H5, H6, H7a | 24; 24/25 | edge a→b; `xb ya` is the minuend |
-| 188 | `dx = Sub(xa, xb)`, `dy = Sub(ya, yb)` | H6 | 24/25 | `top <= 129` |
-| 189 | `dxP = sw(dx)`, `dyP = sw(dy)` | H7a | | for the start's products |
-| 190-191 | `dx, dy >= 2^128` → `Pow2(127, neg)` | H7a | | for the steps; hugepos_v4-v6 |
-| 192 | `x0 = FromHalves(2 left + HALF_OFFSET[0])`, likewise `y0` | H4 | | the tile's first sample point |
-| 194 | `first = sw(Add(sw(Mul(dxP, y0, 24)), -sw(Mul(dyP, x0, 24)), 24, 25, -1))` | H5, H6, H7a | 24; 24/25 | a dropped operand here is what covmeas point 3 saw; `Mul(±2^200, 0)` is a zero |
-| 195 | `start = Add(first, c, 24, 25, -1)` | H6 | 24/25 | |
-| 196-197 | `start >= 2^128` → `Pow2(127, start.neg)` | H7a | | `es <= 128` after it |
-| 198 | `sy = dx.cut(20)`, `sx = (-dy).cut(20)` | H2 | 20 | |
-| 199-200 | `ep = max(top dx, top dy)`, `es = top(start)` | H1 | | |
-| 208 | `s20 = start.cut(20)` | H2 | 20 | |
-| 216-230 | `E = max(ep + 6, es + 1)`; `E > 129` → `E = 129` (cut); `unit = ep - 21` | int | | the cut happens iff `ep >= 124`; `big = cut && ep >= 124` (L268) is the cut |
-| 231-235 | `E - unit > 56` → constant tile | int | | never for a big edge (`E - unit = 150 - ep`) |
-| 237-238 | `sx, sy .cutBelow(unit)` | H3 | | the walk keeps `sx`, `sy` before this cut (L236) |
-| 239-264 | `unitsAt`: `t0 = 2 floor(s20 / 2^unit) + frac`; `tx = 2 floor(sx / 2^unit)`; `ty` likewise; `zero2 = 2 << (E - 21 - unit)`; `tie2` likewise | H11 (`unitsAt`) | | `unitsAt(+-0) = 0`; `frac` = any bit of `s20` below `unit`; `isp.md` 8.5: 31-bit accumulator |
-| 268-277 | big: `fine = unit - 6`; `f0 = 2 floor(s20 / 2^fine) + frac`; `fx = 2 unitsAt(sx.cutBelow(fine))`, `fy` likewise; `h = 2 << (131 - fine)`; `z = 2 << (E - 21 - fine)`; `Walk()` | H3, H11 | | `isp.md` 8.4b, 8.5: 36-bit walk accumulator |
-| 282-289 | `SetFirstRow(row)`: clamp to 0 .. 31, walk again if it changed | int | | |
-| 291-304, 307-327, 362-401 | `InsideOrdinary`, `RowMask`, `Walk` | int | | integer compares and adds only |
+| 88-92 | `Winding`: `e(j,k) = Sub(Mul(x_j, y_k, 24), Mul(x_k, y_j, 24), 24, 25)`; `det = Add(Add(e1, e2), e3)` | H5, H6 | 24; 24/25 | only `det.bad` is used: a bad corner |
+| 116 | `swamp(v) = v.atLeastPow2(128) ? Pow2(200, v.neg) : v` | H7a | | in `EdgeWinding` |
+| 117-121 | `EdgeWinding`: `e(j,k) = sw(Sub(sw(Mul(x_j, y_k, 24)), sw(Mul(x_k, y_j, 24)), 24, 25))`; `det = sw(Add(sw(Add(e1, e2)), e3))` | H5, H6, H7a | 24; 24/25 | `e1 = e(1,2)`, `e2 = e(2,0)`, `e3 = e(0,1)`; `x_j y_k` is the minuend; **order `(e1 + e2) + e3`**; winding = `+1` iff `det < 0` and `det != 0`; also feeds `CulledBySize` and `CulledByFacing`. No zero rule (the depth setup's own `addE` has one, `0de9776b`) |
+| 134 | `FloorScaled(y_k, 0)`, `(FloorScaled(y_k, 1) + 1) >> 1` | H11 | clamp 2^40 | row range `floor(ymin) .. floor(ymax + 1/2)`; not for modifier volumes |
+| 184-185 | `c = sw(Sub(sw(Mul(xb, ya, 24)), sw(Mul(xa, yb, 24)), 24, 25))` | H5, H6, H7a | 24; 24/25 | edge a→b; `xb ya` is the minuend |
+| 191 | `dx = Sub(xa, xb)`, `dy = Sub(ya, yb)` | H6 | 24/25 | `top <= 129` |
+| 192 | `dxP = sw(dx)`, `dyP = sw(dy)` | H7a | | for the start's products |
+| 193-194 | `dx, dy >= 2^128` → `Pow2(127, neg)` | H7a | | for the steps; hugepos_v4-v6 |
+| 195 | `x0 = FromHalves(2 left + HALF_OFFSET[0])`, likewise `y0` | H4 | | the tile's first sample point (tile.cpp L798) |
+| 197 | `first = sw(Add(sw(Mul(dxP, y0, 24)), -sw(Mul(dyP, x0, 24)), 24, 25, -1))` | H5, H6, H7a | 24; 24/25 | a dropped operand here is what covmeas point 3 saw; `Mul(±2^200, 0)` is a zero |
+| 198 | `start = Add(first, c, 24, 25, -1)` | H6 | 24/25 | |
+| 199-200 | `start >= 2^128` → `Pow2(127, start.neg)` | H7a | | `es <= 128` after it |
+| 201 | `sy = dx.cut(20)`, `sx = (-dy).cut(20)` | H2 | 20 | |
+| 202-203 | `ep = max(top dx, top dy)`, `es = top(start)` | H1 | | |
+| 211 | `s20 = start.cut(20)` | H2 | 20 | turned with `sgn` (L212-214), as `sx`, `sy` |
+| 219-232 | `E = max(ep + 6, es + 1)`; `E > 129` → `E = 129` (cut) | int | | the cut happens iff `ep >= 124`; `big = cut && ep >= 124` (L285) is the cut |
+| 243 | `unit = cut ? E - 27 : ep - 21` | int | | `cutUnitBits` 27: 2^102 for every big edge (`1040c4aa`; before: `ep - 21` for all) |
+| 244-248 | `E - unit > 56` → constant tile | int | | never for a big edge (`E - unit = 27`) |
+| 249-250 | `sx, sy .cutBelow(unit)` | H3 | | toward zero; the walk takes these too (no finer copy since `1040c4aa`) |
+| 251-279 | `unitsAt`: `t0 = 2 floor(s20 / 2^unit) + frac`, a big edge `t0 = 2 unitsAt(s20.cutBelow(unit))` (toward zero, no `frac`, L276-277); `tx = 2 floor(sx / 2^unit)`; `ty` likewise; `zero2 = 2 << (E - 21 - unit)`; `tie2` likewise | H3, H11 (`unitsAt`) | | `unitsAt(+-0) = 0`; `frac` = any bit of `s20` below `unit`; `isp.md` 8.5: 31-bit accumulator ordinary, 34-bit big |
+| 285-293 | big: `f0 = t0`, `fx = tx`, `fy = ty`; `h = 2 << (131 - unit)` (= 2^30); `z = zero2` (= 2^7); `Walk()` | int | | `isp.md` 8.4b, 8.5 |
+| 297-304 | `SetFirstRow(row)`: clamp to 0 .. 31, walk again if it changed | int | | |
+| 306-319, 322-342, 397-438 | `InsideOrdinary`, `RowMask`, `Walk` | int | | integer compares and adds only; `Walk`'s `far32` (L404): `fx > 0 ? (32 fx) mod h : fx < 0 && (-32 fx) mod h == 0 ? h : 0`, its end test `rw + far32 > z` (L419) |
 
 ### 5.2 `pvr_isp_depth.h` (`DepthHW`; inputs `FromSingle(., 1)`; ranged)
 
@@ -828,7 +836,7 @@ Indices 0, 1, 2 are the corners in rasterizer order, `j = k + 1`, `l = k + 2` (m
 | tile.cpp 722-740 | `CulledBySize`, `CulledByFacing` | H9 | |
 | tile.cpp 748-749, 771-772 | `FromBits(v.x)`, `FromBits(v.y)` | H4 | the fourth corner of a sprite too |
 | tile.cpp 752-755, 778-779 | `Winding` (bad corners), `EdgeWinding` (sgn and the culls' det) | H5, H6, H7a | `isp.md` 7.1 |
-| tile.cpp 811-835 | `RowRange`; the row-31 shift with a big edge; `SetFirstRow` | H11 | `isp.md` 8.6 |
+| tile.cpp 815-847 (`4f3efe15`) | `RowRange`; the row-31 shift, every polygon (`1040c4aa`); `SetFirstRow` | H11 | `isp.md` 8.6 |
 | tile.cpp 1264-1318 | `CoordKeep`, `TexCoordFixed(u, shift)` | H11 | `tsp.md` 9.1 |
 | tile.cpp 1728-1770 | `LookupFogTable`: `M = FOG_DENSITY[15:8] * W.mant` (8 × 16 bits, exact), `E = W.exp + FOG_DENSITY[7:0] (signed) - 7`, normalize to 24 bits, clamp to [1, 256 - 2^-16], index and blend from the float bits | H1, H5 (8×16 integer) | `tsp.md` 15.2; `W < 0`, zero or bad → 1.0 |
 | lists.cpp 374-379 | `perpVal = FromBits(FPU_PERP_VAL & 0x7fffffff)` | H4 | |
@@ -973,7 +981,7 @@ otherwise:             exact sum, truncated to 64 then 62 significant bits
 The truncations compose with whatever cut follows, except at H7b where a floor follows. Each site takes few
 operands, so it gets its own small circuit.
 
-**H7a `fp_swamp`: the edge unit at 2^128** (edge L113, L181, L189-191, L196-197; refsw3 `6784ea3d`). It replaces
+**H7a `fp_swamp`: the edge unit at 2^128** (edge L116, L184-185, L192-194, L199-200 at `4f3efe15`; refsw3 `6784ea3d`). It replaces
 `2d08a440`'s `edge_start_sat` (the `±2^132 - first` wide add, which is gone). Two comparators on `|v| >= 2^128`
 (`top(v) > 128`) that replace the tuple:
 
@@ -1089,7 +1097,7 @@ The variants differ in their zero convention and clamping. Each is a variable sh
 |---|---|---|---|---|
 | `FloorScaled(v, s)` | 0 | `floor(v 2^s)` | `top + s > 40` → `+-2^40` | edge row range |
 | `FloorUnits(v, unit)` | `+0` → 0, **`-0` → -1** | `floor(v / 2^unit)` | `s >= 62` → `INT64_MAX/4` (unreachable, A4) | TSP `Value`: `c_`, `ax`, `by`, `a_`, `ah`, H7b |
-| edge `unitsAt(v, u)` | 0 | `floor(v / 2^u)`, plus `frac` = any bit below `u` | none (`E - unit <= 56`) | edge `t0`, `tx`, `ty` (`u = unit`); a big edge's `f0`, `fx`, `fy` (`u = unit - 6`, the steps first `cutBelow(u)`) |
+| edge `unitsAt(v, u)` | 0 | `floor(v / 2^u)`, plus `frac` = any bit below `u` | none (`E - unit <= 56`) | edge `t0`, `tx`, `ty` (`u = unit`, the steps first `cutBelow(u)`); a big edge's `t0` from `s20.cutBelow(u)` (toward zero, `frac` unused) and `u = 102`; `f0`, `fx`, `fy` are these (`4f3efe15`) |
 | depth grid | | exact left shift: values are on the grid by construction (`m.exp >= unit`) | none | depth `d0`, `dx`, `dy` |
 | depth REG `r0`, `fa`, `fb` | | `r0`: `cut_20`, trunc toward zero onto 2^102 (sign-magnitude); `fa`, `fb`: `cut_20(Mul(v, inv, 24))`, trunc onto 2^102, the magnitude mod 2^30, then the sign | `r0`'s shift clamps unreachable (A4) | depth L436-443, L479-482 |
 | depth `M` | | `flat`: `-ceil(\|s\| / 2^(E - 16))`; `bgkey`: `-ceil(t / 2^10)`; `NegWord`: `floor(tu / 2^sh)` (arithmetic shift) | `NegWord`'s `sh < 0`: the fallback word (A5) | depth L195-202, L668; lists L643-645 |
@@ -1293,7 +1301,7 @@ is never bad, so `fallback` is reachable only from a caller with a bad quotient.
     REG's `rstep` (L433-444);
   - the TSP `mul`, `addTerm`, `sum3`, `withZero` (`pvr_tsp_plane.h` L145-184, L256-267);
   - the mip `kind`, `rmul`, `radd` (L602-612, L699-730);
-  - the edge `swamp` (L113, L181) and `unitsAt` (L239-257);
+  - the edge `swamp` (L116, L184) and `unitsAt` (L251-268, at `4f3efe15`);
   - the `Value` normalizer (L377-397);
   - `TexCoordFixed` / `CoordKeep` (`refsw_tile.cpp` L1264-1318);
   - the fog arithmetic (L1728-1755);
@@ -1439,9 +1447,10 @@ specifications.
 - **G6** Stored depth: the order of positive denormal depths among each other (only "above 0, below 2^-126" is
   measured); `big`'s grid (any cut of about 13 to 23 bits fits depthgaps_bigord, 19 is taken). (Negative depths
   outside the window and below 2^-122, and positive ones from 2^128, are measured since `708fb8cd`: H14.)
-- **G7** The ISP depth's range rules: measured on the depth unit since `708fb8cd` (section 4.1). Open: the zero
-  rule's reach into the depth setup's coordinate differences and determinant (one shared adder in refsw3; only the
-  depth products' sums were measured).
+- **G7** The ISP depth's range rules: measured on the depth unit since `708fb8cd` (section 4.1). The zero rule's
+  reach into the depth setup's coordinate differences, edge sums and determinant was open here; `0de9776b`
+  measured it (depth2_zcoord, depth2_zedge: `DepthHW::zeroRuleCoords`, `zeroRuleEdges` 1), not yet transcribed
+  (header). The edge unit's adds have no zero rule (`isp.md` 6.2).
 - **G8** The TSP value of -1 unit is `-2^-143`. Measured only as "below 2^-130"; the divider's reading of it is
   pinned by texfar_m1.
 - **G9** The mean: a division by 3 or a multiplication by `0xAAAAAB 2^-25` give the same 19 bits for every 24-bit
@@ -1452,5 +1461,5 @@ specifications.
 - **G11** The exponent field bounds (section 1.4) are derived, not measured. Since the reference has 32-bit
   exponents, the tbs assert the bounds.
 - **G12** (closed by `708fb8cd`: the mean with infinite or NaN corners, depthgaps_dzinf.)
-- **G13** The edge walk's fine units 2^(unit - 6) (`isp.md` 8.4b): only the decisions are measured. The RTL keeps
-  refsw3's.
+- **G13** (closed by `1040c4aa`: the walk's units are the edge's own 2^(E - 27) = 2^102, the start and steps cut
+  toward zero, ordinary rows too; edge2_walk pages 3-5, 900 tiles; `isp.md` 8.3, 8.4b.)

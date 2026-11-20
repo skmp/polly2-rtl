@@ -5,8 +5,9 @@ of [ARCHITECTURE.md](ARCHITECTURE.md), which defines the units this plan builds.
 [conventions.md](conventions.md). Unit names, formats, free parameters and the D1-D11 decisions are the
 architecture's.
 
-Pins: refsw3 = nulldc3 `skmp/refsw3` @ `708fb8cd` (refcore clean); dreamcast-tests @ `b54c934`. The specs lag refsw3
-on the edge and depth units (ARCHITECTURE §0.1); where they disagree, refsw3 is the reference for every gate.
+Pins: refsw3 = nulldc3 `skmp/refsw3` @ `4f3efe15` (refcore clean); dreamcast-tests @ `a932980`. M0 and M1 were
+built and gated at `708fb8cd`. The specs' edge sections are at `4f3efe15`, their depth and TSP sections still lag
+(ARCHITECTURE §0.1, §0.1b); where they disagree, refsw3 is the reference for every gate.
 
 ## 0. Rules for every milestone
 
@@ -130,7 +131,7 @@ namespace p2ref {
 - Values are compared as tuples: `neg`, `bad`, `mant`, and `exp` when `mant != 0` (num §1.3). Never as `double`.
   Depths are compared as the 64-bit key.
 - The arguments every unit testbench takes: `--seed`, `--n`, `--shard`, `--only`, `--vec`, `--set`, `--trace`.
-- **Triangles from console pages.** Many edge and depth tests (faredge_*, hugepos_*, depthgaps_*, zovf_*, nantr_*,
+- **Triangles from console pages.** Many edge and depth tests (faredge_*, hugepos_*, edge2_*, depthgaps_*, zovf_*, nantr_*,
   perpmean_*, zword) are whole pages. `tools/gate/tria_extract.sh <test>` runs refsw3-offline with its render log on
   the test's PC stream. It turns every `TRIA` line (the corners exactly, `%a`) with its `TILE` into a unit vector
   file, `build/vec/<test>.tri`, so M2 / M3 test the edge and depth units on exactly the console's primitives. The
@@ -156,7 +157,8 @@ These sit between unit and frame. They are the main bring-up tool for the ISP an
   - pre-sorted and autosorted translucent lists with ties, and autosort lists longer than the translucent cache;
   - keep-Z chains, no-writeout entries, empty keep-Z entries spaced far apart;
   - edge-case corners: ±0, denormals, 2^127, ±inf, NaN, slivers, points, far corners (steps of 2^123 and more, first
-    row 28..31, 32·sx near 2^131 and 2^132: the gen3 class of agents/nulldc3/hunt/faredge).
+    row 28..31, 32·sx near 2^131 and 2^132: the gen3 class of agents/nulldc3/hunt/faredge; column steps below zero
+    at multiples of 2^124..2^127, the edge2 class), points and tiny triangles with the top corner in row 31.
 - **Subsets** (conv §7.8), in `tb/tile/subset_*.txt`: about 30 dumps across games and features, one or two pages per
   dreamcast-tests class, and 200 scenegen seeds. The full set is every dump, every page, and 5000 seeds.
 
@@ -370,27 +372,44 @@ The whole of num §6 and §7, in three rounds, with H7a and H14 taken from refsw
 ### M2. ISP edge path
 
 **Deliverables.** The edge datapath of `p2_isp_setup` as a fixed-latency unit (the sequencer comes in M4), at refsw3
-`6784ea3d` semantics:
-- bad corners; the swamped determinant (`EdgeWinding`); CulledBySize / CulledByFacing on it;
+`4f3efe15` semantics (isp §7-8, ARCHITECTURE §0.1b, §2.4, §3.4.4 steps 1-5, §3.4.5):
+- bad corners; the swamped determinant (`EdgeWinding`, no zero rule: isp §6.2); CulledBySize / CulledByFacing on it;
 - per edge per tile `c`, `dx`, `dy`, `dxP`, `dyP`, `first`, `start` with the swamp and the 2^127 saturation, `s20`,
-  `sx`, `sy`, `ep`, `es`, E with the cap at 129, `unit`, `d`; blocking to `p2_edge_t` with the big-edge walk fields;
-- RowRange with the row-31 shift;
-- the 32-lane, 40-bit edge evaluator of `p2_isp_raster` with the per-edge row stage and the walk (inside mask per
-  row).
+  `sx`, `sy`, `ep`, `es`, E with the cap at 129, `unit` (`ep - 21`, or `E - 27 = 102` for a big edge), `d`; blocking
+  to `p2_edge_t`: the steps cut toward zero onto 2^unit, `t0` floored with its half-unit bit or, for a big edge, cut
+  toward zero; `far32` for a big edge;
+- RowRange with the row-31 shift for every polygon (not MODIFIER);
+- the 32-lane, 34-bit edge evaluator of `p2_isp_raster` with the per-edge row stage and the walk (one grid, `H = 2^30`
+  and `Z = 2^7` half units; the end against ZERO; the far value), the inside mask per row;
+- `p2_hw_pkg` at `4f3efe15`: `make hw-pkg-check` fails there today ("pvrisp::EdgeHW has member cutUnitBits, which
+  this generator does not list"; the same for `DepthHW::zeroRuleCoords`, `zeroRuleEdges`). `tools/gen/gen_hw_pkg.cpp`
+  lists `cutUnitBits` (WIDTH) and the two DepthHW members (MODE, each with its `p2_hw_check.sv` check: the RTL has
+  only the value 1); the package regenerated; `make scaffold` passes again.
 
 **Gate** `make isp-edge`.
-1. **Directed facts**: the covmeas rules; hugepos (2^118..2^124 pixel counts); the faredge_* and hugepos_* rules as
-   edge.h cites them (cmax's 2^128 products, k132's cancelling RV tiles, m131's -2^131 not pushed and +2^131 pushed,
-   ecap's cap at 129, walk's row-31 shift).
+1. **Directed facts**: the covmeas rules; hugepos (2^118..2^124 pixel counts); the faredge_*, hugepos_* and edge2_*
+   rules as edge.h cites them: cmax's 2^128 products, k132's cancelling RV tiles, m131's -2^131 not pushed and
+   +2^131 pushed, ecap's cap at 129 and its R = -2^131 ends (pages 7, 9); edge2_walk pages 3-5 (the 2^102 grid, the
+   start toward zero, the end against ZERO), pages 0-2 and edge2_end pages 0-4 (the far value with sx < 0: R + 2^131
+   for -2^126, -2^127, -1.5 2^127, R alone near -2^127 and for +2^127), edge2_mult (odd multiples of 2^125, 2^124:
+   R alone); the row-31 shift of faredge_walk pages 0-3, edge2_walk page 6 and edge2_row31 (points and tiny
+   triangles, no big edge).
 2. **All 115 covmeas sets**: per-pixel coverage equal to the console's record.
-3. **The console pages' own triangles** (§1.2 `tria_extract`): every primitive of `fit/hw/faredge*` and
-   `fit/hw/hugepos*` (8 + 19 tests), per tile, against the copied setup and `EdgeTile::Inside`. 0 differences from
-   refsw3; refsw3's own console residuals (hugepos_rules, hugepos_v5) are refsw3-known at M13, computed.
+3. **The console pages' own triangles** (§1.2 `tria_extract`): every primitive of `fit/hw/faredge*`,
+   `fit/hw/hugepos*` and `fit/hw/edge2_*` (8 + 19 + 4 tests), per tile, against the copied setup and
+   `EdgeTile::Inside`. 0 differences from refsw3; refsw3 has no console residual left on these sets at `4f3efe15`
+   (hugepos_rules 3,600 / 3,600, hugepos_v5 2,400 / 2,400), and refsw3-known stays computed at M13.
 4. **Random**: 2M edges quick, 400M full, against the copies and edge.h. Classes: pixel-grid corners, ulp-perturbed,
-   huge, denormal, slivers, points, both windings, both HALF_OFFSET values, and **the far class**: steps of 2^123 and
-   more, first row 28..31, `32 sx` within a few units of 2^131 and 2^132, both signs, products at exactly 2^128.
-5. **The width claims**, asserted: the `d >= 30` constant rule; the 31-bit ordinary accumulator; the 40-bit lanes;
-   the walk's 36-bit row accumulator and `|f0| < 2^32 + 1`, `|fx|, |fy| < 2^28`. Any value outside fails.
+   huge, denormal, slivers, points, both windings, both HALF_OFFSET values, first row 28..31 for **every** class
+   (tiny triangles and points included), and **the far class**: steps of 2^123 and more, `32 sx` within a few units
+   of 2^131 and 2^132, both signs, products at exactly 2^128; column steps below zero at and near multiples of 2^126,
+   2^125, 2^124 (saturated differences included); starts within a few units of 2^102 of zero, both signs (the cut
+   toward zero); rows where R reaches -2^131 exactly and `R + far32` lands on ZERO.
+5. **The width claims**, asserted: the `d >= 30` constant rule; the 31-bit ordinary accumulator; on every big edge
+   `d = 27`, `unit = 102`, refsw3's `f0`, `fx`, `fy`, `z`, `h` equal to `t0`, `tx`, `ty`, `zero2`, 2^30;
+   `|t0|, |tx|, |ty| < 2^27`; the 34-bit lanes and walk accumulator (every value the walk or the lanes use below
+   2^33); `far32` in [0, 2^30]. Any value outside fails. (`agents/spec-sync-edge/widths4f3.cpp` is the model check:
+   2^32.31 at most on 300,000 edges.)
 
 **Mutants.**
 - zeroShift 21 to 20 or 22; the tie threshold;
@@ -404,8 +423,13 @@ The whole of num §6 and §7, in three rounds, with H7a and H14 taken from refsw
 - **the plain determinant in the cull**; the plain determinant for the edge sign;
 - the swamp off in the start's products (the old saturation after the sum);
 - blockMax 129 to 130;
-- **no wrap**; **no push**; **32·sx kept whole** (no `mod 2^131`); **0 counted as above**; **the walk counted from
-  row 0** (not `jf`); **no row-31 shift**; the row-31 shift without a big edge;
+- **a big edge's grid**: `cutUnitBits` 27 to 26 or 28; `708fb8cd`'s two grids (`ep - 21` for the rows, `ep - 27` for
+  the walk); a big edge's start floored (with and without the half-unit bit);
+- **no wrap**; **no push**; **32·sx kept whole** (no `mod 2^131`); **the end against 0** (not ZERO); **0 counted as
+  above**; **the walk counted from row 0** (not `jf`);
+- **the far value with sx < 0**: R alone for the multiples of 2^126 (`708fb8cd`); R + 2^131 for every multiple of
+  2^125 (or 2^124); R + 32 sx; R + sx;
+- **no row-31 shift**; **the row-31 shift only with a big edge** (`6784ea3d`);
 - dx / dy at 2^128 stepping as the swamp value instead of 2^127.
 
 ### M3. ISP depth path
@@ -493,7 +517,8 @@ This closes conv G10 (the glue compiled for the first time).
 - scenegen's 200 seeds render through both without a mismatch;
 - `check_ref_copies` and `check_ref_switches` are clean;
 - `refsw3_known.sh` reproduces the dreamcast-tests README's per-test scores at the recorded revision (faredge
-  1,340 / 1,340; hugepos_rules 3,590 / 3,600; hugepos_v5 2,399 / 2,400).
+  1,340 / 1,340; hugepos_rules 3,600 / 3,600 and hugepos_v5 2,400 / 2,400 at `4f3efe15`, 3,590 and 2,399 at
+  `708fb8cd`).
 
 **Mutants.** Phase-driver order swaps (OP_MOD before OP; PT final before PT_MOD) must be caught by the self-test.
 
@@ -816,8 +841,8 @@ dreamcast-tests owner through `OPEN_ITEMS.md`. Never run from here. Ordered by w
 | F14 | isp §15 #7: an infinite determinant (refsw3: depth 0). Det 0 with an infinite corner depth is closed (depthgaps_dzinf) | corners at 2^64 and beyond, flat polygons in front and behind |
 | F15 | tsp §22 #11: stuck alpha with textures, autosort, other clearing events (TODO C8) | blendsel variants |
 | F16 | tsp §22 #12-14: SupSample in PT_MV, translucent modifier volumes, two-volume textured, render to texture 1555 / 4444 (TODO C6, C7, C10) | as TODO |
-| F17 (new) | edge.h's open points: an **ordinary** sliver with its top corner in row 31 (does it start at row 30 too?); the walk's unit (2^(unit-6)); the end rule with `sx < 0`; the hugepos_rules page 11 (10 tiles) and hugepos_v5 (1 tile) residuals | faredge_walk-style slivers without a big edge; gen3 cases where the unit size or the `sx < 0` rule changes a pixel |
-| F18 (new) | depth.h's open points: the order of REG words (m = 2..15, 17..22, 24..29) and Big keys among **other** planes' depths; the zero rule in the coordinate differences and the determinant; an off-grid negative REG slope of 2^102 or more; a slope of 2^128 or more after the division | depthgaps_mm-style ramps crossed with ordinary slivers in the same intervals; zovf_creg variants |
+| ~~F17~~ | closed: edge.h's open points (row 31 for an ordinary polygon, the walk's unit, the end rule with `sx < 0`, the hugepos_rules page 11 and hugepos_v5 residuals), measured by edge2_walk, _end, _mult, _row31 and resolved by refsw3 `1040c4aa`. Left: why row 31 (no probe designed) | — |
+| F18 (new) | (`0de9776b` measured the REG / Big order among other planes, the zero rule in the coordinate differences and the determinant and the off-grid negative REG slope: depth2_regmix, _regbelow, _zcoord, _zedge, _cneg; depth sync pending, ARCHITECTURE §0.1b) depth.h's open points: the order of REG words (m = 2..15, 17..22, 24..29) and Big keys among **other** planes' depths; the zero rule in the coordinate differences and the determinant; an off-grid negative REG slope of 2^102 or more; a slope of 2^128 or more after the division | depthgaps_mm-style ramps crossed with ordinary slivers in the same intervals; zovf_creg variants |
 
 ## 4. Requests to other owners (record in `OPEN_ITEMS.md`)
 
@@ -826,7 +851,7 @@ dreamcast-tests owner through `OPEN_ITEMS.md`. Never run from here. Ordered by w
 | dreamcast-tests | PC emission of the timemeas timed scenes, preceded by `echo T <scene>` (conv §7.6.2 option a) | MT0 |
 | dreamcast-tests | multi-run race logs for every `*_races` test as data, at least 3 runs (blendpos_races has 1) | MT8 |
 | dreamcast-tests | T1-T21, F1-F3, F7-F18 above | MT1-MT9, refsw3 GAPs |
-| polly2-rtl spec readers | re-transcribe isp §7-9, §15, num §3 (EdgeHW), H7a, H14, §4 (depth flavour), §8 (A1 edge site, A3, G3-G6, G12) to refsw3 `708fb8cd` (ARCHITECTURE §0.1) | M2, M3 (the gates use refsw3 directly meanwhile) |
+| polly2-rtl spec readers | re-transcribe isp §7-9, §15, num §3 (EdgeHW), H7a, H14, §4 (depth flavour), §8 (A1 edge site, A3, G3-G6, G12) to refsw3 `708fb8cd` (ARCHITECTURE §0.1): done; the edge sections to `4f3efe15` (§0.1b): done; the depth and TSP sections to `4f3efe15` (`0de9776b`, `2bee80f2`, `4f3efe15`): open | M3, M9 (the gates use refsw3 directly meanwhile) |
 | nulldc3 | a hex depth field (the key, or the word and offset) in the render log (conv G6) | M13 depth diffs |
 | nulldc3 | a defined value for MipSelect with `Sdet == 0` (D4), once F1 answers | M9 |
 | nulldc3 | SB_ISTERR bit 0 in refsw3, if D11 says the RTL models it | MT9 |
