@@ -7,8 +7,8 @@ which sets the build order, the gates and the console probes.
 
 Inputs, all read only:
 - the bit-level specifications [spec/isp.md](spec/isp.md), [spec/tsp.md](spec/tsp.md) and
-  [spec/numerics.md](spec/numerics.md), pinned at nulldc3 `708fb8cd`, their edge-unit sections at `4f3efe15`
-  (§0.1, §0.1b below);
+  [spec/numerics.md](spec/numerics.md), pinned at nulldc3 `708fb8cd`, their edge-unit and depth-unit sections at
+  `4f3efe15` (§0.1, §0.1b below);
 - the timing collection [timing.md](timing.md);
 - the repository rules [conventions.md](conventions.md) and [reuse.md](reuse.md);
 - **refsw3: nulldc3 `skmp/refsw3` @ `4f3efe15`** (`refsw3/refcore`, tree clean). This includes, after the specs'
@@ -36,7 +36,7 @@ spec and refsw3 disagree, **refsw3 wins** and the spec is wrong (conv §1).
 | `num H6`, `num §2.8` | docs/spec/numerics.md primitive H6 / section 2.8 |
 | `tim §3.2`, `tim T4` | docs/timing.md section 3.2 / probe T4 |
 | `conv §7.3` | docs/conventions.md section 7.3 |
-| `edge.h`, `depth.h`, `plane.h`, `tile.cpp`, `lists.cpp` | refcore `pvr_isp_edge.h`, `pvr_isp_depth.h`, `pvr_tsp_plane.h`, `refsw_tile.cpp`, `refsw_lists.cpp`; at `4f3efe15` for the edge unit (§2.4 `p2_edge_t`, §3.4.4 steps 1-5, §3.4.5 edge lanes and walk), at `708fb8cd` elsewhere |
+| `edge.h`, `depth.h`, `plane.h`, `tile.cpp`, `lists.cpp` | refcore `pvr_isp_edge.h`, `pvr_isp_depth.h`, `pvr_tsp_plane.h`, `refsw_tile.cpp`, `refsw_lists.cpp`; at `4f3efe15` for the edge unit (§2.4 `p2_edge_t`, §3.4.4 steps 1-5, §3.4.5 edge lanes and walk) and the depth unit (§2.4 `p2_ztile_t`, §3.4.4 steps 6-7, §3.4.5 depth lanes), at `708fb8cd` elsewhere |
 
 **Tags**, as in the specs:
 - **[M]** a console measurement shows it, and the test is named.
@@ -65,7 +65,8 @@ Found while re-transcribing, for this document (it is not edited here; the spec 
   the run). With a nonzero start `M = t * 2^-nsh` (a left shift); with a start cut to zero refsw3 stores its fallback
   word 0xFF000000 (isp §9.6, num A5). Neither happened at a covered pixel in 300,000 random planes
   (`agents/spec-refresh/widths708.cpp`), but `At` returns them, so a lockstep over every lane meets them. §2.4's
-  5-bit unsigned `nsh` does not hold them.
+  5-bit unsigned `nsh` did not hold them; since the depth spec sync it is 5 bits signed (-14..14 with a start) beside
+  a fallback flag `fbw` (isp §9.6).
 - **M can exceed 2^23** at such pixels (2^34.1 in the run, bounded by 2^43; never above 2^23 at a covered pixel).
   §2.1's "`|M| < 2^23` in the 30-bit form" holds for covered pixels only.
 - **The TR peel's reset `bits(0x7F7FFFFF)` is not above every depth**: a `Big` depth (2^128 and up) is above it
@@ -76,15 +77,19 @@ Found while re-transcribing, for this document (it is not edited here; the spec 
 ### 0.1b Where the specs are behind refsw3 `4f3efe15`
 
 Four refsw3 commits followed `708fb8cd` (nulldc3 r8 round 1, dreamcast-tests `a932980`: every regress test exact,
-hugepos_rules and hugepos_v5 included). The edge rows are transcribed (spec sync, 2026-11-20); the depth and TSP rows
-wait for their own sync, and until then refsw3 `4f3efe15` is the reference there (conv §1).
+hugepos_rules and hugepos_v5 included). The edge rows are transcribed (spec sync, 2026-11-20), the depth rows too
+(depth spec sync, 2026-11-20); the TSP rows wait for their own sync, and until then refsw3 `4f3efe15` is the
+reference there (conv §1). `pvr_softfp.h` did not change in any of the four: no shared primitive moved. The TSP's
+plane adds now take the depth setup's zero rule (`2bee80f2`) and its reciprocal the same 2^126 limit (`4f3efe15`),
+so H10's DEPTH and TSP flavours are closer than before (num §4.2); M2 already brought `p2_fp_rng_add` /
+`p2_fp_rng_recip` there.
 
 | commit | what changed | status: now in |
 |---|---|---|
 | `1040c4aa` edge.h `EdgeTile::Setup`, `Walk`; tile.cpp `RasterizeTriangle` | a big edge (E cut to 129) keeps its start and steps in units of 2^(E - 27) = 2^102, cut toward zero, its ordinary rows too (`EdgeHW::cutUnitBits` 27); the walk uses those values (no finer grid: `f0 = t0`, `fx = tx`, `fy = ty`, `z = zero2`, `H = 2^30` half units); the end compares the far value against ZERO, not 0; the far value is `R + (32 sx mod 2^131)` for sx > 0, `R + 2^131` for sx < 0 a multiple of 2^126, `R` otherwise; the row-31 shift applies to every polygon | done: isp §0, §8.2-8.6, §15 #1, #24, #25, §16, §17; num header, §3.1, §4.2, §5.1, §5.4, H11 `unitsAt`, G13; this document §2.4, §3.4.4, §3.4.5, §7; PLAN M2 |
-| `0de9776b` depth.h `DepthTileT::Setup`, `At`; tile.cpp | the depth start at the tile's first sample point (the corner with HALF_OFFSET[0] clear); the zero rule in the depth setup's coordinate differences, edge sums and determinant (`DepthHW::zeroRuleCoords`, `zeroRuleEdges`). **The edge unit is not affected**: its `c`, `dx`, `dy` and `EdgeWinding` determinant use plain `pvrfp::Add` / `Sub` (isp §6.2); the depth unit computes its own `e`, `det` and coordinate differences (§3.4.4 step 6) | edge: isp §6.2, §6.3 note, §15 #26, num G7. Depth: **pending** (isp §9, §15 #13; this document §2.4 `p2_ztile_t`, §3.4.4 step 7; PLAN M3) |
+| `0de9776b` depth.h `DepthTileT::Setup`, `At`; tile.cpp | the depth start at the tile's first sample point (the corner with HALF_OFFSET[0] clear), every pixel whole steps from it (`h = 0` in the hardware); the zero rule in the depth setup's coordinate differences, edge sums and determinant (`DepthHW::zeroRuleCoords`, `zeroRuleEdges`). **The edge unit is not affected**: its `c`, `dx`, `dy` and `EdgeWinding` determinant use plain `pvrfp::Add` / `Sub` (isp §6.2); the depth unit computes its own `e`, `det` and coordinate differences (§3.4.4 step 6). Measured, no code change: REG's off-grid negative slopes toward zero, positive denormals by value, Big cut to 19 bits, REG's words among other planes' depths | edge: isp §6.2, §6.3 note, §15 #26, num G7. Depth: **done** (depth spec sync): isp §0, §6.3, §9.1-9.7, §15 #5, #6, #13, #26, §16, §17; num header, §0, §1.4, §2.5, §3.2, §4.1-4.3, §5.2, §5.5, H10, H12b, H14, §7.1, §7.3, §8 (A4, A5, D2, G5-G7); this document §2.4 `p2_ztile_t`, §3.4.4 steps 6-7, §3.4.5 depth lanes; PLAN M3 |
 | `2bee80f2` plane.h, tile.cpp | the TSP's plane adds take the ISP's zero rule; MipSelect with Sdet 0 takes the last level; a mipmapped texture declared taller than wide | **pending** (tsp; PLAN M9-M11) |
-| `4f3efe15` depth.h, plane.h | a depth determinant of 2^126 or more (exactly included), or infinite, has a reciprocal of zero: depth 0 at every pixel; the TSP planes follow (every coefficient zero) | **pending** (isp §9, §15 #7; tsp; PLAN M3, M9) |
+| `4f3efe15` depth.h, plane.h; tile.cpp (comment) | a depth determinant of 2^126 or more (exactly included), or infinite, has a reciprocal of zero: depth 0 at every pixel; the TSP planes follow (every coefficient zero); the translucent sort orders such depths as the depth test (KeyAbove, no code change) | depth: **done** (isp §6.3, §9.3 steps 1 and 1b, §10.3, §15 #7, §16; num §0, §1.4, §3.2, §3.5, §4.1-4.3, §5.2, H10, G5; this document §2.4 CONST, §3.4.4 step 7; PLAN M3). TSP: **pending** (tsp; PLAN M9) |
 
 ### 0.2 Rules this architecture follows
 
@@ -305,7 +310,7 @@ cutter at the `eoe` item.
 
 ### 2.4 ISP setup to rasterizer descriptor (`p2_rdesc_t`)
 
-Per primitive per tile (edge.h `EdgeTile` at `4f3efe15`, depth.h `DepthTileT` at `708fb8cd`):
+Per primitive per tile (edge.h `EdgeTile` and depth.h `DepthTileT`, both at `4f3efe15`):
 
 | field | bits | meaning |
 |---|---|---|
@@ -330,13 +335,15 @@ Per primitive per tile (edge.h `EdgeTile` at `4f3efe15`, depth.h `DepthTileT` at
 The fields `f0` (34), `fx`, `fy` (30), `hsh`, `zfsh` and `708fb8cd`'s 36-bit `far32` are gone: since `1040c4aa` the
 walk runs on the edge's own grid (isp §8.3, §8.4b).
 
-**`p2_ztile_t`** (depth.h `DepthTileT::Setup` at `708fb8cd`; regime names are this document's):
+**`p2_ztile_t`** (depth.h `DepthTileT::Setup` at `4f3efe15`; regime names are this document's). Every start (`r0`,
+`S`) is the plane at the tile's **first sample point**, `(left, top)` plus `HALF_OFFSET[0] / 2` on both axes (isp
+§9.3), and every pixel is whole steps from it, so no field or lane depends on HALF_OFFSET (`0de9776b`):
 
 | regime | when | fields | per pixel |
 |---|---|---|---|
-| CONST | determinant infinite (key 0); zero plane or start and slopes below 2^-126 (key 0); determinant zero or perpendicular (`flat(mean)`); bad start with both slopes zero (`saturated` / `from_fp(cut19)`) | `key` (`p2_zkey_t`) | `key` |
-| REG | a or b infinite (refsw3 `ovf = 2`) | `r0` (30 signed, units of 2^102), `sa`, `sb` (2 signed, -1/0/+1), `fa`, `fb` (31 signed: the finite slope's step on the 2^102 grid, mod 2^30) | `regdepth(r0 + (sa i + sb j) 2^25 + i fa + j fb)` |
-| BLOCK | otherwise, including a forced start of +-2^127 when the constant or the start overflowed (refsw3 `forced`) | `S` (28 signed: `d0` in half units of G), `DX`, `DY` (23 signed, units of G), `gexp` (10: G = 2^gexp), `E` (9: the clamped block exponent, -122..128), `nsh` (5: `E - 15 - gexp`) | `t = S + (2i + h) DX + (2j + h) DY` (30 signed); `t >= 0`: `cut19(t 2^(gexp-1))` then `big` from 2^128 else `from_fp`; `t < 0`: `neg(E, t >>> nsh)` |
+| CONST | determinant infinite, or of 2^126 or more (`top(det) - 1 >= 126`; key 0, `4f3efe15`); zero plane or start and slopes below 2^-126 (key 0); determinant zero or perpendicular (`flat(mean)`); bad start with both slopes zero (`saturated` / `from_fp(cut19)`) | `key` (`p2_zkey_t`) | `key` |
+| REG | a or b infinite (refsw3 `ovf = 2`) | `r0` (30 signed, units of 2^102, from `first0` at the sample point), `sa`, `sb` (2 signed, -1/0/+1), `fa`, `fb` (31 signed: the finite slope's step on the 2^102 grid, mod 2^30) | `regdepth(r0 + (sa i + sb j) 2^25 + i fa + j fb)` |
+| BLOCK | otherwise, including a forced start of +-2^127 when the constant or the start overflowed (refsw3 `forced`) | `S` (28 signed: `d0` in half units of G), `DX`, `DY` (23 signed, units of G), `gexp` (10: G = 2^gexp), `E` (9: the clamped block exponent, -122..128), `nsh` (5 signed: `E - 15 - gexp`, -14..14 with a start), `fbw` (1: the start was cut to zero and `E - 15 - gexp < 0`: every pixel below zero is NegWord's fallback word, num A5) | `t = S + 2i DX + 2j DY` (30 signed); `t >= 0`: `cut19(t 2^(gexp-1))` then `big` from 2^128 else `from_fp`; `t < 0`: `fbw` ? the fallback word : `neg(E, nsh >= 0 ? t >>> nsh : t << -nsh)` |
 
 refsw3's float form (`block == false` with a valid plane) needs `pair - 21 + 24 - unit > 100`. With
 `startOnSlopes = 1` that is unreachable: a non-zero start cut onto the slopes' grid has `top >= pair - 20`, so the
@@ -345,8 +352,12 @@ closed; revision 1's D3 is withdrawn).
 
 `gexp = max(top(first), pair + 5) - 26` (unclamped). Every refsw3 value is a multiple of G: when the start's top is
 at least `pair + 5`, `G = 2^unit`; otherwise the start was cut onto `2^(pair - 21) = G` and the slopes below it.
-`|t| < 2^27 + 63 x 2^22 < 2^29`. This is isp §9.4a's bound restated for `708fb8cd`. PLAN M3 asserts it on every
-pixel.
+`|t| < 2^27 + 62 x 2^22 < 2^29`: isp §9.4a's bound, now without `h` (refsw3's `At` steps `h = centers -
+startCenters` half pixels, 0 when asked at the point it set up at, which is what the ISP does: tile.cpp L813, L863).
+`agents/spec-sync-depth/widths4f3d.cpp` (300,000 planes, both sample points) measured 2^28.45 at most, `nsh` -7..14
+at pixels with a start, the fallback only at pixels no triangle covers. PLAN M3 asserts these on every pixel.
+`708fb8cd`'s `h = -1` corner step (a start at the centre stepped back half a pixel) is gone: it is one of M3's
+mutants.
 
 ## 3. Units
 
@@ -659,34 +670,40 @@ and ISP depth flavours). refsw3: tile.cpp `RasterizeTriangle` up to the row loop
      user tile clip has no part]. `jf` no longer waits for step 4's `big` flags;
    - clipped to the tile to give `jf`, `jl`. A big edge's walk starts at `jf` (refsw3 `SetFirstRow`), and at row 0
      for MODIFIER.
-6. **Depth plane**, ranged (depth.h `Setup` at `708fb8cd`; `FromSingle(., 1)` inputs). The depth flavour of H10:
+6. **Depth plane**, ranged (depth.h `Setup` L415-426 at `4f3efe15`; `FromSingle(., 1)` inputs). The depth flavour of H10:
    - every product and every sum is checked against 2^128 and 2^-126 where it is made: a product below 2^-126 is a
      zero with its sign, a sum below it is +0;
    - **the zero rule**: a zero added to a number of 2^-126 .. 1.5 x 2^-126 of the other sign gives +0; added to any
      other number it gives that number exactly; every zero sum is +0 [M depthgaps_zadd 109 / 109,
-     depthgaps_field1 2,000 / 2,000]. Since `0de9776b` (depth sync pending, §0.1b) also in the depth unit's own
-     coordinate differences, edges `x_j y_k - x_k y_j` and determinant [M depth2_zcoord, depth2_zedge]; these are
-     computed with the depth flavour and are **not** shared with step 2 / 4's edge values, which have no zero rule
-     (isp §6.2);
+     depthgaps_field1 2,000 / 2,000]. Since `0de9776b` also in the depth unit's own coordinate differences, edges
+     `x_j y_k - x_k y_j` and determinant (refsw3's `subC`, `addE`, isp §6.3) [M depth2_zcoord 80 / 80, depth2_zedge
+     65 / 65]; these are computed with the depth flavour and are **not** shared with step 2 / 4's edge values, which
+     have no zero rule (isp §6.2). Every addition of the depth program issues with the zero rule on;
    - an infinite operand: `bad`, as the TSP flavour (zero times infinity is zero; infinities of opposite sign sum to
      +0).
 
    `a = sum3(z_k (y_j - y_l))`, `b` likewise, `c = (z1 e1 + z3 e3) + z2 e2`, `det = (e1 + e2) + e3`;
    `Perpendicular(det)` makes det zero.
 7. **Depth regime and tile start** (§2.4 table), in refsw3's order:
-   - det infinite: CONST key 0 (GAP: not measured, isp §15 #7);
-   - det non-zero: `inv0 = recip24(det)`, `first0 = ((a x00 + b y00) + c) inv0` at the first pixel centre whatever
-     HALF_OFFSET;
+   - det infinite: CONST key 0 [M trsort_recip page 10, trsort_auto];
+   - `|det| >= 2^126` (`top(det) - 1 >= 126`, exactly 2^126 included): CONST key 0, whatever a, b, c are
+     (`4f3efe15`, the reciprocal's range) [M trsort_recip 160 / 160 (2^126 kept: 24 wrong), trsort_recipovf 80 / 80,
+     trsort_auto 240 / 240, trsort_garb 160 / 160]. A compare on det's exponent before the reciprocal issues; the
+     program runs on (§3.4.4 Cycle: depth never shows in the time) and the regime mux selects CONST;
+   - det non-zero: `inv0 = recip24(det)` (det in [2^-126, 2^126), so `inv0` in (2^-126, 2^126]),
+     `first0 = ((a x00 + b y00) + c) inv0` at the tile's **first sample point**, `x00 = left + HALF_OFFSET[0] / 2`,
+     `y00` likewise (`0de9776b`) [M depth2_halfc, depth2_halfo 16 / 16];
      - a or b infinite: REG, with `sa`, `sb`, `fa`, `fb` (`a inv` cut to 20 bits, then to 2^102 toward zero, mod
        2^30) and `r0` (a bad `first0` is +-2^25, else `cut20(first0)` on 2^102 toward zero) [M zovf_creg,
-       zovf_wrap, nantr_pos, depthgaps_rstart, depthgaps_rcut];
+       zovf_wrap, nantr_pos, depthgaps_rstart, depthgaps_rcut; depth2_cneg (toward zero below 2^102 too),
+       depth2_halfc (the start at the corner)];
      - `first0` or c bad: with both slopes zero, CONST `saturated` / `from_fp(cut19(first0))`; otherwise BLOCK from a
        forced start of +-2^127 (or `first0`) [M depthgaps_infstart, depthgaps_edges, zovf];
    - det zero or perpendicular: CONST `flat(mean)`, with `mean = ((z1 + z2) + z3) x OneThird()` and the infinite
      corner rule (an exponent-field-255 corner adds as an infinity; two of opposite sign as their fractions say)
      [M perpmean_word 16,384 / 16,384, depthgaps_dzinf 48 / 48];
    - otherwise BLOCK: `A = a inv`, `B = b inv` (24 bits), `under()` on A, B, first; `pair`; start
-     `cut20(first)`, then onto `2^(pair - 21)`; `gexp`, `E`, `S`, `DX`, `DY`, `nsh` (§2.4). A zero start with zero
+     `cut20(first)`, then onto `2^(pair - 21)`; `gexp`, `E`, `S`, `DX`, `DY`, `nsh`, `fbw` (§2.4). A zero start with zero
      slopes is CONST 0.
 8. **Summary-only descriptor.** A MODIFIER triangle with VolumeMode 1 or 2 that is culled or has a bad corner is
    still handed over, with `kill = 1` and its `sum_op`, so that the raster applies the summary (§3.4.7). Every other
@@ -782,9 +799,10 @@ depth.h `At`, `NegWord`, `RegDepth`).
   on skipped rows.
 - Inside = AND of 3 (4) edges, forced 0 by `kill`.
 - **Depth lanes** (§2.4 `p2_ztile_t`), 32 lanes:
-  - BLOCK: `t = S + (2i + h) DX + (2j + h) DY` (30-bit signed; `h = 0` at centres, -1 at corners, from
-    HALF_OFFSET[0]), kept as a row base plus lane offsets. Each lane converts `t` to a key: `t >= 0` normalizes to 19
-    bits at `2^(gexp - 1)`, then `big` from 2^128 or `from_fp`; `t < 0` is `neg(E, t >>> nsh)`. num §8 A2 cannot
+  - BLOCK: `t = S + 2i DX + 2j DY` (30-bit signed; the same at centres and corners since `0de9776b`: only the
+    start, made in §3.4.4 step 7, depends on HALF_OFFSET[0]), kept as a row base plus lane offsets. Each lane
+    converts `t` to a key: `t >= 0` normalizes to 19 bits at `2^(gexp - 1)`, then `big` from 2^128 or `from_fp`;
+    `t < 0` is `neg(E, t >>> nsh)` (a left shift for `nsh < 0`), or the fallback word with `fbw`. num §8 A2 cannot
     occur: the 30-bit form is exact, and the testbench asserts equality with refsw3's 64-bit truncation;
   - REG: lane register `r = r0 + (sa i + sb j) 2^25 + i fa + j fb` (mod 2^30), key `regdepth(r)`;
   - CONST: the key.
@@ -1452,12 +1470,12 @@ and RenderCORE's end-of-entry logic.
 | H7c mip_minor_sub | tsp_setup (mip numerators) |
 | H8 recip24 | isp_alu (depth: one value for `inv0`, `inv`, `invS`), tsp_alu (TSP det, mip) |
 | H9 cmp | isp_setup (cull on the swamped det, perp), tsp_setup (perp, mip `AtMost`) |
-| H10 range | isp_alu (**depth flavour at `708fb8cd`**: limits per product and sum, the zero rule, §3.4.4 step 6), tsp_alu (TSP, mip flavours) |
+| H10 range | isp_alu (**depth flavour at `4f3efe15`**: limits per product and sum, the zero rule in every addition (coordinates, edges, determinant included), the 2^126 determinant limit, §3.4.4 steps 6-7), tsp_alu (TSP, mip flavours) |
 | H11 floor | isp_setup (FloorScaled row range; edge `unitsAt` at `unit`; depth grid shifts; REG `r0`, `fa`, `fb`), tsp_rstart (FloorUnits), tex_coord (TexCoordFixed / CoordKeep) |
 | H12a tsp_value_norm | pp_plane (11 instances) |
 | H12b depth_block_to_fp | isp_raster (32 lanes, positive `t` only; exact in the 30-bit form) |
 | H13 tsp_div | pp_div (1 reciprocal + 11 products a pixel) |
-| **H14 `p2_zword_pkg`** (depth.h `StoredDepth` at `708fb8cd`; num H14 is stale, §0.1) | isp_raster (`from_fp`, `big`, `neg`, `regdepth`), isp_setup (`flat`, `saturated`), isp_pix (the 64-bit key compare), isp_ctl (`bgkey`) |
+| **H14 `p2_zword_pkg`** (depth.h `StoredDepth` at `708fb8cd`, unchanged at `4f3efe15`; num H14) | isp_raster (`from_fp`, `big`, `neg`, `regdepth`), isp_setup (`flat`, `saturated`), isp_pix (the 64-bit key compare), isp_ctl (`bgkey`) |
 | H15 color_round | pp_col (8 instances) |
 
 Every primitive takes and returns the reference tuple as flat ports (num §6). Combinational by default. A unit may
@@ -1562,7 +1580,7 @@ register a primitive's output as one of its pipeline stages; its lockstep testbe
 | 4.3 | accumulation across entries | isp_buf (no clear), tbuf | M6, M12 |
 | 4.4 | end of entry: emptyKeepZ, emptyAfterNoWrite, swap | isp_cut (`shaded_any`, entq), tbuf | M7, M12 |
 | 5 | list walk, ObjectListHasPrimitive | isp_olw | M6 |
-| 6.1-6.3 | soft float, inputs, range rules (depth flavour at `708fb8cd`) | lib/fp (H4, H5, H6, H10) | M1 |
+| 6.1-6.3 | soft float, inputs, range rules (depth flavour at `4f3efe15`: the zero rule in every addition, the 2^126 determinant limit) | lib/fp (H4, H5, H6, H10) | M1, M3 |
 | 7.1 | bad corners; the winding from the **swamped** determinant (`EdgeWinding`) | isp_setup (H7a swamp) | M2 |
 | 7.2 | cull by size / facing on the swamped determinant | isp_setup (H9) | M2 |
 | 7.3 | FPU_PERP_VAL | isp_setup (H9) | M3 |
@@ -1570,7 +1588,7 @@ register a primitive's output as one of its pipeline stages; its lockstep testbe
 | 8.4 | inside decision (ordinary and big-edge walk: wrap, push, end against ZERO, far value) | isp_raster | M2 |
 | 8.5 | RTL widths (31-bit ordinary, 34-bit lanes and walk, d ≥ 30 constant, d 27 big) | isp_raster, `p2_edge_t` | M2 |
 | 8.6 | row range, row-31 shift (every polygon) | isp_setup (compute), isp_raster (apply) | M2 |
-| 9.1-9.3 | DepthHW, plane setup, regimes CONST / REG / BLOCK | isp_setup | M3 |
+| 9.1-9.3 | DepthHW (zeroRuleCoords, zeroRuleEdges), plane setup, the start at the first sample point, regimes CONST (det infinite or >= 2^126) / REG / BLOCK | isp_setup | M3 |
 | 9.4a | block plane, 30-bit stepping; the float form unreachable | isp_setup, isp_raster | M3 |
 | 9.4b | determinant-zero mean, infinite corners | isp_setup | M3 |
 | 9.5 | overflowing planes: REG (`regdepth`), forced start | isp_setup, isp_raster | M3 |
@@ -1590,7 +1608,7 @@ register a primitive's output as one of its pipeline stages; its lockstep testbe
 | 12.3 | who updates the ISP buffers after shading | isp_cut (presort, autosort), isp_fb (PT) | M7 |
 | 13 | state summary | isp_buf, isp_ctl, tbuf | M6, M7 |
 | 14 | timing anchors, races | §5 of this document | MT1-MT9 |
-| 15 | GAPs | per unit, as refsw3 (#1-#6, #8, #10 resolved at `708fb8cd`; #21 SB_ISTERR in pcache, D11; #22 the pre-sorted glitch in isp_ctl_tg) | — |
+| 15 | GAPs | per unit, as refsw3 (#1-#6, #8, #10 resolved at `708fb8cd`; #5, #6 (but a slope of 2^128 after the division), #7, #13, #26 at `0de9776b` / `4f3efe15`; #21 SB_ISTERR in pcache, D11; #22 the pre-sorted glitch in isp_ctl_tg) | — |
 | 17 | lockstep points | PLAN §1 | — |
 
 ### 7.2 tsp.md
@@ -1648,17 +1666,17 @@ register a primitive's output as one of its pipeline stages; its lockstep testbe
 | §1 the number, representation contract, exponent range | `p2_fp*_t`, every primitive | M1 |
 | §2.1-2.12 operations | lib/fp H1-H11 | M1 |
 | §3 configurations EdgeHW (now with blockMax, walkExp) / DepthHW / PlaneHW, constants | `p2_hw_pkg` (generated) | M0 |
-| §4 range rules, four flavours (the depth flavour per `708fb8cd`) | H10 instances in isp_alu, tsp_alu | M1, M2, M3, M9 |
+| §4 range rules, four flavours (the depth flavour per `4f3efe15`) | H10 instances in isp_alu, tsp_alu | M1, M2, M3, M9 |
 | §5 call sites | the units of §3.11 | M2-M11 |
 | H1-H6, H8-H13, H15 | lib/fp | M1 |
 | H7a (now `fp_swamp`) | isp_setup | M1, M2 |
-| H14 (now `p2_zword_pkg` at `708fb8cd`) | zword_pkg | M1, M3 |
+| H14 (now `p2_zword_pkg` at `708fb8cd`, unchanged at `4f3efe15`) | zword_pkg | M1, M3 |
 | §8 A1 wide adds | H7b (tsp_rstart), H7c (tsp_setup). The edge site is gone | M1 |
 | §8 A2 64-bit truncation | isp_raster (exact in 30 bits; tb asserts) | M3 |
-| §8 A3 float fallback | unreachable at `708fb8cd`; tb asserts | M3 |
+| §8 A3 float fallback | unreachable at `708fb8cd` and `4f3efe15`; tb asserts | M3 |
 | §8 A4 unreachable clamps | tb assertions | M1 |
 | §8 D1 MipSelect divide by zero | tsp_setup (needs refsw3's definition, D4) | M9 |
-| §8 G1-G12 | as refsw3, per unit (G3, G4, G6, G12 resolved at `708fb8cd`) | — |
+| §8 G1-G13 | as refsw3, per unit (G3, G4, G12 resolved at `708fb8cd`; G13 at `1040c4aa`; G6, G7 and G5 but a REG slope of 2^128 after the division at `0de9776b` / `4f3efe15`) | — |
 
 ### 7.4 refsw3 functions to units
 
@@ -1724,7 +1742,8 @@ register a primitive's output as one of its pipeline stages; its lockstep testbe
     ordinary polygons, the walk's end rule with `sx < 0`) are measured and closed by `1040c4aa` (edge2_*; PLAN F17
     closed); why row 31 is not known, and the far value's 2^131 has only a reading [I]. The depth ones (the zero rule
     in the coordinate differences and determinant, the order of REG and Big keys among other planes' depths) are
-    measured by `0de9776b` (depth2_*), depth sync pending (§0.1b; PLAN F18).
+    measured by `0de9776b` (depth2_*) and transcribed (§0.1b; PLAN F18 closed but for a slope of 2^128 or more after
+    the division); the determinant of 2^126 or more by `4f3efe15` (trsort_*; PLAN F14 closed).
 
 ## Appendix A. Revision 2: answers to the review of revision 1
 

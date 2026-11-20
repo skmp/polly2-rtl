@@ -8,9 +8,9 @@ architecture's.
 Pins: refsw3 = nulldc3 `skmp/refsw3` @ `4f3efe15` (refcore clean); dreamcast-tests @ `a932980`. M0 and M1 were
 built and gated at `708fb8cd`; M1's range wrappers (H10: `p2_fp_rng_add`'s TSP zero rule and MIP flavour,
 `p2_fp_rng_recip`'s determinant of 2^126 or more and zero determinant) and `tb/fp/ref_copies.h` were brought to
-`4f3efe15` with M2 (`make fp`, `make scaffold` pass there). The specs' edge sections are at `4f3efe15`, num §4 / H10
-too; the rest of their depth and TSP sections still lag (ARCHITECTURE §0.1, §0.1b); where they disagree, refsw3 is
-the reference for every gate.
+`4f3efe15` with M2 (`make fp`, `make scaffold` pass there). The specs' edge and depth sections are at `4f3efe15`,
+num §4 / H10 too; their TSP sections still lag (ARCHITECTURE §0.1, §0.1b); where they disagree, refsw3 is the
+reference for every gate.
 
 ## 0. Rules for every milestone
 
@@ -135,7 +135,7 @@ namespace p2ref {
   Depths are compared as the 64-bit key.
 - The arguments every unit testbench takes: `--seed`, `--n`, `--shard`, `--only`, `--vec`, `--set`, `--trace`.
 - **Triangles from console pages.** Many edge and depth tests (faredge_*, hugepos_*, edge2_*, depthgaps_*, zovf_*, nantr_*,
-  perpmean_*, zword) are whole pages. `tools/gate/tria_extract.sh <test>` runs refsw3-offline with its render log on
+  perpmean_*, zword, depth2_*, trsort_*) are whole pages. `tools/gate/tria_extract.sh <test>` runs refsw3-offline with its render log on
   the test's PC stream. It turns every `TRIA` line (the corners exactly, `%a`) with its `TILE` into a unit vector
   file, `build/vec/<test>.tri`, so M2 / M3 test the edge and depth units on exactly the console's primitives. The
   comparison with the console's pictures happens at frame level (M13).
@@ -288,7 +288,7 @@ the RTL's storage sharing and its per-phase rules are not reported as difference
 | M0 | scaffolding | — | `make scaffold` |
 | M1 | numerics primitives (M1a / M1b / M1c) | M0 | `make fp` |
 | M2 | ISP edge path (with the swamp and the big-edge walk) | M1 | `make isp-edge` |
-| M3 | ISP depth path (`708fb8cd`) | M1 | `make isp-depth` |
+| M3 | ISP depth path (`4f3efe15`: the sample point, the zero rule everywhere, the 2^126 determinant) | M1 | `make isp-depth` |
 | M4 | ISP setup sequencer (generated programs) and row stepper | M2, M3 | `make isp-setup` |
 | M5 | tile-harness infrastructure (glue, copies, captures, scenegen, refsw3-known) | M0 | `make refglue-selftest` |
 | M6 | ISP tile: list walk, fetch, opaque, modifier volumes | M4, M5 | `make isp-tile-op` |
@@ -444,38 +444,96 @@ Results in `agents/m2r2/`.
 
 ### M3. ISP depth path
 
-**Deliverables.** The depth datapath at refsw3 `708fb8cd`:
-- ranged plane setup (`a`, `b`, `c`, `det`, Perpendicular) with the depth flavour of H10;
-- per tile: `inv0`, `first0`, the regimes CONST / REG / BLOCK (ARCHITECTURE §2.4), the forced start, the mean with
-  the infinite-corner rule, `under()`, `pair`, `gexp`, `E`, `S`, `DX`, `DY`, `nsh`;
-- the 32 depth lanes of `p2_isp_raster`: the 30-bit `t`, `from_fp` / `big` / `neg`, REG `regdepth`.
+**Deliverables.** The depth datapath at refsw3 **`4f3efe15`** semantics (isp §6.3, §9; num §4, §5.2, H10, H12b,
+H14; ARCHITECTURE §0.1b, §2.4 `p2_ztile_t`, §3.4.4 steps 6-7, §3.4.5 depth lanes), as a fixed-latency unit (the
+sequencer comes in M4):
+- ranged plane setup (`a`, `b`, `c`, `det`, Perpendicular) with the depth flavour of H10, **the zero rule in every
+  addition**: the coordinate differences (refsw3 `subC`), the edges `x_j y_k - x_k y_j` and the determinant's sums
+  (`addE`) as well as `a`, `b`, `c`, the start and the mean (`add`); the depth unit's own `e` and `det`, not the
+  edge unit's (isp §6.2, §9.2);
+- per tile: the regimes CONST / REG / BLOCK in refsw3's order (isp §9.3), with **CONST key 0 for a determinant of
+  2^126 or more** (`top(det) - 1 >= 126`, exactly 2^126 included; `4f3efe15`) as for an infinite one; `inv0`, and
+  `first0` **at the tile's first sample point**, `(left, top) + HALF_OFFSET[0] / 2` (`0de9776b`); the forced start,
+  the mean with the infinite-corner rule, `under()`, `pair`, `gexp`, `E`, `S`, `DX`, `DY`, `nsh` (5 signed) and `fbw`;
+  REG's `r0`, `sa`, `sb`, `fa`, `fb` from that start;
+- the 32 depth lanes of `p2_isp_raster`: the 30-bit `t = S + 2i DX + 2j DY` (no half step: the start is at the sample
+  point), `from_fp` / `big` / `neg` (a left shift for `nsh < 0`) / the fallback word, REG `regdepth`;
+- the console pages' primitives with their depths: `tools/gate/tria_conv.cpp` keeps each corner's `z` (the render
+  log's TRIA line has x, y, z, u, v a corner, `%a`; refsw_lists.cpp L143) in a depth record beside M2's `TriRec`
+  (a new magic or a version field; M2's `.tri` readers unchanged), with HALF_OFFSET as M2 already records it;
+- `tb/isp_depth/` (lockstep with refsw3 `4f3efe15`: `DepthTileT<DepthHW>::Setup(x, y, z, left, top, hw, centers)`
+  and `At(i, j, centers)` with the **same** `centers`, `StoredDepth`; `tb/fp/ref_copies.h`'s depth lambdas, already at
+  `4f3efe15` since M2), `tools/gate/gate_isp_depth.sh`, `tb/mk/isp_depth.mk`: `make isp-depth`, `isp-depth-full`,
+  `isp-depth-mutants`, as M2's. `p2_hw_pkg` needs no change: M2 added `DepthHW::zeroRuleCoords`, `zeroRuleEdges`
+  (MODE, `p2_hw_check.sv`: the RTL implements 1).
 
 **Gate** `make isp-depth`.
 1. **Directed**: zword's 32 register words and depthgaps_mm's order; nantr_* starts; zovf_* (lim, c, ps, creg, wrap,
    ab, sum, far, slope, sat*, neg*); depthgaps_* (zadd, field1, negconv, neggrid, bigpos, bigord, bigslope, bigpair,
    dzinf, detneg, rstart, rcut, infstart, edges, tinyramp, flt); perpmean_word (16,384 words) and perpmean_neg*;
-   the literals as depth.h cites them.
+   and the `0de9776b` / `4f3efe15` facts as depth.h cites them:
+   - depth2_halfc: in tile (0, 0) at the corner zword's TL +inf triangle starts at +1 step (`m = 1 - (i + j)`) and
+     zovf_creg's C0 at -1 step; nantr_fin2's and tiles (2, 0) .. (8, 0) the same as at the centre; depth2_halfo's 8
+     ordinary triangles at HALF_OFFSET 6 (the corner's words at all 40 probed pixels);
+   - depth2_zcoord, depth2_zedge: products of a zero difference / edge with 2^126 and +-inf depths (0, not an
+     infinity), the words at every pixel;
+   - depth2_cneg: F = -(8192 + 1/2), -(8192 + 3/4), -(256 + 1/4), -(2^18 + 1/2) units of 2^102 a row toward zero at the
+     44 targets, the controls +(8192 + 1/2), -(127 + 1/2);
+   - depth2_denorm (denormal depths on the 2^-145 grid, ordered by value), depth2_biggrid (Big cut to 19 bits),
+     depth2_regmix and depth2_regbelow (REG's words and values between steps against blocks above / below their
+     window and Big: the key order of every pair);
+   - trsort_recip: determinants of exactly f 2^126, f = 0.5, 0.75, 1 - 2^-24 an ordinary depth of 1; f = 1, 1 + 2^-23,
+     1.25, 1.5, 2, 3, 4 - 2^-22, and 4 (infinite) key 0; both windings; corners of 1, 0.5, 0.25; page 10's 2^128 from
+     corners of 2^116; trsort_recipovf's corner depths inf 1 1, 1 2^127 1, 2^120 x3, -inf 1 1 at f = 1 (key 0) and
+     1 - 2^-24 (the overflow regimes).
 2. **All 13 zmeas sets** (89,801 brackets, 0 missed) and the covmeas `zprobe` sets.
-3. **The console pages' own triangles** (§1.2 `tria_extract`) of every depthgaps_*, zovf_*, nantr_*, perpmean_*,
-   zword, zbad*, zspec, zsign, bg* test: every pixel's key against `DepthTileT::At` and `StoredDepth`.
+3. **The console pages' own triangles** (§1.2 `tria_extract`, with the depth record) of every depthgaps_*, zovf_*,
+   nantr_*, perpmean_*, zword, zbad*, zspec, zsign, bg* test, and of `fit/hw/depth2_*` (9 tests: biggrid 30 pages,
+   cneg 6, denorm 6, halfc 42, halfo 8, regbelow 12, regmix 12, zcoord 80, zedge 65) and `fit/hw/trsort_*` (5 tests:
+   auto, garb, recip, single 16 pages each, recipovf 8; trsort_single is a TSP page, but its hugepos triangles reach
+   determinants of 2^126 and more and infinite ones): every covered pixel's key against `DepthTileT::At` and
+   `StoredDepth`, at each render's HALF_OFFSET[0] (depth2_halfc, _halfo and others render at the corner). refsw3 is
+   exact on all of them at `4f3efe15` (dreamcast-tests README "r8 round 1"); refsw3-known stays computed at M13.
 4. **Random**: 1M planes quick, 100M full, against `DepthTileT::Setup` / `At` and `StoredDepth`, every regime
-   represented, with the classes of depthgaps (negative starts, starts of exactly 0, slopes 2^50 and more times the
-   start, products at 2^128, operands near 2^-126).
-5. **Assertions on every pixel**: `|t| < 2^29`; refsw3 never takes the float form (`block == false` with a valid
-   plane); A2: the RTL's exact value equals refsw3's 64-bit truncation; the key round-trips through `zkey.h`.
+   represented, HALF_OFFSET[0] 0 or 1 at random, with the classes of depthgaps (negative starts, starts of exactly 0,
+   slopes 2^50 and more times the start, products at 2^128, operands near 2^-126) and three more:
+   - **near 2^126**: right triangles of legs about 2^63 whose determinant is within a few units of 2^126, exactly
+     2^126 included, both windings, any tile; infinite determinants (corners from 2^64);
+   - **zcoord / zedge**: tile (0, 0), coordinates among +-0, +-(1 .. 1.5) 2^-126, +-1 and small integers, depths of
+     2^126, 2^127, +-inf, 1, -2^127. The zero-rule mutants need it: in `agents/spec-sync-depth/widths4f3d.cpp`
+     neither changes a key on ordinary random planes (0 of about 37,500), while in this class `zeroRuleCoords` 0
+     changes 1,988 and `zeroRuleEdges` 0 1,115 of 30,000 planes;
+   - **at the corner**: the classes above at HALF_OFFSET[0] = 0, REG included (the start where an infinite slope's
+     term is `x0 = 0`).
+5. **Assertions on every pixel**: `|t| < 2^29` (2^28.45 in widths4f3d, both sample points); `nsh` in -14..14 where
+   there is a start, `fbw` only where the start was cut to zero (its pixels reported with whether they are covered:
+   none in widths4f3d); refsw3 never takes the float form (`block == false` with a valid plane); A2: the RTL's exact
+   value equals refsw3's 64-bit truncation; the key round-trips through `zkey.h`; the reference is always asked with
+   `startCenters == centers` (refsw3's `h` is 0, as in RasterizeTriangle).
 
 **Mutants.**
 - tileBits 26 to 25;
 - startOnSlopes off;
 - pairBits 21 to 20;
 - `OneThird` as 0xAAAAAA;
-- the `h = -1` corner step off;
+- **the sample point swapped**: the start at the centre with HALF_OFFSET[0] = 0 and at the corner with 1;
+  **`708fb8cd`'s corner model**: the start at the centre stepped back half a pixel (`h = -1`). widths4f3d: the
+  other sample point changes 18,495 of about 37,500 random planes;
+- **the zero rule off in the coordinate differences** (`zeroRuleCoords` 0); **off in the edges and the
+  determinant** (`zeroRuleEdges` 0); and, as before, off everywhere, at 1.5 x 2^-126 inclusive, a zero sum keeping
+  -0. The expected values for the first two come from refsw3 itself,
+  `DepthTileT<DepthConfig>` with the switch at 0;
+- **the determinant limit**: a determinant of 2^126 or more keeps its reciprocal (`708fb8cd`; `Recip` taken, the
+  plane stepped); exactly 2^126 kept (the limit at `> 2^126`, i.e. the reciprocal 2^-126 kept: trsort_recip's f = 1);
+  the limit at 2^127; an infinite determinant not 0 (its first corner's word);
 - the ranged and unranged chains swapped at `first`;
 - E not clamped at 128; E not clamped at -122;
 - the forced start not stepped (revision 1's ovf 1: 0 at the first pixel, a word elsewhere);
 - REG without the finite slope's steps (`fa = fb = 0`);
-- REG's negative start rounded down instead of toward zero; `r0` without the cut to 20 bits;
-- the mean's infinite corners as z1's word (revision 1).
+- REG's negative start rounded down instead of toward zero; `r0` without the cut to 20 bits; a finite slope below
+  zero rounded down (depth2_cneg);
+- the mean's infinite corners as z1's word (revision 1);
+- `big` cut to 18 or 20 bits (depth2_biggrid); denormal depths as one word (depth2_denorm).
 
 ### M4. ISP setup sequencer and row stepper
 
@@ -848,11 +906,11 @@ dreamcast-tests owner through `OPEN_ITEMS.md`. Never run from here. Ordered by w
 | F11 | conv G8: SOFTRESET and power-on contents of the tile buffers and the buffer select | render, SOFTRESET, keep-Z tile that shows the buffer |
 | F12 | tsp §22 #9: `offsKept` with an all-zero setter (planes dropped) | offspersist variant |
 | F13 | isp §15 #14, tsp §22 #1: PARAM_BASE not 1 MB aligned | a PARAM_BASE with bit 19 set |
-| F14 | isp §15 #7: an infinite determinant (refsw3: depth 0). Det 0 with an infinite corner depth is closed (depthgaps_dzinf) | corners at 2^64 and beyond, flat polygons in front and behind |
+| ~~F14~~ | closed: isp §15 #7, an infinite determinant gives depth 0, and so does one of 2^126 or more (trsort_recip page 10, trsort_auto, trsort_recip, _recipovf; refsw3 `4f3efe15`). Det 0 with an infinite corner depth is closed (depthgaps_dzinf) | — |
 | F15 | tsp §22 #11: stuck alpha with textures, autosort, other clearing events (TODO C8) | blendsel variants |
 | F16 | tsp §22 #12-14: SupSample in PT_MV, translucent modifier volumes, two-volume textured, render to texture 1555 / 4444 (TODO C6, C7, C10) | as TODO |
 | ~~F17~~ | closed: edge.h's open points (row 31 for an ordinary polygon, the walk's unit, the end rule with `sx < 0`, the hugepos_rules page 11 and hugepos_v5 residuals), measured by edge2_walk, _end, _mult, _row31 and resolved by refsw3 `1040c4aa`. Left: why row 31 (no probe designed) | — |
-| F18 (new) | (`0de9776b` measured the REG / Big order among other planes, the zero rule in the coordinate differences and the determinant and the off-grid negative REG slope: depth2_regmix, _regbelow, _zcoord, _zedge, _cneg; depth sync pending, ARCHITECTURE §0.1b) depth.h's open points: the order of REG words (m = 2..15, 17..22, 24..29) and Big keys among **other** planes' depths; the zero rule in the coordinate differences and the determinant; an off-grid negative REG slope of 2^102 or more; a slope of 2^128 or more after the division | depthgaps_mm-style ramps crossed with ordinary slivers in the same intervals; zovf_creg variants |
+| ~~F18~~ | closed but for one point: `0de9776b` measured the REG / Big order among other planes' depths (depth2_regmix, _regbelow), the zero rule in the coordinate differences, edges and determinant (depth2_zcoord, _zedge) and the off-grid negative REG slope (depth2_cneg); isp §9.5, §15 #6, #26. Left: a slope of 2^128 or more after the division (isp §15 #6, #11) | a determinant below 1 with finite a, b: zovf_creg variants |
 
 ## 4. Requests to other owners (record in `OPEN_ITEMS.md`)
 
@@ -861,7 +919,7 @@ dreamcast-tests owner through `OPEN_ITEMS.md`. Never run from here. Ordered by w
 | dreamcast-tests | PC emission of the timemeas timed scenes, preceded by `echo T <scene>` (conv §7.6.2 option a) | MT0 |
 | dreamcast-tests | multi-run race logs for every `*_races` test as data, at least 3 runs (blendpos_races has 1) | MT8 |
 | dreamcast-tests | T1-T21, F1-F3, F7-F18 above | MT1-MT9, refsw3 GAPs |
-| polly2-rtl spec readers | re-transcribe isp §7-9, §15, num §3 (EdgeHW), H7a, H14, §4 (depth flavour), §8 (A1 edge site, A3, G3-G6, G12) to refsw3 `708fb8cd` (ARCHITECTURE §0.1): done; the edge sections to `4f3efe15` (§0.1b): done; the depth and TSP sections to `4f3efe15` (`0de9776b`, `2bee80f2`, `4f3efe15`): open | M3, M9 (the gates use refsw3 directly meanwhile) |
+| polly2-rtl spec readers | re-transcribe isp §7-9, §15, num §3 (EdgeHW), H7a, H14, §4 (depth flavour), §8 (A1 edge site, A3, G3-G6, G12) to refsw3 `708fb8cd` (ARCHITECTURE §0.1): done; the edge sections to `4f3efe15` (§0.1b): done; the depth sections to `4f3efe15` (`0de9776b`, `4f3efe15`): done; the TSP sections to `4f3efe15` (`2bee80f2`, `4f3efe15`): open | M9 (the gates use refsw3 directly meanwhile) |
 | nulldc3 | a hex depth field (the key, or the word and offset) in the render log (conv G6) | M13 depth diffs |
 | nulldc3 | a defined value for MipSelect with `Sdet == 0` (D4), once F1 answers | M9 |
 | nulldc3 | SB_ISTERR bit 0 in refsw3, if D11 says the RTL models it | MT9 |

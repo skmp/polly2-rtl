@@ -15,11 +15,18 @@ the zero rule, the limit at every operation, the mean's infinities, `pvrfp::OneT
 from L615). **Edge unit at `4f3efe15`** (spec sync, 2026-11-20): `1040c4aa` changed the edge arithmetic (a big
 edge's grid 2^102, its start toward zero, the walk's end against ZERO and its far value with a column step below
 zero, row 31 for every polygon): sections 3.1, 4.2 (the edge column), 5.1, 5.4 (tile.cpp row range), the `unitsAt`
-row of H11 and G13 follow it, with `pvr_isp_edge.h` line numbers and `refsw_tile.cpp` L815-847 at `4f3efe15`. The
-depth and TSP changes of `0de9776b`, `2bee80f2` and `4f3efe15` are not transcribed yet (ARCHITECTURE §0.1b); none of
-them touches the edge unit's primitives (`0de9776b`'s zero rule in the coordinates and edges is the depth setup's,
-`isp.md` 6.2). **Evidence:** dreamcast-tests at `b54c934` (`a932980` for edge2_*), `README.md` (the section is named with each rule; the edge
-and depth rules of `708fb8cd` are in "refsw3 without float: the number formats at their edges") and `TODO.md`.
+row of H11 and G13 follow it, with `pvr_isp_edge.h` line numbers and `refsw_tile.cpp` L815-847 at `4f3efe15`.
+**Depth unit at `4f3efe15`** (depth spec sync, 2026-11-20): `0de9776b` (the start at the tile's first sample point;
+the zero rule in the coordinate differences, edges and determinant: `DepthHW::zeroRuleCoords`, `zeroRuleEdges`) and
+the depth part of `4f3efe15` (a determinant of 2^126 or more gives depth 0): sections 0, 1.4, 2.5, 3.2, 3.5, 4.1-4.3
+(the depth column), 5.2, 5.5 (depth sites), H10, H12b, H14, 7.1, 7.3 and 8 (G5-G7, A5) follow them, with
+`pvr_isp_depth.h` line numbers at `4f3efe15` throughout; `pvr_softfp.h` did not change (no shared primitive moved).
+The TSP changes of `2bee80f2` and of `4f3efe15` are in section 4 and H10 (with M2's range wrappers) but not yet in
+5.3 (ARCHITECTURE §0.1b); none of the three commits touches the edge unit's primitives (`0de9776b`'s zero rule in
+the coordinates and edges is the depth setup's, `isp.md` 6.2). **Evidence:** dreamcast-tests at `b54c934`
+(`a932980` for edge2_*, depth2_*, trsort_*), `README.md` (the section is named with each rule; the edge and depth
+rules of `708fb8cd` are in "refsw3 without float: the number formats at their edges", those of `0de9776b` /
+`4f3efe15` in "r8 round 1") and `TODO.md`.
 
 **Scope.** This document covers every number format and arithmetic operation of the CORE's setup and evaluation
 units as bit-level rules: what the RTL primitives must compute, at which widths, with which operand order and
@@ -64,8 +71,11 @@ the timing specification.
    is an infinity; one below 2^-126 is a zero; input field 0 is zero and field 255 is infinity; `inf * 0 = 0`;
    `inf - inf = +0`; a sum below the range is `+0`; the TSP's last addition has a rule for zero operands, and every
    addition of the depth setup has its own (a zero added to [2^-126, 1.5 * 2^-126) of the other sign is `+0`, every
-   zero sum is `+0`; the edge unit has no zero rule, `isp.md` 6.2). The edge unit instead **swamps**: a product or sum of 2^128 or more becomes ±2^200, which drops
-   every finite operand of the adds, and the start and the steps saturate to ±2^127.
+   zero sum is `+0`, the coordinate differences, edges and determinant included; the edge unit has no zero rule,
+   `isp.md` 6.2). The depth setup's reciprocal has the range too: a determinant of 2^126 or more (exactly
+   included) gives depth 0 at every pixel (`4f3efe15`), as an infinite one does; the TSP's planes follow. The edge
+   unit instead **swamps**: a product or sum of 2^128 or more becomes ±2^200, which drops every finite operand of the
+   adds, and the start and the steps saturate to ±2^127.
 6. The TSP divider is a 16-bit table reciprocal (512 entries of `(t, n)` and a 6-bit linear step), times the
    numerator, floored at 17 fractional bits. A negative denominator is read with its 15 bits under the leading one
    negated.
@@ -180,7 +190,7 @@ The bounds below are derived from the code, not measured (GAP G11). The testbenc
 |---|---|---|---|
 | edge unit (unranged, `FromBits`) | ≥ -298 | ≤ 259 | denormal × denormal = 2^-298; `x y` products ≤ 2^256 before the swamp (H7a), which leaves ≤ 2^201 in `c`, `first`, the start's sum and `EdgeWinding`'s det (the swamp value 2^200, two of them added); `Winding`'s plain det (only its bad flag is used) ≤ 2^259; `dx` ≤ 2^129 before `sat`; `Mul(swamp(dx), y0)` ≤ 2^213; the start ≤ 2^127 after `sat` |
 | depth setup (ranged) | ≥ -150 after range | ≤ 128 | numbers in [2^-126, 2^128) |
-| depth `Recip`, `A`, `B` and the REG steps (unranged) | ≥ -278 | ≤ 255 | `inv` in (2^-128, 2^126]; `a * inv` up to 2^255; `under()` only zeroes small values; the start `first0` is ranged (since `708fb8cd`), `C` feeds nothing |
+| depth `Recip`, `A`, `B` and the REG steps (unranged) | ≥ -278 | ≤ 254 | `det` in [2^-126, 2^126) where `Recip` is taken (a determinant of 2^126 or more is depth 0 since `4f3efe15`), so `inv` in (2^-126, 2^126]; `a * inv` below 2^254; `under()` only zeroes small values; the start `first0` is ranged (since `708fb8cd`), `C` feeds nothing |
 | depth block `tu`, REG `r` (integers) | | | `tu` ≤ 54 bits in half units of 2^unit, `t` < 2^29 in half-G units (H12b); `r` 30 bits |
 | TSP setup (ranged) | ≥ -150 | ≤ 128 | as depth |
 | TSP `Value` | ≥ -149 | ≤ 142 | `e` ≤ 139 (a coefficient below 2^128 times a coordinate below 2^12), `unit = e - 22` ≥ -149; the normalizer's -128 floor and -2^-143 |
@@ -252,7 +262,7 @@ It is used for:
 
 It is used for:
 
-- the depth setup's `x, y, z` (`pvr_isp_depth.h` L323);
+- the depth setup's `x, y, z` (`pvr_isp_depth.h` L355);
 - the TSP setup's `x, y, z` and attributes (`pvr_tsp_plane.h` L149);
 - `MipSelect` with DCalcCtrl 1: `u1, v1, z1, x1, y1` (L698).
 
@@ -262,7 +272,8 @@ It is used for:
 The `k` at the HW sites:
 
 - `2·left + HALF_OFFSET[0]` and `2·top + HALF_OFFSET[0]` (edge);
-- `2·left + 1` and `2·top + 1` (depth, always the centres);
+- `2·left + HALF_OFFSET[0]` and `2·top + HALF_OFFSET[0]` (depth, the tile's first sample point since `0de9776b`;
+  `708fb8cd` had `+ 1`, always the centres);
 - `2·(left + i) + c` (depth float form, unreachable: A3);
 - `2·(left + SpanStart) + h` and `2·(top + y) + h` (TSP);
 - `2·(tile + 16)` (TSP grid);
@@ -404,7 +415,7 @@ Both are exact and independent of the representation.
 
 ```
 perpVal = FromBits(FPU_PERP_VAL & 0x7fffffff)                  // once per render (refsw_lists.cpp L377-378)
-Perpendicular(det):            // det = the ranged setup's determinant (depth L382, TSP L214)
+Perpendicular(det):            // det = the ranged setup's determinant (depth L425, TSP L214)
   det == 0 and not bad:  false                         // a zero is one already
   det.bad:               perpVal.bad                   // an infinite FPU_PERP_VAL takes an infinite det
   otherwise:             (perpVal.bad or perpVal != 0) and AbsAtMost(det, perpVal)
@@ -465,9 +476,10 @@ with its sets faredge_cmax, _k132, _m131, _ecap, _walk, _cull, _far32, and edge2
 | `cutUnitBits` | 27 | an edge whose E was cut keeps its start and steps in units of 2^(E - 27) = 2^102, cut toward zero (since `1040c4aa`) | edge2_walk pages 3-5, 900 tiles: 26: 240 wrong, 28: 428; 2^(ep - 25 .. 27): 435 .. 557; `708fb8cd`'s two grids: 339 |
 | `walkExp` | 131 | the walk holds R and R + 16 sx in [-2^131, 2^131) (mod 2^132), and 32 sx below 2^131 | faredge_walk 3,537 tiles; faredge_m131 pages 0-5 (-2^131 not pushed, +2^131 pushed); faredge_k132 group K; hugepos_rules pages 0-3 (the wrap) |
 
-### 3.2 `DepthHW` (`pvr_isp_depth.h` L41)
+### 3.2 `DepthHW` (`pvr_isp_depth.h` L41, at `4f3efe15`)
 
-Evidence: zmeas (13 sets, 89,801 brackets, 0 missed), zstart, covmeas zprobe, perpmean_*. The scan is
+The sample point is not a `DepthHW` member: `Setup` takes it (`centers`, HALF_OFFSET[0], from `refsw_tile.cpp`
+L809-813). Evidence: zmeas (13 sets, 89,801 brackets, 0 missed), zstart, covmeas zprobe, perpmean_*. The scan is
 `model/depthprobe`, one step off each way.
 
 | constant | value | use | evidence |
@@ -483,7 +495,9 @@ Evidence: zmeas (13 sets, 89,801 brackets, 0 missed), zstart, covmeas zprobe, pe
 | `tileBits` | 26 | grid 26 bits under the start's exponent | 25 / 27: 472 / 232 |
 | `storedBits` | 19 | stored depth above zero (and `Big`'s grid, GAP G6) | zmeas, zblock, precision |
 | `startOnSlopes` | 1 | the start is cut to the slopes' grid too | zstart 49,152 of 49,152 (0 is the old model; 2 keeps only negative starts cut) |
-| `range` | 1 | range rules and the zero rule (section 4) | zovf_lim 4,984 of 4,984, zovf_c, zovf_ps, zovf_sum, zovf_far, zovf_ab; huge 250 of 250 regions (228 without); zspec 1040 of 1040; depthgaps_zadd 109 of 109, depthgaps_field1 2,000 of 2,000; GAP G7 |
+| `range` | 1 | range rules and the zero rule (section 4); since `4f3efe15` also the reciprocal's limit (a determinant of 2^126 or more: depth 0) | zovf_lim 4,984 of 4,984, zovf_c, zovf_ps, zovf_sum, zovf_far, zovf_ab; huge 250 of 250 regions (228 without); zspec 1040 of 1040; depthgaps_zadd 109 of 109, depthgaps_field1 2,000 of 2,000; trsort_recip, _recipovf, _auto, _garb |
+| `zeroRuleCoords` | 1 | the zero rule in the coordinate differences (`subC`, L413) | depth2_zcoord 80 of 80 regions; 0 stores other words at all 2,599 pixels (`0de9776b`) |
+| `zeroRuleEdges` | 1 | the zero rule in the edges and the determinant's sums (`addE`, L414) | depth2_zedge 65 of 65 regions; 0 stores other words at all 160 pixels (`0de9776b`) |
 
 `2d08a440`'s `storedNegBits` (16) is gone: a depth below zero is stored by H14 `neg`, whose window holds the 16 bits.
 
@@ -531,7 +545,7 @@ These `PlaneHW` constants select experiments; the HW value is 0 and the experime
 
 | constant | value | site | evidence |
 |---|---|---|---|
-| 1/3, rounded up | `0xAAAAAB * 2^-25` (`0x3EAAAAAB`) | `pvrfp::OneThird()` (softfp L331): depth mean L569, TSP flat L246 | perpmean_word 16,384 of 16,384 (0xAAAAAA: 1,618 wrong); slivers_detzero 9,600 of 9,600 (0xAAAAAA: 8,143); perpmean_uv 8,192 |
+| 1/3, rounded up | `0xAAAAAB * 2^-25` (`0x3EAAAAAB`) | `pvrfp::OneThird()` (softfp L331): depth mean L646, TSP flat L246 | perpmean_word 16,384 of 16,384 (0xAAAAAA: 1,618 wrong); slivers_detzero 9,600 of 9,600 (0xAAAAAA: 8,143); perpmean_uv 8,192 |
 | 2 - sqrt(2), less 8 units | `0x95F612 * 2^-24` (`0x3F15F612`) | mip L684 | mipk4 / mipk3 lenfit 3,920 cells, mipk2 2,401 of 2,401 |
 | edge swamp value | `±2^200` (`{mant 1, exp 200}`) | edge L116, L184 (`4f3efe15`) | faredge_cmax, faredge_k132 (any value beyond every adder's reach of a finite operand does the same) |
 | saturated edge start and steps | `±2^127` | edge L190-191, L196-197 | hugepos, hugepos_v4-v6 |
@@ -539,12 +553,13 @@ These `PlaneHW` constants select experiments; the HW value is 0 and the experime
 | value of -1 unit | `-2^-143` | TSP L381 | wzero1 (below 2^-130); GAP G8 |
 | divider: -1 unit | `0xFFFF * 2^-143` | TSP L455 | texfar_m1 166 of 166, texfar_m1q |
 | divider: zero denominator | `2^-128` | TSP L480 | wzero2 32,784 readings |
-| stored overflow (`Saturated`) | `0x7F000000` with the sign bit | depth L235 | bgbig, bgspec, zsign page 15 |
-| forced start | `±2^127` (`FromSingle(0x7F000000 or 0xFF000000, 0)`) | depth L510 | depthgaps_infstart, zovf (six cells), depthgaps_edges N |
-| REG step and sign | 2^25 units of 2^102 (2^127); sign at 2^29 units (2^131) | depth L477, L702 | zword, zovf |
-| the lowest word | `0x807FFFFF` | depth L718 | zword (m = 16) |
+| stored overflow (`Saturated`) | `0x7F000000` with the sign bit | depth L251 | bgbig, bgspec, zsign page 15 |
+| forced start | `±2^127` (`FromSingle(0x7F000000 or 0xFF000000, 0)`) | depth L587 | depthgaps_infstart, zovf (six cells), depthgaps_edges N |
+| REG step and sign | 2^25 units of 2^102 (2^127); sign at 2^29 units (2^131) | depth L554, L801 | zword, zovf |
+| the lowest word | `0x807FFFFF` | depth L817 | zword (m = 16) |
+| the reciprocal's limit | a determinant of `2^126` or more (`top(det) - 1 >= 126`): depth 0 | depth L463 (`4f3efe15`) | trsort_recip (exactly 2^126 included; 1 - 2^-24 not), trsort_recipovf, trsort_auto |
 | TR peel reset | `Bits(0x7F7FFFFF)` | lists L763 | sort |
-| NegWord fallback | `0x80000000 \| (E + 126) << 23` | depth L667 | [R] A5 |
+| NegWord fallback | `0x80000000 \| (E + 126) << 23` | depth L744 | [R] A5 |
 | `27146 / 65536` | | mip L674, MIP_K 1 only | not HW |
 
 ---
@@ -572,21 +587,27 @@ _ab; depthgaps_zadd, _field1, _nanprod, _tinyramp; huge, zspec], with its own ze
   zero as 2^-127 in the last addition only: 1,463]. MipSelect's `radd` has no zero rule and keeps Add's sign on a
   zero sum.
 - **Every addition of the ISP depth setup** (`708fb8cd`; since `0de9776b` the coordinate differences, the edges and
-  the determinant too: `zeroRuleCoords`, `zeroRuleEdges` 1, depth2_zcoord, depth2_zedge): when one operand is zero and the other is in
+  the determinant too: `zeroRuleCoords`, `zeroRuleEdges` 1, depth2_zcoord 80 of 80, depth2_zedge 65 of 65 regions;
+  `isp.md` 6.3): when one operand is zero and the other is in
   [2^-126, 1.5 * 2^-126) with the other sign, the sum is **+0**; otherwise a zero adds nothing, exactly. Every zero
   sum is +0, `-0 + -0` too. 2^128 is checked at every product and every sum where it is made, after the truncation.
   [depthgaps_zadd 109 of 109 (the TSP's last-addition rule there: 76); depthgaps_field1 2,000 of 2,000; zovf_lim
   4,984 of 4,984]
+- **The depth setup's reciprocal** (`4f3efe15`): a determinant of 2^126 or more, 2^126 itself included
+  (`top(det) - 1 >= 126`, before `Recip`), has a reciprocal of zero, so the depth is 0 at every pixel; an infinite
+  determinant too. [trsort_recip: f 2^126 for f = 1, 1 + 2^-23 .. 4 - 2^-22 a depth of 0, f = 1 - 2^-24 an ordinary
+  one; 2^126 kept as 2^-126: 24 of 160 regions wrong; trsort_recipovf 80 of 80; trsort_auto 240 of 240 (202
+  before); `isp.md` 6.3]
 
 ### 4.2 The four flavours side by side
 
-| | edge unit | ISP depth setup (`DepthTileT::Setup` L321-371) | TSP setup (`PlaneT::Setup` L144-184) | TSP mip (`MipSelect` L602-612, L699-730) |
+| | edge unit | ISP depth setup (`DepthTileT::Setup` L355-474, `4f3efe15`) | TSP setup (`PlaneT::Setup` L144-184) | TSP mip (`MipSelect` L602-612, L699-730) |
 |---|---|---|---|---|
 | input | `FromBits` | `FromSingle(., 1)` | `FromSingle(., 1)` | the planes' sums; DCalcCtrl 1: `FromSingle(., 1)` |
 | product | `Mul 24`, no range; ≥ 2^128 swamps (H7a) | `mul` | `mul` | `kind`, `rmul` |
-| sum | `Add 24/25`, no range, no zero rule; ≥ 2^128 swamps | `add_d`: `limit(., true)`, the zero rule, every zero `+0` | `addTerm(., ., false)` | `radd`: **reach 53** |
+| sum | `Add 24/25`, no range, no zero rule; ≥ 2^128 swamps | `add_d`: `limit(., true)`, the zero rule, every zero `+0`; the coordinate differences (`subC`), edges and determinant (`addE`) the same (`zeroRuleCoords`, `zeroRuleEdges` 1) | `addTerm(., ., false)` | `radd`: **reach 53** |
 | `sum3` | `(e1 + e2) + e3` | `add_d(add_d(p, q), r)`; the mean: `addInf` | `addTerm(addTerm(p, q, false), r, true)` (the same rule in both since `2bee80f2`) | none |
-| reciprocal | none | `Recip 24`, **unranged** | `det.bad ? zero(det.neg) : Recip 24`, then below 2^-126 **or a determinant of 2^126 or more** (`4f3efe15`, trsort_recip) → `zero(sign)` | `det.bad or det == 0 ? +0 : Recip 24` (`4f3efe15`), then below → `+0` |
+| reciprocal | none | `top(det) - 1 >= 126` (or `det.bad`) → the plane is depth 0 (`4f3efe15`); else `Recip 24`, unranged (`inv` in (2^-126, 2^126]) | `det.bad ? zero(det.neg) : Recip 24`, then below 2^-126 **or a determinant of 2^126 or more** (`4f3efe15`, trsort_recip) → `zero(sign)` | `det.bad or det == 0 ? +0 : Recip 24` (`4f3efe15`), then below → `+0` |
 | coefficients | | `A`, `B`: `Mul(., inv, 24)`, **unranged**, then `under()`: below 2^-126 → mant 0, **sign kept**; the start: the ranged `first0` | `mul(., inv)` ranged, then `cut_16` | `Mul(best, inv2, 24)`, then range |
 
 The wrappers, exactly:
@@ -596,7 +617,7 @@ inf(s)  = {bad 1, neg s, mant 0}          zero(s) = {neg s, mant 0}
 above(r) = r != 0 and top(r) - 1 > 127    // |r| >= 2^128
 below(r) = r != 0 and top(r) - 1 < -126   // |r| <  2^-126
 
-mul(p, q):                                    // depth L330, TSP L150, mip rmul L699 (the same rule)
+mul(p, q):                                    // depth L362, TSP L150, mip rmul L699 (the same rule)
   if p.bad or q.bad:
      other = p.bad ? q : p
      return (not other.bad and other == 0) ? zero(p.neg ^ q.neg) : inf(p.neg ^ q.neg)
@@ -621,7 +642,7 @@ kind(x, y):                                    // mip L606: the class of the pro
   x == 0 or y == 0: ZERO
   m = Mul(x, y, 24): above(m) ? INF : below(m) ? ZERO : NUMBER
 
-add_d(p, q):                                  // depth L354 (708fb8cd)
+add_d(p, q):                                  // depth L395-414 (4f3efe15): addRule(p, q, true) = add = subC = addE
   if p.bad or q.bad:
      if p.bad and q.bad and p.neg != q.neg: return +0
      return inf(p.bad ? p.neg : q.neg)
@@ -630,7 +651,7 @@ add_d(p, q):                                  // depth L354 (708fb8cd)
      return +0                                // the zero rule
   r = Add(p, q, 24, 25)
   above(r): inf(r.neg);  below(r) or r == 0: +0;  else r
-addInf(p, fp, q, fq):                         // depth L571 (the det-zero mean); fp, fq: the corner's raw fraction
+addInf(p, fp, q, fq):                         // depth L648 (the det-zero mean); fp, fq: the corner's raw fraction
   if p.bad and q.bad and p.neg != q.neg and fp != fq:      //   when its exponent field is 255, else 0 (a sum: 0)
      return inf(fp > fq ? p.neg : q.neg)
   return add_d(p, q)
@@ -657,17 +678,20 @@ withZero(p, zbits):
 These sites are listed in `isp.md` 6.3 and repeated here for the primitive choice:
 
 - **Depth.**
-  - `inv0`, `invS` and `inv` = `Recip(det, 24)` (L396, L432, L581) have no range rule, but `det` is in
-    [2^-126, 2^128), so `inv` is in (2^-128, 2^126].
-  - `first0` (L398) is the **ranged** evaluation of `((a x0 + b y0) + c) * inv0`. It decides the regimes, and since
-    `708fb8cd` it is also the start the block steps from (L591; depthgaps_tinyramp). refsw3's unranged evaluation of
-    the same expression (the third choice at L591) is never taken with `range = 1`.
-  - `A`, `B` (L582-583) and the REG steps (L436) are the **unranged** `Mul(., inv, 24)`; `A` and `B` are then
-    `under()`ed (L596-597). `C` (L584) feeds only the float form, which is unreachable (A3).
+  - `inv0`, `invS` and `inv` = `Recip(det, 24)` (L470, L509, L658) have no range rule of their own: `det` is in
+    [2^-126, 2^126) there, since a determinant of 2^126 or more leaves depth 0 before them (L463, `4f3efe15`), so
+    `inv` is in (2^-126, 2^126]. (At `708fb8cd` `det` reached 2^128 and `inv` 2^-128.)
+  - `first0` (L472) is the **ranged** evaluation of `((a x0 + b y0) + c) * inv0` at the tile's first sample point
+    (`x0 = left + HALF_OFFSET[0] / 2`, L471). It decides the regimes, and since `708fb8cd` it is also the start the
+    block steps from (L668; depthgaps_tinyramp). refsw3's unranged evaluation of the same expression (the third
+    choice at L668) is never taken with `range = 1`.
+  - `A`, `B` (L659-660) and the REG steps (L513) are the **unranged** `Mul(., inv, 24)`; `A` and `B` are then
+    `under()`ed (L673-674). `C` (L661) feeds only the float form, which is unreachable (A3).
 - **Edge.** The edge unit's `det` (unranged, `FromBits`, swamped: H7a) and the depth unit's or TSP's `det`
   (ranged, `FromSingle`) are the same arithmetic on normal finite inputs whose intermediate values stay within
-  [2^-126, 2^128), except where the depth zero rule acts (a zero coordinate difference or product against one of
-  [2^-126, 1.5 * 2^-126) of the other sign). They differ for denormal, infinite or NaN corners and for products or
+  [2^-126, 2^128), except where the depth zero rule acts (a zero coordinate difference, product or edge against one
+  of [2^-126, 1.5 * 2^-126) of the other sign: since `0de9776b` in the coordinate differences, edges and the
+  determinant too). They differ for denormal, infinite or NaN corners and for products or
   sums outside the range (corners from about 2^64 on, where the edge unit swamps and the depth unit makes an
   infinity). One datapath with a mode bit can serve both. A datapath that computes the
   unranged chain and derives the ranged one from range flags **cannot**, because a ranged infinity or zero changes
@@ -718,47 +742,52 @@ not depend on the tile. `SetFirstRow` walks a big edge again once the row range 
 | 297-304 | `SetFirstRow(row)`: clamp to 0 .. 31, walk again if it changed | int | | |
 | 306-319, 322-342, 397-438 | `InsideOrdinary`, `RowMask`, `Walk` | int | | integer compares and adds only; `Walk`'s `far32` (L404): `fx > 0 ? (32 fx) mod h : fx < 0 && (-32 fx) mod h == 0 ? h : 0`, its end test `rw + far32 > z` (L419) |
 
-### 5.2 `pvr_isp_depth.h` (`DepthHW`; inputs `FromSingle(., 1)`; ranged)
+### 5.2 `pvr_isp_depth.h` (`DepthHW`; inputs `FromSingle(., 1)`; ranged) — at `4f3efe15`
 
-`DepthTileT::Setup` runs per triangle per tile in refsw3 (`refsw_tile.cpp` L807) and starts from a clean object
-(L308). In the HW, `a`, `b`, `c` and `det` are per triangle and the start is per tile. Algorithm: `isp.md` 9.
+`DepthTileT::Setup(x, y, z, left, top, cfg, centers)` runs per triangle per tile in refsw3 (`refsw_tile.cpp`
+L809-813, `centers` = HALF_OFFSET[0]) and starts from a clean object (L325). In the HW, `a`, `b`, `c` and `det` are
+per triangle and the start is per tile. Algorithm: `isp.md` 9.
 
 | line | expression | op | N/R | notes |
 |---|---|---|---|---|
-| 311 | `first_z = Bits(z[0])` | | | every CONST path overwrites it in the HW configuration: never stored |
-| 323 | `load = FromSingle(u, 1)` | H4 | | `x, y, z` of the three corners in rasterizer order |
-| 324-329 | `limit(r, sum)`: `>= 2^128` → inf; `< 2^-126` → zero (`+0` for a sum, sign kept for a product) | H10 | | |
-| 330-336 | `mul(p, q)` | H5 + H10 | 24 | `bad × 0 = 0`, `bad × x = inf`, sign xor |
-| 354-370 | `add(p, q)`: the bad rules; the zero rule (L359-365); `limit`; a zero sum `+0` (L367-368) | H6 + H10 | 24/25 | section 4.2 `add_d`; D2 at L363 |
-| 371, 375-376 | `sub(p, q) = add(p, -q)`; `edge(j,k) = sub(mul(X_j, Y_k), mul(X_k, Y_j))` | H5+H10, H6+H10 | 24; 24/25 | ranged |
-| 378 | `a = sum3(mul(Z0, sub(Y1,Y2)), mul(Z1, sub(Y2,Y0)), mul(Z2, sub(Y0,Y1)))` | H5, H6, H10 | 24; 24/25 | **`(t0 + t1) + t2`** |
-| 379 | `b = sum3(mul(Z0, sub(X2,X1)), mul(Z1, sub(X0,X2)), mul(Z2, sub(X1,X0)))` | as above | | `(t0 + t1) + t2` |
-| 380 | `c = sum3(mul(Z0, e1), mul(Z2, e3), mul(Z1, e2))` | as above | | **`(t0 + t2) + t1`** [zmeas 1: one of 384 combinations of vertex order and sum orders fits] |
-| 381 | `det = sum3(e1, e2, e3)` | H6, H10 | | `(e1 + e2) + e3` |
-| 382-383 | `Perpendicular(det)` → `det = +0` | H9 | | |
-| 384-393 | `det.bad` → key 0 everywhere | | | GAP G5 |
-| 396 | `inv0 = Recip(det, 24)` | H8 | 24 | unranged |
-| 397-399 | `first0 = mul(add(add(mul(a, x00), mul(b, y00)), c), inv0)`, `x00 = FromHalves(2 left + 1)` | H5, H6, H10 | 24; 24/25 | **always the pixel centre**; `(a x0 + b y0) + c`; the regimes' test and the block's start (L591) |
-| 405-413 | `a` or `b` bad → REG; `sa`, `sb` from the signs of `a`, `b`, `det` | | | |
-| 432-446 | `invS = Recip(det, 24)`; `rstep(v) = Mul(v, invS, 24).cut(20).cutBelow(102)`, the magnitude mod 2^30 in units of 2^102, then the sign | H8, H5, H2, H3 | 24; 20 | unranged `Mul`; `fa`, `fb` |
-| 476-483 | REG `r0 = first0.bad ? ±2^25 : trunc(first0.cut(20) / 2^102)` | H2, H11 | 20 | sign-magnitude, toward zero |
-| 486-511 | `first0` or `c` bad: `a = b = 0` → `Saturated(first0.neg)`; else the forced start: `±2^127` (`FromSingle(0x7F000000 / 0xFF000000, 0)`) or `first0` | H14 | | |
-| 568-578 | `mean = mul(addBad(addBad(Z0, frac0, Z1, frac1), 0, Z2, frac2), OneThird())`; `Flat(mean, 20, 19)` | H6+H10, H5+H10, H14 | 24 | `(z1 + z2) + z3`, the third corner sent added last; `addBad` L571-575 |
-| 581-584 | `inv = Recip(det, 24)`; `A, B, C = Mul(a, b or c, inv, 24)` | H8, H5 | 24 | **unranged**; `C` feeds only the float form |
-| 591 | `first = forced ? forcedFirst : rangedFirst` | | | the unranged third choice is never taken with `range = 1` |
-| 596-597 | `under(A, B, C, first)`: below 2^-126 → `mant 0`, sign kept | H10 | | zspec pages 3-6 |
-| 599 | `pair = max(top A, top B)` | H1 | | |
-| 600-606 | `first == 0` and `pair == NoExp` → key 0 | | | |
-| 616-618 | `start = first.cut(20).cutBelow(pair - 21)` | H2, H3 | 20 | zstart |
-| 619-620 | `e = (first == 0 or start == 0) ? pair + 5 : top(first)`; `unit = e - 26` | | | zmeas mix reach; depthgaps_flt |
-| 621-629 | `step(v) = v.cut(20).cutBelow(pair - 21).cutBelow(unit)` | H2, H3 | 20 | |
-| 630-631 | `pair - 21 + 24 - unit > 100` → float form | | | unreachable (A3) |
-| 632-635 | `d0 = 2 start / 2^unit`, `dx`, `dy` exact | H11 | | at most 54 bits a pixel (H12b) |
-| 636-656 | `E = max(e, pair + 5)`, then at least -122 and at most 128 | int | | depthgaps_neggrid, _tinymean; _bigslope, _bigpair |
-| 663-669 | `NegWord(t)`: `sh = E - 15 - unit`; `0 <= sh <= 120` ? `Neg(E, t >> sh)` : the fallback word | H14 | | A5 |
-| 700-721 | `RegDepth(r)` | H14 | | `isp.md` 9.5 |
-| 723-752 | `At`: REG; CONST; `tu = d0 + (2i + h) dx + (2j + h) dy`; `tu < 0` → `NegWord`; else to `Fp` (64-bit truncation, never acts), `cut(19)`, `Big` from 2^128, else `FromFp` | H12b, H14 | 19 | `h = 0` at centres, -1 at corners (HALF_OFFSET[0]); the float form at L742-747 is unreachable |
-| 110-279 | `StoredDepth`: `Key32` (L116), `Bits` (L122), `Between` (L124), `Neg` (L160), `Flat` (L180), `Big` (L224), `Saturated` (L235), `FromFp` (L239) | H14 | | |
+| 342 | `sampleHalf = centers ? 1 : 0` | | | the tile's first sample point (`0de9776b`; depth2_halfc, depth2_halfo) |
+| 343 | `first_z = Bits(z[0])` | | | every CONST path overwrites it in the HW configuration: never stored |
+| 355 | `load = FromSingle(u, 1)` | H4 | | `x, y, z` of the three corners in rasterizer order |
+| 356-361 | `limit(r, sum)`: `>= 2^128` → inf; `< 2^-126` → zero (`+0` for a sum, sign kept for a product) | H10 | | |
+| 362-367 | `mul(p, q)` | H5 + H10 | 24 | `bad × 0 = 0`, `bad × x = inf`, sign xor |
+| 395-411 | `addRule(p, q, rule)`: the bad rules; the zero rule when `rule` (L400-406); `limit`; a zero sum `+0` | H6 + H10 | 24/25 | section 4.2 `add_d`; D2 at L404 |
+| 412-414 | `add = addRule(., ., true)`; `subC(p, q) = addRule(p, -q, zeroRuleCoords)`; `addE = addRule(., ., zeroRuleEdges)` | H6 + H10 | 24/25 | all three `add_d` in the HW configuration (both switches 1) |
+| 418 | `edge(j,k) = addE(mul(X_j, Y_k), -mul(X_k, Y_j))` | H5+H10, H6+H10 | 24; 24/25 | ranged, the zero rule (depth2_zedge) |
+| 421 | `a = sum3(mul(Z0, subC(Y1,Y2)), mul(Z1, subC(Y2,Y0)), mul(Z2, subC(Y0,Y1)))` | H5, H6, H10 | 24; 24/25 | **`(t0 + t1) + t2`**; the differences with the zero rule (depth2_zcoord) |
+| 422 | `b = sum3(mul(Z0, subC(X2,X1)), mul(Z1, subC(X0,X2)), mul(Z2, subC(X1,X0)))` | as above | | `(t0 + t1) + t2` |
+| 423 | `c = sum3(mul(Z0, e1), mul(Z2, e3), mul(Z1, e2))` | as above | | **`(t0 + t2) + t1`** [zmeas 1: one of 384 combinations of vertex order and sum orders fits] |
+| 424 | `det = addE(addE(e1, e2), e3)` | H6, H10 | | `(e1 + e2) + e3` |
+| 425-426 | `Perpendicular(det)` → `det = +0` | H9 | | |
+| 427-445 | `det.bad` → key 0 everywhere | | | trsort_recip page 10, trsort_auto (G5 closed) |
+| 463-467 | `!det.zero() && top(det) - 1 >= 126` → key 0 everywhere | H9 (exponent compare) | | `4f3efe15`; exactly 2^126 included (trsort_recip, _recipovf, _auto) |
+| 470 | `inv0 = Recip(det, 24)` | H8 | 24 | unranged; `det` in [2^-126, 2^126) here |
+| 471-472 | `first0 = mul(add(add(mul(a, x00), mul(b, y00)), c), inv0)`, `x00 = FromHalves(2 left + sampleHalf)` | H5, H6, H10 | 24; 24/25 | **the tile's first sample point**; `(a x0 + b y0) + c`; the regimes' test and the block's start (L668) |
+| 479-487 | `a` or `b` bad → REG; `sa`, `sb` from the signs of `a`, `b`, `det` | | | |
+| 509-523 | `invS = Recip(det, 24)`; `rstep(v) = Mul(v, invS, 24).cut(20).cutBelow(102)`, the magnitude mod 2^30 in units of 2^102, then the sign | H8, H5, H2, H3 | 24; 20 | unranged `Mul`; `fa`, `fb`; toward zero either sign (zovf_wrap W2, depth2_cneg) |
+| 553-560 | REG `r0 = first0.bad ? ±2^25 : trunc(first0.cut(20) / 2^102)` | H2, H11 | 20 | sign-magnitude, toward zero; `first0` at the sample point |
+| 563-588 | `first0` or `c` bad: `a = b = 0` → `Saturated(first0.neg)`; else the forced start: `±2^127` (`FromSingle(0x7F000000 / 0xFF000000, 0)`) or `first0` | H14 | | |
+| 645-655 | `mean = mul(addBad(addBad(Z0, frac0, Z1, frac1), 0, Z2, frac2), OneThird())`; `Flat(mean, 20, 19)` | H6+H10, H5+H10, H14 | 24 | `(z1 + z2) + z3`, the third corner sent added last; `addBad` L648-652 |
+| 658-661 | `inv = Recip(det, 24)`; `A, B, C = Mul(a, b or c, inv, 24)` | H8, H5 | 24 | **unranged**; `C` feeds only the float form |
+| 662 | `x0 = FromHalves(2 left + sampleHalf)` | H4 | | feeds only the unranged third choice of L668 |
+| 668 | `first = forced ? forcedFirst : rangedFirst` | | | the unranged third choice is never taken with `range = 1` |
+| 673-674 | `under(A, B, C, first)`: below 2^-126 → `mant 0`, sign kept | H10 | | zspec pages 3-6 |
+| 676 | `pair = max(top A, top B)` | H1 | | |
+| 677-683 | `first == 0` and `pair == NoExp` → key 0 | | | |
+| 693-695 | `start = first.cut(20).cutBelow(pair - 21)` | H2, H3 | 20 | zstart |
+| 696-697 | `e = (first == 0 or start == 0) ? pair + 5 : top(first)`; `unit = e - 26` | | | zmeas mix reach; depthgaps_flt |
+| 698-706 | `step(v) = v.cut(20).cutBelow(pair - 21).cutBelow(unit)` | H2, H3 | 20 | |
+| 707-708 | `pair - 21 + 24 - unit > 100` → float form | | | unreachable (A3) |
+| 709-712 | `d0 = 2 start / 2^unit`, `dx`, `dy` exact | H11 | | at most 54 bits a pixel (H12b) |
+| 713-733 | `E = max(e, pair + 5)`, then at least -122 and at most 128 | int | | depthgaps_neggrid, _tinymean; _bigslope, _bigpair |
+| 740-746 | `NegWord(t)`: `sh = E - 15 - unit`; `0 <= sh <= 120` ? `Neg(E, t >> sh)` : the fallback word | H14 | | A5 |
+| 799-820 | `RegDepth(r)` | H14 | | `isp.md` 9.5; among other planes' depths: depth2_regmix, _regbelow |
+| 822-852 | `At(i, j, centers)`: REG; CONST; `h = centers - startCenters`; `tu = d0 + (2i + h) dx + (2j + h) dy`; `tu < 0` → `NegWord`; else to `Fp` (64-bit truncation, never acts), `cut(19)`, `Big` from 2^128, else `FromFp` | H12b, H14 | 19 | `h = 0` in the HW (the ISP asks at the point it set up at, `refsw_tile.cpp` L863); the float form is unreachable |
+| 123-295 | `StoredDepth`: `Key32` (L129), `Bits` (L135), `Between` (L137), `Neg` (L173), `Flat` (L193), `Big` (L240), `Saturated` (L251), `FromFp` (L255) | H14 | | unchanged since `708fb8cd` but for comments (depth2_denorm, depth2_biggrid now cited) |
 
 ### 5.3 `pvr_tsp_plane.h` (`PlaneHW`; inputs `FromSingle(., 1)`; ranged)
 
@@ -851,20 +880,21 @@ Indices 0, 1, 2 are the corners in rasterizer order, `j = k + 1`, `l = k + 2` (m
 
 | primitive instance | sites (in the HW config) |
 |---|---|
-| H5 `Mul` 24×24 → cut 24 | edge 86, 115, 182, 194 (`Winding`, `EdgeWinding`, `c`, `first`); depth 335 (every ranged product: `mul`), 436 (REG steps), 582-583 (`A`, `B`); TSP 152/158 (edges, terms, attribute products, coefficients, mean); mip 610, 623, 641, 686, 706, 745 |
+| H5 `Mul` 24×24 → cut 24 | edge 86, 115, 182, 194 (`Winding`, `EdgeWinding`, `c`, `first`); depth 366 (every ranged product: `mul`), 513 (REG steps), 659-660 (`A`, `B`); TSP 152/158 (edges, terms, attribute products, coefficients, mean); mip 610, 623, 641, 686, 706, 745 |
 | H5 `Mul` exact 16 × ≤13 (integer coordinate) and × 1/2 | TSP 326, 363 |
 | H5 `Mul` exact 24×24, range class only | mip 646 |
 | H5 `Mul` 24 × ≤5 bits → cut 8; 8×8 → cut 8 | mip 759-762; 779, 782 |
-| H5 constant multiplies | `OneThird()` = `0xAAAAAB 2^-25` (depth 576 through `mul`, TSP 275); `0x95F612 2^-24` (mip 686) |
-| H6 `Add` 24/25 | edge 86, 89, 115, 118, 182, 188, 194, 195; depth 366 (every ranged sum: `add`); TSP 165/177; mip 686, 687 |
+| H5 constant multiplies | `OneThird()` = `0xAAAAAB 2^-25` (depth 653 through `mul`, TSP 275); `0x95F612 2^-24` (mip 686) |
+| H6 `Add` 24/25 | edge 86, 89, 115, 118, 182, 188, 194, 195; depth 408 (every ranged sum: `addRule`, through `add`, `subC`, `addE`); TSP 165/177; mip 686, 687 |
 | H6 `Add` 24/53 | mip 726 |
 | H7a swamp and saturation (2^128 comparators) | edge 113, 181 (swamp), 189 (`dxP`, `dyP`), 190-191 (`dx`, `dy`), 196-197 (start) |
 | H7b, H7c wide `Add` (62, R ≥ 200, window 90) | TSP 368 (H7b); mip 642 (H7c). TSP 265 is the same call but exact on its operands |
-| H8 `Recip` 24 | depth 396, 432, 581; TSP 285; mip 619 |
-| H2 `cut` | 20: edge 198, 208; depth 188 (`Flat`), 436, 479, 616, 624; lists 642 (the background's `>> 4`); 16: TSP 276, 289-291; 19: depth 187 (`Flat`), 488, 710, 748; 8: mip 762, 773 |
-| H3 `cutBelow` | edge 237-238, 273-274; depth 436 (2^102), 618, 624 (twice) |
-| H11 converters | edge 131 (`FloorScaled`), 239-264, 272-274 (`unitsAt`); depth 441-443, 479-482 (REG), 632-635 (block), 195-202 (`Flat`'s M), 668 (`NegWord`'s M); lists 643-645 (the background's M) |
-| H14 stored-depth key | depth 110-279 (`StoredDepth`), 663-669 (`NegWord`), 700-721 (`RegDepth`), 748-751 (`At`'s store); lists 637-653 (`bgkey`), 763 (the TR peel's `Bits(0x7F7FFFFF)`) |
+| H8 `Recip` 24 | depth 470, 509, 658 (one value; `det` below 2^126 there, 463); TSP 285; mip 619 |
+| H9 exponent compare | depth 463 (`top(det) - 1 >= 126`: depth 0, `4f3efe15`) |
+| H2 `cut` | 20: edge 198, 208; depth 201 (`Flat`), 513, 556, 693, 701; lists 642 (the background's `>> 4`); 16: TSP 276, 289-291; 19: depth 200 (`Flat`), 565, 809, 848; 8: mip 762, 773 |
+| H3 `cutBelow` | edge 237-238, 273-274; depth 513 (2^102), 695, 701 (twice) |
+| H11 converters | edge 131 (`FloorScaled`), 239-264, 272-274 (`unitsAt`); depth 518-520, 556-559 (REG), 709-712 (block), 208-215 (`Flat`'s M), 745 (`NegWord`'s M); lists 643-645 (the background's M) |
+| H14 stored-depth key | depth 123-295 (`StoredDepth`), 740-746 (`NegWord`), 799-820 (`RegDepth`), 848-851 (`At`'s store); lists 637-653 (`bgkey`), 763 (the TR peel's `Bits(0x7F7FFFFF)`) |
 
 ---
 
@@ -1076,10 +1106,14 @@ Three flavours, exactly as in section 4.2:
 
 - `rng_mul`: depth, TSP and mip `rmul`.
 - `rng_add #(R)` with a mode (`p2_fp_rng_add`, at `4f3efe15`): NONE, the edge unit's plain Add; DEPTH, `add_d`
-  (the zero rule at top - 1 == -126, every zero sum +0); TSP, `addTerm` (the zero rule at top - 1 < -125, every zero
+  (the zero rule at top - 1 == -126, every zero sum +0; in every addition of the depth setup, the coordinate
+  differences, edges and determinant included since `0de9776b`); TSP, `addTerm` (the zero rule at top - 1 < -125, every zero
   sum +0; `third` no longer matters); MIP, `radd` with R = 53 (no zero rule, a zero sum keeps its sign).
 - `rng_recip`: the TSP's reciprocal is also a zero of its sign for a determinant of 2^126 or more (`4f3efe15`);
-  MipSelect's is +0 for a zero determinant (D1, now refsw3's own rule).
+  MipSelect's is +0 for a zero determinant (D1, now refsw3's own rule). The depth unit's limit at the same 2^126
+  (`top(det) - 1 >= 126`, depth L463) does not feed a zero reciprocal on: it ends the setup with key 0 at every
+  pixel (CONST, `isp.md` 9.3 step 1b), which is what a zero reciprocal would give (every product with it zero, the
+  start and slopes 0). The RTL may build it either way; the regime decision is the reference.
 - `rng_add_inf`: the depth mean's `addInf` (two infinities of opposite signs: the larger raw fraction's sign).
 - `rng_kind`: the mip product class.
 
@@ -1106,8 +1140,8 @@ The variants differ in their zero convention and clamping. Each is a variable sh
 | `FloorUnits(v, unit)` | `+0` → 0, **`-0` → -1** | `floor(v / 2^unit)` | `s >= 62` → `INT64_MAX/4` (unreachable, A4) | TSP `Value`: `c_`, `ax`, `by`, `a_`, `ah`, H7b |
 | edge `unitsAt(v, u)` | 0 | `floor(v / 2^u)`, plus `frac` = any bit below `u` | none (`E - unit <= 56`) | edge `t0`, `tx`, `ty` (`u = unit`, the steps first `cutBelow(u)`); a big edge's `t0` from `s20.cutBelow(u)` (toward zero, `frac` unused) and `u = 102`; `f0`, `fx`, `fy` are these (`4f3efe15`) |
 | depth grid | | exact left shift: values are on the grid by construction (`m.exp >= unit`) | none | depth `d0`, `dx`, `dy` |
-| depth REG `r0`, `fa`, `fb` | | `r0`: `cut_20`, trunc toward zero onto 2^102 (sign-magnitude); `fa`, `fb`: `cut_20(Mul(v, inv, 24))`, trunc onto 2^102, the magnitude mod 2^30, then the sign | `r0`'s shift clamps unreachable (A4) | depth L436-443, L479-482 |
-| depth `M` | | `flat`: `-ceil(\|s\| / 2^(E - 16))`; `bgkey`: `-ceil(t / 2^10)`; `NegWord`: `floor(tu / 2^sh)` (arithmetic shift) | `NegWord`'s `sh < 0`: the fallback word (A5) | depth L195-202, L668; lists L643-645 |
+| depth REG `r0`, `fa`, `fb` | | `r0`: `cut_20`, trunc toward zero onto 2^102 (sign-magnitude); `fa`, `fb`: `cut_20(Mul(v, inv, 24))`, trunc onto 2^102, the magnitude mod 2^30, then the sign | `r0`'s shift clamps unreachable (A4) | depth L513-520, L553-560 |
+| depth `M` | | `flat`: `-ceil(\|s\| / 2^(E - 16))`; `bgkey`: `-ceil(t / 2^10)`; `NegWord`: `floor(tu / 2^sh)` (arithmetic shift) | `NegWord`'s `sh < 0`: the fallback word (A5) | depth L208-215, L745; lists L643-645 |
 | `TexCoordFixed(u, shift)` | 0 | two's complement `floor(u 2^shift)` while `top + shift <= 31`; beyond, `2^30 + low 26 bits` (`CoordKeep`) | none (texfar: never overflows) | `tsp.md` 9.1 |
 
 TSP `Value` integer widths: `|k| < 2^25` (`|C|` and the products are below 2^e or 2^(e+1), with the grid 22 bits
@@ -1129,10 +1163,11 @@ if top - 1 < -128: exp += -128 - (top - 1)             // exponent floor at -128
 [uvmeas point 3, valueFixed table: 16 bits from the leading one, wherever it is; wtiny 37 readings for the -128
 floor; wzero1 for -1]
 
-**H12b `depth_block_to_fp`** (`At` L733-751; below zero `NegWord` L663-669):
+**H12b `depth_block_to_fp`** (`At` L822-852; below zero `NegWord` L740-746):
 
 ```
-tu = d0 + (2i + h) dx + (2j + h) dy     // signed fixed point in half units of 2^unit; at most 54 bits
+tu = d0 + 2i dx + 2j dy                 // signed fixed point in half units of 2^unit; at most 54 bits
+                                        // (refsw3: + h (dx + dy), h = centers - startCenters, 0 in the HW: isp.md 9.4a)
 tu < 0:   sh = E - 15 - unit
           0 <= sh <= 120:  neg(E, floor(tu / 2^sh))                   // H14 e; an arithmetic shift
           otherwise:       bits(0x80000000 | (E + 126) << 23)         // the fallback word (A5)
@@ -1140,9 +1175,10 @@ tu >= 0:  v = {0, 0, unit - 1, tu}      // refsw3 truncates to 64 significant bi
           s = cut_19(v);  top(s) - 1 >= 128 ? big(s) : from_fp(s)
 ```
 
-`tu` has at most 54 bits: `|t| < 2^29` half-G units (`isp.md` 9.4a) times `2^(gexp - unit) <= 2^25`; the run of
-`isp.md` 9.4a saw 50. In the G form the accumulator is the 30-bit `t` and `M = floor(t / 2^nsh)`, `nsh = E - 15 -
-gexp`, a left shift when `nsh < 0` (`isp.md` 9.6). A negative pixel never becomes a float (A2 is closed).
+`tu` has at most 54 bits: `|t| < 2^29` half-G units (`isp.md` 9.4a) times `2^(gexp - unit) <= 2^25`; the runs of
+`isp.md` 9.4a saw 50 (`708fb8cd`) and 49 (`4f3efe15`, both sample points). In the G form the accumulator is the
+30-bit `t` and `M = floor(t / 2^nsh)`, `nsh = E - 15 - gexp`, a left shift when `nsh < 0` (`isp.md` 9.6: `nsh >=
+-14` with a start, the fallback word without one). A negative pixel never becomes a float (A2 is closed).
 
 ### H13 `tsp_div`: the TSP divider
 
@@ -1182,13 +1218,17 @@ q = p >> bn;  if num.neg and (p mod 2^bn) != 0: q += 1      // floor of the prod
 return {num.neg, q, en + 1 - ed - 17}                        // q in [2^15, 2^17]; 18-bit field
 ```
 
-### H14 `p2_zword_pkg`: the stored depth (depth.h `StoredDepth` L110-279, `RegDepth` L700; lists.cpp L637-653)
+### H14 `p2_zword_pkg`: the stored depth (depth.h `StoredDepth` L123-295, `RegDepth` L799 at `4f3efe15`; lists.cpp L637-653)
+
+`StoredDepth` and `RegDepth` are the same functions as at `708fb8cd`; `0de9776b` only measured them further
+(depth2_denorm: the denormals ordered by value; depth2_biggrid: Big's 19 bits cut; depth2_regmix, depth2_regbelow:
+RegDepth's words among other planes' depths), so `p2_zword_pkg` (M1b) needs no change.
 
 A stored depth is a **64-bit signed order key** (`StoredDepth::k`): the IEEE word's order, 32 bits finer. Every
 depth compare of the ISP (`DepthMode`, `KeyAbove`, the modifier volumes' "greater") compares keys (`isp.md` 9.7).
 refsw3's 32-bit `bits` is for logs and probes only. The functions, each a combinational function of its inputs:
 
-**a. `key32(w)`, `bits(w)`, `between(w, o)`** (L116-130; zsign, bgspec, bgneg, bgneg2):
+**a. `key32(w)`, `bits(w)`, `between(w, o)`** (L129-145; zsign, bgspec, bgneg, bgneg2):
 
 ```
 key32(w)      = w == 0x80000000 ? 0 : int32(w ^ (w[31] ? 0x007FFFFF : 0))
@@ -1196,7 +1236,7 @@ bits(w)       = key32(w) << 32
 between(w, o) = (key32(w) << 32) + o,  1 <= o <= 2^32 - 1         // after w, before the next word
 ```
 
-**b. `from_fp(v)`** (`FromFp` L239). It takes an `Fp` (≤ 19 bits here) to the key of its IEEE single word: RNE on
+**b. `from_fp(v)`** (`FromFp` L255). It takes an `Fp` (≤ 19 bits here) to the key of its IEEE single word: RNE on
 the denormal grid, saturating.
 
 ```
@@ -1210,15 +1250,15 @@ else:            bits(sign | (t2 + 126) << 23 | (top 24 bits of m)[22:0])
 ```
 
 With ≤ 19-bit inputs the rounding acts only below 2^-125 (a depth there has at most 19 bits on 2^-145 or coarser:
-it never rounds; GAP G6: the denormals' order among each other).
+it never rounds). The denormal words order the depths by value (depth2_denorm, 420 of 420 regions; G6 closed).
 
-**c. `saturated(neg)`** (L235) = `bits((neg ? 0x80000000 : 0) | 0x7F000000)`, ±2^127 (bgbig, bgspec, zsign page 15).
+**c. `saturated(neg)`** (L251) = `bits((neg ? 0x80000000 : 0) | 0x7F000000)`, ±2^127 (bgbig, bgspec, zsign page 15).
 
-**d. `big(v)`** (L224; depthgaps_bigpos, _bigord): `v >= 2^128`, at most 19 bits. `f = top(v) + 126` (255 and up),
+**d. `big(v)`** (L240; depthgaps_bigpos, _bigord; its 19-bit cut: depth2_biggrid): `v >= 2^128`, at most 19 bits. `f = top(v) + 126` (255 and up),
 `frac` = the 23 bits under v's leading one; `between(0x7F800000, ((f - 255) << 23 | frac) + 1)`: above every float
 word. `f - 255` stays below 2^9 (`v < 2^157`).
 
-**e. `neg(E, M)`** (L160; the depthgaps hunt, `isp.md` 9.7): `M < 0`, the value `M 2^(E - 16)`, E in -122 .. 128.
+**e. `neg(E, M)`** (L173; the depthgaps hunt, `isp.md` 9.7): `M < 0`, the value `M 2^(E - 16)`, E in -122 .. 128.
 
 ```
 -2^16 <= M <= -2^15:   bits(0x80000000 | (E + 126) << 23 | (M == -2^16 ? 0x7FFFE0 : (-M - 2^15) << 8))   // the window
@@ -1227,17 +1267,17 @@ M < -2^16:             between(0x80000000 | (E + 125) << 23, 2^31 + max(M + 2^30
 ```
 
 M's range at the callers: from the block store (H12b) below 2^43 in size (`tu < 2^54`, `sh >= 11` when `nsh < 0`;
-2^34.1 in `isp.md` 9.6's run, and at most 2^23 at every covered pixel there); from `regdepth` below 2^18; from `flat`
+2^34.1 and 2^33.9 in `isp.md` 9.6's runs, and at most 2^23 at every covered pixel there); from `regdepth` below 2^18; from `flat`
 and `bgkey` at most 2^16. From M = -2^30 down the key no longer moves.
 
-**f. `flat(v)`** (L180; perpmean_*, depthgaps_detneg, _tinymean): a flat plane's or a mean's key.
+**f. `flat(v)`** (L193; perpmean_*, depthgaps_detneg, _tinymean): a flat plane's or a mean's key.
 
 ```
 v.bad:  saturated(v.neg);   v == 0: key 0;   v > 0: from_fp(cut_19(v))
 v < 0:  s = cut_20(v);  E = clamp(top(s), -122, 128);  neg(E, -ceil(|s| / 2^(E - 16)))
 ```
 
-**g. `regdepth(r)`** (L700; zword, depthgaps_mm, nantr_*), `r` the 30-bit register in units of 2^102:
+**g. `regdepth(r)`** (L799; zword, depthgaps_mm, nantr_*, depth2_regmix, depth2_regbelow), `r` the 30-bit register in units of 2^102:
 
 ```
 r = ((r + 2^29) mod 2^30) - 2^29
@@ -1304,8 +1344,9 @@ is never bad, so `fallback` is reachable only from a caller with a bad quotient.
   explicitly in every tb that calls `Perpendicular`.
 - **Copied reference code.** Some reference rules are local lambdas or static functions in `.cpp` files and
   cannot be called:
-  - the depth `limit`, `mul`, `add`, `sub` (`pvr_isp_depth.h` L324-371), the mean's `addBad` (L571-575) and the
-    REG's `rstep` (L433-444);
+  - the depth `limit`, `mul`, `addRule`, `add`, `subC`, `addE` (`pvr_isp_depth.h` L353-414 at `4f3efe15`, with
+    `inf`, `zero`, `load`), the mean's `addBad` (L648-652), `under` (L673) and the REG's `rstep` (L510-521) and `r0`
+    (L553-560) (`tb/fp/ref_copies.h` holds them at `4f3efe15` since M2);
   - the TSP `mul`, `addTerm`, `sum3`, `withZero` (`pvr_tsp_plane.h` L145-184, L256-267);
   - the mip `kind`, `rmul`, `radd` (L602-612, L699-730);
   - the edge `swamp` (L116, L184) and `unitsAt` (L251-268, at `4f3efe15`);
@@ -1320,7 +1361,7 @@ is never bad, so `fallback` is reachable only from a caller with a bad quotient.
 
   Where a public entry point exists, the tbs also exercise the rule in place:
   - `PlaneT::Value`: set `A`, `B`, `C`, `cfg` directly;
-  - `DepthTileT::At`: set `d0`, `dx`, `dy`, `unit`, `E`, `valid`, `block` (or `ovf`, `r0`, `sa`, `sb`, `fa`, `fb`, or
+  - `DepthTileT::At(i, j, centers)` with `startCenters == centers` (the hardware's `h = 0`): set `d0`, `dx`, `dy`, `unit`, `E`, `valid`, `block` (or `ovf`, `r0`, `sa`, `sb`, `fa`, `fb`, or
     `first_z`) directly on an object (`Setup` resets them all);
   - `StoredDepth::{Key32, Bits, Between, FromFp, Saturated, Big, Neg, Flat}` and `DepthTileT::RegDepth`, `NegWord`
     (public);
@@ -1363,10 +1404,10 @@ is never bad, so `fallback` is reachable only from a caller with a bad quotient.
 | H7c mip minor | `Sub(q1, q2, 62, 200).cut(24)` | gaps 0..120 × LSB offsets × signs, with `q2` mantissas {1, 0x800000, U} | random 24-bit pairs | 2 s |
 | H8 recip | `Recip(v, C<24>)` | all 2^23 normalized mantissas × 3 exponents × 2 signs; every unnormalized form 1..23 bits of 4096 values | the dividers' corner cases: `dn = 2^23`, `2^23 + 1`, `2^24 - 1` | 5 s |
 | H9 cmp | `AbsAtMost`, `AtMost`, `atLeastPow2`, `Perpendicular`, `CulledBySize` / `Facing` (copy) | registers: every exponent field × {0, 1, 0x400000, 0x7FFFFF} × sign bit | `det` at the threshold in three representations, ±1 unit, both signs, ±0, bad | 2 s |
-| H10 range | copies + in place via `PlaneT::Setup`, `DepthTileT::Setup` | class pairs {±0, ±bad, [2^-126, 2^-125), [2^-125, 2^-124), ordinary, [2^127, 2^128)} for both operands, 1000 members a pair, each flavour; `withZero`: every `z` in [2^-126, 2^-125) (2^23 × 2 signs) against zeros of every fraction; `add_d`'s zero rule: every `v` in [2^-126, 2^-125) × 2 signs against ±0, one-bit mantissas (D2), `-0 + -0`; `addInf`: field-255 pairs with equal, larger and smaller fractions, both signs | random sums and products that land at 2^128 and 2^-126 exactly | 3 s |
+| H10 range | copies + in place via `PlaneT::Setup`, `DepthTileT::Setup` | class pairs {±0, ±bad, [2^-126, 2^-125), [2^-125, 2^-124), ordinary, [2^127, 2^128)} for both operands, 1000 members a pair, each flavour; `withZero`: every `z` in [2^-126, 2^-125) (2^23 × 2 signs) against zeros of every fraction; `add_d`'s zero rule: every `v` in [2^-126, 2^-125) × 2 signs against ±0, one-bit mantissas (D2), `-0 + -0`; in place through `DepthTileT::Setup` also at the `subC` / `addE` sites (coordinates among ±0, ±(1 .. 1.5) 2^-126, ±1; depths of 2^126 and ±inf); `addInf`: field-255 pairs with equal, larger and smaller fractions, both signs | random sums and products that land at 2^128 and 2^-126 exactly | 3 s |
 | H11 floor | `FloorScaled`, `FloorUnits`, copies of `units` and `TexCoordFixed` | 17-bit mantissas × shift -70..45 × sign + ±0 (~30M, quick: 16-bit) | the clamps (2^40, 2^30) ±1 | 5 s / 30 s |
 | H12a value norm | copy of the normalizer; `PlaneT::Value` in place | `k` in [-2^20, 2^20] × `unit` in {-170..-100, 0} | random 27-bit `k` | 5 s |
-| H12b depth block | `DepthTileT::At` with the block form set | | random `d0`, `dx`, `dy` within `isp.md` 9.4a's bounds (`\|S\| < 2^27`, `\|DX\|, \|DY\| < 2^21`, `gexp - unit` 0 .. 25), `i, j` 0..31, both `h`, `E` at both clamps (`nsh` -15 .. 14, the fallback word) | 3 s |
+| H12b depth block | `DepthTileT::At` with the block form set | | random `d0`, `dx`, `dy` within `isp.md` 9.4a's bounds (`\|S\| < 2^27`, `\|DX\|, \|DY\| < 2^21`, `gexp - unit` 0 .. 25), `i, j` 0..31, `h = 0` (`startCenters == centers`; M1b also swept `h = -1`, which only the model probes use since `0de9776b`), `E` at both clamps (`nsh` -15 .. 14, the fallback word) | 3 s |
 | H13 divider | `RecipTable::Mantissa`, `DenominatorSeen`, `Divide` | `recip_mant`: all 32768; `denominator_seen`: all 16-bit mantissas × both signs × tops around -127, plus the 17-bit `2^16`; `divide`: all 2^16 + 1 numerators × 64 denominators and all 32768 denominators × 64 numerators, both signs; `den` ±0, `-2^-143`, `0xFFFF 2^-143`; `num` 0 | random tuples | 5 s |
 | H14 depth key | `StoredDepth::{Key32, Bits, Between, FromFp, Saturated, Big, Neg, Flat}`, `DepthTileT::RegDepth`, copy of the background key | `key32`, `bgkey`: all 2^32 words (full); `regdepth`: all 2^30 registers (full) and every whole step; `neg(E, M)`: E -122 .. 128 × M in [-2^23, 0) (full; quick: M around -2^15, -2^16, -2^30 and ±2^k); `from_fp`, `big`: every 19-bit mantissa at every exponent (full; quick: 17-bit); `flat`: every 20-bit negative mantissa × 8 exponents including both clamps | `key32`: 2^24 random + every boundary word (±0, NaNs, ±inf, denormals); M ≤ -2^30 | 10 s / 5 min |
 | H15 colour | `ColorRounded` | all 2^17 mantissas × exponent -40..20 × sign × max {255, 65535} (~32M; quick: 2^14) | bad, zero | 5 s / 30 s |
@@ -1410,13 +1451,14 @@ specifications.
 - **A3 (closed).** The float form (L630-631, L742-747) is unreachable with `startOnSlopes = 1` (`isp.md` 9.4a: the
   proof, and 0 of 300,000 random planes). `coefBits` stays invisible. The RTL has no float form; the tbs assert that
   refsw3 never takes it.
-- **A4 Unreachable clamps.** `FloorUnits`' `s >= 62` (L97), the depth REG `r0`'s `sh < 40` (L481), `Add`'s step 5
+- **A4 Unreachable clamps.** `FloorUnits`' `s >= 62` (L97), the depth REG `r0`'s `sh < 40` (L558 at `4f3efe15`), `Add`'s step 5
   `cut_32`, and `Mul`'s input `cut_32`. The RTL omits them and the tbs assert that they never act.
 - **A5 `NegWord`'s fallback word** (L666-667). With `sh = E - 15 - unit < 0` refsw3 stores `0x80000000 | (E + 126)
   << 23` (0xFF000000: E is 128 there) and calls it "not reached". `At` does reach it, for planes whose start was cut
   to zero with slopes of 2^134 and more (`nsh < 0`, `isp.md` 9.6), at pixels the triangle does not cover: 26,404
-  pixels of 300,000 random planes, none covered (`agents/spec-refresh/widths708.cpp`). The RTL reproduces it, so that
-  a lockstep that compares every lane holds.
+  pixels of 300,000 random planes, none covered (`agents/spec-refresh/widths708.cpp`); at `4f3efe15` with both sample
+  points 11,014, none covered (`agents/spec-sync-depth/widths4f3d.cpp`). The RTL reproduces it, so that a lockstep
+  that compares every lane holds.
 
 ### Defect
 
@@ -1431,7 +1473,7 @@ specifications.
   follows from the pixel's `w`.
 
   Console probe: covmeas degen triangles with a mipmapped texture whose levels are flat colours (mipdump's method).
-- **D2 The depth zero rule shifts by -1** (depth L363: `(v.mant >> (n - 2)) & 1` with `n = BL(v.mant)`). For a
+- **D2 The depth zero rule shifts by -1** (depth L404 at `4f3efe15`, in `addRule`, so at every depth addition: `(v.mant >> (n - 2)) & 1` with `n = BL(v.mant)`). For a
   one-bit mantissa (`{mant 1, exp -126}` = 2^-126, which a sum whose operands' exponents are -126 or more can produce)
   the shift is -1, undefined in C++ (UBSan: "shift exponent -1 is negative"). GCC on x86-64 computes 0 at -O0 and
   -O2, so the rule applies and the sum is +0. That is the value rule, `|v| < 1.5 * 2^-126`
@@ -1447,18 +1489,19 @@ specifications.
   observable (README).
 - **G3** (closed by `6784ea3d`: the swamp per product; faredge 1,340 of 1,340, the 2^132 rule is gone.)
 - **G4** (closed by `708fb8cd`: 2^128 is checked at every product and sum; zovf 1,080 of 1,080.)
-- **G5** Depth overflow: an infinite determinant gives depth 0 (a guess; detinf is consistent with it). The REG
-  words between fields among other planes' depths, a REG slope of 2^128 or more after the division, an off-grid
-  REG slope below zero of 2^102 or more, and REG with HALF_OFFSET[0] = 0 are unmeasured (`isp.md` 9.5). (ovf 1's
-  word, kWrap / WrapWord's open bits and the negative REG start are gone: the forced start, `RegDepth` and
-  depthgaps_rstart measure them.)
-- **G6** Stored depth: the order of positive denormal depths among each other (only "above 0, below 2^-126" is
-  measured); `big`'s grid (any cut of about 13 to 23 bits fits depthgaps_bigord, 19 is taken). (Negative depths
-  outside the window and below 2^-122, and positive ones from 2^128, are measured since `708fb8cd`: H14.)
-- **G7** The ISP depth's range rules: measured on the depth unit since `708fb8cd` (section 4.1). The zero rule's
-  reach into the depth setup's coordinate differences, edge sums and determinant was open here; `0de9776b`
-  measured it (depth2_zcoord, depth2_zedge: `DepthHW::zeroRuleCoords`, `zeroRuleEdges` 1), not yet transcribed
-  (header). The edge unit's adds have no zero rule (`isp.md` 6.2).
+- **G5** Depth overflow. Left: a REG slope of 2^128 or more after the division (`isp.md` 9.5). Closed: an infinite
+  determinant gives depth 0, and so does one of 2^126 or more (`4f3efe15`: trsort_recip, _recipovf, _auto, _garb);
+  the REG words between fields among other planes' depths (depth2_regmix, depth2_regbelow), an off-grid REG slope
+  below zero of 2^102 or more (toward zero: depth2_cneg) and REG with HALF_OFFSET[0] = 0 (whole steps from the
+  corner: depth2_halfc), all `0de9776b`. (ovf 1's word, kWrap / WrapWord's open bits and the negative REG start are
+  gone: the forced start, `RegDepth` and depthgaps_rstart measure them.)
+- **G6** (closed by `0de9776b`: positive denormal depths are ordered by value, depth2_denorm 420 of 420 regions;
+  `big` cuts to 19 bits, depth2_biggrid 30 of 30 (18 or 20 bits, rounding or a fixed grid all differ). Negative
+  depths outside the window and below 2^-122, and positive ones from 2^128, are measured since `708fb8cd`: H14.)
+- **G7** (closed: the ISP depth's range rules are measured on the depth unit since `708fb8cd` (section 4.1), the
+  zero rule in the depth setup's coordinate differences, edge sums and determinant since `0de9776b` (depth2_zcoord,
+  depth2_zedge: `DepthHW::zeroRuleCoords`, `zeroRuleEdges` 1; section 4.1, `isp.md` 6.3), and the reciprocal's
+  limit at 2^126 since `4f3efe15`. The edge unit's adds have no zero rule, `isp.md` 6.2.)
 - **G8** The TSP value of -1 unit is `-2^-143`. Measured only as "below 2^-130"; the divider's reading of it is
   pinned by texfar_m1.
 - **G9** The mean: a division by 3 or a multiplication by `0xAAAAAB 2^-25` give the same 19 bits for every 24-bit
