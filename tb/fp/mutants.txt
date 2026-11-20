@@ -1,0 +1,59 @@
+# tb/fp/mutants.txt: the planted bugs of the numerics primitives (PLAN M1 "Mutants", conventions.md 7.7), run by
+# tools/gate/mutants.py (make fp-a-mutants: those whose probe is an M1a testbench). Every one must be caught by its probe,
+# a testbench in quick mode, and the unchanged library must pass every probe first.
+#
+# Format: <id> | <file in rtl/v1/lib/fp> | <original fragment> | <mutated fragment> | <probe> [args] | <what it breaks>
+# (\n a newline, \| a bar, \\ a backslash in a fragment).
+#
+# Equivalent mutants left out:
+#   - p2_fp_cull's `size >= 0x7f800000` culls-all test: FromBits of such a register is bad, and AbsAtMost of a finite det
+#     against a bad bound is true anyway, so dropping or changing the test changes nothing (refsw3 has the same
+#     redundancy, refsw_tile.cpp CulledBySize).
+#   - p2_fp_cut_below's `exp < e` as `exp <= e`: at exp == e the shift is 0 and the tuple is unchanged either way.
+@dir rtl/v1/lib/fp FP_DIR
+@obj FP_OBJDIR
+@probe lzc      fp-lzc-build      lzc/tb
+@probe cut      fp-cut-build      cut/tb
+@probe cutbelow fp-cutbelow-build cutbelow/tb
+@probe in       fp-in-build       in/tb
+@probe mul      fp-mul-build      mul/tb
+@probe add      fp-add-build      add/tb
+@probe recip    fp-recip-build    recip/tb
+@probe cmp      fp-cmp-build      cmp/tb
+@probe range    fp-range-build    range/tb
+
+# ---- the M1 table: H6
+add-reach24 | p2_fp_add.sv | localparam int REACH = R; | localparam int REACH = R - 1; | add | reach 25 to 24: an operand 24 tops below is dropped (covmeas point 3, uvmeas reach1)
+add-drop-borrow | p2_fp_add.sv | // b lies wholly beyond the alignment shift: dropped (no borrow; covmeas point 3)\n      o_neg  = a_neg;\n      o_exp  = a_exp;\n      o_mant = a_mant; | // b lies wholly beyond the alignment shift: dropped (no borrow; covmeas point 3)\n      o_neg  = a_neg;\n      o_exp  = a_exp;\n      o_mant = (a_neg != b_neg) ? a_mant - 1'b1 : a_mant; | add | a dropped operand of the other sign still borrows one unit
+add-cancel-neg0 | p2_fp_add.sv | // an exact cancellation is +0 (num 1.2)\n      o_neg  = 1'b0; | // an exact cancellation is +0 (num 1.2)\n      o_neg  = a_neg; | add | an exact cancellation gives -0 (a's sign)
+add-zeros-or | p2_fp_add.sv | o_neg  = a_neg & b_neg; | o_neg  = a_neg \| b_neg; | add | a sum of two zeros is negative if either is (num 1.2: only if both are)
+# ---- the M1 table: H8
+recip-round | p2_fp_recip24.sv | assign o_mant = pow2 ? 24'h800000 : q; | assign o_mant = pow2 ? 24'h800000 : q + {23'd0, (rem << 1) >= {1'b0, dn}}; | recip | a rounding reciprocal (1/3 becomes 0xAAAAAB: perpmean_word's 0xaaaaaa is the reciprocal's)
+# ---- the M1 table: H10 depth (708fb8cd)
+depth-zrule-off | p2_fp_rng_add.sv | assign zrule  = depth && | assign zrule  = 1'b0 && depth && | range | the depth zero rule off (depthgaps_zadd: -0 + 1.25 2^-126 is +0)
+depth-zrule-incl | p2_fp_rng_add.sv | (v_just < {2'b11, {(W - 2){1'b0}}}); | (v_just <= {2'b11, {(W - 2){1'b0}}}); | range | the zero rule at 1.5 x 2^-126 inclusive (depthgaps_zadd: -1.5 2^-126 is kept)
+depth-zero-sum-neg | p2_fp_rng_add.sv | if (depth && !l_bad && l_mant == '0) o_neg = 1'b0; | if (1'b0) o_neg = 1'b0; | range | a zero sum of the depth setup keeps -0 (depthgaps_zadd: -0 + -0 is +0)
+
+# ---- one or more a mechanism of the other M1a primitives
+lzc-off-by-one | p2_fp_lzc.sv | n = (v == '0) ? '0 : b + NW'(1); | n = (v == '0) ? '0 : b; | lzc | the bit length one short (the leading one's index)
+cut-keep-n1 | p2_fp_cut.sv | assign sh     = (n > NW'(N)) ? n - NW'(N) : '0; | assign sh     = (n > NW'(N + 1)) ? n - NW'(N + 1) : '0; | cut | N + 1 bits kept (the port drops the top one)
+cutbelow-sign | p2_fp_cut_below.sv | assign o_neg  = i_neg; | assign o_neg  = i_neg && o_mant != '0; | cutbelow | a negative value cut to nothing is +0 (num 1.2: -0)
+in-inf-signed | p2_fp_in_single.sv | if (!ranged) o_neg = 1'b0;        // FromBits: an unsigned infinity | if (1'b0) o_neg = 1'b0; | in | FromBits' infinity keeps its sign (refsw3: unsigned)
+in-denormal-ranged | p2_fp_in_single.sv | if (!ranged) begin                // FromBits: the denormal itself | if (1'b1) begin | in | a ranged input of field 0 kept as a denormal (uvmeas wtiny: a zero)
+in-seen-zero | p2_fp_in_seen.sv | (i_mant == '0) ? P2_FP_EW'(-127) | (i_mant == '0) ? P2_FP_EW'(-128) | in | the evaluator's zero as 2^-128 (uvmeas wexp: 2^-127)
+in-colour-exp | p2_fp_in_colour.sv | 8'd118 + {4'h0, n} | 8'd119 + {4'h0, n} | in | a colour enters as c 2^-7 (cmeas cwext1: c 2^-8)
+mul-zero-sign | p2_fp_mul.sv | .i_neg(a_neg ^ b_neg) | .i_neg((a_neg ^ b_neg) && p != '0) | mul | a zero product is +0 (num 1.2: the xor of the signs)
+mul-exp | p2_fp_mul.sv | assign l = p2_fp_xw(a_exp) + p2_fp_xw(b_exp); | assign l = p2_fp_xw(a_exp) + p2_fp_xw(b_exp) + P2_FP_XW'(1); | mul | the product's exponent one high
+cmp-equal-not-culled | p2_fp_abs_le.sv | (ja <= jb) | (ja < jb) | cmp | equal is not culled / not perpendicular (raster page 4, perpeq)
+cmp-le-negzero | p2_fp_le.sv | assign an = a_neg && a_mant != '0; | assign an = a_neg; | cmp | -0 below +0 (AtMost: a zero of either sign is zero)
+cmp-pow2-ge | p2_fp_at_least_pow2.sv | (t > p2_fp_xw(e)) | (t >= p2_fp_xw(e)) | cmp | \|v\| >= 2^e true from 2^(e-1)
+cmp-perp-infdet | p2_fp_perp.sv | det_bad                      ? pv_bad : | det_bad                      ? 1'b0 : | cmp | an infinite FPU_PERP_VAL does not take an infinite det (detinf)
+cmp-facing-zero | p2_fp_cull.sv | (cull_mode < 2'd2 \|\| det_bad \|\| det_mant == '0) | (cull_mode < 2'd2 \|\| det_bad) | cmp | -0 culled by facing (refsw3: a zero never is)
+range-third-off | p2_fp_rng_add.sv | assign third  = mode == P2_RNG_ADD_TSP3; | assign third  = 1'b0; | range | the TSP's last-addition zero rule off (cmeas cwext1, uvmeas wtiny1)
+range-inf-times-zero | p2_fp_rng_mul.sv | o_bad  = !other_zero; | o_bad  = 1'b1; | range | infinity times zero an infinity (uvmeas wspec: zero)
+range-sum-below-signed | p2_fp_rng_lim.sv | o_neg  = (mode == P2_RNG_LIM_PRODUCT) ? i_neg : 1'b0; | o_neg  = i_neg; | range | a sum below 2^-126 keeps its sign (+0)
+range-above-127 | p2_fp_rng_lim.sv | assign above = (i_mant != '0) && (t - P2_FP_XW'(1) > P2_FP_XW'(P2_FP_RNG_HIGH)); | assign above = (i_mant != '0) && (t - P2_FP_XW'(1) >= P2_FP_XW'(P2_FP_RNG_HIGH)); | range | an infinity from 2^127 instead of 2^128 (zovf_lim, zovf_ps)
+range-addinf-frac | p2_fp_rng_add_inf.sv | (a_frac > b_frac) ? a_neg : b_neg | (a_frac < b_frac) ? a_neg : b_neg | range | two infinities: the smaller fraction's sign (depthgaps_dzinf: the larger's)
+range-kind-below | p2_fp_rng_kind.sv | else if (below)\n      kind = P2_KIND_ZERO; | else if (1'b0)\n      kind = P2_KIND_ZERO; | range | a product below 2^-126 a number in MipSelect's kind (a zero)
+range-recip-mip-sign | p2_fp_rng_recip.sv | o_neg  = mip ? 1'b0 : r_neg; | o_neg  = r_neg; | range | MipSelect's zero reciprocal keeps the sign (+0)
+range-withzero-boundary | p2_fp_rng_with_zero.sv | assign drop = act && (d < 49'h1000000); | assign drop = act && (d <= 49'h1000000); | range | the flat mean's boundary not kept (slivers_dzzero: 831 on it keep the depth)

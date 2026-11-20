@@ -1,0 +1,25 @@
+// fp_lint.vlt: verilator -Wall waivers for make lint-fp (conventions.md 4.8): rtl/v1/lib/fp and the tb/fp tops. Each
+// waiver names its file and its reason.
+`verilator_config
+// the shared packages declare items for every unit; a build that uses some of them is not wrong (as rtl/v1/p2_lint.vlt)
+lint_off -rule UNUSEDPARAM -file "*/p2_hw_pkg.sv"
+lint_off -rule UNUSEDPARAM -file "*/p2_regs_pkg.sv"
+lint_off -rule UNUSEDPARAM -file "*/p2_pkg.sv"
+lint_off -rule UNUSEDPARAM -file "*/p2_fp_pkg.sv"
+// p2_zword_pkg: signatures only until M1b (as rtl/v1/p2_lint.vlt)
+lint_off -rule UNUSEDSIGNAL -file "*/p2_zword_pkg.sv"
+// the exponent arithmetic is P2_FP_XW bits wide inside a primitive; its top bits are not read when the result goes
+// back into the P2_FP_EW-bit field, which holds every reachable value (num 1.4; the testbenches assert it, G11)
+lint_off -rule UNUSEDSIGNAL -file "*/p2_fp_mul.sv" -match "*'oe'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_fp_recip24.sv" -match "*'oe'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_fp_add.sv" -match "*'se'*"
+// p2_fp_add: -S's sign bit is 0 wherever it is read (|S| < 2^SW); the cut of |S| has no sign or flag of its own (the
+// sum's are S's sign and a.bad | b.bad)
+lint_off -rule UNUSEDSIGNAL -file "*/p2_fp_add.sv" -match "*'ns'*"
+lint_off -rule PINCONNECTEMPTY -file "*/p2_fp_add.sv"
+// p2_fp_perp, p2_fp_cull: the register's sign is masked off before the decode (FPU_PERP_VAL / FPU_CULL_VAL &
+// 0x7fffffff: only the size counts)
+lint_off -rule UNUSEDSIGNAL -file "*/p2_fp_perp.sv" -match "*'pv_neg'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_fp_cull.sv" -match "*'sz_neg'*"
+// p2_fp_rng_with_zero: the zero corner's word; its exponent field is 0 by the caller's choice (fieldZero)
+lint_off -rule UNUSEDSIGNAL -file "*/p2_fp_rng_with_zero.sv" -match "*'zbits'*"
