@@ -6,8 +6,9 @@ lint_off -rule UNUSEDPARAM -file "*/p2_hw_pkg.sv"
 lint_off -rule UNUSEDPARAM -file "*/p2_regs_pkg.sv"
 lint_off -rule UNUSEDPARAM -file "*/p2_pkg.sv"
 lint_off -rule UNUSEDPARAM -file "*/p2_fp_pkg.sv"
-// p2_zword_pkg: signatures only until M1b (as rtl/v1/p2_lint.vlt)
-lint_off -rule UNUSEDSIGNAL -file "*/p2_zword_pkg.sv"
+// p2_zword_pkg: as rtl/v1/p2_lint.vlt (big's flags, regdepth's bits above the wrap)
+lint_off -rule UNUSEDSIGNAL -file "*/p2_zword_pkg.sv" -match "*'v'[31:30]*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_zword_pkg.sv" -match "*'r'[31:30]*"
 // the exponent arithmetic is P2_FP_XW bits wide inside a primitive; its top bits are not read when the result goes
 // back into the P2_FP_EW-bit field, which holds every reachable value (num 1.4; the testbenches assert it, G11)
 lint_off -rule UNUSEDSIGNAL -file "*/p2_fp_mul.sv" -match "*'oe'*"
@@ -23,3 +24,14 @@ lint_off -rule UNUSEDSIGNAL -file "*/p2_fp_perp.sv" -match "*'pv_neg'*"
 lint_off -rule UNUSEDSIGNAL -file "*/p2_fp_cull.sv" -match "*'sz_neg'*"
 // p2_fp_rng_with_zero: the zero corner's word; its exponent field is 0 by the caller's choice (fieldZero)
 lint_off -rule UNUSEDSIGNAL -file "*/p2_fp_rng_with_zero.sv" -match "*'zbits'*"
+// p2_fp_mip_minor: the near adder's sign and flag are not read: MipSelect clears both (n.neg = false, n.bad = false)
+lint_off -rule UNUSEDSIGNAL -file "*/p2_fp_mip_minor.sv" -match "*'n_neg'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_fp_mip_minor.sv" -match "*'n_bad'*"
+// tb tops: the testbenches' tuple macros (FP_SET) drive a flag port that a primitive without one does not read
+// (p2_fp_half_line takes seen() values, never bad; p2_fp_floor takes finite values), and the fraction bit of the
+// FloorScaled and FloorUnits instances (only unitsAt's is a refsw3 output)
+lint_off -rule UNUSEDSIGNAL -file "*/p2_fp_halfline_tb_top.sv" -match "*'c_bad'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_fp_halfline_tb_top.sv" -match "*'b_bad'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_fp_floor_tb_top.sv" -match "*'v_bad'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_fp_floor_tb_top.sv" -match "*'fs_frac'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_fp_floor_tb_top.sv" -match "*'fu_frac'*"

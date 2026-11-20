@@ -1,6 +1,7 @@
-# tb/fp/mutants.txt: the planted bugs of the numerics primitives (PLAN M1 "Mutants", conventions.md 7.7), run by
-# tools/gate/mutants.py (make fp-a-mutants: those whose probe is an M1a testbench). Every one must be caught by its probe,
-# a testbench in quick mode, and the unchanged library must pass every probe first.
+# tb/fp/mutants.txt: the planted bugs of the numerics primitives in rtl/v1/lib/fp (PLAN M1 "Mutants", conventions.md
+# 7.7), run by tools/gate/mutants.py (make fp-a-mutants / fp-b-mutants: those whose probe is a testbench of the round).
+# Every one must be caught by its probe, a testbench in quick mode, and the unchanged library must pass every probe
+# first. The mutants of rtl/v1/pkg/p2_zword_pkg.sv (H14) are in tb/fp/mutants_zword.txt (another folder).
 #
 # Format: <id> | <file in rtl/v1/lib/fp> | <original fragment> | <mutated fragment> | <probe> [args] | <what it breaks>
 # (\n a newline, \| a bar, \\ a backslash in a fragment).
@@ -21,6 +22,12 @@
 @probe recip    fp-recip-build    recip/tb
 @probe cmp      fp-cmp-build      cmp/tb
 @probe range    fp-range-build    range/tb
+@probe swamp    fp-swamp-build    swamp/tb
+@probe halfline fp-halfline-build halfline/tb
+@probe minor    fp-minor-build    minor/tb
+@probe floor    fp-floor-build    floor/tb
+@probe value    fp-value-build    value/tb
+@probe zblock   fp-zblock-build   zblock/tb
 
 # ---- the M1 table: H6
 add-reach24 | p2_fp_add.sv | localparam int REACH = R; | localparam int REACH = R - 1; | add | reach 25 to 24: an operand 24 tops below is dropped (covmeas point 3, uvmeas reach1)
@@ -57,3 +64,44 @@ range-addinf-frac | p2_fp_rng_add_inf.sv | (a_frac > b_frac) ? a_neg : b_neg | (
 range-kind-below | p2_fp_rng_kind.sv | else if (below)\n      kind = P2_KIND_ZERO; | else if (1'b0)\n      kind = P2_KIND_ZERO; | range | a product below 2^-126 a number in MipSelect's kind (a zero)
 range-recip-mip-sign | p2_fp_rng_recip.sv | o_neg  = mip ? 1'b0 : r_neg; | o_neg  = r_neg; | range | MipSelect's zero reciprocal keeps the sign (+0)
 range-withzero-boundary | p2_fp_rng_with_zero.sv | assign drop = act && (d < 49'h1000000); | assign drop = act && (d <= 49'h1000000); | range | the flat mean's boundary not kept (slivers_dzzero: 831 on it keep the depth)
+
+# ==== M1b (PLAN M1 round b) ====
+# Equivalent mutants left out:
+#   - p2_fp_tex_coord's CoordKeep bound `fs >= 2^30` as `fs > 2^30`: at f = 2^30 both give 2^30 + (2^30 mod 2^26) = 2^30.
+#   - p2_fp_half_line's case-W tie (`tc > tb` as `>=`): equal tops put the exponents within 15, never 90 apart.
+#   - p2_fp_mip_minor's near/far split (NEAR = W as W - 1): the far path's formula is exact from a top gap of W + 1 on,
+#     and the exact adder at a gap of W gives the same tuple (both are cut_W of the exact difference).
+# ---- the M1 table: H7a
+swamp-ge127 | p2_fp_swamp.sv | .e(P2_FP_EW'(OE)) | .e(P2_FP_EW'(OE - 1)) | swamp | swamp at >= 2^127 (faredge_cmax: from 2^128)
+swamp-finite | p2_fp_swamp.sv | localparam int SWAMP_EXP = P2_ISP_EDGE_OVERFLOW_EXP + 72; | localparam int SWAMP_EXP = P2_ISP_EDGE_OVERFLOW_EXP + 0; | swamp | the swamp value finite (2^128): it no longer drops a finite operand of the adds
+swamp-sat128 | p2_fp_swamp.sv | localparam int SAT_EXP   = P2_ISP_EDGE_SATURATE_EXP; | localparam int SAT_EXP   = P2_ISP_EDGE_SATURATE_EXP + 1; | swamp | saturation to 2^128 (hugepos a, hugepos_v4-v6: 2^127)
+swamp-keepflag | p2_fp_swamp.sv | assign o_bad  = ge ? 1'b0 : i_bad; | assign o_bad  = i_bad; | swamp | a flagged sum past 2^128 keeps its flag (refsw3's Pow2 is not bad)
+# ---- the M1 table: H7b
+halfline-trunc-off | p2_fp_half_line.sv | localparam int TRUNC = 62; | localparam int TRUNC = 128; | halfline | the 62-bit truncation off (num H7b's table: C < 0, gaps 47 .. 90)
+halfline-window-91 | p2_fp_half_line.sv | localparam int WIN   = 90; | localparam int WIN   = 91; | halfline | the window at 91 (Add case W: more than 90)
+halfline-bh-whole | p2_fp_half_line.sv | assign be  = p2_fp_xw(b_exp) - P2_FP_XW'(1); | assign be  = p2_fp_xw(b_exp); | halfline | B added whole, not B / 2 (half a line)
+halfline-floor-trunc | p2_fp_half_line.sv | m    = KW'(q) + KW'((sgn && lost != '0) ? 1 : 0); | m    = KW'(q); | halfline | the floors toward zero (FloorUnits: toward minus infinity)
+# ---- H7c
+minor-window-off | p2_fp_mip_minor.sv | assign win     = !az && !bz && | assign win     = 1'b0 && !az && !bz && | minor | no window: a far smaller operand always borrows (A1: not beyond 90)
+minor-noborrow | p2_fp_mip_minor.sv | o_mant = xl - W'(1); | o_mant = xl; | minor | the far path takes no borrow (H6's drop instead of cut(L - eps))
+minor-pow2-exp | p2_fp_mip_minor.sv | o_exp  = P2_FP_EW'(xt - P2_FP_XW'(W + 1)); | o_exp  = P2_FP_EW'(xt - P2_FP_XW'(W)); | minor | a power of two minus eps keeps its exponent (W ones one exponent down)
+# ---- H11
+floor-negzero | p2_fp_floor.sv | o_int = (ZNEG && i_neg) ? '1 : '0; | o_int = '0; | floor | FloorUnits(-0) = 0 (uvmeas point 5: one unit below zero)
+floor-trunc | p2_fp_floor.sv | o_int = $signed(OW'(0) - q - OW'(o_frac)); | o_int = $signed(OW'(0) - q); | floor | a negative value with a fraction rounded toward zero (floor)
+floor-clamp41 | p2_fp_floor.sv | assign clamped = (CLAMP > 0) && !zero && (tu > P2_FP_XW'(CLAMP)); | assign clamped = (CLAMP > 0) && !zero && (tu > P2_FP_XW'(CLAMP + 1)); | floor | FloorScaled's clamp from top + shift > 41
+floor-frac-neg | p2_fp_floor.sv | assign o_frac  = lost != '0; | assign o_frac  = lost != '0 && i_neg; | floor | unitsAt's fraction bit only below zero
+reg-mod-off | p2_fp_reg_units.sv | mag = {1'b0, mag[MODW-1:0]}; | mag = mag; | floor | fa / fb without the modulo 2^30 (zovf_creg, zovf_ab: the register's 2^131)
+reg-bad-sign | p2_fp_reg_units.sv | r = i_neg ? 31'd0 - (31'd1 << STEP1) : 31'd1 << STEP1; | r = 31'd1 << STEP1; | floor | a bad start always +1 step (nantr_pos: with its sign)
+reg-grid-101 | p2_fp_reg_units.sv | localparam int GRID  = 102; | localparam int GRID  = 101; | floor | the register's unit 2^101 (2^102: zovf_creg)
+tex-floor-trunc | p2_fp_tex_coord.sv | assign fs   = u_neg ? $signed(33'd0 - 33'(f) - 33'(lost)) : $signed(33'(f)); | assign fs   = u_neg ? $signed(33'd0 - 33'(f)) : $signed(33'(f)); | floor | a coordinate below zero toward zero (coordfix: rounded down)
+tex-far-low | p2_fp_tex_coord.sv | o_coord = 32'sd1073741824 + $signed({6'd0, low}); | o_coord = 32'sd1073741824; | floor | a coordinate past 2^31 loses its low bits (texfar_bits: kept)
+# ---- the M1 table: H12a
+value-floor-off | p2_fp_value_norm.sv | o_exp  = (t1 < P2_FP_XW'(FLOOR)) ? P2_FP_EW'(e + (P2_FP_XW'(FLOOR) - t1)) : P2_FP_EW'(e); | o_exp  = P2_FP_EW'(e); | value | the -128 floor off (uvmeas wtiny)
+value-trunc | p2_fp_value_norm.sv | assign mr   = VB1'(m >> drop) + VB1'(neg && lost); | assign mr   = VB1'(m >> drop); | value | truncation toward zero (the valueFixed table: toward minus infinity)
+value-m1-off | p2_fp_value_norm.sv | end else if (k == '1) begin | end else if (1'b0) begin | value | k = -1 as an ordinary value (wzero1: -2^-143)
+# ---- H12b
+zblock-big-127 | p2_fp_depth_block.sv | if (mag != '0 && stop - P2_FP_XW'(1) >= P2_FP_XW'(128)) | if (mag != '0 && stop - P2_FP_XW'(1) >= P2_FP_XW'(127)) | zblock | Big from 2^127 (depthgaps_bigpos: below 2^128 the float words)
+zblock-fallback-off | p2_fp_depth_block.sv | end else if (fbk) begin | end else if (1'b0) begin | zblock | NegWord's fallback word not stored (A5: refsw3 stores it)
+zblock-neg-trunc | p2_fp_depth_block.sv | m = 31'(TW'(t >>> nsh)); | m = 31'(TW'(t >>> nsh)) + 31'((t[TW-1] && (t & ~({TW{1'b1}} << nsh)) != '0) ? 1 : 0); | zblock | M toward zero instead of down (NegWord: an arithmetic shift)
+zblock-stored-20 | p2_fp_depth_block.sv | localparam int SB  = P2_ISP_DEPTH_STORED_BITS; | localparam int SB  = P2_ISP_DEPTH_STORED_BITS + 1; | zblock | the stored depth with 20 bits (19: zmeas, zblock)
+zblock-lshift-nosat | p2_fp_depth_block.sv | end else if (ls > 6'd31 \|\| wide < MLOW) begin | end else if (ls > 6'd31) begin | zblock | the left-shifted M not saturated at -2^30 (it wraps)

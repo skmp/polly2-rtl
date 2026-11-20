@@ -1,0 +1,31 @@
+# tb/fp/mutants_zword.txt: the planted bugs of H14, rtl/v1/pkg/p2_zword_pkg.sv (PLAN M1 "Mutants" H14, conventions.md
+# 7.7), run by tools/gate/mutants.py (make fp-b-mutants, fp-mutants). The package lives outside rtl/v1/lib/fp, so this
+# file copies rtl/v1/pkg and points the fp builds' ZW_DIR at the copy (tb/mk/fp.mk). Every one must be caught by its
+# probe in quick mode; the unchanged package must pass every probe first.
+#
+# Format: <id> | <file in rtl/v1/pkg> | <original fragment> | <mutated fragment> | <probe> [args] | <what it breaks>
+# (\n a newline, \| a bar, \\ a backslash in a fragment).
+#
+# Equivalent mutants left out:
+#   - between's off as a sum rather than a concatenation: the low half of key32(w) << 32 is empty.
+#   - neg's saturation of the offset below the window (max(M + 2^30, 0)): the callers keep M >= -2^30 (the port has no
+#     room below), so the max never acts inside the function.
+@dir rtl/v1/pkg ZW_DIR
+@obj FP_OBJDIR
+@probe zword  fp-zword-build  zword/tb
+@probe zblock fp-zblock-build zblock/tb
+
+# ---- the M1 table: H14
+zw-neg-carry | p2_zword_pkg.sv | frac = (m == -31'sd65536) ? 32'h007F_FFE0 : (32'(mm) - 32'd32768) << 8; | frac = (32'(mm) - 32'd32768) << 8; | zword | the window's bottom with a carry into the exponent (perpmean_negstore, depthgaps_neggrid: 0x7fffe0)
+zw-between-swap | p2_zword_pkg.sv | return between(zw_word(1'b1, f1), 32'(m + 31'sd32768)); | return between(zw_word(1'b1, f1), 32'h8000_0000 + 32'(32'(m) + 32'sd1073741824)); | zword | above the window with the offset of below it (depthgaps_negladder, depthgaps_search)
+zw-big-sat | p2_zword_pkg.sv | return between(32'h7F80_0000, off); | return saturated(1'b0); | zword | big as saturated (depthgaps_bigpos: above every word, not 2^127)
+zw-reg-nowrap | p2_zword_pkg.sv | rw = $signed(r[29:0]); | rw = $signed({r[31], r[28:0]}); | zword | regdepth without the wrap at 2^131: the register's sign from 2^134 (zword: 16 steps the lowest word)
+zw-bg-e6 | p2_zword_pkg.sv | E   = (f >= 8'd132) ? 10'(f) - 10'sd126 : 10'sd6; | E   = 10'(f) - 10'sd126; | zword | bgkey's E floor of 6 removed (depthgaps_bgpin: -1 ties with a ramp's M -1024 of E 6)
+zw-flat-trunc | p2_zword_pkg.sv | mag = 31'(20'(sm >> sh)) + 31'(((sm & ((20'd1 << sh) - 20'd1)) != '0) ? 1 : 0); | mag = 31'(20'(sm >> sh)); | zword | flat's M rounded toward zero instead of down (perpmean_bg: the size rounded up)
+zw-reg-trunc | p2_zword_pkg.sv | return neg(10'(p) + 10'sd100, 31'(t >>> 10)); | return neg(10'(p) + 10'sd100, 31'(32'sd0 - ((32'sd0 - t) >>> 10))); | zword | regdepth's M rounded toward zero instead of down (nantr_fin: -(2^127 + 2^110) as 0xff000100)
+zw-key32-neg0 | p2_zword_pkg.sv | if (w == 32'h8000_0000)\n      return '0; | if (1'b0)\n      return '0; | zword | -0 not the key of +0 (zsign: -0 is +0)
+zw-fromfp-rne | p2_zword_pkg.sv | if (rest > half \|\| (rest == half && m[0])) | if (rest >= half) | zword | from_fp rounds half up, not to even, on the denormal grid
+zw-fromfp-sat129 | p2_zword_pkg.sv | if (t2 > 12'sd128)\n      return saturated(v.neg); | if (t2 > 12'sd129)\n      return saturated(v.neg); | zword | from_fp saturates from 2^129 (FromFp: from 2^128)
+zw-bg-cut4 | p2_zword_pkg.sv | cut = (field >= 8'd125) ? 8'd5 : 8'd130 - field; | cut = (field >= 8'd126) ? 8'd4 : 8'd130 - field; | zword | the background's low 4 fraction bits cut, not 5 (bgtie: 0.5 + 2^-20 ties with 0.5)
+zw-bg-inf | p2_zword_pkg.sv | if (field == 8'd255)\n      w = w - 32'h0080_0000; | if (1'b0)\n      w = w - 32'h0080_0000; | zword | an infinite background not 2^127 (bgspec, bgbig)
+zw-neg-blockfield | p2_zword_pkg.sv | f0 = 8'(e + 10'sd125); | f0 = 8'(e + 10'sd124); | zblock | below the window two fields down (depthgaps_negconv, depthgaps_final G)

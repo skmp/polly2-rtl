@@ -18,5 +18,6 @@
 // RenderParamTags loop (M5); MipSelect's K part (M9); the PixelFlush_tsp lambdas and the SupSample block (M10, M11);
 // the put / scaler lambdas (M5, M12).
 //
-// M0: no copies yet.
+// M0: no copies yet. M1 and M1b keep their copies in tb/fp/ref_copies.h, which needs only the L1 headers: among them the
+// background key block of RenderCORE (id fp-bgkey, refsw_lists.cpp L637-652), behind p2_zword_pkg::bgkey.
 #pragma once

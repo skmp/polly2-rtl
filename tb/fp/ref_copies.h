@@ -18,9 +18,11 @@
 // with a shift by -1 (num D2, undefined in C++). The testbench expects +0 there (the value rule, as GCC computes it on
 // x86-64) and counts the cases; it does not rely on this copy's result for them.
 #pragma once
+#include <algorithm>
 #include <cstdint>
 #include "pvr_softfp.h"
 #include "pvr_isp_depth.h"
+#include "pvr_isp_edge.h"
 #include "pvr_tsp_plane.h"
 
 namespace p2fpref {
@@ -333,5 +335,327 @@ inline bool culledBySize(const Fp& det, uint32_t fpuCullVal)
     return CulledBySize(det);
 }
 inline bool culledByFacing(uint32_t cullMode, const Fp& det) { return CulledByFacing(cullMode, det); }
+
+// ===============================================================================================================
+// M1b (PLAN M1 round b): the copies behind H7a (the edge start's swamp), H7b and H12a (PlaneT::Value's integer part and
+// its normalizer), H7c (MipSelect's minor), H11 (edge unitsAt, the depth REG's rstep and r0, TexCoordFixed /
+// CoordKeep) and H14 (the background key of refsw_lists.cpp RenderCORE). All at 708fb8cd.
+//
+//   p2fpref::edgeStart(xa, ya, xb, yb, x0h, y0h)   pvr_isp_edge.h EdgeTile::Setup L180-197: c, dx, dy, dxP, dyP,
+//                                                  first, start (the caller has excluded bad corners, L161)
+//   p2fpref::valueK(A, B, C, x0h, yh, n, tl, tt, super, hx, hy, &unit)   pvr_tsp_plane.h PlaneT::Value L311-369: the
+//                                                  integer k before the normalizer, and the grid exponent
+//   p2fpref::valueNorm(k, unit)                    pvr_tsp_plane.h PlaneT::Value L377-397
+//   p2fpref::mipMinor(q1, q2)                      pvr_tsp_plane.h MipSelect minor L642-644
+//   p2fpref::unitsAt(v, &frac, unit)               pvr_isp_edge.h EdgeTile::Setup L239-257
+//   p2fpref::regStep(v0, cap, invS), regStart(first0)   pvr_isp_depth.h DepthTileT::Setup L433-444, L476-483
+//   p2fpref::coordKeep(f), texCoordFixed(u, shift)  refsw_tile.cpp L1264-1316
+//   p2fpref::bgKey(bg)                             refsw_lists.cpp RenderCORE L637-652 (StoredDepth as ZType)
+
+// ---------------------------------------------------------------------------------------------------------------
+struct EdgeStart {
+    Fp c, dx, dy, dxP, dyP, first, start;
+};
+inline EdgeStart edgeStart(const Fp& xa, const Fp& ya, const Fp& xb, const Fp& yb, int64_t x0Halves, int64_t y0Halves)
+{
+    using namespace pvrfp;
+    const pvrisp::EdgeHW cfg{};
+    const auto PB = cfg.productBits;
+    const auto SB = cfg.sumBits;
+    const auto RE = cfg.reach;
+// P2REF-COPY fp-edge-start pvr_isp_edge.h const auto OE = cfg.overflowExp;
+        const auto OE = cfg.overflowExp;
+        auto swamp = [&](const Fp& v) { return v.atLeastPow2(OE) ? Fp::Pow2(OE + 72, v.neg) : v; };
+        Fp c = swamp(Sub(swamp(Mul(xb, ya, PB)), swamp(Mul(xa, yb, PB)), SB, RE));
+        // A coordinate difference that reaches 2^128 swamps too in the products of the start (first), but steps by
+        // +-2^127, the saturated value: dreamcast-tests/pvr-tests/hugepos_v4, _v5, _v6 (differences past 2^128: as an
+        // infinite step instead, 68,397 / 67,565 pixels of hugepos_v5 / v6 wrong), hugepos_cov pages 6-9 and 26-29,
+        // hugepos_sw2 pages 7-10, 18-21 and 29-32, hugepos_rules page 8 (|dx| or |dy| of 2^128 .. 1.75 2^128; hugepos's
+        // triangles a and c are not drawn, a at 2^125 with dx = -2^128 exactly has its 4 pixels in row 0 only).
+        Fp dx = Sub(xa, xb, SB, RE), dy = Sub(ya, yb, SB, RE);
+        const Fp dxP = swamp(dx), dyP = swamp(dy);
+        dx = dx.atLeastPow2(OE) ? Fp::Pow2(cfg.saturateExp, dx.neg) : dx;
+        dy = dy.atLeastPow2(OE) ? Fp::Pow2(cfg.saturateExp, dy.neg) : dy;
+        Fp x0 = Fp::FromHalves(x0Halves), y0 = Fp::FromHalves(y0Halves);
+        const auto GD = cfg.guard;
+        Fp first = swamp(Add(swamp(Mul(dxP, y0, PB)), -swamp(Mul(dyP, x0, PB)), SB, RE, GD));
+        Fp start = Add(first, c, SB, RE, GD);
+        if (start.atLeastPow2(OE))
+            start = Fp::Pow2(cfg.saturateExp, start.neg);
+// P2REF-END fp-edge-start
+    return EdgeStart{c, dx, dy, dxP, dyP, first, start};
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// PlaneT::Value up to the normalizer: k in units of 2^unit (PlaneHW: range 1, macOrder 0, tileLocal 0)
+inline int64_t valueK(const Fp& A, const Fp& B, const Fp& C, int64_t x0Halves, int64_t yHalves, int n, int tileLeft,
+                      int tileTop, bool super, int hx, int hy, int* unitOut)
+{
+    using namespace pvrfp;
+    using pvrtsp::FloorUnits;
+    const pvrtsp::PlaneHW cfg{};
+// P2REF-COPY fp-tsp-valuek pvr_tsp_plane.h auto seen = [](const Fp& v) {
+        auto seen = [](const Fp& v) {
+            if (v.bad) return Fp::Pow2(-128, v.neg);
+            if (v.zero()) return Fp::Pow2(-127, v.neg);
+            return v;
+        };
+        const Fp a_ = seen(A), b_ = seen(B), c_ = seen(C);
+        // range 0: as before the limits were measured, a zero coefficient does not count for the grid
+        auto top = [&](const Fp& v, const Fp& s) { return (!cfg.range && v.zero() && !v.bad) ? NoExp : s.top(); };
+        int ex = Fp::FromHalves(2 * (int64_t)(tileLeft + 16)).top(), ey = Fp::FromHalves(2 * (int64_t)(tileTop + 16)).top();
+        int e = top(C, c_);
+        if (top(A, a_) != NoExp && top(A, a_) + ex - 1 > e) e = top(A, a_) + ex - 1;
+        if (top(B, b_) != NoExp && top(B, b_) + ey - 1 > e) e = top(B, b_) + ey - 1;
+        if (e == NoExp)
+            e = 0;                                      // a plane that is zero everywhere: any grid
+        int unit = e - cfg.gridBits;
+        Fp ax = Mul(a_, Fp::FromHalves(x0Halves), 62), by = Mul(b_, Fp::FromHalves(yHalves), 62);
+        if (ax.zero()) ax.neg = a_.neg;                 // x = 0: still on the coefficient's side of zero
+        if (by.zero()) by.neg = b_.neg;
+        int64_t k = FloorUnits(c_, unit) + FloorUnits(ax, unit) + FloorUnits(by, unit) + (int64_t)n * FloorUnits(a_, unit);
+        if (cfg.macOrder) {
+            auto exact = [](const Fp& p, const Fp& q) { return Add(p, q, 62, 400); };
+            if (cfg.macOrder == 1)
+                k = FloorUnits(exact(c_, by), unit) + FloorUnits(ax, unit) + (int64_t)n * FloorUnits(a_, unit);
+            else if (cfg.macOrder == 2)
+                k = FloorUnits(exact(c_, ax), unit) + FloorUnits(by, unit) + (int64_t)n * FloorUnits(a_, unit);
+            else
+                k = FloorUnits(exact(exact(c_, by), ax), unit) + (int64_t)n * FloorUnits(a_, unit);
+        }
+        if (cfg.tileLocal) {
+            const Fp xt = Fp::FromHalves(2 * (int64_t)tileLeft), yt = Fp::FromHalves(2 * (int64_t)tileTop);
+            const Fp ct = Add(Add(c_, Mul(a_, xt, 62), 62, 400), Mul(b_, yt, 62), 62, 400);
+            Fp axl = Mul(a_, Fp::FromHalves(x0Halves - 2 * (int64_t)tileLeft), 62), byl = Mul(b_, Fp::FromHalves(yHalves - 2 * (int64_t)tileTop), 62);
+            if (axl.zero()) axl.neg = a_.neg;
+            if (byl.zero()) byl.neg = b_.neg;
+            if (cfg.tileLocal == 2) {
+                const int el = Fp::FromHalves(2 * 16).top();
+                int e2 = ct.zero() ? NoExp : ct.top();
+                if (a_.top() + el - 1 > e2) e2 = a_.top() + el - 1;
+                if (b_.top() + el - 1 > e2) e2 = b_.top() + el - 1;
+                unit = e2 - cfg.gridBits;
+            }
+            k = FloorUnits(ct, unit) + FloorUnits(axl, unit) + FloorUnits(byl, unit) + (int64_t)n * FloorUnits(a_, unit);
+            if (cfg.tileLocal == 3) {       // every piece rounded down by itself: C, A Xt, B Yt, A x, B y
+                Fp axt = Mul(a_, xt, 62), byt = Mul(b_, yt, 62);
+                if (axt.zero()) axt.neg = a_.neg;
+                if (byt.zero()) byt.neg = b_.neg;
+                k = FloorUnits(c_, unit) + FloorUnits(axt, unit) + FloorUnits(byt, unit) + FloorUnits(axl, unit) + FloorUnits(byl, unit)
+                    + (int64_t)n * FloorUnits(a_, unit);
+            }
+        }
+        if (super) {
+            const Fp half = Fp::FromHalves(1);
+            Fp ah = Mul(a_, half, 62), bh = Mul(b_, half, 62);
+            if (ah.zero()) ah.neg = a_.neg;
+            if (bh.zero()) bh.neg = b_.neg;
+            k += -(int64_t)n * FloorUnits(a_, unit) + (int64_t)(2 * n + hx) * FloorUnits(ah, unit);
+            if (hy)
+                k += FloorUnits(Add(c_, bh, 62, 400), unit) - FloorUnits(c_, unit);
+        }
+// P2REF-END fp-tsp-valuek
+    *unitOut = unit;
+    return k;
+}
+inline Fp valueNorm(int64_t k, int unit)
+{
+    using namespace pvrfp;
+    const pvrtsp::PlaneHW cfg{};
+// P2REF-COPY fp-tsp-valuenorm pvr_tsp_plane.h Fp v;
+        Fp v;
+        if (k == 0)
+            return v;
+        if (k == -1 && cfg.range)
+            return Fp::Pow2(-143, true);
+        v.neg = k < 0;
+        uint64_t m = (uint64_t)(k < 0 ? -k : k);
+        int bits = Fp::Bits(m), drop = bits > cfg.valueBits ? bits - cfg.valueBits : 0;
+        if (cfg.valueFixed > drop)
+            drop = cfg.valueFixed < 63 ? cfg.valueFixed : 63;
+        if (drop) {
+            uint64_t lost = m & ((1ull << drop) - 1);
+            m >>= drop;
+            if (lost && v.neg)
+                m += 1;
+        }
+        v.mant = m;
+        v.exp = unit + drop;
+        if (cfg.range && v.top() - 1 < -128)
+            v.exp += -128 - (v.top() - 1);
+        return v;
+// P2REF-END fp-tsp-valuenorm
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+inline Fp mipMinor(const Fp& q1, const Fp& q2)
+{
+    using namespace pvrfp;
+// P2REF-COPY fp-mip-minor pvr_tsp_plane.h Fp n = Sub(q1, q2, 62, 200).cut(24);
+            Fp n = Sub(q1, q2, 62, 200).cut(24);
+            n.neg = false;
+            n.bad = false;
+// P2REF-END fp-mip-minor
+    return n;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+inline int64_t unitsAt(const Fp& v, bool* frac, int u)
+{
+    using namespace pvrfp;
+// P2REF-COPY fp-edge-unitsat pvr_isp_edge.h auto unitsAt = [&](const Fp& v, bool* frac, int unit) -> int64_t {
+        auto unitsAt = [&](const Fp& v, bool* frac, int unit) -> int64_t {      // floor(v / 2^unit); *frac: not a whole number
+            if (frac) *frac = false;
+            if (v.zero())
+                return 0;
+            int s = v.exp - unit;
+            int64_t m;
+            if (s >= 0)
+                m = (int64_t)(v.mant << s);
+            else {
+                uint64_t lost = (-s >= 64) ? v.mant : (v.mant & ((1ull << -s) - 1));
+                m = (-s >= 64) ? 0 : (int64_t)(v.mant >> -s);
+                if (lost) {
+                    if (frac) *frac = true;
+                    if (v.neg)
+                        m += 1;                         // floor of a negative: one further from zero
+                }
+            }
+            return v.neg ? -m : m;
+        };
+// P2REF-END fp-edge-unitsat
+    return unitsAt(v, frac, u);
+}
+inline int64_t regStep(const Fp& v0, bool cap, const Fp& invS)
+{
+    using namespace pvrfp;
+    const pvrisp::DepthHW cfg{};
+// P2REF-COPY fp-depth-rstep pvr_isp_depth.h auto rstep = [&](const Fp& v0, bool cap) -> int64_t {
+                    auto rstep = [&](const Fp& v0, bool cap) -> int64_t {
+                        if (cap || v0.zero())
+                            return 0;
+                        const Fp q = Mul(v0, invS, cfg.coefBits).cut(cfg.slopeBits).cutBelow(102);
+                        if (q.zero())
+                            return 0;
+                        // modulo the register's 2^131 (GAP: a slope of 2^128 or more after the division, from a
+                        // determinant below 1, is not measured)
+                        const int sh = q.exp - 102;
+                        const int64_t m = sh < 30 ? (int64_t)((q.mant << sh) & ((uint64_t(1) << 30) - 1)) : 0;
+                        return q.neg ? -m : m;
+                    };
+// P2REF-END fp-depth-rstep
+    return rstep(v0, cap);
+}
+inline int64_t regStart(const Fp& first0)
+{
+    using namespace pvrfp;
+    const pvrisp::DepthHW cfg{};
+    int64_t r0 = 0;
+// P2REF-COPY fp-depth-r0 pvr_isp_depth.h if (first0.bad) {
+                if (first0.bad) {
+                    r0 = first0.neg ? -(int64_t(1) << 25) : (int64_t(1) << 25);
+                } else if (!first0.zero()) {
+                    const Fp st = first0.cut(cfg.startBits);
+                    const int sh = st.exp - 102;
+                    const int64_t m = sh >= 0 ? (sh < 40 ? (int64_t)(st.mant << sh) : 0) : (-sh < 64 ? (int64_t)(st.mant >> -sh) : 0);
+                    r0 = st.neg ? -m : m;
+                }
+// P2REF-END fp-depth-r0
+    return r0;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+#ifndef ALWAYS_INLINE
+#define P2FPREF_UNDEF_ALWAYS_INLINE
+#define ALWAYS_INLINE inline
+#endif
+// P2REF-COPY fp-tex-coord refsw_tile.cpp ALWAYS_INLINE int CoordKeep(int64_t f) {
+ALWAYS_INLINE int CoordKeep(int64_t f) {
+    if (f >= 1073741824)
+        return (int)(1073741824 + (f & 67108863));
+    if (f < -1073741824)
+        return (int)(-1073741824 + (f & 67108863));
+    return (int)f;
+}
+
+// A texture coordinate in 1/256 texel as hardware sees it. Hardware's coordinates come out a hair toward
+// zero: a coordinate that is exactly on a boundary belongs to the texel before it, except at 0
+// (dreamcast-tests/pvr-tests/sample: point sampling with half-pixel shifts, bilinear with the weights of page 2).
+// Values within 1/32 of a unit of an integer are treated as being exactly on it.
+ALWAYS_INLINE int TexCoordFixed(const pvrfp::Fp& u, int shift) {
+    // u * 2^shift (the size of the texture in 1/256 texel: exact, u has 17 bits), rounded down in two's complement,
+    // below zero too (dreamcast-tests/pvr-tests/coordfix: every weight step from -4 to +4 texels and at up to 2^17
+    // texels, clamp and flip; toward zero gets 437 of its 1568 regions wrong). The coordinate the TSP delivers is
+    // already rounded down (PlaneStepper3), which is what makes a coordinate exactly on a texel boundary show the
+    // texel before it (dreamcast-tests/pvr-tests/sample, uvmeas). Far outside an int (coordinates of thousands of
+    // texture repeats): the sign and the low 26 bits, which is all that wrapping, flipping and clamping look at.
+    // That holds at 2^128 and beyond too: there is no overflow to texel 0 there (as the old float code had it), a
+    // clamped one is the last texel, below zero the first, wrapped and flipped the low bits are zeros
+    // (dreamcast-tests/pvr-tests/texfar_edge: quotients of exactly 2^128, (1 + 2^-15) 2^128, 1.5 2^128, 2^129,
+    // 2^132 and up to the largest float times the size, in 1/256 texel, of 8, 64 and 1024 texel textures, along U
+    // and V, point and bilinear: 63 clamped regions the last texel, as above 2^127; texfar: 28 regions;
+    // texfar_quot: quotients over a zero 1/w up to 2^260 in 1/256 texel, 103 regions; texfar_m1q: up to 2^261).
+    // The low bits are the integer's own up to where the quotient's 17 bits leave them (texfar_bits: tops 2^9 ..
+    // 2^36, wrap and flip, both signs, U and V: 300 of 300, as refsw3 had it).
+    // A quotient is never an infinity or a NaN (Divide); u.bad is for a caller that has one.
+    if (u.bad || u.zero())
+        return 0;
+    const int top = u.top() + shift;                    // |u| 2^shift is in [2^(top - 1), 2^top)
+    const int e = u.exp + shift;                        // u 2^shift = mant 2^e
+    if (top <= 31) {
+        int64_t f;
+        if (e >= 0)
+            f = (int64_t)(u.mant << e);
+        else {
+            const int s = -e;
+            const uint64_t lost = s >= 64 ? u.mant : (u.mant & ((1ull << s) - 1));
+            f = s >= 64 ? 0 : (int64_t)(u.mant >> s);
+            if (u.neg && lost)
+                f += 1;
+        }
+        if (u.neg)
+            f = -f;
+        return CoordKeep(f);
+    }
+    // 2^30 and more: an integer; its low 26 bits (two's complement for a negative one)
+    const uint64_t low = e >= 26 ? 0 : (uint64_t)(u.mant << e) & 67108863;
+    if (!u.neg)
+        return (int)(1073741824 + low);
+    return (int)(-1073741824 + (int64_t)((67108864 - low) & 67108863));
+}
+// P2REF-END fp-tex-coord
+#ifdef P2FPREF_UNDEF_ALWAYS_INLINE
+#undef ALWAYS_INLINE
+#undef P2FPREF_UNDEF_ALWAYS_INLINE
+#endif
+inline int coordKeep(int64_t f) { return CoordKeep(f); }
+inline int texCoordFixed(const Fp& u, int shift) { return TexCoordFixed(u, shift); }
+
+// ---------------------------------------------------------------------------------------------------------------
+// the background's key from ISP_BACKGND_D (StoredDepth is refsw3's ZType)
+inline pvrisp::StoredDepth bgKey(uint32_t isp_backgnd_d)
+{
+    typedef pvrisp::StoredDepth ZType;
+    struct { u32 i; } ISP_BACKGND_D = {isp_backgnd_d};
+// P2REF-COPY fp-bgkey refsw_lists.cpp const u32 bg = ISP_BACKGND_D.i, field = (bg >> 23) & 0xff;
+            const u32 bg = ISP_BACKGND_D.i, field = (bg >> 23) & 0xff;
+            ZType bgZ;
+            if (bg >> 31) {
+                const int f = field == 255 ? 254 : (int)field;
+                const int E = std::max(f - 126, 6);
+                const uint64_t m20 = (0x800000u | (bg & 0x7fffffu)) >> 4;       // the depth is m20 2^(f - 146)
+                const int sh = f - 120 - E;                                     // in units of 2^(E - 26)
+                const uint64_t t = f < 107 ? 0 : sh >= 0 ? m20 << sh : (-sh < 64 ? m20 >> -sh : 0);
+                bgZ = t ? ZType::Neg(E, -(int64_t)((t + 1023) >> 10)) : ZType();
+            } else {
+                const int cut = std::max(5, 130 - (int)field);
+                u32 bgBits = cut > 23 ? 0 : (bg & ~((1u << cut) - 1));
+                if (field == 255)
+                    bgBits -= 1u << 23;
+                bgZ = ZType::Bits(bgBits);
+            }
+// P2REF-END fp-bgkey
+    return bgZ;
+}
 
 }   // namespace p2fpref
