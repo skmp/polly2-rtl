@@ -146,34 +146,14 @@ module p2_isp_edge_setup
     end
   endgenerate
 
-  // the row range in the tile, with the row-31 shift (refsw_tile.cpp RasterizeTriangle L819-847, pvr_isp_edge.h
-  // EdgeTile::SetFirstRow L297; isp 8.6; ARCHITECTURE 2.4 jf / jl / rows_v, 3.4.4 step 5)
-  //   not MODIFIER: a polygon whose first row is the tile's row 31 starts at row 30 in that tile, every polygon
-  //                 [faredge_walk pages 0-3: 366 of 3,537 tiles wrong without; faredge_far32 390 against 0; edge2_walk
-  //                 page 6: 43 tiles wrong with the shift for big edges only (6784ea3d), 0 for every polygon;
-  //                 edge2_row31 300 of 300: the user tile clip has no part]; then rows_v = some row of the tile is in
-  //                 first .. last, jf / jl the range clipped to 0 .. 31. jf is also where a big edge's walk starts
-  //                 (SetFirstRow: the first row clamped to 0 .. 31).
-  //   MODIFIER:     no range and no shift: rows 0 .. 31, the walk from row 0 [covmeas sliver36].
-  logic signed [RW-1:0]    b_top, b_rf, b_rl;
+  // the row range in the tile, with the row-31 shift (p2_isp_rowclip, shared with M4's p2_isp_setup)
   logic [P2_TILE_LOG2-1:0] b_jf, b_jl;
   logic                    b_rows_v;
-  assign b_top = $signed({{(RW - 6 - P2_TILE_LOG2){1'b0}}, s1_ty, {P2_TILE_LOG2{1'b0}}});
-  always_comb begin
-    b_rf = s1_rf - b_top;
-    b_rl = s1_rl - b_top;
-    if (b_rf == RW'(P2_TILE) - RW'(1))
-      b_rf = b_rf - RW'(1);
-    if (s1_modvol) begin
-      b_jf     = '0;
-      b_jl     = '1;
-      b_rows_v = 1'b1;
-    end else begin
-      b_rows_v = (b_rf <= RW'(P2_TILE) - RW'(1)) && (b_rl >= RW'(0));
-      b_jf     = (b_rf < 0) ? '0 : (b_rf > RW'(P2_TILE) - RW'(1)) ? '1 : b_rf[P2_TILE_LOG2-1:0];
-      b_jl     = (b_rl < 0) ? '0 : (b_rl > RW'(P2_TILE) - RW'(1)) ? '1 : b_rl[P2_TILE_LOG2-1:0];
-    end
-  end
+  logic b_big_any;
+  assign b_big_any = $signed(s1_ep[0]) >= 124 || $signed(s1_ep[1]) >= 124 || $signed(s1_ep[2]) >= 124 ||
+                     (s1_quad && $signed(s1_ep[3]) >= 124);
+  p2_isp_rowclip #(.RW(RW)) u_clip (.row_first(s1_rf), .row_last(s1_rl), .tile_y(s1_ty), .modvol(s1_modvol),
+    .big_any(b_big_any), .jf(b_jf), .jl(b_jl), .rows_v(b_rows_v));
 
   always_ff @(posedge clk) begin
     if (rst)

@@ -1,0 +1,26 @@
+# tb/isp_setup/mutants.txt: the planted bugs of M4's setup sequencer and row stepper in rtl/v1/isp (PLAN M4 "Mutants",
+# conventions.md 7.7), run by tools/gate/mutants.py (make isp-setup-mutants). Every one must be caught by its probe and the
+# unchanged folder must pass first. The probe `setup`: the testbench's directed, random (20,000 primitives) and cycle
+# sections, with the program trace on every clock. The graph mutants (the generator's operation graphs) are in
+# tb/isp_setup/mutants_gen.txt (another folder: tools/gen).
+#
+# Format: <id> | <file in rtl/v1/isp> | <original fragment> | <mutated fragment> | <probe> [args] | <what it breaks>
+# (\n a newline, \| a bar, \\ a backslash in a fragment).
+@dir rtl/v1/isp ISP_DIR
+@obj ISP_SETUP_OBJDIR
+@probe setup isp-setup-build tb --only directed,random,cycle --n 20000
+
+# ---- PLAN M4's list
+handoff-depth-2 | p2_isp_setup.sv | localparam int HO_N = 1; | localparam int HO_N = 2; | setup | the hand-off 2 deep: a setup runs a primitive further ahead of the raster (the mixed streams' takes off the recurrence)
+culled-handed | p2_isp_setup.sv | assign s_skip  = act && pc == len - P2_ISP_PC_BITS'(2) && (bad \|\| culled) && !kill_d; | assign s_skip  = act && pc == len - P2_ISP_PC_BITS'(2) && bad && !kill_d; | setup | a culled triangle handed over (and 16, not 15)
+kill-not-handed | p2_isp_setup.sv | assign kill_d = (bad \|\| culled) && sum_op != P2_SUM_NONE; | assign kill_d = 1'b0; | setup | a culled or bad closing triangle of a volume not handed over: no summary (ARCHITECTURE 3.4.4 step 8)
+rows-from-0 | p2_isp_raster.sv | j         <= rd.jf; | j         <= '0; | setup | the row counter from 0 instead of jf
+modvol-row-range | p2_isp_setup.sv | .tile_y(pr.tiley), .modvol(modvol), | .tile_y(pr.tiley), .modvol(1'b0), | setup | a MODIFIER triangle given the row range (and the row-31 shift)
+# ---- the structure the schedule assumed
+add-latency-short | p2_isp_alu.sv | localparam int L = (g < P2_ISP_NM) ? P2_ISP_L_MUL : (g < P2_ISP_NM + P2_ISP_NA) ? P2_ISP_L_ADD : P2_ISP_L_RCP; | localparam int L = (g < P2_ISP_NM) ? P2_ISP_L_MUL : (g < P2_ISP_NM + P2_ISP_NA) ? P2_ISP_L_ADD - 1 : P2_ISP_L_RCP; | setup | the adders one clock faster than the scheduler's L_ADD: the writes off the schedule
+rcp-latency-long | p2_isp_alu.sv | localparam int L = (g < P2_ISP_NM) ? P2_ISP_L_MUL : (g < P2_ISP_NM + P2_ISP_NA) ? P2_ISP_L_ADD : P2_ISP_L_RCP; | localparam int L = (g < P2_ISP_NM) ? P2_ISP_L_MUL : (g < P2_ISP_NM + P2_ISP_NA) ? P2_ISP_L_ADD : P2_ISP_L_RCP + 1; | setup | the reciprocal one clock slower: inv0 read before it is written
+skip-late | p2_isp_setup.sv | assign s_skip  = act && pc == len - P2_ISP_PC_BITS'(2) && | assign s_skip  = act && pc == len - P2_ISP_PC_BITS'(1) && | setup | a culled primitive ends in the hand-off step's clock (16, measured 15)
+# ---- the ALU's flavours
+swamp-on-read-off | p2_isp_alu.sv | assign a = s.swa ? asw : a0; | assign a = a0; | setup | dxP, dyP read without the swamp (faredge_cmax)
+perp-off | p2_isp_alu.sv | P2_ISP_PO_PERP: res[P2_ISP_NM + g].val = perp ? '0 : rm; | P2_ISP_PO_PERP: res[P2_ISP_NM + g].val = rm; | setup | FPU_PERP_VAL ignored (perpval, perpeq)
+mul-r-unranged | p2_isp_alu.sv | .ranged(s.op == P2_ISP_MUL_R), | .ranged(1'b0), | setup | the depth products without the range (zovf_ps, depthgaps_nanprod)

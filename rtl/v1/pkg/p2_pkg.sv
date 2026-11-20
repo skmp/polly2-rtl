@@ -182,6 +182,20 @@ package p2_pkg;
     logic                   ro;
   } p2_fb_t;
 
+  // an assembled primitive in one tile (p2_isp_pfetch to p2_isp_setup, ARCHITECTURE 3.4.3 `asm`), valid/ready: the
+  // corners as the TA wrote them (raw IEEE single bits, rasterizer order; corner 4 for a quad only; the depth's three)
+  typedef struct packed {
+    logic [31:0]       isp;     // the ISP/TSP word: DepthMode / VolumeMode 31:29, CullMode 28:27, ZWriteDis 26
+    p2_tag_t           tag;     // CoreTagFromDesc
+    p2_rm_t            rm;      // the list's RenderMode
+    logic              quad;    // a quad array's primitive: four corners, four edges
+    logic [3:0][31:0]  x;
+    logic [3:0][31:0]  y;
+    logic [2:0][31:0]  z;
+    logic [5:0]        tilex;   // the tile the primitive is set up in (the region array entry's)
+    logic [5:0]        tiley;
+  } p2_asm_t;
+
   // ---------------------------------------------------------------------------------------------------------------
   // 2.4 ISP setup to rasterizer descriptor, per primitive per tile (edge.h EdgeTile and depth.h DepthTileT at 4f3efe15)
   // ---------------------------------------------------------------------------------------------------------------

@@ -547,6 +547,26 @@ sequencer comes in M4):
 
 ### M4. ISP setup sequencer and row stepper
 
+**Status (2026-11-20): done.** `tools/gen/gen_setup_prog.cpp` (graphs, graph check, list
+scheduler, emitters) -> `rtl/v1/pkg/p2_isp_prog_pkg.sv` (GENERATED; `make isp-prog`, `isp-prog-check`, `isp-prog-sweep`);
+`rtl/v1/isp/p2_isp_alu.sv`, `p2_isp_setup.sv`, `p2_isp_raster.sv`; `p2_pkg::p2_asm_t`; `tb/isp_setup/` (testbench,
+`ref_copies_setup.h`, `mutants.txt`, `mutants_gen.txt`), `tools/gate/gate_isp_setup.sh`, `tb/mk/isp_setup.mk`. Results
+in `agents/m4/`. How it differs from the text below (which predates M2 / M3's module split):
+- M2 / M3's fixed-latency units stay (their gates and testbenches); the logic after the arithmetic was moved, verbatim,
+  into modules M4 shares with them: `p2_isp_edge_steps` (from `p2_isp_edge_line`), `p2_isp_edge_fin` (from
+  `p2_isp_edge_block`), `p2_isp_rowclip` (from `p2_isp_edge_setup`), `p2_isp_depth_fin` (from `p2_isp_depth_tile`).
+  `tb/isp_edge/mutants.txt` and `tb/isp_depth/mutants.txt` point at the new files (row31-big-only reads the clip's
+  `big_any` hook, corner-708fb8cd-h the depth fin's `half` hook); `make isp-edge-mutants`, `isp-depth-mutants` re-run.
+- The graph's outputs are the values the hand-off step reads (ARCHITECTURE 3.4.4 "As built"); the graph check compares
+  them with verbatim copies of refsw3's code (`tb/isp_setup/ref_copies_setup.h`, drift-checked) and EdgeWinding, not the
+  descriptor (the descriptor is item 2's).
+- **Item 4's TRI 16 / QUAD 19 cannot both come out of the scheduler with the real datapaths.** At `ISP_NM` 3, `ISP_NA` 3,
+  `L_MUL` 1, `L_ADD` 2, `L_RCP` 2: TRI 16, culled 15, QUAD **18**, MODIFIER 16; no set of the sweep gives 16 / 19 (the
+  nearest 16 / 18 and 16 / 17). Not padded; reported, not gated (the parameters are fitted on the triangle: rule 6); the
+  sprite's third clock joins GAP T2. The gate checks the RTL's periods against the scheduler's lengths.
+- The console pages' records (`build/vec`) hold no MODIFIER triangles and no quad corner 4: MODIFIER, kill and quads are
+  covered by the directed and random sections only.
+
 **Deliverables.**
 - `tools/gen/gen_setup_prog.cpp`: the operation graphs (TRI, QUAD, MODIFIER TRI), the graph check, the list scheduler,
   the generated microprogram package (ARCHITECTURE §3.4.4).

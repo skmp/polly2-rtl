@@ -1,0 +1,36 @@
+// isp_setup_lint.vlt: verilator -Wall waivers for make lint-isp-setup (conventions.md 4.8): M4's p2_isp_setup, _alu, _raster with
+// the shared M2 / M3 modules they instance, and the tb/isp_setup top. The M2 / M3 modules' waivers are theirs (tb/isp_edge,
+// tb/isp_depth); each waiver of M4's own files names its file and its reason.
+`verilator_config
+lint_off -rule PINCONNECTEMPTY -file "*/p2_isp_edge_fin.sv"
+lint_off -rule PINCONNECTEMPTY -file "*/p2_isp_rowrange.sv"
+lint_off -rule PINCONNECTEMPTY -file "*lib/fp/p2_fp_*.sv"
+lint_off -rule UNUSEDPARAM -file "*/p2_fp_pkg.sv"
+lint_off -rule UNUSEDPARAM -file "*/p2_hw_pkg.sv"
+lint_off -rule UNUSEDPARAM -file "*/p2_pkg.sv"
+lint_off -rule UNUSEDPARAM -file "*/p2_regs_pkg.sv"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_depth_fin.sv" -match "*'a'[33:24]*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_depth_fin.sv" -match "*'b'[33:24]*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_depth_fin.sv" -match "*'c'[35,33:0]*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_depth_fin.sv" -match "*'half'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_depth_fin.sv" -match "*'q'[30]*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_depth_fin.sv" -match "*'rs'[35:34]*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_depth_fin.sv" -match "*'st'[30]*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_depth_fin.sv" -match "*'v'[30]*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_edge_fin.sv" -match "*'s20'[30]*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_edge_fin.sv" -match "*'sx'[30]*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_edge_fin.sv" -match "*'sy'[30]*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_edge_fin.sv" -match "*'zsh'[12:4]*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_edge_row.sv" -match "*'e'[122:92]*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_rowclip.sv" -match "*'big_any'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_zword_pkg.sv" -match "*'r'[31:30]*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_zword_pkg.sv" -match "*'v'[31:30]*"
+lint_off -rule UNUSEDSIGNAL -file "*lib/fp/p2_fp_*.sv"
+// p2_isp_prog_pkg (GENERATED): a register index for every value of the graphs; the RTL names only the inputs and the
+// values the hand-off step reads, the micro-words carry the others as numbers
+lint_off -rule UNUSEDPARAM -file "*/p2_isp_prog_pkg.sv"
+// p2_isp_setup: p2_isp_depth_fin's debug taps of A and B are M3's testbench's; M4's compares the descriptor
+lint_off -rule PINCONNECTEMPTY -file "*/p2_isp_setup.sv"
+// p2_isp_raster: the descriptor's quad is not a raster rule (a triangle's fourth edge is a constant inside; p2_rdesc_t
+// carries it for the testbench and the later units)
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_raster.sv" -match "*'rd'[775]*"

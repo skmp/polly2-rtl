@@ -12,8 +12,15 @@ lint_off -rule UNUSEDSIGNAL -file "*lib/fp/p2_fp_*.sv"
 lint_off -rule PINCONNECTEMPTY -file "*lib/fp/p2_fp_*.sv"
 // p2_isp_depth_tile: the bad flags of the 20-bit cuts of finite values (the slopes and the start: a, b, inv0 and first
 // are finite where they are read; refsw3's cut / cutBelow carry the flag and nobody reads it there)
-lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_depth_tile.sv" -match "*'q'[30]*"
-lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_depth_tile.sv" -match "*'st'[30]*"
-lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_depth_tile.sv" -match "*'v'[30]*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_depth_fin.sv" -match "*'q'[30]*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_depth_fin.sv" -match "*'st'[30]*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_depth_fin.sv" -match "*'v'[30]*"
 // p2_isp_depth_tile: the register's start rs is read for its exponent and mantissa (its sign and flag are first0's)
-lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_depth_tile.sv" -match "*'rs'[35:34]*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_depth_fin.sv" -match "*'rs'[35:34]*"
+// p2_isp_depth_fin: HALF_OFFSET[0] is read by no rule (0de9776b); the port is the corner-708fb8cd-h mutant's hook
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_depth_fin.sv" -match "*'half'*"
+// p2_isp_depth_fin: of the plane's a and b only the sign, the flag and whether the mantissa is zero are rules here (the
+// slopes are A, B); of c only its flag (an overflowed constant): their other bits are p2_isp_depth_tile's / the ALU's
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_depth_fin.sv" -match "*'a'[33:24]*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_depth_fin.sv" -match "*'b'[33:24]*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_depth_fin.sv" -match "*'c'[35,33:0]*"

@@ -1,0 +1,15 @@
+# tb/isp_setup/mutants_gen.txt: the planted bugs of M4's operation graphs in tools/gen/gen_setup_prog.cpp (PLAN M4
+# "Mutants": "one graph edge removed (the graph check must fail)", "the shared product used for the depth unit (ranged)
+# path"), run by tools/gate/mutants.py (make isp-setup-mutants). The probe `graph` builds the mutated generator and runs
+# its graph check (gen_setup_prog --check) on 200,000 random primitives and every console-page record of build/vec.
+#
+# Format: <id> | <file in tools/gen> | <original fragment> | <mutated fragment> | <probe> [args] | <what it breaks>
+@dir tools/gen ISP_GEN_DIR
+@obj ISP_GEN_OBJDIR
+@probe graph isp-setup-graph-bin gen_setup_prog --check --n 200000 --vec build/vec --threads 4
+
+depth-shares-edge-product | gen_setup_prog.cpp | auto pz = [&](int j, int k) { return g.mul(S2("pz", j, k), MUL_R, ZX[j], ZY[k]); }; | auto pz = [&](int j, int k) { return pe(j, k); }; | graph | the edge unit's swamped products shared with the depth unit's ranged edges (isp 6.2, 9.2: not shared)
+edge-c-start | gen_setup_prog.cpp | const int sabc = g.add("zsabc", ADD_Z, sab, zc, false); | const int sabc = g.add("zsabc", ADD_Z, sab, sab, false); | graph | one graph edge removed: the depth start without the constant c
+edge-start-c | gen_setup_prog.cpp | g.out(g.add(S("start", k), ADD_E, first, c, false, PO_SAT)); | g.out(g.add(S("start", k), ADD_E, first, first, false, PO_SAT)); | graph | one graph edge removed: an edge's start without c
+edge-det-e3 | gen_setup_prog.cpp | g.out(g.add("detE", ADD_E, d12, ee[2], false, PO_SW)); | g.out(g.add("detE", ADD_E, d12, d12, false, PO_SW)); | graph | one graph edge removed: the swamped determinant without e3
+edge-swamp-read | gen_setup_prog.cpp | const int q0 = g.mul(S("fy", k), MUL_E, dx, TY, true); | const int q0 = g.mul(S("fy", k), MUL_E, dx, TY, false); | graph | dxP read as dx (no swamp: faredge_cmax)

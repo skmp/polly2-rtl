@@ -614,10 +614,11 @@ entry end: the last SHADE's last item carries eoe, or a null eoe item (§3.4.8)
 
 **Interfaces.**
 - In: prim stream.
-- Out: `asm_v`, `asm_rdy`, `asm`:
-  - `isp_word[31:0]`, `tag`, `rm`;
+- Out: `asm_v`, `asm_rdy`, `asm` (`p2_pkg::p2_asm_t`, M4):
+  - `isp` (the ISP/TSP word), `tag`, `rm`;
   - `x[0:3][31:0]`, `y[0:3][31:0]`, `z[0:2][31:0]` (raw IEEE single bits, rasterizer order);
-  - `quad`.
+  - `quad`;
+  - `tilex`, `tiley`: the tile the primitive is set up in (the setup is per primitive per tile).
 - Memory: C2.
 
 **State.** A strip vertex buffer (8 x 3 words). An assembled-primitive FIFO `PF_AHEAD` [G: 2].
@@ -736,6 +737,38 @@ products):
   2 adds for `first0`, A, B, plus REG's 2.
 
 That is about 33 multiplies, 37 adds and 1 reciprocal. A quad's 4th edge adds 2 multiplies and 5 adds.
+
+**As built (M4, `tools/gen/gen_setup_prog.cpp`; PLAN M4).** The scheduler's input counts, without the sharing of the
+determinant's products with the edges' `c` that the graph makes: TRI and MODIFIER TRI 33 multiplies, 41 additions, 1
+reciprocal; QUAD 39, 46, 1 (the quad's E31 and E41 need 4 products of their own, and the 4th edge's dx, dy, first and
+start). The units' flavours are per issue (`p2_isp_alu`): multiplies MUL_E (Mul, then the swamp; operand a may be read
+through the swamp: `dxP`, `dyP`), MUL_R (the depth setup's ranged `mul`), MUL_U (A, B); additions ADD_E (plain, then
+nothing, the swamp or the saturation), ADD_Z (the depth setup's `addRule`, every zero-rule switch 1; the post-operation
+PERP is FPU_PERP_VAL), ADD_M1 / ADD_M2 (the determinant-zero mean's sums with the corners' fractions); the reciprocal.
+The depth unit's products are its own (the PLAN M4 mutant "the shared product used for the depth unit" fails the graph
+check). Every value has its own register (106 over the three classes, the 20 inputs loaded at the accept). The graph's
+outputs are the values the **hand-off step** reads (each edge's dx, dy and saturated start, the swamped determinant; the
+depth unit's a, b, c, det, first0, A, B and the mean): the fixed logic after the arithmetic runs there, one copy shared
+with M2 / M3's fixed-latency units: `p2_isp_edge_steps` (sat, cut20, ep), `p2_isp_edge_fin` (the blocking),
+`p2_isp_rowrange` and `p2_isp_rowclip` (the rows), `p2_fp_cull` on the swamped determinant, `p2_isp_depth_fin` (the
+regime and the fields, `flat(mean)`). The graph check (PLAN M4 item 1) compares the outputs with verbatim copies of
+refsw3's code (`tb/isp_setup/ref_copies_setup.h`) and EdgeWinding.
+
+At the ARCHITECTURE 6 parameters (`ISP_NM` 3, `ISP_NA` 3, `L_MUL` 1, `L_ADD` 2, `L_RCP` 2) the scheduler gives **TRI
+16** (culled / bad 15), **QUAD 18**, MODIFIER TRI 16: the triangle and the culled triangle are the measured 16 and
+15.05 - 15.1, **the sprite is one clock short of the measured 19 (18.9)**. No parameter set of the sweep (`make
+isp-prog-sweep`: `ISP_NM`, `ISP_NA` 1 .. 6, `L_MUL`, `L_ADD` 1 .. 3, `L_RCP` 1 .. 6) gives 16 and 19 together; the
+nearest are 16 / 18 (`L_ADD` 2, the chosen set) and 16 / 17. With the real M2 / M3 datapaths the quad's extra work (6
+multiplies, 5 additions) costs 2 steps on three adders, not 3; the program is not padded (above). Where the third clock
+comes from is GAP T2, beside the strip alternation (candidates: corner 4 read late, the 4th edge's start serialised behind
+the third's, a quad-specific step of the fixed logic).
+
+The sequencer (`p2_isp_setup`): the accept loads the input registers and latches FPU_CULL_VAL, FPU_PERP_VAL and
+HALF_OFFSET[0] with the primitive (constant over a render); step 0 is the clock after; every step issues its micro-word,
+nothing stalls inside a program; the hand-off step waits while the 1-deep hand-off is full, and the next primitive is
+accepted in the clock its hand-off is written (or, culled or bad without `kill`, in the clock of the step before, the
+cull's determinant being readable there: the generator checks it). A `kill` descriptor and a MODIFIER triangle carry rows
+0 .. 31. The ptc strobe (`pc_v`, `pc_culled`, `pc_quad`) comes at each program's end.
 
 **Interfaces.**
 - In: `asm` stream.
@@ -1502,7 +1535,7 @@ register a primitive's output as one of its pipeline stages; its lockstep testbe
 
 | measured [M] (tim §) | mechanism | unit | free parameter | probe |
 |---|---|---|---|---|
-| ISP 16 / 15 culled / 19 sprite / strip 19-15 (3.2) | generated setup program; culled skips the hand-off | isp_setup | `ISP_NM`, `ISP_NA`, `L_*` | T2 |
+| ISP 16 / 15 culled / 19 sprite / strip 19-15 (3.2) | generated setup program; culled skips the hand-off (M4: 16 / 15 / **18**, the sprite one short: 3.4.4) | isp_setup | `ISP_NM`, `ISP_NA`, `L_*` | T2 |
 | +1 a line per triangle past 16 lines (3.2) | raster 1 row/clk behind a 1-deep hand-off: `max(16, rows)` | isp_raster | hand-off depth 1 | T2 |
 | thin triangles step ~25 rows of 32 (3.2) | GAP (no row skipping by default) | isp_raster | row-skip rule | T2 |
 | 2-triangle volume 65 (3.2) | 32 rows each (no row range), summary folded; the 65th clock GAP | isp_raster | `MV_GAP` | T2 |
@@ -1535,7 +1568,7 @@ register a primitive's output as one of its pipeline stages; its lockstep testbe
 |---|---|---|---|
 | `SEQ_AHEAD`, `OLW_AHEAD`, `PF_AHEAD` | 2, 8, 2 | [G] | T1, T2 |
 | `CTL_T`: clocks a ctl transition | 1 | [G] | T13 |
-| `ISP_NM`, `ISP_NA`, `L_MUL`, `L_ADD`, `L_RCP` (ISP) | chosen so the scheduler gives 16 / 19 | [M] lengths are the check | T2, MT1 |
+| `ISP_NM`, `ISP_NA`, `L_MUL`, `L_ADD`, `L_RCP` (ISP) | 3, 3, 1, 2, 2 (M4): the scheduler gives TRI 16, QUAD 18; no set gives 16 / 19 (3.4.4) | [M] lengths are the check; fitted on the triangle, so the 16 is reported, not gated | T2, MT1 |
 | row-skip rule for thin triangles | none | [M] anomaly | T2 |
 | `MV_GAP`: bubble after a `sum_op` descriptor | 1 | [G] 65 = 64 + 1 | T2 |
 | row barrier form (cut vs next writes) | per row | [G] | T4 |
