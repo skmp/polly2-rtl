@@ -799,7 +799,7 @@ dreamcast-tests owner through `OPEN_ITEMS.md`. Never run from here. Ordered by w
 
 | probe | question | unblocks |
 |---|---|---|
-| **T1** `TM_STAMP` absolute palette clock | every hidden latency: STARTRENDER to the first pixel, list and parameter fetch latency, tile k's last pixel to k+1's first, the 335 / 142 / 55-90 split, setup latency | `VR_LAT`, `SEQ_AHEAD`, `OLW_AHEAD`; MT1-MT7 |
+| **T1** `TM_STAMP` absolute palette clock (**partially done 2026-11-20**: tim §3.1a; fog-RAM stamp; T1_SET 2 and b-e open, need a safer design: the probe wedged the console) | every hidden latency: STARTRENDER to the first pixel, list and parameter fetch latency, tile k's last pixel to k+1's first, the 335 / 142 / 55-90 split, setup latency | `VR_LAT`, `SEQ_AHEAD`, `OLW_AHEAD`; MT1-MT7 |
 | **T2** `TM_ISPRAST` | the setup program per kind (strips 19 / 15, perpendicular, modifier triangles of every size, two-volume), the rows rule for thin triangles, hand-off depth; **big edges** (steps of 2^123 and more: any cost?); **a culled closing triangle** (32 or 15?); **the 65th clock of a volume** | `ISP_*`, the row-skip rule, `MV_GAP`; MT1 |
 | **T3** `TM_ISPQ2` | whether cut runs, flags and tile boundaries take entries (the fit says no); `ENT_N`; the 32-rows-of-32x1 pace | MT2 |
 | **T4** `TM_CUT2` | how cutting overlaps the next tile's ISP work (58 of 128 vs 11 of 256) | the row barrier form; MT2 |

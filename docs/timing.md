@@ -172,7 +172,105 @@ costs about the largest of its ISP, TSP and write-out times:
 buffers. The per-tile cost "about the largest" falls out of FIFO back-pressure; no rule computes it.
 
 **GAP:** how the 335 clk divide between the region array fetch, the ISP's start, the TSP's start and the
-handovers, and what the 55-90 are (T1 measures them as latencies).
+handovers, and what the 55-90 are. T1 (3.1a) put event times on these; it did not split them into named parts.
+
+### 3.1a T1 results: the CORE's events on an absolute clock (2026-11-20, partial)
+
+Probe: dreamcast-tests pvr-tests/t1stamp_clock (not committed; analysis in agents/nulldc3/hunt/t1stamp). While the
+core renders, the CPU writes the time since its STARTRENDER write (PMCTR0 >> 1, clk) into FOG_COL_RAM (stamped
+primitives untextured, table fog mode 2, so a pixel's RGB is the register) or into PALETTE_RAM[0] (8 bpp index 0,
+decal). A pixel's stored colour is then the latest stamp the TSP read for it. Every scene is also rendered without
+stamps and the end-of-render bits polled as timemeas does (B lines). One tile at (0, 0), five empty list pointers,
+no entry in front of it, 0888, unless said. Runs 2, 4, 5 x 4 stamped renders a scene (scenes 69-99: run 4 only);
+values are means, the ranges in tables_runs245.txt are a few clk.
+
+How far the clock can be trusted:
+- [M] Calibration (T1_SET 1): with one stamp write at least every 24 counts, the first background pixel reads
+  541-546 (one render 556) at every pace 24-48 and poll interval 2-16; written back to back the stamp's lag varies by up to 28
+  counts (14 clk) along a line. Runs used pace 26 (a new stamp every ~12-14 clk), so a run's start is known to a
+  stamp interval and a time is the start of a run of equal pixels.
+- [I] Zero point: the stamps and STARTRENDER both leave the CPU from an empty write buffer, so their write latency
+  is taken to cancel. Not checked independently: all absolute times below carry that assumption; differences
+  between scenes do not.
+- [M] The fog stamp does not slow the core: TSP bit 2995 unstamped against 2999 fog-stamped (within the poll
+  quantum). **The palette stamp does**: with 565 entries the first pixel comes 72 clk later and a tile shades in
+  1094 instead of 1049 (16 tiles at 565: pitch 1101-1191 instead of 1041); 8888 entries ~2.1 clk a pixel. The plan's
+  assumption that 565 palette entries run at 1.01 clk a pixel is wrong; use the fog stamp.
+
+**Solid results [M]** (end-of-render bits from the unstamped renders, so +- the 14-clk poll quantum):
+
+| event | clk after STARTRENDER | notes |
+|---|---|---|
+| ISP's bit, reference tile (background, five empty lists) | 342 | 340-347 over all runs |
+| first pixel (the background's line 0), reference tile | 545.3 | 96 renders: 536-556, mode 545 |
+| last pixel, reference tile | 1594 | first -> last 1049 (see "tile shade" below) |
+| TSP's bit, reference tile | 2999 | 1405 after the last pixel (write-out 1355 + ~50) |
+| video bit | TSP + 37 | every one-tile scene, display off. With FB_X_CLIP 0..15: TSP + 13. Not seen in some renders of scenes top and kz_row16. Whole frames (2.1) show it 80-96 *before* the TSP's bit: not reconciled (T15) |
+| no list pointers (L0): ISP bit / first pixel / last / TSP bit | 202 / 403 / 1452 / 2854 | |
+| first pixel after the ISP's bit, one tile whose first shaded run is the background | 184-216 | every such scene, whatever the lists and objects |
+
+**List pointers [M].** Each pointer to an empty list delays the ISP's bit and the first pixel alike, serially:
+
+| pointers | 0 | 1 (OP / OM / TR / TM / PT) | 2 | 3 (TR TM PT / OP OM TR) | 4 | 5 |
+|---|---|---|---|---|---|---|
+| first pixel | 403 | 434 / 432 / 433 / 424 / 433 | 462 | 485 / 493 | 515 | 545 |
+| ISP's bit | 202 | 231 / 231 / 230 / 226 / 229 | 257 | 281 / 292 | 309 | 342 |
+
+About 30 clk a pointer (TR mod ~22), the same as timemeas's 20-31. Keep Z with no background: five pointers against
+none move the ISP's bit 133 -> 277 and the TSP's bit 1685 -> 1829, again ~29 each. [I] One list-block fetch
+each, not overlapped with the next (the 7.2 "list block fetch latency").
+
+**Entries in front [M].** KallistiOS's dummy entry (empty lists, not written out): the first pixel moves +913 for
+one, +1950 for two, +4024 for four, i.e. ~1037 for each after the first; the TSP's bit +900 / +1939 / +4013 (timemeas's
+899 for the first). The ISP's bit moves only +17 / +34 / +195. Keep-Z entries with no list pointer: +17.5 / +71 /
++145 for 1 / 4 / 8 (~18 each; timemeas 17). [I] The dummy's cost is its background shading (B 1035) on the TSP
+side; the ISP runs ahead through it.
+
+**Tile shade and tile-to-tile [M].**
+- Reference tile: first -> last pixel 1049 (96 renders: 1048-1059). Lines start every 32-34 clk (alternating;
+  line 0 -> 1: 35).
+- Tiles after the first in t4 / t16 (0888, 565, cover, clip; fog-stamped): 1034-1039. Tile 0 of t16_d (a dummy entry in front):
+  1034. Tile 1 of t2_isp / t2_isp565 (64 never sprites in that tile): 1052 / 1059.
+  **So the 1049 is not "the first tile of a render is 14 clk longer"**: tile 0 after a dummy entry shades in
+  1034, and a later tile behind heavy ISP work takes longer. [I] A tile shades in ~1035 when its runs were cut
+  ahead of the TSP, and ~14+ clk longer when the TSP had to wait on the cutter; not tested beyond these scenes.
+- Last pixel of tile k -> first pixel of tile k+1: 6-7 clk at 565 (pitch 1041, TSP bound, as timemeas's 1042);
+  ~300-340 at 0888 (pitch 1340-1381, write-out bound, as timemeas's 1358). Tile 0 -> 1 at 0888: 7 (the second
+  colour buffer is free).
+- A single 1x1 sprite in a keep-Z tile is shaded at 601-607 whatever its position (0,0), (31,0), (0,31), (16,16),
+  (31,31); a 32x1 row at line 0, 16 or 31 starts at 607-610 and lasts 32. Over a background, a pixel at (31,31) is
+  shaded in raster order (1653). [I] The TSP does not step through lines without runs.
+
+**Objects [M].** Against the reference tile (first pixel 545, ISP bit 342):
+
+| scene (all in the tile's first entry, no entry in front) | first pixel | ISP's bit |
+|---|---|---|
+| one never-passing 1x1 sprite (never1) / opaque list only (never1_Lop, against Lop 434 / 231) | +72 / +70 | +78 / +69 |
+| one 32x32 sprite over the background (cover) / opaque list only (cover_Lop) | +95 / +96 | +102 / +102 |
+| N never-passing sprites, N = 1 -> 64 | +17.0 each | +16.8 each |
+| a translucent never-passing sprite (trnever1) | +70 | +89 |
+| a translucent or PT sprite over lines 0-15 (tr_top, pt_top): the opaque background's first pixel | 1145 (+600) | +141 |
+
+The first object of the tile costs ~70 (never passing) to ~95 (seen) before the first pixel, against ~17 for each
+further one; this is the 55-90 of 3.1, now seen as a delay in front of the first pixel and the ISP's bit.
+**What it is is not measured.** A cold-versus-warm explanation (first parameter fetch, a setup started from
+nothing) is [I] only, and every scene above is also the render's first tile with no entry in front, so it is
+confounded with first-tile start-up. In t4_cover tile 1 also starts 96 later than t4's, but tile 1's start is
+pinned by tile 0's end, so that does not separate them. T1_SET 2 (a dummy entry, then 48 never sprites, with and
+without a seen sprite; t2_isp with a sprite over tile 1) was built to separate them and has not run.
+
+**The 335 split: not established.** The stamps give times for the ISP's bit (202), the first pixel (403) and the TSP's
+bit (2854) of a tile with no list pointers, and the background's 1049 between the first and last pixel. A
+decomposition of the 335 into region-array fetch, ISP start, TSP start and a ~156 clk "hand-over" was proposed from
+these; the hand-over is only what is left after subtracting the other terms (a residual, not an event the stamps
+show), so it is not used. The 335 / 142 split of 3.1 stays [M] as totals, its parts GAP.
+
+**The probe wedged the console.** Two runs left it with the first PVR access of every later program never
+returning until a power cycle (once on start right after a clean run, once in scene 95 kz_row00_Lop, which the run
+before had passed). Suspects, not isolated: ~10^5 FOG_COL / PALETTE register writes a scene during the render,
+region arrays without the dummy entry, keep-Z tiles. A re-run (T1_SET 2, the rest of T1) needs a safer design
+first: fewer stamp writes (stamp only around the event of interest, or a coarser pace once calibrated), the dummy
+entry in front where the scene allows, and one scene per program run so a wedge loses one scene.
 
 ### 3.2 ISP: list walk, setup, rasterizer
 
@@ -893,8 +991,8 @@ step count is either measured (cited) or a free parameter marked GAP to be fixed
 | ISP setup step counts by primitive kind | 16 / 15 / 19 / 19-15 | [M] | T2 |
 | rows stepped per triangle (thin triangles) | GAP | [M] anomaly | T2 |
 | setup-raster hand-off depth | 1 (G) | "first 16 lines hidden" | T2 |
-| list block fetch latency | ~20-31 | [M] | T1 |
-| fixed tile costs 335 / 142 / 55-90 split | GAP | [M] totals | T1 |
+| list block fetch latency | ~20-31; ~30 serial a pointer on the stamp clock (3.1a) | [M] | T1 (done for empty lists) |
+| fixed tile costs 335 / 142 / 55-90 split | GAP (3.1a: event times only; 55-90 cause not measured) | [M] totals | T1 rest (T1_SET 2) |
 | tag buffer count, cut/raster overlap rule | GAP | [M] 3.4 | T4 |
 | run queue depth and entry rules | ~430-480 total | [M] | T3 |
 | sorter emit/fill rate, early drains | GAP | [M] | T5 |
@@ -942,7 +1040,10 @@ of 11 x 3 runs, twins. Races go in `<test>_races`.
 Each entry: question -> scene -> readout -> what it fixes. Priority is for building a cycle-accurate rtl/v1: the
 instruments first, then the stages in pipeline order, weighted by how much end-of-render time they carry.
 
-**T1 (first): an absolute palette clock, for latencies.** `TM_STAMP`.
+**T1 (first): an absolute palette clock, for latencies.** `TM_STAMP`. **Partially done 2026-11-20** (3.1a):
+variant a) and the list / entry / object / position scenes ran as t1stamp_clock with a FOG_COL_RAM stamp (the 565
+palette stamp slows the TSP); results in 3.1a. Open: T1_SET 2 (55-90 against first-tile start-up), b)-e), and a
+safer design first: the probe wedged the console twice (3.1a).
 - Question: every latency the queues hide (STARTRENDER to the first pixel; region-array and list fetch
   latencies; tile k's last pixel to tile k+1's first; ISP-to-TSP delay per tile; setup latency of a drain;
   SEC WRITE wait start and end).
