@@ -1,0 +1,5 @@
+build/
+obj_dir/
+*.o
+*.vcd
+*.fst
