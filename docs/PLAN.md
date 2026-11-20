@@ -6,8 +6,11 @@ of [ARCHITECTURE.md](ARCHITECTURE.md), which defines the units this plan builds.
 architecture's.
 
 Pins: refsw3 = nulldc3 `skmp/refsw3` @ `4f3efe15` (refcore clean); dreamcast-tests @ `a932980`. M0 and M1 were
-built and gated at `708fb8cd`. The specs' edge sections are at `4f3efe15`, their depth and TSP sections still lag
-(ARCHITECTURE §0.1, §0.1b); where they disagree, refsw3 is the reference for every gate.
+built and gated at `708fb8cd`; M1's range wrappers (H10: `p2_fp_rng_add`'s TSP zero rule and MIP flavour,
+`p2_fp_rng_recip`'s determinant of 2^126 or more and zero determinant) and `tb/fp/ref_copies.h` were brought to
+`4f3efe15` with M2 (`make fp`, `make scaffold` pass there). The specs' edge sections are at `4f3efe15`, num §4 / H10
+too; the rest of their depth and TSP sections still lag (ARCHITECTURE §0.1, §0.1b); where they disagree, refsw3 is
+the reference for every gate.
 
 ## 0. Rules for every milestone
 
@@ -370,6 +373,13 @@ The whole of num §6 and §7, in three rounds, with H7a and H14 taken from refsw
 | H15 | half-up to truncate |
 
 ### M2. ISP edge path
+
+**Status (2026-11-20): implemented, not committed.** `rtl/v1/isp/` (p2_isp_edge_setup, _det, _line, _cross, _block,
+p2_isp_rowrange, p2_isp_edge_raster, _row and the p2_isp_fadd / fmul / fsw wrappers), `tb/isp_edge/` (lockstep with
+refsw3 `4f3efe15`; directed literals including the console pages of faredge_*, hugepos_a, edge2_* compared pixel by
+pixel), `tools/gate/gate_isp_edge.sh`, `tria_extract.sh`, `tria_conv.cpp`; `make isp-edge`, `isp-edge-full` and
+`isp-edge-mutants` pass, as do `make scaffold` and `make fp` after the M1 range wrappers' move to `4f3efe15` (Pins).
+Results in `agents/m2r2/`.
 
 **Deliverables.** The edge datapath of `p2_isp_setup` as a fixed-latency unit (the sequencer comes in M4), at refsw3
 `4f3efe15` semantics (isp §7-8, ARCHITECTURE §0.1b, §2.4, §3.4.4 steps 1-5, §3.4.5):

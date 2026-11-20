@@ -2,12 +2,14 @@
 # check_ref_switches.sh: refsw3's run-time and compile-time switches are at their hardware values (PLAN 1.1). Every
 # gate runs it and records its verdict in the summary. A second or two (item 4 builds the generator once).
 #
-#   1. env       MIP_K and MIP_ARITH are unset, empty or 0 (pvr_tsp_plane.h MipSelect reads both with getenv);
+#   1. env       MIP_K, MIP_ARITH, MIP_DZ and TSP_ZERO are unset, empty or 0 (pvr_tsp_plane.h reads them with getenv:
+#                MipSelect's MIP_K, MIP_ARITH, MIP_DZ and the setup adders' TSP_ZERO, each "0: the model" since 2bee80f2);
 #   2. defines   FOG_VARIANT (refsw_tile.cpp) is not defined other than 0, and PVRFP_NO_INT128 (pvr_softfp.h) not at
 #                all, by refsw3-offline's build.sh (the L2 glue and p2-offline take its flags) or by this repository's
 #                build files; refsw_tile.cpp's own default is still 0;
-#   3. refcore   has no switch beyond the known ones: its getenv names are {MIP_K, MIP_ARITH}, and every macro its
+#   3. refcore   has no switch beyond the known ones: its getenv names are item 1's, and every macro its
 #                #if / #ifdef / #ifndef / #elif lines test is known (a new one must be classified here);
+#                (its getenv names are those of item 1)
 #   4. *HW       the *HW structs are the ones p2_hw_pkg was generated from (make hw-pkg-check).
 #
 #   tools/check_ref_switches.sh [--no-hwpkg]     --no-hwpkg: skip item 4 (a caller that runs hw-pkg-check itself)
@@ -24,21 +26,21 @@ RC=${REFCORE:-$N3/refsw3/refcore}
 KNOWN_MACROS="_MSC_VER __clang__ __GNUC__ __SIZEOF_INT128__ REFSW_OFFLINE FOG_VARIANT PVRFP_NO_INT128"
 #   compilers: _MSC_VER __clang__ __GNUC__ __SIZEOF_INT128__; REFSW_OFFLINE: the offline build (refsw3-offline, the
 #   glue, p2-offline all define it); FOG_VARIANT, PVRFP_NO_INT128: checked by item 2
-KNOWN_GETENV="MIP_K MIP_ARITH"
+KNOWN_GETENV="MIP_K MIP_ARITH MIP_DZ TSP_ZERO"
 # this repository's build files, where a -D of a switch would come from
 OUR_BUILD_FILES="$ROOT/Makefile $ROOT/tb/mk/*.mk $ROOT/tools/p2-offline/build.sh"
 
 check() {   # check <nulldc3> <refcore> <hwpkg: 1/0>
   local n3=$1 rc=$2 hw=$3 bad=0 line
   # 1. environment
-  for v in MIP_K MIP_ARITH; do
+  for v in $KNOWN_GETENV; do
     local val
     val=$(printenv "$v")
     if [ -n "$val" ] && [ "$val" != 0 ]; then
-      echo "check_ref_switches: env: $v=$val (must be unset or 0: MipSelect's experiment)"; bad=1
+      echo "check_ref_switches: env: $v=$val (must be unset or 0: an experiment of pvr_tsp_plane.h)"; bad=1
     fi
   done
-  [ $bad = 0 ] && echo "check_ref_switches: env: MIP_K, MIP_ARITH unset or 0"
+  [ $bad = 0 ] && echo "check_ref_switches: env: $KNOWN_GETENV unset or 0"
   # 2. defines
   local b2=0 f
   local offsh="$n3/refsw3-offline/build.sh"
@@ -92,7 +94,7 @@ if [ "${1:-}" = "--selftest" ]; then
   }
   st=0
   expect() {   # expect <exit> <case>   (on the fake tree as it is now)
-    ( unset MIP_K MIP_ARITH; eval "$3"; check "$T/n3" "$T/n3/refsw3/refcore" 0 ) > "$T/$2.log" 2>&1; local got=$?
+    ( unset $KNOWN_GETENV; eval "$3"; check "$T/n3" "$T/n3/refsw3/refcore" 0 ) > "$T/$2.log" 2>&1; local got=$?
     if [ "$got" = "$1" ]; then echo "check_ref_switches --selftest: $2: ok (exit $got)"
     else echo "check_ref_switches --selftest: $2: exit $got, want $1"; sed 's/^/    /' "$T/$2.log"; st=1; fi
   }
@@ -100,6 +102,8 @@ if [ "${1:-}" = "--selftest" ]; then
   fresh; expect 0 env-zero "export MIP_K=0 MIP_ARITH="
   fresh; expect 1 env-mipk "export MIP_K=99"
   fresh; expect 1 env-miparith "export MIP_ARITH=4"
+  fresh; expect 1 env-mipdz "export MIP_DZ=2"
+  fresh; expect 1 env-tspzero "export TSP_ZERO=1"
   fresh; sed -i 's/^DEF="/DEF="-DFOG_VARIANT=1 /' "$T/n3/refsw3-offline/build.sh"; expect 1 fog-variant ":"
   fresh; sed -i 's/^DEF="/DEF="-DFOG_VARIANT=0 /' "$T/n3/refsw3-offline/build.sh"; expect 0 fog-variant-0 ":"
   fresh; sed -i 's/^FLAGS="/FLAGS="-DPVRFP_NO_INT128 /' "$T/n3/refsw3-offline/build.sh"; expect 1 no-int128 ":"

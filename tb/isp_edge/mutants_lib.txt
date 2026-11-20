@@ -1,0 +1,8 @@
+# tb/isp_edge/mutants_lib.txt: the planted bugs of the M1 library (rtl/v1/lib/fp) that the edge path's own rules sit in
+# (PLAN M2 "Mutants"), caught by the edge testbench (make isp-edge-mutants runs this file after tb/isp_edge/mutants.txt).
+@dir rtl/v1/lib/fp FP_DIR
+@obj ISP_EDGE_OBJDIR
+@probe edge isp-edge-build tb --n 20000
+
+cull-equal-kept | p2_fp_abs_le.sv | (ja <= jb) | (ja < jb) | edge | a determinant equal to FPU_CULL_VAL not culled (raster page 4: it is)
+swamp-at-127 | p2_fp_swamp.sv | p2_fp_at_least_pow2 #(.MW(MW)) u_ge (.i_exp(i_exp), .i_mant(i_mant), .e(P2_FP_EW'(OE)), .ge(ge)); | p2_fp_at_least_pow2 #(.MW(MW)) u_ge (.i_exp(i_exp), .i_mant(i_mant), .e(P2_FP_EW'(OE - 1)), .ge(ge)); | edge | the swamp and the saturation from 2^127 (faredge_cmax: 2^128 exactly is the edge)

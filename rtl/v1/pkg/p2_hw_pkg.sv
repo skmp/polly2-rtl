@@ -23,21 +23,24 @@ package p2_hw_pkg;
   localparam int P2_ISP_EDGE_SATURATE_EXP        = 127;  // pvrisp::EdgeHW::saturateExp
   localparam int P2_ISP_EDGE_LAST_COLUMN_BY_STEP = 1;    // pvrisp::EdgeHW::lastColumnByStep (MODE)
   localparam int P2_ISP_EDGE_BLOCK_MAX           = 129;  // pvrisp::EdgeHW::blockMax
+  localparam int P2_ISP_EDGE_CUT_UNIT_BITS       = 27;   // pvrisp::EdgeHW::cutUnitBits
   localparam int P2_ISP_EDGE_WALK_EXP            = 131;  // pvrisp::EdgeHW::walkExp
 
   // pvrisp::DepthHW (pvr_isp_depth.h)
-  localparam int P2_ISP_DEPTH_PRODUCT_BITS    = 24;   // pvrisp::DepthHW::productBits
-  localparam int P2_ISP_DEPTH_SUM_BITS        = 24;   // pvrisp::DepthHW::sumBits
-  localparam int P2_ISP_DEPTH_REACH           = 25;   // pvrisp::DepthHW::reach
-  localparam int P2_ISP_DEPTH_RECIP_BITS      = 24;   // pvrisp::DepthHW::recipBits
-  localparam int P2_ISP_DEPTH_COEF_BITS       = 24;   // pvrisp::DepthHW::coefBits
-  localparam int P2_ISP_DEPTH_START_BITS      = 20;   // pvrisp::DepthHW::startBits
-  localparam int P2_ISP_DEPTH_SLOPE_BITS      = 20;   // pvrisp::DepthHW::slopeBits
-  localparam int P2_ISP_DEPTH_PAIR_BITS       = 21;   // pvrisp::DepthHW::pairBits
-  localparam int P2_ISP_DEPTH_TILE_BITS       = 26;   // pvrisp::DepthHW::tileBits
-  localparam int P2_ISP_DEPTH_STORED_BITS     = 19;   // pvrisp::DepthHW::storedBits
-  localparam int P2_ISP_DEPTH_START_ON_SLOPES = 1;    // pvrisp::DepthHW::startOnSlopes (MODE)
-  localparam int P2_ISP_DEPTH_RANGE           = 1;    // pvrisp::DepthHW::range (MODE)
+  localparam int P2_ISP_DEPTH_PRODUCT_BITS     = 24;   // pvrisp::DepthHW::productBits
+  localparam int P2_ISP_DEPTH_SUM_BITS         = 24;   // pvrisp::DepthHW::sumBits
+  localparam int P2_ISP_DEPTH_REACH            = 25;   // pvrisp::DepthHW::reach
+  localparam int P2_ISP_DEPTH_RECIP_BITS       = 24;   // pvrisp::DepthHW::recipBits
+  localparam int P2_ISP_DEPTH_COEF_BITS        = 24;   // pvrisp::DepthHW::coefBits
+  localparam int P2_ISP_DEPTH_START_BITS       = 20;   // pvrisp::DepthHW::startBits
+  localparam int P2_ISP_DEPTH_SLOPE_BITS       = 20;   // pvrisp::DepthHW::slopeBits
+  localparam int P2_ISP_DEPTH_PAIR_BITS        = 21;   // pvrisp::DepthHW::pairBits
+  localparam int P2_ISP_DEPTH_TILE_BITS        = 26;   // pvrisp::DepthHW::tileBits
+  localparam int P2_ISP_DEPTH_STORED_BITS      = 19;   // pvrisp::DepthHW::storedBits
+  localparam int P2_ISP_DEPTH_START_ON_SLOPES  = 1;    // pvrisp::DepthHW::startOnSlopes (MODE)
+  localparam int P2_ISP_DEPTH_RANGE            = 1;    // pvrisp::DepthHW::range (MODE)
+  localparam int P2_ISP_DEPTH_ZERO_RULE_COORDS = 1;    // pvrisp::DepthHW::zeroRuleCoords (MODE)
+  localparam int P2_ISP_DEPTH_ZERO_RULE_EDGES  = 1;    // pvrisp::DepthHW::zeroRuleEdges (MODE)
 
   // pvrtsp::PlaneHW (pvr_tsp_plane.h)
   localparam int P2_TSP_PLANE_PRODUCT_BITS = 24;   // pvrtsp::PlaneHW::productBits

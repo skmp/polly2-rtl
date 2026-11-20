@@ -323,7 +323,7 @@ Per primitive per tile (edge.h `EdgeTile` at `4f3efe15`, depth.h `DepthTileT` at
 | `const_v`, `const_in` | 2 | the whole tile has one answer: a bad corner (nothing inside), a point edge (inside), or `d = E - unit >= 30` (the start's sign; isp §8.5's proof, still valid: big edges have `d = 27`) |
 | `t0` | 31 signed | start in half units of 2^unit (`unit = ep - 21`, or 102 for a big edge, whose start is cut toward zero: even, `|t0| < 2^27`) |
 | `tx`, `ty` | 28 signed | column step (from -dy) and row step (from dx), in half units, even. Ordinary `|tx|, |ty| < 2^22`; big `< 2^27` |
-| `zsh` | 3 | `zero2 = tie2 = 2^zsh` half units, `zsh = d - 20`: d = 27..29 for an ordinary edge, **27 for a big edge** (E capped at 129, unit 102): 7..9 |
+| `zsh` | 4 | `zero2 = tie2 = 2^zsh` half units, `zsh = d - 20`: d = 27..29 for an ordinary edge, **27 for a big edge** (E capped at 129, unit 102): 7..9 (4 bits, `P2_EDGE_ZSH_BITS`) |
 | `big` | 1 | E was capped (`ep >= 124`, a step of 2^123 or more): the walk below decides each row, on the same `t0`, `tx`, `ty`, `zero2` (refsw3's `f0`, `fx`, `fy`, `z`); `H = 2^30` half units (2^131) is a constant |
 | `far32` | 31 | the walk's far-value term, precomputed: `tx > 0 ? (tx mod 2^25) << 5` (= `(32 sx) mod 2^131`), `tx < 0` with `tx mod 2^25 == 0` (sx a multiple of 2^126) `? 2^30` (= 2^131), else 0 |
 

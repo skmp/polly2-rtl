@@ -19,15 +19,17 @@ package p2_fp_pkg;
   // `below` (literals). The testbench compares each flavour with its own copy, so a change in any one shows there.
   localparam int P2_FP_RNG_HIGH = 127;
   localparam int P2_FP_RNG_LOW  = -126;
-  // the TSP's last addition: a zero added to a value with top - 1 < -127 + zeroReach counts as 2^-127
-  // (pvr_tsp_plane.h PlaneT::Setup addTerm, PlaneHW::zeroReach 2; uvmeas wtiny1, cmeas cwext1 / cwsum1; GAP G2)
+  // the TSP's reciprocal is a zero for a determinant with top - 1 >= this (pvr_tsp_plane.h PlaneT::Setup; trsort_recip)
+  localparam int P2_FP_RECIP_DET_HIGH = 126;
+  // the TSP setup's zero rule: a zero added to a value v with top - 1 < -127 + zeroReach, |v| < 1.5 2^(top - 1) and
+  // the other sign is +0 (pvr_tsp_plane.h PlaneT::Setup addTerm, PlaneHW::zeroReach 2; tsp2_zadd 9,600 of 9,600)
   localparam int P2_FP_ZERO_REACH = 2;
 
   // p2_fp_rng_add: the flavour of one addition (num 4.2)
   localparam logic [1:0] P2_RNG_ADD_NONE  = 2'd0;   // edge unit: plain Add, no range (pvr_isp_edge.h)
-  localparam logic [1:0] P2_RNG_ADD_DEPTH = 2'd1;   // ISP depth setup `add` at 708fb8cd: the zero rule, every zero sum +0
-  localparam logic [1:0] P2_RNG_ADD_TSP   = 2'd2;   // TSP `addTerm(., ., false)`; MipSelect `radd` (with R = 53)
-  localparam logic [1:0] P2_RNG_ADD_TSP3  = 2'd3;   // TSP `addTerm(., ., true)`: the last addition of a sum of three
+  localparam logic [1:0] P2_RNG_ADD_DEPTH = 2'd1;   // ISP depth setup `add` (4f3efe15): the zero rule, every zero sum +0
+  localparam logic [1:0] P2_RNG_ADD_TSP   = 2'd2;   // TSP `addTerm` (4f3efe15, either addition): the zero rule, every zero sum +0
+  localparam logic [1:0] P2_RNG_ADD_MIP   = 2'd3;   // MipSelect `radd` (with R = 53): no zero rule, a zero sum keeps its sign
 
   // p2_fp_rng_lim: the check after an operation (num 4.2)
   localparam logic [1:0] P2_RNG_LIM_PRODUCT = 2'd0;  // above: infinity of its sign; below: zero of its sign

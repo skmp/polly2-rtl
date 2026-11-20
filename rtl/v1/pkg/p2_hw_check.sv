@@ -36,6 +36,15 @@ module p2_hw_check;
     if (P2_ISP_DEPTH_RANGE != 1) begin : g_depth_range
       $fatal(1, "p2_hw_pkg: DepthHW::range is %0d; the RTL implements 1", P2_ISP_DEPTH_RANGE);
     end
+    // DepthHW::zeroRuleCoords 1, zeroRuleEdges 1: the depth setup's own coordinate differences, edges and determinant
+    // take the zero rule (refsw3 0de9776b, depth.h subC / addE; dreamcast-tests pvr-tests/depth2_zcoord, depth2_zedge).
+    // The edge unit's c, dx, dy and EdgeWinding determinant do not (plain Add / Sub, isp 6.2)
+    if (P2_ISP_DEPTH_ZERO_RULE_COORDS != 1) begin : g_depth_zero_rule_coords
+      $fatal(1, "p2_hw_pkg: DepthHW::zeroRuleCoords is %0d; the RTL implements 1", P2_ISP_DEPTH_ZERO_RULE_COORDS);
+    end
+    if (P2_ISP_DEPTH_ZERO_RULE_EDGES != 1) begin : g_depth_zero_rule_edges
+      $fatal(1, "p2_hw_pkg: DepthHW::zeroRuleEdges is %0d; the RTL implements 1", P2_ISP_DEPTH_ZERO_RULE_EDGES);
+    end
     // PlaneHW::range 1: the TSP setup's range rules (num 4; uvmeas wexp, whuge, wtiny, wspec, wneg)
     if (P2_TSP_PLANE_RANGE != 1) begin : g_plane_range
       $fatal(1, "p2_hw_pkg: PlaneHW::range is %0d; the RTL implements 1", P2_TSP_PLANE_RANGE);

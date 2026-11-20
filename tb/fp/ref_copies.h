@@ -5,14 +5,17 @@
 // tb/ref/ref_copies.h. Code outside the blocks is ours: the functions around them give each copy the names it captures
 // (the HW configuration: DepthHW, PlaneHW, ranged = 1) and dispatch on an operation.
 //
-//   p2fpref::depth(op, a, b, af, bf)   pvr_isp_depth.h L321-371 (inf, zero, load, limit, mul, add, sub), L571-575
-//                                      (addBad), L596 (under), at 708fb8cd
-//   p2fpref::tsp(op, a, b, zbits)      pvr_tsp_plane.h L144-184 (ranged, inf, zero, above, below, load, mul, addTerm,
-//                                      add, sum3, sub), L257-267 (withZero), L285-287 (the reciprocal's range)
-//   p2fpref::mip(op, a, b, &kind)      pvr_tsp_plane.h L602-612 (above, below, inf, kind), L619-621 (1/det), L629-630
-//                                      (1/det^2 below the range), L699-710 (rmul), L720-730 (radd)
-//   p2fpref::seen(v)                   pvr_tsp_plane.h L311-315 (PlaneT::Value: the evaluator's view of a coefficient)
-//   p2fpref::culledBySize(det, reg), culledByFacing(mode, det)   refsw_tile.cpp L722-740
+//   p2fpref::depth(op, a, b, af, bf)   pvr_isp_depth.h L353-414 (inf, zero, load, limit, mul, addRule, add, subC, addE),
+//                                      L648-652 (addBad), L673 (under), at 4f3efe15 (cfg: DepthConfig, zeroRuleCoords
+//                                      and zeroRuleEdges 1: subC and addE are add)
+//   p2fpref::tsp(op, a, b, zbits)      pvr_tsp_plane.h L168-223 (ranged, inf, zero, above, below, load, mul, addTerm,
+//                                      add, sum3, sub; TSP_ZERO 0, the model), L297-307 (withZero), L331-333 (the
+//                                      reciprocal's range), at 4f3efe15
+//   p2fpref::mip(op, a, b, &kind)      pvr_tsp_plane.h L657-667 (above, below, inf, kind), L680-682 (1/det; +0 for a
+//                                      zero determinant), L690-691 (1/det^2 below the range), L762-773 (rmul), L783-793
+//                                      (radd), at 4f3efe15
+//   p2fpref::seen(v)                   pvr_tsp_plane.h L357-361 (PlaneT::Value: the evaluator's view of a coefficient)
+//   p2fpref::culledBySize(det, reg), culledByFacing(mode, det)   refsw_tile.cpp L726-744
 //   p2fpref::tables::BM_HW_SIN, BM_HW_COS, ditherAdd   refsw_tile.cpp L1542-1577 (BumpMapper's tables), refsw_lists.cpp
 //                                      L390-395 (the write-out's dither), at 708fb8cd (M1c: the ROMs' testbench, fp-rom)
 //
@@ -37,6 +40,7 @@ enum DepthOp { D_LIMIT_PRODUCT, D_LIMIT_SUM, D_MUL, D_ADD, D_ADDBAD, D_UNDER };
 inline Fp depth(DepthOp op, const Fp& a, const Fp& b = Fp(), uint32_t af = 0, uint32_t bf = 0)
 {
     using namespace pvrfp;
+    const pvrisp::DepthConfig cfg{};
     const auto PB = pvrisp::DepthHW::productBits;
     const auto SB = pvrisp::DepthHW::sumBits;
     const auto RE = pvrisp::DepthHW::reach;
@@ -60,12 +64,12 @@ inline Fp depth(DepthOp op, const Fp& a, const Fp& b = Fp(), uint32_t af = 0, ui
         };
         // An addition of the setup's. A sum of zero is +0, -0 + -0 too. A zero added to a number x of 2^-126 ..
         // 1.5 2^-126 in size whose sign is not the zero's is +0 (as if the zero were 2^-127 with its sign and the sum
-        // then below the range; the TSP's mean adds a zero so, pvr_tsp_plane.h withZero); to any other x it is x, to
+        // then below the range; the TSP's setup adds a zero so too: pvr_tsp_plane.h Setup); to any other x it is x, to
         // the bit. A zero is one from an input, a product below 2^-126 with its sign, or a sum. In every addition:
         // dreamcast-tests/pvr-tests/depthgaps_zadd (32 slivers read out to the bit, one triangle per case, nothing
         // else near 2^-126; 12 flat probes against quads at 0, z and z + 2^-126): the slope's last addition, +0 +
         // t3: t3 = -2^-126, -1.25 2^-126, -(1.5 - 2^-22) 2^-126 give a slope of 0, -1.5, -1.75, -(2 - 2^-22) and
-        // +1 .. +1.75 (2^-126) themselves exactly (not 2^-127 more or less: the TSP's planes' rule, 76 of 109
+        // +1 .. +1.75 (2^-126) themselves exactly (not 2^-127 more or less: refsw3's TSP planes' rule then, 76 of 109
         // regions); -0 + -0 is +0 (as -0: 108 of 109); zeros from products below 2^-126 the same; the first
         // addition, -0 + 1.25 2^-126 is +0, +0 + 1.25 and -0 + 1.75 are kept (without the rule there: 108 of 109);
         // the tile's start +0 + c: c = -(1 .. 1.5 - 2^-10) 2^-126 starts at 0, -(1.5 .. 2 - 2^-9) and +1 .. +1.75 at
@@ -73,14 +77,23 @@ inline Fp depth(DepthOp op, const Fp& a, const Fp& b = Fp(), uint32_t af = 0, ui
         // probes at depths of exponent fields 0 .. 5, most of field 1, against 0 and against a probe of the same
         // shape at another depth): 2000 of 2000 orders with this (1642 with a zero as a zero, 1944 with the TSP's
         // planes' rule in the last additions, 1972 with -0 + -0 = -0, 1996 without the rule in the first additions).
-        // GAP: the rule sits in the setup's shared add, so it also applies to the coordinate differences and the
-        // determinant of the depth setup; only the depth products' sums were measured.
-        auto add = [&](const Fp& p, const Fp& q) {
+        // The coordinate differences (y1 - y2 .., x2 - x1 ..) go through the same adder, with the rule:
+        // dreamcast-tests/pvr-tests/depth2_zcoord (16 triangles near the origin, one coordinate of two corners among
+        // +-0 and +-(1 .. 1.5) 2^-126, where such a difference multiplies a depth of 2^126 and more or an infinity:
+        // the product a zero, or an infinity times zero 0, with the rule; refsw3 without it there (zeroRuleCoords 0)
+        // stores other words at all 2,599 pixels; 5 background probes each: 80 of 80 regions with it, 4,558 probe
+        // pixels on 49 pages that tell the two apart). So do the edges x_j y_k - x_k y_j and the determinant's sums:
+        // dreamcast-tests/pvr-tests/depth2_zedge (13 triangles near the origin, tiny and signed-zero coordinates,
+        // an infinite corner: an edge of +0 against one of +-(1 .. 1.5) 2^-126 makes the infinite depth's term of the
+        // constant 0 or an infinity; refsw3 without the rule there (zeroRuleEdges 0) stores other words at all 160
+        // pixels; 65 of 65 regions with it, 110 probe pixels on 29 pages that tell the two apart).
+        // rule false: the same addition without the zero rule (zeroRuleCoords, zeroRuleEdges 0: not the hardware's)
+        auto addRule = [&](const Fp& p, const Fp& q, bool rule) {
             if (ranged && (p.bad || q.bad)) {
                 if (p.bad && q.bad && p.neg != q.neg) return zero(false);
                 return inf(p.bad ? p.neg : q.neg);
             }
-            if (ranged && p.zero() != q.zero()) {
+            if (rule && ranged && p.zero() != q.zero()) {
                 const Fp& v = p.zero() ? q : p;
                 const bool zneg = p.zero() ? p.neg : q.neg;
                 const int n = Fp::Bits(v.mant);
@@ -92,7 +105,9 @@ inline Fp depth(DepthOp op, const Fp& a, const Fp& b = Fp(), uint32_t af = 0, ui
                 r.neg = false;
             return r;
         };
-        auto sub = [&](const Fp& p, const Fp& q) { return add(p, -q); };
+        auto add = [&](const Fp& p, const Fp& q) { return addRule(p, q, true); };
+        auto subC = [&](const Fp& p, const Fp& q) { return addRule(p, -q, cfg.zeroRuleCoords != 0); };
+        auto addE = [&](const Fp& p, const Fp& q) { return addRule(p, q, cfg.zeroRuleEdges != 0); };
 // P2REF-END fp-depth-rng
 // P2REF-COPY fp-depth-addbad pvr_isp_depth.h auto addBad = [&](const Fp& p, uint32_t pf, const Fp& q, uint32_t qf) {
                 auto addBad = [&](const Fp& p, uint32_t pf, const Fp& q, uint32_t qf) {
@@ -105,7 +120,8 @@ inline Fp depth(DepthOp op, const Fp& a, const Fp& b = Fp(), uint32_t af = 0, ui
             auto under = [](Fp& v) { if (!v.zero() && v.top() - 1 < -126) v.mant = 0; };
 // P2REF-END fp-depth-under
     (void)load;
-    (void)sub;
+    (void)subC;
+    (void)addE;
     switch (op) {
     case D_LIMIT_PRODUCT: return limit(a, false);
     case D_LIMIT_SUM: return limit(a, true);
@@ -128,6 +144,7 @@ enum TspOp { T_MUL, T_ADD, T_ADD3, T_RECIP, T_WITHZERO };
 inline Fp tsp(TspOp op, const Fp& a, const Fp& b = Fp(), uint32_t zbits = 0)
 {
     using namespace pvrfp;
+    using pvrtsp::TspZero;
     const pvrtsp::PlaneHW cfg{};
     const auto PB = cfg.productBits;
     const auto SB = cfg.sumBits;
@@ -152,23 +169,38 @@ inline Fp tsp(TspOp op, const Fp& a, const Fp& b = Fp(), uint32_t zbits = 0)
             if (below(r)) return zero(neg);
             return r;
         };
-        auto addTerm = [&](const Fp& p0, const Fp& q0, bool third) {
+        const bool oldZero = TspZero() == 1;            // EXPERIMENT: the rule before tsp2_zadd
+        auto addTerm = [&](const Fp& p, const Fp& q, bool third) {
             if (!ranged)
-                return Add(p0, q0, SB, RE);
-            if (p0.bad || q0.bad) {
-                if (p0.bad && q0.bad && p0.neg != q0.neg)
+                return Add(p, q, SB, RE);
+            if (p.bad || q.bad) {
+                if (p.bad && q.bad && p.neg != q.neg)
                     return zero(false);
-                return inf(p0.bad ? p0.neg : q0.neg);
+                return inf(p.bad ? p.neg : q.neg);
             }
-            Fp p = p0, q = q0;
-            if (third) {
-                auto smallest = [&](const Fp& v) { return !v.zero() && v.top() - 1 < -127 + cfg.zeroReach; };
-                if (q0.zero() && smallest(p0)) { q.mant = 1; q.exp = -127; }
-                if (p0.zero() && smallest(q0)) { p.mant = 1; p.exp = -127; }
+            auto smallest = [&](const Fp& v) { return !v.zero() && v.top() - 1 < -127 + cfg.zeroReach; };
+            if (oldZero) {
+                Fp a = p, b = q;
+                if (third) {
+                    if (q.zero() && smallest(p)) { b.mant = 1; b.exp = -127; }
+                    if (p.zero() && smallest(q)) { a.mant = 1; a.exp = -127; }
+                }
+                Fp r = Add(a, b, SB, RE);
+                if (above(r)) return inf(r.neg);
+                if (below(r)) return zero(false);
+                return r;
+            }
+            if (p.zero() != q.zero()) {
+                const Fp& v = p.zero() ? q : p;
+                const bool zneg = p.zero() ? p.neg : q.neg;
+                const int n = Fp::Bits(v.mant);
+                const bool half = n >= 2 && ((v.mant >> (n - 2)) & 1);        // |v| >= 1.5 2^(top - 1)
+                if (smallest(v) && zneg != v.neg && !half)
+                    return zero(false);
             }
             Fp r = Add(p, q, SB, RE);
             if (above(r)) return inf(r.neg);
-            if (below(r)) return zero(false);
+            if (below(r) || r.zero()) return zero(false);
             return r;
         };
         auto add = [&](const Fp& p, const Fp& q) { return addTerm(p, q, false); };
@@ -195,7 +227,7 @@ inline Fp tsp(TspOp op, const Fp& a, const Fp& b = Fp(), uint32_t zbits = 0)
         const Fp& det = a;
 // P2REF-COPY fp-tsp-recip pvr_tsp_plane.h Fp inv = det.bad ? zero(det.neg) : Recip(det, cfg.recipBits);
         Fp inv = det.bad ? zero(det.neg) : Recip(det, cfg.recipBits);
-        if (ranged && below(inv))
+        if (ranged && (below(inv) || (!det.bad && !det.zero() && det.top() - 1 >= 126)))
             inv = zero(inv.neg);
 // P2REF-END fp-tsp-recip
         return inv;
@@ -239,8 +271,8 @@ inline Fp mip(MipOp op, const Fp& a, const Fp& b = Fp(), int* kindOut = nullptr)
     }
     if (op == M_RECIP) {
         const Fp& det = a;
-// P2REF-COPY fp-mip-recip pvr_tsp_plane.h Fp inv = det.bad ? Fp() : Recip(det, 24);
-    Fp inv = det.bad ? Fp() : Recip(det, 24);
+// P2REF-COPY fp-mip-recip pvr_tsp_plane.h Fp inv = (det.bad || det.zero()) ? Fp() : Recip(det, 24);
+    Fp inv = (det.bad || det.zero()) ? Fp() : Recip(det, 24);
     if (ranged && below(inv))
         inv = Fp();
 // P2REF-END fp-mip-recip

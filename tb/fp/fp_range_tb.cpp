@@ -4,12 +4,13 @@
 //   p2_fp_rng_lim      PRODUCT / SUM: depth `limit(r, false / true)`; UNDER: depth `under`; BELOW: MipSelect's
 //                      `if (ranged && below(inv2)) inv2 = Fp()`
 //   p2_fp_rng_mul      ranged 0: Mul(a, b, C<24>) (edge); ranged 1: depth `mul`, TSP `mul` and mip `rmul`, each
-//   p2_fp_rng_add 25   NONE: Add(a, b, C<24>, C<25>) (edge); DEPTH: depth `add`; TSP: TSP `add`; TSP3: `addTerm(., ., true)`
-//   p2_fp_rng_add 53   NONE: Add(a, b, 24, 53); TSP: mip `radd` (DEPTH and TSP3 have no refsw3 site at reach 53)
+//   p2_fp_rng_add 25   NONE: Add(a, b, C<24>, C<25>) (edge); DEPTH: depth `add`; TSP: TSP `addTerm(., ., false)` and
+//                      `addTerm(., ., true)` (one rule at 4f3efe15); MIP: no refsw3 site at reach 25
+//   p2_fp_rng_add 53   NONE: Add(a, b, 24, 53); MIP: mip `radd` (DEPTH and TSP have no refsw3 site at reach 53)
 //   p2_fp_rng_add_inf  depth `addBad`
 //   p2_fp_rng_kind     mip `kind` and Mul(a, b, 24)
 //   p2_fp_rng_recip    mip 0: the TSP's `inv` (not for a zero determinant: refsw3 never takes one there); mip 1:
-//                      MipSelect's `inv`, and +0 for a zero determinant (the RTL's definition, num D1)
+//                      MipSelect's `inv` (+0 for a zero determinant since 4f3efe15)
 //   p2_fp_rng_with_zero   TSP `withZero`
 //
 // num D2: depth `add`'s zero rule shifts by -1 for a one-bit mantissa. Those cases expect +0 (the value rule,
@@ -17,8 +18,9 @@
 //
 // Sections (--only):
 //   directed  console facts as literals: depthgaps_zadd (-0 + 1.25 2^-126 is +0; +0 + 1.25 and -0 + 1.75 are kept;
-//             -0 + -0 is +0; a zero against -(1 .. 1.5 - 2^-22) 2^-126 is +0, against -1.5 2^-126 kept); the TSP's last
-//             addition (-2.5 2^-127 + 0 is +0, cmeas cwext1); inf * 0 = 0, inf - inf = +0 (uvmeas wspec); a product of
+//             -0 + -0 is +0; a zero against -(1 .. 1.5 - 2^-22) 2^-126 is +0, against -1.5 2^-126 kept); the TSP's
+//             zero rule (tsp2_zadd: 1.25 2^-126 + 0 is +0 in either addition, -1.75 kept, -0 + -0 +0) and MipSelect's
+//             radd (-0 + -0 = -0); trsort_recip (a determinant of exactly 2^126: a zero reciprocal); inf * 0 = 0, inf - inf = +0 (uvmeas wspec); a product of
 //             exactly 2^128 an infinity (zovf_ps), a sum of it too (zovf_lim); slivers_dzzero's boundary kept
 //   classes   the class pairs of num 7.3 ({+-0, +-bad, [2^-126, 2^-125), [2^-125, 2^-124), ordinary, [2^127, 2^128)}
 //             for both operands) x every mode, 100 members a pair (1000 --full), and arbitrary tuples
@@ -41,7 +43,7 @@ using namespace p2fpref;
 typedef Vp2_fp_range_tb_top Top;
 
 enum { LIM_PRODUCT, LIM_SUM, LIM_UNDER, LIM_BELOW };
-enum { ADD_NONE, ADD_DEPTH, ADD_TSP, ADD_TSP3 };
+enum { ADD_NONE, ADD_DEPTH, ADD_TSP, ADD_MIP };
 enum { KIND_NUMBER, KIND_INF, KIND_ZERO };
 
 static uint64_t g_d2 = 0, g_d2CopyOther = 0;   // num D2 cases met, and those where this build's copy is not +0
@@ -62,8 +64,8 @@ struct Case {
     unsigned limMode = 0, addMode = 0;
     bool mulRanged = false, recipMip = false;
     // directed: the console's values (when set)
-    bool litAdd = false, litMul = false, litWz = false;
-    Fp litAddV, litMulV, litWzV;
+    bool litAdd = false, litMul = false, litWz = false, litRcp = false;
+    Fp litAddV, litMulV, litWzV, litRcpV;
 
     void drive(Top* t) const
     {
@@ -129,8 +131,11 @@ struct Case {
                     expectFp(f, "depth add", copy, got, 24, in);
                 break;
             }
-            case ADD_TSP: expectFp(f, "TSP addTerm(a, b, false)", tsp(T_ADD, a, b), got, 24, in); break;
-            default: expectFp(f, "TSP addTerm(a, b, true)", tsp(T_ADD3, a, b), got, 24, in); break;
+            case ADD_TSP:
+                expectFp(f, "TSP addTerm(a, b, false)", tsp(T_ADD, a, b), got, 24, in);
+                expectFp(f, "TSP addTerm(a, b, true)", tsp(T_ADD3, a, b), got, 24, in);
+                break;
+            default: break;   // MIP: radd has no site at reach 25
             }
             if (litAdd)
                 expectFp(f, "console: sum", litAddV, got, 24, in);
@@ -140,7 +145,7 @@ struct Case {
             const Fp got = FP_GET(t, a53);
             if (addMode == ADD_NONE)
                 expectFp(f, "Add(a, b, 24, 53)", pvrfp::Add(a, b, 24, 53), got, 24, in);
-            else if (addMode == ADD_TSP)
+            else if (addMode == ADD_MIP)
                 expectFp(f, "mip radd", mip(M_RADD, a, b), got, 24, in);
         }
         // the depth mean's addBad
@@ -166,9 +171,11 @@ struct Case {
             const Fp got = FP_GET(t, rcp);
             const bool zeroDet = a.zero() && !a.bad;
             if (recipMip)
-                expectFp(f, zeroDet ? "mip inv of det 0 (RTL: +0, num D1)" : "mip inv", zeroDet ? Fp() : mip(M_RECIP, a), got, 24, in);
+                expectFp(f, "mip inv", mip(M_RECIP, a), got, 24, in);
             else if (!zeroDet)
                 expectFp(f, "TSP inv", tsp(T_RECIP, a), got, 24, in);
+            if (litRcp)
+                expectFp(f, "console: reciprocal", litRcpV, got, 24, in);
         }
         // withZero
         {
@@ -244,9 +251,16 @@ int main(int argc, char** argv)
             sum(pz, u126(true, 0xA00000), ADD_DEPTH, pz);                     // +0 - 1.25 2^-126
             sum(u126(true, 0xBFFFFE), pz, ADD_DEPTH, pz);                     // -(1.5 - 2^-22) 2^-126 + 0
             sum(pz, u126(true, 0xC00000), ADD_DEPTH, u126(true, 0xC00000));   // -1.5 2^-126: kept
-            // the TSP's last addition (cmeas cwext1): -2.5 2^-127 + 0 is -1.5 2^-127, below the range: +0
-            sum(u126(true, 0xA00000), pz, ADD_TSP3, pz);
-            sum(u126(true, 0xA00000), pz, ADD_TSP, u126(true, 0xA00000));     // in t1 + t2 a zero is a zero
+            // the TSP's zero rule (tsp2_zadd, 4f3efe15): as the depth setup's, in every addition of the sum
+            sum(u126(true, 0xA00000), pz, ADD_TSP, pz);                       // -1.25 2^-126 + 0 = +0 (cmeas cwext1)
+            sum(pz, u126(false, 0xA00000), ADD_TSP, u126(false, 0xA00000));   // +0 + 1.25: kept (same sign)
+            sum(nz, u126(false, 0xA00000), ADD_TSP, pz);                      // -0 + 1.25 = +0
+            sum(nz, u126(false, 0xE00000), ADD_TSP, u126(false, 0xE00000));   // -0 + 1.75: kept
+            sum(nz, nz, ADD_TSP, pz);                                         // -0 + -0 = +0
+            sum(mk(false, false, 0, 3), mk(true, false, 0, 3), ADD_TSP, pz);  // x - x = +0
+            // MipSelect's radd: no zero rule, -0 + -0 = -0 (at reach 53; reach 25 is unchecked in MIP mode)
+            sum(nz, nz, ADD_MIP, nz);
+            sum(nz, u126(false, 0xA00000), ADD_MIP, u126(false, 0xA00000));
             // infinities (uvmeas wspec): +inf + -inf = +0, inf + x = inf
             sum(mk(false, true, 0, 0), mk(true, true, 0, 0), ADD_TSP, pz);
             sum(mk(false, true, 0, 0), mk(true, true, 0, 0), ADD_DEPTH, pz);
@@ -261,6 +275,23 @@ int main(int argc, char** argv)
             prod(mk(false, false, 104, 0x800000), mk(false, false, -22, 0x800000), mk(false, true, 0, 0));
             prod(mk(false, false, 104, 0xFFFFFF), mk(false, false, -23, 0x800000), mk(false, false, 104, 0xFFFFFF));
             prod(mk(false, false, -123, 0x800000), mk(true, false, -53, 0x800000), nz);
+            // trsort_recip pages 3, 11 (4f3efe15): the TSP's reciprocal of a determinant of exactly +-2^126 is a zero of
+            // its sign; of 2^126 (1 - 2^-24) it is kept (page 2)
+            auto rcp = [&](const Fp& d, bool mipSite, const Fp& v) {
+                Case c = basic(d, pz, 0, g);
+                c.recipMip = mipSite;
+                c.litRcp = true;
+                c.litRcpV = v;
+                ls.push(c);
+            };
+            rcp(mk(false, false, 103, 0x800000), false, pz);
+            rcp(mk(true, false, 103, 0x800000), false, nz);
+            rcp(mk(false, false, 103, 0x800001), false, pz);
+            {
+                const Fp d = mk(false, false, 102, 0xFFFFFF);
+                rcp(d, false, pvrfp::Recip(d, 24));
+            }
+            rcp(nz, true, pz);                                                // MipSelect: det 0 gives +0
             // slivers_dzzero: on the boundary the depth is kept; one unit more and the sum is +0
             {
                 Case c = basic(u126(false, 0xC00000), pz, 0, g);
@@ -305,7 +336,7 @@ int main(int argc, char** argv)
             const bool vneg = (i >> 23) & 1, zneg = (i >> 24) & 1, swap = (i >> 25) & 1;
             Fp v = mk(vneg, false, -149, m), z = mk(zneg, false, (int)g.r.range(-200, 200), 0);
             Case c = basic(swap ? z : v, swap ? v : z, i, g);
-            c.addMode = ADD_DEPTH;
+            c.addMode = g.r.chance(500) ? ADD_TSP : ADD_DEPTH;
             ls.push(c);
         };
         if (a.full) {

@@ -183,23 +183,27 @@ package p2_pkg;
   } p2_fb_t;
 
   // ---------------------------------------------------------------------------------------------------------------
-  // 2.4 ISP setup to rasterizer descriptor, per primitive per tile (edge.h EdgeTile, depth.h DepthTileT at 708fb8cd)
+  // 2.4 ISP setup to rasterizer descriptor, per primitive per tile (edge.h EdgeTile at 4f3efe15, depth.h DepthTileT at 708fb8cd)
   // ---------------------------------------------------------------------------------------------------------------
-  // one edge (edge.h EdgeTile); the widths are ARCHITECTURE 2.4's bounds, asserted by M2
+  // one edge in one tile (edge.h EdgeTile at refsw3 4f3efe15; ARCHITECTURE 2.4, isp 8.3-8.5). Values in half units of
+  // 2^unit (unit = ep - 21, or E - cutUnitBits = 102 for a big edge). The widths are isp 8.5's bounds; M2's
+  // testbench (tb/isp_edge) asserts every one on refsw3's own values. Built by p2_isp_edge_block, read by p2_isp_edge_row.
+  localparam int P2_EDGE_T0_BITS   = 31;   // t0: |t0| < 2^29 (ordinary, d <= 29), < 2^27 (big)
+  localparam int P2_EDGE_STEP_BITS = 28;   // tx, ty: < 2^22 (ordinary), < 2^27 (big)
+  localparam int P2_EDGE_FAR_BITS  = 31;   // far32 in [0, 2^30]
+  localparam int P2_EDGE_ZSH_BITS  = 4;    // zsh = d - 20: 7 .. 9
+  localparam int P2_EDGE_LANE_BITS = 34;   // the row accumulator, the walk and the 32 lanes (isp 8.5: below 2^32.4)
   typedef struct packed {
-    logic               const_v;   // the whole tile has one answer: bad corner, point edge, or d = E - unit >= 30
-    logic               const_in;  // ... and that answer
-    logic signed [30:0] t0;        // start in half units of 2^unit
-    logic signed [22:0] tx;        // column step (from -dy), half units, even
-    logic signed [22:0] ty;        // row step (from dx), half units, even
-    logic [3:0]         zsh;       // zero2 = tie2 = 2^zsh half units, zsh = d - 20
-    logic               big;       // E was capped (ep >= 124): the walk decides each row
-    logic signed [33:0] f0;        // the start in half units of 2^fine, fine = unit - 6 = ep - 27
-    logic signed [29:0] fx;        // the steps in the same fine units
-    logic signed [29:0] fy;
-    logic [2:0]         hsh;       // H = 2^131 in fine half units: hsh = 132 - fine - 31 (31..35 encoded 0..4)
-    logic [3:0]         zfsh;      // z = 2^(136 - ep) fine half units (8..12)
-    logic [35:0]        far32;     // fx > 0 ? (32 fx) mod H : 0 (edge.h Walk)
+    logic                                const_v;   // the whole tile has one answer: a bad corner, a point edge, no
+                                                    // step, or d = E - unit >= 30 (isp 8.5)
+    logic                                const_in;  // ... and that answer
+    logic signed [P2_EDGE_T0_BITS-1:0]   t0;        // the start: 2 floor(s20 / 2^unit) + frac; a big edge 2 trunc(s20 / 2^102)
+    logic signed [P2_EDGE_STEP_BITS-1:0] tx;        // column step (from -dy), even
+    logic signed [P2_EDGE_STEP_BITS-1:0] ty;        // row step (from dx), even
+    logic [P2_EDGE_ZSH_BITS-1:0]         zsh;       // zero2 = 2^zsh (tie2 = 2^(zsh + zeroShift - tieShift))
+    logic                                big;       // E was capped at blockMax (ep >= 124): the walk decides each row
+    logic [P2_EDGE_FAR_BITS-1:0]         far32;     // the walk's far term: tx > 0: (tx mod 2^25) << 5; tx < 0 with
+                                                    // tx mod 2^25 == 0: 2^30; else 0 (edge.h Walk L404)
   } p2_edge_t;
 
   // the depth plane's regime (ARCHITECTURE 2.4; the names are the architecture's)

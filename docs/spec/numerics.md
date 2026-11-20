@@ -565,10 +565,14 @@ _ab; depthgaps_zadd, _field1, _nanprod, _tinyramp; huge, zspec], with its own ze
 - **Sum**: infinity plus a number is that infinity, and two infinities of the same sign stay infinite. Infinities
   of opposite sign give **+0**. A result of 2^128 or more is infinity; a result below 2^-126 is **+0**, as an
   exact cancellation is.
-- **The last addition of `(t1 + t2) + t3`** (TSP only, `zeroReach = 2`): when one of the two operands is zero and
-  the other is in [2^-126, 2^-125), the zero is added as **2^-127 with its own sign**. In `t1 + t2` a zero is a
-  zero.
-- **Every addition of the ISP depth setup** (`708fb8cd`): when one operand is zero and the other is in
+- **Every addition of the TSP setup** (since `2bee80f2`, `PlaneHW::zeroReach = 2`, `TSP_ZERO` 0): when one
+  operand is zero and the other, v, has top(v) - 1 < -125 ("smallest": [2^-126, 2^-125) in the range), the other
+  sign and |v| < 1.5 * 2^(top(v) - 1), the sum is **+0**; every zero sum is +0, `-0 + -0` too: the depth setup's
+  rule, in the first addition of `(t1 + t2) + t3` as in the last [tsp2_zadd 9,600 of 9,600; the earlier rule, a
+  zero as 2^-127 in the last addition only: 1,463]. MipSelect's `radd` has no zero rule and keeps Add's sign on a
+  zero sum.
+- **Every addition of the ISP depth setup** (`708fb8cd`; since `0de9776b` the coordinate differences, the edges and
+  the determinant too: `zeroRuleCoords`, `zeroRuleEdges` 1, depth2_zcoord, depth2_zedge): when one operand is zero and the other is in
   [2^-126, 1.5 * 2^-126) with the other sign, the sum is **+0**; otherwise a zero adds nothing, exactly. Every zero
   sum is +0, `-0 + -0` too. 2^128 is checked at every product and every sum where it is made, after the truncation.
   [depthgaps_zadd 109 of 109 (the TSP's last-addition rule there: 76); depthgaps_field1 2,000 of 2,000; zovf_lim
@@ -581,8 +585,8 @@ _ab; depthgaps_zadd, _field1, _nanprod, _tinyramp; huge, zspec], with its own ze
 | input | `FromBits` | `FromSingle(., 1)` | `FromSingle(., 1)` | the planes' sums; DCalcCtrl 1: `FromSingle(., 1)` |
 | product | `Mul 24`, no range; ≥ 2^128 swamps (H7a) | `mul` | `mul` | `kind`, `rmul` |
 | sum | `Add 24/25`, no range, no zero rule; ≥ 2^128 swamps | `add_d`: `limit(., true)`, the zero rule, every zero `+0` | `addTerm(., ., false)` | `radd`: **reach 53** |
-| `sum3` | `(e1 + e2) + e3` | `add_d(add_d(p, q), r)`; the mean: `addInf` | `addTerm(addTerm(p, q, false), r, true)` | none |
-| reciprocal | none | `Recip 24`, **unranged** | `det.bad ? zero(det.neg) : Recip 24`, then below 2^-126 → `zero(sign)` | `det.bad ? +0 : Recip 24`, then below → `+0` |
+| `sum3` | `(e1 + e2) + e3` | `add_d(add_d(p, q), r)`; the mean: `addInf` | `addTerm(addTerm(p, q, false), r, true)` (the same rule in both since `2bee80f2`) | none |
+| reciprocal | none | `Recip 24`, **unranged** | `det.bad ? zero(det.neg) : Recip 24`, then below 2^-126 **or a determinant of 2^126 or more** (`4f3efe15`, trsort_recip) → `zero(sign)` | `det.bad or det == 0 ? +0 : Recip 24` (`4f3efe15`), then below → `+0` |
 | coefficients | | `A`, `B`: `Mul(., inv, 24)`, **unranged**, then `under()`: below 2^-126 → mant 0, **sign kept**; the start: the ranged `first0` | `mul(., inv)` ranged, then `cut_16` | `Mul(best, inv2, 24)`, then range |
 
 The wrappers, exactly:
@@ -599,19 +603,19 @@ mul(p, q):                                    // depth L330, TSP L150, mip rmul 
   r = Mul(p, q, 24)
   above(r): inf(r.neg);  below(r): zero(r.neg);  else r       // r.neg = p.neg ^ q.neg
 
-add(p, q) = addTerm(p, q, third = false)     // the TSP's; the depth setup has add_d (below)
-addTerm(p0, q0, third):                       // TSP L163
-  if p0.bad or q0.bad:
-     if p0.bad and q0.bad and p0.neg != q0.neg: return +0
-     return inf(p0.bad ? p0.neg : q0.neg)
-  p = p0; q = q0
-  if third:                                   // zeroReach 2: "smallest" = top - 1 < -125
-     if q0 == 0 and p0 != 0 and top(p0) - 1 < -125:  q = {neg q0.neg, mant 1, exp -127}
-     if p0 == 0 and q0 != 0 and top(q0) - 1 < -125:  p = {neg p0.neg, mant 1, exp -127}
+add(p, q) = addTerm(p, q, third)             // the TSP's (4f3efe15 L188, TSP_ZERO 0: `third` changes nothing)
+addTerm(p, q, third):
+  if p.bad or q.bad:
+     if p.bad and q.bad and p.neg != q.neg: return +0
+     return inf(p.bad ? p.neg : q.neg)
+  if exactly one of p, q is 0 (call it z) and the other (v) has top(v) - 1 < -125, v.neg != z.neg
+     and |v| < 1.5 * 2^(top(v) - 1):          // zeroReach 2; the "half" bit read only for n >= 2 (no D2)
+     return +0                                // the zero rule
   r = Add(p, q, 24, 25)
-  above(r): inf(r.neg);  below(r): +0;  else r
+  above(r): inf(r.neg);  below(r) or r == 0: +0;  else r
 
-radd(x, y):                                    // mip L720: as add, but Add(x, y, 24, 53)
+radd(x, y):                                    // mip L783: no zero rule; Add(x, y, 24, 53)
+  bad rules as addTerm; m = Add(x, y, 24, 53); above(m): inf(m.neg); below(m): +0; else m (a zero keeps its sign)
 kind(x, y):                                    // mip L606: the class of the product x*y
   x.bad or y.bad: ((not x.bad and x == 0) or (not y.bad and y == 0)) ? ZERO : INF
   x == 0 or y == 0: ZERO
@@ -807,7 +811,7 @@ Indices 0, 1, 2 are the corners in rasterizer order, `j = k + 1`, `l = k + 2` (m
 | line | expression | op | N/R | notes |
 |---|---|---|---|---|
 | 606-612 | `kind(x, y)`: class of `Mul(x, y, 24)` | H5, H10 | 24 | shares the product of L641 |
-| 618-621 | `inv = det.bad ? +0 : Recip(Sdet, 24)`; below → `+0` | H8, H10 | 24 | **DEFECT D1**: `Sdet == 0` divides by zero |
+| 618-621 | `inv = det.bad ? +0 : Recip(Sdet, 24)`; below → `+0` | H8, H10 | 24 | **DEFECT D1**: `Sdet == 0` divides by zero (closed at `4f3efe15`, L680: `det.bad or det == 0 ? +0`) |
 | 622 | `undivided = !det.zero && !inv.zero` | | | |
 | 623-630 | `inv2 = Mul(inv, inv, 24)`; below → `+0` | H5, H10 | 24 | mipdump, mipdet (a determinant above 2^63 gives the largest map) |
 | 641 | `q1 = Mul(sa1, sb2, 24)`, `q2 = Mul(sb1, sa2, 24)` (or `+0` by kind / bad) | H5 | 24 | the undivided sums `Sa, Sb, Sc` |
@@ -1071,15 +1075,18 @@ a value for it at the mip site only (section 8).
 Three flavours, exactly as in section 4.2:
 
 - `rng_mul`: depth, TSP and mip `rmul`.
-- `rng_add #(R, third, zrule)`: depth `add_d` (`zrule`: the zero rule, every zero sum +0); TSP `addTerm` with
-  `third` 0 or 1; mip `radd` with R = 53.
+- `rng_add #(R)` with a mode (`p2_fp_rng_add`, at `4f3efe15`): NONE, the edge unit's plain Add; DEPTH, `add_d`
+  (the zero rule at top - 1 == -126, every zero sum +0); TSP, `addTerm` (the zero rule at top - 1 < -125, every zero
+  sum +0; `third` no longer matters); MIP, `radd` with R = 53 (no zero rule, a zero sum keeps its sign).
+- `rng_recip`: the TSP's reciprocal is also a zero of its sign for a determinant of 2^126 or more (`4f3efe15`);
+  MipSelect's is +0 for a zero determinant (D1, now refsw3's own rule).
 - `rng_add_inf`: the depth mean's `addInf` (two infinities of opposite signs: the larger raw fraction's sign).
 - `rng_kind`: the mip product class.
 
 They are combinational wrappers around H5 and H6:
 
-- **pre-checks**: bad operands; for `third`, the zero-substitution, which needs H1 on the nonzero operand; for
-  `zrule`, `top(v) - 1 == -126` and the bit under `v`'s leading one (a one-bit mantissa reads as 0: D2);
+- **pre-checks**: bad operands; for the zero rule (DEPTH, TSP), H1 on the nonzero operand: `top(v) - 1 == -126`
+  (DEPTH) or `< -125` (TSP) and the bit under `v`'s leading one (a one-bit mantissa reads as 0: D2);
 - **post-checks**: `top(r) - 1 > 127` or `< -126`.
 
 Also here:
@@ -1413,7 +1420,8 @@ specifications.
 
 ### Defect
 
-- **D1 `MipSelect` divides by zero** (L619: `Recip(det = w.Sdet, 24)` with `Sdet == 0`). A mipmapped triangle whose
+- **D1 `MipSelect` divides by zero** (CLOSED at `4f3efe15`: refsw3 takes `+0` for `Sdet == 0`, L680, which is the
+  proposal below and what `p2_fp_rng_recip` does; kept for the record) (L619: `Recip(det = w.Sdet, 24)` with `Sdet == 0`). A mipmapped triangle whose
   TSP determinant is exactly zero crashes refsw3 with SIGFPE. Examples: three equal corners, or collinear corners
   whose sum cancels exactly. Such triangles are drawn when not culled (covmeas mix degen). Reproduced in the
   scratch run: three equal corners give `Sdet = +0`, then SIGFPE. The console's value is unknown.

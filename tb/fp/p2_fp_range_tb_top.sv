@@ -1,6 +1,6 @@
 // p2_fp_range_tb_top: make fp-range (tb/fp/fp_range_tb.cpp). H10, the range wrappers of every flavour (num H10, 4):
-// p2_fp_rng_lim (lim_mode), p2_fp_rng_mul (mul_ranged), p2_fp_rng_add at 24/25 (add_mode: edge, depth, TSP, TSP third)
-// and at 24/53 (MipSelect's radd: TSP), p2_fp_rng_add_inf (the depth mean), p2_fp_rng_kind (mip), p2_fp_rng_recip
+// p2_fp_rng_lim (lim_mode), p2_fp_rng_mul (mul_ranged), p2_fp_rng_add at 24/25 (add_mode: edge, depth, TSP, MIP)
+// and at 24/53 (MipSelect's radd: MIP), p2_fp_rng_add_inf (the depth mean), p2_fp_rng_kind (mip), p2_fp_rng_recip
 // (recip_mip: TSP, mip), p2_fp_rng_with_zero (the TSP flat mean). Every vector drives all of them. Outputs registered
 // (latency 1, tb/fp/fp_tb.h).
 module p2_fp_range_tb_top

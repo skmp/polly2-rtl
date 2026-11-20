@@ -1,0 +1,24 @@
+// isp_edge_lint.vlt: verilator -Wall waivers for make lint-isp-edge (conventions.md 4.8): rtl/v1/isp's edge units
+// (PLAN M2) and the tb/isp_edge top. Each waiver names its file and its reason.
+`verilator_config
+// the shared packages and the M1 library, as tb/fp/fp_lint.vlt (they are linted there; here they are only compiled in)
+lint_off -rule UNUSEDPARAM -file "*/p2_hw_pkg.sv"
+lint_off -rule UNUSEDPARAM -file "*/p2_regs_pkg.sv"
+lint_off -rule UNUSEDPARAM -file "*/p2_pkg.sv"
+lint_off -rule UNUSEDPARAM -file "*/p2_fp_pkg.sv"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_zword_pkg.sv" -match "*'v'[31:30]*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_zword_pkg.sv" -match "*'r'[31:30]*"
+lint_off -rule UNUSEDSIGNAL -file "*lib/fp/p2_fp_*.sv"
+lint_off -rule PINCONNECTEMPTY -file "*lib/fp/p2_fp_*.sv"
+// unused outputs of the floors: FloorScaled's and the steps' fraction bits (only unitsAt's of the start is refsw3's)
+lint_off -rule PINCONNECTEMPTY -file "*/p2_isp_edge_block.sv"
+lint_off -rule PINCONNECTEMPTY -file "*/p2_isp_rowrange.sv"
+// p2_isp_edge_block: the bad flags of sx, sy and s20 (the steps and the start of finite corners; Setup returned on a bad
+// coordinate before it reads them, and the block's own bad input stands for that test)
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_edge_block.sv" -match "*'sx'[30]*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_edge_block.sv" -match "*'sy'[30]*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_edge_block.sv" -match "*'s20'[30]*"
+// p2_isp_edge_row: t0 is read by the raster at the take (r = t0 + jf ty), not per row
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_edge_row.sv" -match "*'e'[122:92]*"
+// p2_isp_edge_block: zsh = d - 20 is 7 .. 9 wherever the edge is not constant (isp 8.5); its high bits are not kept
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_edge_block.sv" -match "*'zsh'[12:4]*"
