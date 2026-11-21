@@ -281,7 +281,7 @@ Wide internal values (H7b/c: 62/64-bit) never leave their primitive. The edge un
 | `tag` | 32 | `p2_tag_t` |
 | `y`, `x`, `lenm1` | 5 + 5 + 5 | line, first column, length - 1 |
 | `rm` | 3 | the pass's RenderMode |
-| `epoch` | 7 | the SHADE pass number modulo 128, counted by p2_isp_cut. It goes into the sorter's key (§3.6) |
+| `epoch` | 7 | the SHADE pass number modulo 128, counted by p2_isp_cut: as built (M7) the passes that emitted a run (an empty pass emits nothing and does not count). It goes into the sorter's key (§3.6) |
 | `vmask[31:0]` | 32 | stencil bit 0 of pixel x+i at bit i (i < len) |
 | `pmask[31:0]` | 32 | `rendered` of pixel x+i, in PT_PASS0/N (run-only pixels, refsw3 `keepRes`) and PT_MV (alpha-tested pixels); 0 otherwise |
 | `eop` | 1 | the last item of its SHADE pass |
@@ -566,6 +566,30 @@ them to M4's `p2_isp_setup` and `p2_isp_raster`). **The phase halt** (sim, PLAN 
 the controller sits in a halt state with `halted` and `halt_phase` (tb/common/isp_live.h's numbers: Z 0, OP 1, OP_MOD 2)
 until `resume`; a phase the entry does not have neither runs nor halts. Each transition is one clock (`CTL_T`).
 
+**As built (M7, `rtl/v1/isp/p2_isp_ctl.sv`; PLAN M7).** Every phase of the function above, in RenderCORE's order. A
+sweep, a list walk and a SHADE are generic states with the phase in a register; one state (`S_NEXT`) halts and sets up
+what follows. Where the tree differs from the text:
+- **OpInPt** is olw's scan (`walk_scan`, olw `has_prim`: the list *holds* a primitive), run between OP_MOD and the OPAQUE
+  SHADE. The OPAQUE SHADE's issue goes through `p2_isp_ctl_tg` (a pass-through, `shade_in` = 1).
+- **A punch-through chunk after the first** starts its pass 0 by moving ptc's current chunk (`pt_set_cur`): the
+  descriptor ptc held in setup's 1-deep hand-off is its first member, and olw, pfetch and setup, which waited behind it
+  by back-pressure, go on (olw has no pause command). Between walks ptc passes nothing (§3.4.10 as built).
+- **A chunk that overflows pcache** (more than `PCACHE_N` = 256 descriptors) puts ptc in full-walk mode for the rest of
+  the punch-through phase: every later walk starts at the list's start with the counter restarted, and a descriptor of
+  another chunk is dropped, not held (refsw3's own way of walking). scenegen's PTLONG scenes (a third generator) reach
+  it; a chunk holds at most 340 triangles (size 0x3ff).
+- **TR_PRESORT**: ctl blocks the hand-off (`ho_block`) after each descriptor the raster takes until its rows are written
+  (the raster and pix idle) and its SHADE is issued. A culled or bad-corner primitive has no descriptor and gets no
+  SHADE: refsw3's SHADE after it is empty (every valid pixel was shaded by the SHADE before).
+- **The entry's end** (§3.4.8): the SHADE ctl knows at its issue to be the entry's last carries `last` (OP_SHADE with
+  no PT and no TR list, PT_MV_SHADE with no TR list, the sort's pass that found `more` = 0); otherwise END sends the
+  cutter a null eoe item. The next entry is accepted when END (or the entry's last sweep, RESTORE) is done.
+- **Phase halt**: every halt first waits for the cutter to be idle, so that a phase's runs are all out (TR_PS's last
+  SHADE too). In free-running mode nothing waits for the cutter but its command slot and PASS_DONE.
+- `P2_PTCARRY` is a parameter; only 0 is built (a simulation `$fatal` otherwise) until T12.
+- Status outputs for the testbench: the entry's punch-through chunks, passes (walks), SHADEs and sort passes
+  (`st_*`).
+
 **Cycle.**
 - Each controller transition takes one clock [G; §6 `CTL_T`, T13].
 - A pointer to an empty list costs 20-31 [M tim §3.1]: olw's first read.
@@ -631,6 +655,10 @@ until `resume`; a phase the entry does not have neither runs nor halts. Each tra
   words wait in `p2_mem`'s response buffer for C1. At a link (or the end) the words requested past it are counted and
   dropped as they come back, in order; in the clock a link is consumed no new word is requested.
 - `scan` (ObjectListHasPrimitive, OpInPt) and the chunk pause are M7's.
+
+**As built (M7).** `cmd_scan` makes the walk a scan (refsw_lists.cpp `ObjectListHasPrimitive`): nothing is handed on;
+it stops at the first strip with a mask bit or the first array (`has_prim` = 1) or at end_of_list (0), dropping the words
+read ahead as at a link. The chunk pause is back-pressure only (§3.4.1 as built).
 
 #### 3.4.3 `p2_isp_pfetch`: parameter fetch and primitive assembly
 
@@ -948,6 +976,13 @@ starting in row 31, so in row 30); the R2 case needs the first primitive's pixel
 centre sampling only a tile clip gives (and the row-31 shift then moves the next one up a row), so corner sampling and
 an integer top (scenegen ROWS's pairs). The summary is `f_sum(f_parity(stencil, hit), sum_op)` per pixel of the row.
 
+**As built (M7).** The PT_PASS0 / N and TR_AUTOSORT rules of the table, with `KeyAbove` as a function (one 64-bit key
+compare and the tag compares; three uses in the PT rule, two in the sort's). depthB, tagB, depthC and refTagC come with
+the F read (one row address for every non-C RAM, §3.4.7 as built); rendered and rlp are flip-flops read in R1. The raster
+never writes them, so they need no bypass; valid's bypass from R2 is now read (PT and sort rows). `more` is a register:
+set by any lane of a row in R1, cleared by ctl before each PT or sort walk. **The row barrier is at R0**: a row enters
+R0's read only when `bar_ok[row]` (the cutter has passed it), otherwise the raster holds it (`out_rdy` = 0).
+
 #### 3.4.7 `p2_isp_buf`: per-pixel ISP state
 
 **Function.** Owns isp §10.1, §13 (per pixel), and the buffer operations of isp §4.2, §11.2, §11.4 and §11.6
@@ -1013,6 +1048,16 @@ refsw3's ClearBuffers sets `tagStatus = {true, false}`, so the background is sha
 each. The debug port reads a row of every field and (sim only) writes one: the tile testbench's compare and its resync
 (PLAN §1.3 "As built"). The other fields, sweeps and the row barrier are M7's.
 
+**As built (M7).** Every field of the table. Wide fields are `p2_isp_lram` instances (32 rows x 32 lanes, one array a
+lane, a registered row read, lane write enables); depthA and tagA have the F and C copies, written together. Every
+non-C RAM read goes to **one row address**: the sweep engine's while it runs, else the feedback's, else the raster's (ctl
+keeps them apart in time). resPass is two flip-flops, `rcur` (resolved in this pass) and `rlp` (in the pass before:
+refsw3's `ptResolvedLastPass`); PASS_START moves rcur into rlp. **The sweeps have two stages**: A issues the row's reads
+(when `bar_ok` lets the row go), B writes it the clock after (33 clocks a sweep; CLEAR and CLRSTATUS too, 32 in M6).
+The cutter writes valid (TR_PRESORT) and savedDepth (TR_AUTOSORT) with its own enables; the feedback one pixel's
+depthB, tagB, valid, and on a pass rendered, rcur, resTag, resDepth. The checks that no two writers meet are
+simulation assertions. The debug port reads and writes every field.
+
 #### 3.4.8 `p2_isp_cut`: the ISP side of a SHADE pass
 
 **Function.** Owns isp §12.1, §12.3 (the ISP-local parts) and §4.4 (`tilePixelsShaded`, as `shaded_any`), and tsp
@@ -1048,6 +1093,20 @@ costs 31 more than a line of one run.
 - An empty row costs 0 clocks [G] (GAP T3).
 - Stalls when p2_runq or p2_entq is full [M ispq]. So `ev_isp` is "the last run accepted" [I].
 
+**As built (M7, `rtl/v1/isp/p2_isp_cut.sv`).** A one-command slot (`cmd_rdy`) in front of the command being cut, so
+that ctl can issue the next SHADE while this one is cut. Stage A finds the next row with a part pixel from the row
+pointer (a priority encoder over the 32 rows' part bits, computed from the flip-flop fields; rows without one cost no
+clock) and issues its C read with its flip-flops latched; B holds the row and emits one run a clock, the side effects in
+its first clock; A issues the next row in B's last clock, so a row of k runs costs k clocks. Choices the text left open:
+- **The pass's last run** (`eop`) is known from A: no row is left for it. The flip-flops of the rows after B's cannot
+  tell once A has passed them, because a later epoch may then write them.
+- **The epoch counts the passes that emitted a run**: an empty pass emits nothing and does not count (refsw3's empty
+  SHADE passes, e.g. a culled pre-sorted triangle's, have no counterpart in the RTL).
+- **The barrier** (`bar_ok`): every row while nothing is cut; while a SHADE is cut and no other waits in the slot, the
+  rows it has finished (B done, or skipped by A); no row while a SHADE waits in the slot.
+- A last SHADE with no run, and END, emit a null item with eoe and the entry record. The entry record goes into
+  `p2_entq`, which is `rtl/v1/isp/p2_isp_entq.sv` (a FIFO of `ENT_N` = 32); a full queue stalls the eoe item.
+
 #### 3.4.9 `p2_isp_fb`: punch-through feedback
 
 **Function.** Owns isp §11.4 "After the TSP has shaded a valid pixel", and §12.3 (tile.cpp `RenderParamTags`'s PT
@@ -1064,6 +1123,10 @@ branch).
 - The pixel pipe's 1 px/clk sets the rate. In a PT SHADE the raster and the sweeps are idle (ctl waits), so the
   feedback ports are free. The cutter reads other rows: a pixel is fed back only after its run, and so its row, was
   cut.
+
+**As built (M7, `rtl/v1/isp/p2_isp_fb.sv`).** Two stages: a PIXEL message reads the pixel's depthA / tagA on the F port,
+the clock after its effect is written; `pass_done` goes to ctl the clock after the last write, with `anyfail` the OR of
+the pass's PIXEL fails and PASS_DONE's own. One message a clock (`fb_rdy` = 1).
 
 #### 3.4.10 `p2_isp_ptc`: punch-through chunk counter
 
@@ -1093,6 +1156,15 @@ per primitive with its mask bit:   culled (setup's verdict, swamped determinant)
 - The two lags (the quad's 4th vertex, the culled 3) are [I] an occupancy counter updated one primitive late
   (tim §3.3). In this structure they are the counter's update rule, not timing.
 - Primitives of earlier chunks are not walked again (§3.4.11), which is a timing claim: T13.
+
+**As built (M7, `rtl/v1/isp/p2_isp_ptc.sv`).** Between setup's hand-off and the raster's input mux. `pt` (the whole
+punch-through phase) enables the counter: a culled or bad-corner primitive behind a held descriptor still finishes its
+setup program and strobes, so the counter counts while the passes replay. `en` (a punch-through walk) enables the gate:
+in the phase, a member passes only during a walk, a later chunk's descriptor is held (`hold`), and in full-walk mode
+(`fw`, set by pcache's overflow during a fill, cleared at PT_INIT) dropped. Each descriptor's chunk is latched when setup
+pushes it into the hand-off (setup's new `pc_desc` strobe beside `pc_v`). `more_chunks` (`chunkAt != cur`) tells ctl
+that another chunk follows; `restart` zeroes the counter for a walk from the list's start (chunk 0, and every walk in
+full-walk mode).
 
 #### 3.4.11 `p2_isp_pcache`: the ISP primitive cache (replays of set-up descriptors)
 
@@ -1131,6 +1203,14 @@ start, at AUTOSORT start, at the next chunk). Counters `units`, `n`, flag `ovf`.
 
 **Cycle.** A replay issues one descriptor per hand-off: a primitive costs `max(1, rows)` [G], against
 `max(16, rows)` for a walked one.
+
+**As built (M7, `rtl/v1/isp/p2_isp_pcache.sv`).** `PCACHE_N` = 256 descriptors (`p2_rdesc_t`) in one array. A fill
+records the descriptors the raster takes from the setup side while ctl enables it (a chunk's pass 0, the sort's pass 0);
+the translucent units count 4 a triangle, 8 a quad, against ISP_FEED_CFG[23:14] (32 at least): a descriptor that would
+bring the count to the size overflows the cache (`ovf`), and it and the ones after it are not recorded. A punch-through
+chunk overflows at its 257th member. The replay has one descriptor in a read register ahead (one a clock at most).
+Reset at PT_INIT, at PT_CHUNK and at the sort's first PEEL. The raster's input is a mux (`src_rp`, ctl's) between the
+replay and the setup side; in TR_PRESORT the setup side is blocked between a descriptor and its SHADE.
 
 ### 3.5 `p2_runq`: the run queue
 
@@ -1636,8 +1716,8 @@ register a primitive's output as one of its pipeline stages; its lockstep testbe
 | row-skip rule for thin triangles | none | [M] anomaly | T2 |
 | `MV_GAP`: bubble after a `sum_op` descriptor | 1 | [G] 65 = 64 + 1 | T2 |
 | row barrier form (cut vs next writes) | per row | [G] | T4 |
-| sweep costs (CLEAR, PEEL, PT_*) | 32 clk each | [G] | T13 |
-| `PCACHE_N`; replay cost; what pcache stores; TR_MOD re-walked; PT replay (vs vertices, vs re-walk) | 256; max(1, rows); descriptors; yes; replay | [I] TR, [G] PT | T13 |
+| sweep costs (CLEAR, PEEL, PT_*) | 32 clk each (as built M7: 33, a read stage and a write stage) | [G] | T13 |
+| `PCACHE_N`; replay cost; what pcache stores; TR_MOD re-walked; PT replay (vs vertices, vs re-walk) | 256; max(1, rows); descriptors; yes; replay (as built M7: a PT chunk past 256 walks its later passes, ptc full-walk mode) | [I] TR, [G] PT | T13 |
 | `RUNQ_N` | 300 | [M] ispq, fitted | MT2 (fit) |
 | flags instead of marker items | flags | [I] ispq fit (§3.5) | T3 |
 | `ENT_N` (`p2_entq`) | 32 | [G] | T3 |

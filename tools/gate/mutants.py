@@ -10,7 +10,9 @@ The mutants file:
     @probe <name> <make target> <binary under the object folder> [args ...]
     <id> | <file in the folder> | <original fragment> | <mutated fragment> | <probe> [extra args] | <what it breaks>
 
-In a fragment, \\n is a newline, \\| a bar and \\\\ a backslash. Lines that start with # are comments.
+In a fragment, \\n is a newline, \\| a bar and \\\\ a backslash. Lines that start with # are comments. A probe written
+!<name> marks a mutant that must PASS the probe (a change the function must not see, e.g. a timing choice: PLAN M7's
+per-tile barrier); it counts when it passes ("passes, as it must").
 
 The control (the folder unchanged) builds and runs every probe the selected mutants use; each must pass. A mutant copies
 the folder into build/mut/<unit>/<id>/src and replaces its original fragment, which must occur exactly once in the file
@@ -80,8 +82,10 @@ def parse(path):
             if len(p) != 6:
                 sys.exit(f"{path}:{n}: a mutant needs 6 fields separated by bars, has {len(p)}")
             probe = p[4].split()
+            must_pass = probe[0].startswith("!")
             cfg["mutants"].append({"id": p[0], "file": p[1], "orig": unescape(p[2]), "mut": unescape(p[3]),
-                                   "probe": probe[0], "extra": probe[1:], "what": unescape(p[5]), "line": n})
+                                   "probe": probe[0].lstrip("!"), "extra": probe[1:], "what": unescape(p[5]),
+                                   "line": n, "pass": must_pass})
     if not cfg["dir"] or not cfg["obj"]:
         sys.exit(f"{path}: needs @dir and @obj")
     for m in cfg["mutants"]:
@@ -171,8 +175,13 @@ def main():
             verdict = "ERROR: " + r["error"]
         else:
             x = r[m["probe"]]
-            verdict = "ERROR: does not build" if x is None else ("caught" if x != 0 else "SURVIVED")
-        if verdict == "caught":
+            if x is None:
+                verdict = "ERROR: does not build"
+            elif m["pass"]:
+                verdict = "passes, as it must" if x == 0 else "CAUGHT (must pass)"
+            else:
+                verdict = "caught" if x != 0 else "SURVIVED"
+        if verdict in ("caught", "passes, as it must"):
             caught += 1
             if not a.keep:
                 shutil.rmtree(os.path.join(ROOT, "build", "mut", unit, m["id"]), ignore_errors=True)

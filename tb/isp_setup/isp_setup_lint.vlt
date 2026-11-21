@@ -36,3 +36,5 @@ lint_off -rule PINCONNECTEMPTY -file "*/p2_isp_setup.sv"
 lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_raster.sv" -match "*'rd'[775]*"
 // p2_isp_setup_tb_top: the setup's and the raster's idle outputs are M6's (p2_isp_ctl's walk end)
 lint_off -rule PINCONNECTEMPTY -file "*/p2_isp_setup_tb_top.sv" -match "*'idle'*"
+// p2_isp_setup_tb_top: the setup's pc_desc (a descriptor with the ptc strobe) is p2_isp_ptc's (M7)
+lint_off -rule PINCONNECTEMPTY -file "*/p2_isp_setup_tb_top.sv" -match "*'pc_desc'*"

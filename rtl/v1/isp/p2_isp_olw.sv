@@ -19,6 +19,15 @@
 // Command: start (cmd_v) with the list's byte address in the 32-bit view (the entry's ptr_in_words * 4). The walk is
 // done (idle) when the end of the list has been consumed, every word requested has come back, and the last item was
 // taken by pfetch.
+//
+// Scan (cmd_scan with cmd_v; PLAN M7, ARCHITECTURE 3.4.1 OpInPt, isp 11.3; refsw_lists.cpp ObjectListHasPrimitive): the
+// same walk, handing nothing on: it stops at the first strip entry with a mask bit or the first triangle / quad array
+// entry (has_prim = 1: the list HOLDS a primitive, whether it draws or not: pvr-tests/optcull) or at end_of_list
+// (has_prim = 0); the words requested past the stop are dropped as at a link.
+//
+// Chunk pause (ARCHITECTURE 3.4.2): when p2_isp_ptc holds a primitive of the next punch-through chunk, the walk is held
+// by back-pressure (pfetch, setup and the hand-off fill up behind it) at its position, and goes on when ctl starts the
+// next chunk; no command is needed.
 module p2_isp_olw
   import p2_pkg::*;
   import p2_regs_pkg::*;
@@ -28,7 +37,9 @@ module p2_isp_olw
   // the walk
   input  logic          cmd_v,
   input  logic [23:0]   cmd_addr,
+  input  logic          cmd_scan,
   output logic          idle,
+  output logic          has_prim,       // the last scan's answer
   // the entries that draw, to p2_isp_pfetch
   output logic          ob_v,
   input  logic          ob_rdy,
@@ -45,6 +56,7 @@ module p2_isp_olw
   localparam int AB = $clog2(OLW_AHEAD + 1);
 
   logic          walking;           // words are still to be requested and consumed (the end not yet met)
+  logic          scan;              // the walk is a scan
   logic [23:0]   fa;                // the next word to request
   logic [AB-1:0] ahead;             // requested and not yet consumed
   logic [AB-1:0] drop;              // of those, requested past a link or the end: consumed and dropped
@@ -67,11 +79,12 @@ module p2_isp_olw
   assign is_link  = w_ent.is_not_triangle_strip && w_typ.type_ == 3'b111;
   assign emits    = (is_strip && w_strip.mask != '0) || is_arr;
 
-  logic live, w_use, take_link;
+  logic live, w_use, take_link, take_hit;
   assign live      = m_rv && drop == '0 && walking;       // a word of the list
-  assign w_use       = live && (!emits || ob_rdy);
-  assign m_rrdy    = (drop != '0) || (walking && (!emits || ob_rdy));
+  assign w_use       = live && (scan || !emits || ob_rdy);
+  assign m_rrdy    = (drop != '0) || (walking && (scan || !emits || ob_rdy));
   assign take_link = w_use && is_link;
+  assign take_hit  = w_use && scan && emits;
 
   always_comb begin
     ob        = '0;
@@ -82,11 +95,11 @@ module p2_isp_olw
     ob.prims  = w_arr.prims;
     ob.kind   = is_strip ? P2_OBJ_STRIP : (w_typ.type_ == 3'b100 ? P2_OBJ_TRI : P2_OBJ_QUAD);
   end
-  assign ob_v = live && emits;
+  assign ob_v = live && emits && !scan;
 
   // ---------------------------------------------------------------------------------------------- the requests
   // none in the clock a link is consumed: the words in flight are then exactly the ones to drop
-  assign m_v    = walking && !take_link && ahead != AB'(OLW_AHEAD);
+  assign m_v    = walking && !take_link && !take_hit && ahead != AB'(OLW_AHEAD);
   assign m_addr = fa;
 
   logic pop;
@@ -110,9 +123,17 @@ module p2_isp_olw
         else
           fa <= {w_link.next_block_ptr_in_words, 2'b00};
       end
+      // a scan's answer: the list holds a primitive (stop here), or the end of the list (no)
+      if (take_hit) begin
+        drop     <= AB'(ahead - AB'(1));
+        walking  <= 1'b0;
+        has_prim <= 1'b1;
+      end
       if (cmd_v) begin
-        walking <= 1'b1;
-        fa      <= cmd_addr;
+        walking  <= 1'b1;
+        scan     <= cmd_scan;
+        has_prim <= 1'b0;
+        fa       <= cmd_addr;
       end
     end
   end

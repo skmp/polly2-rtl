@@ -123,7 +123,7 @@ module p2_isp_setup_tb_top
   logic [P2_ISP_NM+P2_ISP_NA:0][P2_ISP_RW-1:0]         wrd;
   p2_isp_setup u_setup (.clk(clk), .rst(rst), .asm_v(asm_v), .asm_rdy(asm_rdy), .asm_i(asm_i),
     .fpu_cull_val(fpu_cull_val), .fpu_perp_val(fpu_perp_val), .half(half), .rd_v(rd_v), .rd_rdy(rd_rdy), .rd(rd),
-    .pc_v(pc_v), .pc_culled(pc_culled), .pc_quad(pc_quad), .idle(), .t_issue(t_issue), .t_cls(t_cls), .t_pc(t_pc), .t_uw(uw),
+    .pc_v(pc_v), .pc_culled(pc_culled), .pc_quad(pc_quad), .pc_desc(), .idle(), .t_issue(t_issue), .t_cls(t_cls), .t_pc(t_pc), .t_uw(uw),
     .t_wv(wv), .t_wrd(wrd));
 
   p2_zkey_t [P2_TILE-1:0] zkp;

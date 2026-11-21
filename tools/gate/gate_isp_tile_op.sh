@@ -7,7 +7,8 @@
 #                         scenegen, the ISP tile testbench); the captures of the M6 inputs (tools/gate/capture_prerender.sh:
 #                         tb/tile/subset_isp_op.txt at most 8 renders a test, the tile subset's dumps subset_dumps.txt,
 #                         scenegen seeds subset_seeds.txt); lint-isp-tile; then the testbench (build/obj_isp_tile/tb) in
-#                         phase-halt mode on every capture, sharded 12 ways: after Z, OP and OP_MOD of every entry, depthA,
+#                         phase-halt mode on every capture, sharded 12 ways (--op-only: M7's testbench runs every phase,
+#                         M6's gate compares these): after Z, OP and OP_MOD of every entry, depthA,
 #                         tagA, stencil and valid of all 1024 pixels against the M5 phase driver's (p2ref), once with the
 #                         VRAM model plain and once with --vramvary 7 (the values must not change); the mutants of
 #                         tb/isp_tile/mutants.txt (rtl/v1/isp) and mutants_mem.txt (rtl/v1/mem), every one caught
@@ -76,9 +77,9 @@ if [ "$mode" != --mutants ]; then
   for v in 0 7; do
     name=phase-halt; [ $v != 0 ] && name=phase-halt-vramvary$v
     gate_step "$name" bash tools/gate/run_shards.sh "$name" "$J" "$GATE_DIR/shards-$name" \
-      build/obj_isp_tile/tb --vramvary $v "@$list"
+      build/obj_isp_tile/tb --op-only --vramvary $v "@$list"
     r=$(cat "$GATE_DIR"/shards-$name/log_*.txt | grep -h '^isp_tile: build/pre/' |
-        awk '{ r += $3; e += $5; p += $7; s += $10 } END { printf "%d renders, %d entries, %d phases compared (1024 pixels each), %d keep-Z resyncs after M7 phases", r, e, p, s }')
+        awk '{ r += $3; e += $5; p += $7 } END { printf "%d renders, %d entries, %d phases compared (1024 pixels each; Z, OP, OP_MOD)", r, e, p }')
     note "$name: $r; $(cat "$GATE_DIR"/shards-$name/log_*.txt | grep -c '  FAIL ') failures shown"
     c=$(cat "$GATE_DIR"/shards-$name/log_*.txt | grep -h '^isp_tile: [0-9]* cases' |
         awk '{ n += $10; c += $12; if ($20 + 0 > m) m = $20 + 0 } END { printf "%d entries, %d RTL clocks: mean %.0f, max %d clocks an entry (from the entry accept to its last phase; halts excluded; VRAM model VR_LAT 8)", n, c, n ? c / n : 0, m }')

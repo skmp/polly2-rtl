@@ -1,0 +1,9 @@
+# subset_isp_tile_dumps.txt: the polly2-data dumps of make isp-tile beside the tile subset's (tb/tile/subset_dumps.txt):
+# every dump with punch-through and translucent lists the PLAN names (M7, gate inputs 3) that the subset lacks
+shenmue_intro3
+shenmue_intro4
+f1wgp_grid
+f1wgp_menu
+f1wgp_title
+thps2_ingame2
+thps2_ingame3

@@ -55,6 +55,8 @@ module p2_isp_setup
   output logic                         pc_v,
   output logic                         pc_culled,
   output logic                         pc_quad,
+  output logic                         pc_desc,        // ... and it put a descriptor into the hand-off (not culled, no
+                                                       // bad corner, or a kill descriptor)
   // no primitive in the program and none in the hand-off (p2_isp_ctl's walk end, M6)
   output logic                         idle,
   // taps (the testbench's program trace; not a hardware interface)
@@ -348,6 +350,7 @@ module p2_isp_setup
   assign pc_v      = done;
   assign pc_culled = culled;
   assign pc_quad   = pr.quad;
+  assign pc_desc   = ho_push;
 
   assign t_issue = issue;
   assign t_cls   = cls;

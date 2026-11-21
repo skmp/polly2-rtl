@@ -1,0 +1,41 @@
+# tb/isp_tile/mutants_m7.txt: the planted bugs of M7's ISP tile units in rtl/v1/isp (PLAN M7 "Mutants", conventions.md
+# 7.7), run by tools/gate/mutants.py (make isp-tile-mutants). Every one must be caught by its probe (the per-tile barrier
+# must PASS: `!`) and the unchanged folder must pass first. M6's are in tb/isp_tile/mutants.txt.
+#
+# The probes, on tb/isp_tile/mutant_cases_m7.txt, a phase that takes more than 1M clocks failing (a walk that never
+# ends), stopping at the first failure: `tile`, phase-halt mode (every live field at every phase boundary, every SHADE's runs, the feedback, the counts);
+# `free`, free-running mode (no halt: the cutter beside the next pass's and entry's work, the run stream under random
+# back-pressure).
+#
+# Format: <id> | <file in rtl/v1/isp> | <original fragment> | <mutated fragment> | <probe> [args] | <what it breaks>
+# (\n a newline, \| a bar, \\ a backslash in a fragment).
+@dir rtl/v1/isp ISP_DIR
+@obj ISP_TILE_OBJDIR
+@probe tile isp-tile-build tb --max-fails 1 --phase-limit 1000000 @tb/isp_tile/mutant_cases_m7.txt
+@probe free isp-tile-build tb --max-fails 1 --mode free --phase-limit 20000000 @tb/isp_tile/mutant_cases_m7.txt
+
+# ---- PLAN M7's list
+quad-lag-off | p2_isp_ptc.sv | lhs  = (fill - (prev_quad ? 13'sd1 : 13'sd0)) + | lhs  = fill + | tile | the chunk check counts a quad right before with all 4 vertices (refsw3: its 4th not yet counted; ptchunkq, ptchunklag)
+culled-lag-off | p2_isp_ptc.sv | + $signed({11'd0, culled}) + nv; | + nv; | tile | a culled primitive's 3 vertices not counted in the next check (ptchunklag, ptchunkcost; scenegen PT's culled primitives)
+chunk-size-minus-1 | p2_isp_ptc.sv | thr  = $signed({3'd0, chunk_size}) - 13'sd2; | thr  = $signed({3'd0, chunk_size}) - 13'sd1; | tile | the chunk holds the vertices up to ISP_FEED_CFG's size less 1, not less 2 (ptchunk: 20 triangles at 0x40)
+threshold-unsigned | p2_isp_ptc.sv | brk  = fill > 13'sd0 && lhs > thr; | brk  = fill > 13'sd0 && $unsigned(lhs) > $unsigned(thr); | tile | the threshold S - 2 compared unsigned: at chunk sizes 0 and 1 (-2, -1) the whole list is one chunk (scenegen PT sizes 0, 1)
+rlp-never-cleared | p2_isp_buf.sv | rl[sb_row] <= b_rc; | rl[sb_row] <= rl[sb_row] \| b_rc; | tile | `resolved in the pass before` never cleared: a pixel resolved in pass p takes part in p + 2 too (ptlayers kind 4)
+ptfinal-depthc-resolved | p2_isp_buf.sv | da_wd[i] = fin_r[i] ? q_rsd[i] : q_dc[i]; | da_wd[i] = q_dc[i]; | tile | PT_FINAL takes the opaque depth for resolved pixels too (the sort's and a keep-Z entry's reference)
+autosort-displaced-no-more | p2_isp_pix.sv | n_more[i] = vl[i]; | n_more[i] = 1'b0; | tile | the sort's best displaced by a farther fragment does not set MoreToDraw: the displaced layer is never drawn (sort, scenegen TRANS)
+saveddepth-not-written | p2_isp_cut.sv | assign cs_we   = b_v && b_first && rm == P2_RM_TRANSLUCENT_AUTOSORT; | assign cs_we   = 1'b0; | tile | the sort's SHADE does not save the drawn layer's depth (SaveDepthAt): RESTORE gives the depth before the sort (keepz page 3, thps2_ingame)
+opinpt-draws | p2_isp_ctl.sv | cmd_opinpt = opinpt; | cmd_opinpt = opinpt && (ph != PH_PT_MV_SHADE \|\| pt_shades != '0); | tile | OpInPt from a punch-through list that DRAWS (a PT pass shaded) instead of one that holds a primitive: a culled or hidden PT triangle no longer brings the opaque pixels inside a volume into PT_MV (optcull, optrun)
+presort-volume-break | p2_isp_cut.sv | if (m == P2_RM_TRANSLUCENT_PRESORT \|\| m == P2_RM_PUNCHTHROUGH_PASS0 | if (m == P2_RM_PUNCHTHROUGH_PASS0 | tile | pre-sorted runs end at volume edges (SpanGen: they do not; uvrun kind 6, scenegen TRANS with MODVOL)
+pmask-off-pt | p2_isp_cut.sv | rs.pmask   = (rm == P2_RM_PUNCHTHROUGH_PASS0 \|\| rm == P2_RM_PUNCHTHROUGH_PASSN \|\| rm == P2_RM_PUNCHTHROUGH_MV) ? | rs.pmask   = (rm == P2_RM_PUNCHTHROUGH_MV) ? | tile | no `rendered` mask in the punch-through passes: the TSP cannot tell run-only pixels (keepRes) from fresh ones (ptruns, ptlayers)
+pmask-per-run-ptmv | p2_isp_cut.sv | ((b_rend >> s) & len_mask) : '0; | (b_rend[s] ? len_mask : '0) : '0; | tile | revision 1's rflag: one `rendered` bit per run in PT_MV, its first pixel's (a resolved PT tag equal to an opaque tag: scenegen SHARED; uvrun kind 7)
+row-barrier-off | p2_isp_cut.sv | assign bar_ok = (q_v && !q_end) ? '0 : (cst == C_CUT) ? done : '1; | assign bar_ok = '1; | free | no row barrier: the next pass's or entry's raster and sweeps overwrite rows the cutter has not read (free-running mode; phase-halt waits for the cutter at every halt)
+barrier-per-tile | p2_isp_cut.sv | assign bar_ok = (q_v && !q_end) ? '0 : (cst == C_CUT) ? done : '1; | assign bar_ok = (q_v && !q_end) ? '0 : (cst == C_CUT) ? {P2_TILE{&done}} : '1; | !free | the barrier per tile, not per row: a timing choice (T4), so the function must not change; the testbench sees no difference
+pcache-reverse | p2_isp_pcache.sv | rp   <= mem[rptr[NB-2:0]]; | rp   <= mem[n[NB-2:0] - rptr[NB-2:0] - 1'b1]; | tile | the replay in reverse order: the later passes' fragments in another order (equal keys tie by list order; MODIFIER-free but the depth compare's ties and the PT / sort KeyAbove on tags)
+pcache-no-chunk-reset | p2_isp_ctl.sv | sw_q == P2_SW_PT_INIT \|\| sw_q == P2_SW_PT_CHUNK \|\| sw_q == P2_SW_PEEL | sw_q == P2_SW_PT_INIT \|\| sw_q == P2_SW_PEEL | tile | pcache not reset at the next chunk: chunk c + 1's later passes replay chunk c's members too (ptchunk, scenegen PT at chunk sizes 0 .. 2)
+tr-replay-after-ovf | p2_isp_ctl.sv | assign tr_rp = trpass != '0 && !pc_ovf; | assign tr_rp = trpass != '0; | tile | after a translucent cache overflow the later passes replay what was recorded instead of walking the list: the overflowed primitives are dropped (ispcache; scenegen's ISP_FEED_CFG[23:14] = 0 acts as 32: 8 triangles)
+# ---- the structure
+valid-bypass-r2-off | p2_isp_pix.sv | vl[i] = (by2 && r2_vwe[i]) ? r2_vl[i] : n_valid[i]; | vl[i] = n_valid[i]; | tile | valid not bypassed from R2: a punch-through or sort row one clock after another of the same row reads `valid` before it was written
+ptc-gate-open-between-walks | p2_isp_ptc.sv | assign o_v         = rd_v && (!pt \|\| (en && member));\n  assign rd_rdy      = !pt ? o_rdy : (en && (member ? o_rdy : fw));     // fw: dropped | assign o_v         = rd_v && (!en \|\| member);\n  assign rd_rdy      = (!en \|\| member) ? o_rdy : fw; | tile | ptc's gate open between the punch-through walks: the held first descriptor of the next chunk goes to the raster during the chunk's SHADE (a write beside the feedback's)
+cut-eop-from-flops | p2_isp_cut.sv | pass_last_run = row_last_run && !(a_act && a_found); | pass_last_run = row_last_run && (rows_nz & ~((P2_TILE'(2) << b_row) - 1'b1)) == '0; | tile | the pass's last run decided from the flip-flops of the rows after it, which the next primitive may have written once A passed them (TR_PRESORT: eop lost)
+fb-anyfail-pass-done-only | p2_isp_fb.sv | anyfail <= acc \| s_fail; | anyfail <= s_fail; | tile | anyfail only from PASS_DONE's own bit, not the pass's PIXEL fails (the testbench's PASS_DONE carries 0)
+sweep-barrier-off | p2_isp_buf.sv | assign sa_go   = sa_act && bar_ok[sa_row]; | assign sa_go   = sa_act; | free | the sweeps ignore the row barrier: the next entry's CLEAR / the next pass's PEEL overwrite rows the cutter has not read
+raster-barrier-off | p2_isp_pix.sv | assign out_rdy = bar_ok[row_j]; | assign out_rdy = 1'b1; | free | the raster ignores the row barrier: the next walk's rows overwrite rows the cutter has not read

@@ -5,8 +5,8 @@
 # goes first while nothing writes).
 @dir rtl/v1/mem MEM_DIR
 @obj ISP_TILE_OBJDIR
-@probe tile isp-tile-build tb --phase-limit 1000000 @tb/isp_tile/mutant_cases.txt
-@probe vary isp-tile-build tb --phase-limit 1000000 --vramvary 7 @tb/isp_tile/mutant_cases.txt
+@probe tile isp-tile-build tb --max-fails 1 --phase-limit 1000000 @tb/isp_tile/mutant_cases.txt
+@probe vary isp-tile-build tb --max-fails 1 --phase-limit 1000000 --vramvary 7 @tb/isp_tile/mutant_cases.txt
 
 half-bit-21 | p2_mem.sv | need   = c_w64[c] ? 2'b11 : (c_addr[c][22] ? 2'b10 : 2'b01); | need   = c_w64[c] ? 2'b11 : (c_addr[c][21] ? 2'b10 : 2'b01); | tile | the 32-bit view's half from a[21], not a[22] (pvr_map32)
 word-index | p2_mem.sv | q_idx[h] <= c_w64[c] ? c_addr[c][22:3] : c_addr[c][21:2]; | q_idx[h] <= c_w64[c] ? c_addr[c][22:3] : {c_addr[c][22], c_addr[c][20:2]}; | tile | the 32-bit view's word index with the half's bit in it

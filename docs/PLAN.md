@@ -232,6 +232,27 @@ resTag row as a mutant):
   writes every field M6 compares. Otherwise the state carries from entry to entry and render to render. A phase that
   takes more than `--phase-limit` clocks fails. `--vramvary S` (or `+vramvary=S`) varies the VRAM model.
 
+  **As built (M7, the same testbench).** Every phase runs and is compared; there are no resyncs any more (the case's
+  first render starts with the reference's whole state written into the RTL's buffers, every field, through the debug
+  port). At each boundary the fields `tb/common/isp_live.h` calls live are compared (resPass as the RTL's `rcur` / `rlp`
+  against `resPass == PtPass` / `PtPass - 1`). The testbench is the TSP: it pops the run stream with a random stall
+  chance and burst length per case. The reference's runs are refsw3's `SpanGen` of the pass (`p2ref::span_gen`) with
+  the masks from the state before the SHADE (the PT pass's from the PT_WALK boundary); **the pre-sorted passes**, which
+  refsw3 shades inside its walk, come from refsw3's own render log (`rendlog` pointed at a memory stream from the
+  boundary before TR_PS: RenderParamTags' PASS / SPAN lines, put back in raster order). **The PT outcome** of a pixel:
+  run-only if it was `rendered` before the SHADE, pass if it is after, fail otherwise; the testbench sends them as
+  `p2_fb_t` messages as the runs come, then PASS_DONE. The eoe is checked where ctl's rule puts it (the SHADE it knows
+  to be the entry's last, else END's null item), the entry records as p2_entq gives them (popped when their eoe item
+  has been), and at END the PT chunk, pass and SHADE and the sort pass counts against the hooks'. `--op-only` keeps
+  M6's scope (Z, OP, OP_MOD compared): `make isp-tile-op` runs it so.
+
+  **Free-running mode (`--mode free`).** The reference renders first (through the same phase driver, the hooks
+  recording each entry's non-empty passes with their runs, masks and PT outcomes, its record and counts); then the RTL
+  runs with no halt, the entries fed as fast as ctl takes them, and the stream is checked as it comes: each run against
+  the next expected one, `eop` on each pass's last run, one eoe per entry (on its last pass's last run or as a null item
+  after it), the epoch; the PT passes are answered from the recorded outcomes after a random delay. At the render's end
+  the live fields of all pixels (depthA, tagA, stencil, valid) are compared.
+
 **TSP tile testbench** (`tb/tsp_tile`, M9-M11).
 - The DUT is the TSP side: store, pfetch, setup, ALU, run start, pixel queue, pixel pipe, texture, and the tile
   buffers. The write-out is excluded.
@@ -632,7 +653,7 @@ in `agents/m4/`. How it differs from the text below (which predates M2 / M3's mo
 
 ### M5. Tile-harness infrastructure
 
-**Status (2026-11-20): built, gate passing (not committed).** `make refglue-selftest` (tools/gate/gate_refglue.sh,
+**Status (2026-11-21): done (72ad5e2).** `make refglue-selftest` (tools/gate/gate_refglue.sh,
 `tb/mk/refglue.mk`); results and scratch in `agents/m5/`. As built, where the text below no longer matches the tree:
 - **The glue is two translation units** (`tb/ref/refcore_glue.cpp` with refsw_tile.cpp, `refcore_glue_lists.cpp` with
   refsw_lists.cpp) plus the L1 `refcore_bgkey.cpp`: both `.cpp` files include refcore's `TexUtils.h`, which has no
@@ -761,6 +782,71 @@ built (M6)"):
 - TAG_BELOW kept as a separate flag (a 0xFFFFFFFF background tag then ties differently).
 
 ### M7. ISP tile: OpInPt, punch-through, translucent, cutter, primitive cache
+
+**Status (2026-11-21): done.** `make isp-tile` (tools/gate/gate_isp_tile.sh,
+`tb/mk/isp_tile.mk`), `make isp-tile-mutants`, `make isp-tile-full`; results and scratch in `agents/m7/`. RTL in
+`rtl/v1/isp/`: `p2_isp_ctl.sv` (every phase), `p2_isp_ctl_tg.sv`, `p2_isp_ptc.sv`, `p2_isp_pcache.sv`, `p2_isp_cut.sv`,
+`p2_isp_fb.sv`, `p2_isp_entq.sv` (p2_entq), `p2_isp_lram.sv` (one wide field), `p2_isp_buf.sv` (every field and sweep,
+the barrier at its sweeps), `p2_isp_pix.sv` (PT and AUTOSORT rules, `more`, the barrier at R0), `p2_isp_olw.sv`
+(scan); `p2_isp_setup.sv` got `pc_desc`; `p2_pkg`'s `p2_sweep_t` has every sweep. ARCHITECTURE 3.4.1-3.4.11 "As built
+(M7)" say how the tree differs from the text; in short:
+- **PT chunks continue the walk**: ptc holds the next chunk's first descriptor in setup's hand-off (olw, pfetch, setup
+  wait by back-pressure) and passes nothing between walks; pass 0 of the next chunk moves its current chunk. A chunk
+  of more than `PCACHE_N` = 256 descriptors puts ptc in **full-walk mode** (every later walk from the list's start,
+  the counter restarted, non-members dropped).
+- **scenegen got three classes the M7 mechanisms needed**, drawn from a third generator (`Rng::of(seed, 2)`) after
+  everything else is written, so that no other scene moves (checked when PTLONG was added: the 190 other seeds' 215
+  renders were byte for byte the same video memory and registers; PTROW and TWINS draw only from the same generator,
+  after it; the 35 seeds that drew one were captured again):
+  - PTLONG (seeds 3, 67, 70, 87, 125, 127, 138, 146, 172, 184 of 1-200): 272-336 small PT triangles in tile (0, 0) at
+    chunk size 0x3ff. Nothing in the pages or dumps reaches full-walk mode;
+  - PTROW (16 seeds): PT triangles on rows 8-10 and 10-12 in turn with corner sampling, replayed one a clock: the
+    `valid` bypass of p2_isp_pix from R2 (`valid-bypass-r2-off` survived without it: RowRange's last row has pixels
+    only with corner sampling, so a replayed row of one row number one clock after the last one is rare);
+  - TWINS (12 seeds): one translucent block listed twice, once with the shadow bit (intensity mode): equal keys, equal
+    sort bits, tags that differ in bit 27, so a sort pass's choice depends on the replay's order (`pcache-reverse`
+    survived without it: KeyAbove's order is total for distinct fragments, so a replay's order is invisible
+    otherwise).
+- **TR_PRESORT** shades one descriptor at a time (ctl blocks the hand-off until its rows are written and its SHADE is
+  issued); a culled or bad primitive has no descriptor and no SHADE. **The epoch counts the passes that emitted a run.**
+- **The entry's end**: `last` on the SHADE ctl knows to be the last (OP_SHADE with no PT / TR, PT_MV_SHADE with no TR,
+  the sort pass with `more` = 0), else END's null eoe item.
+- **Every phase halt waits for the cutter** (the phase's runs out). The sweeps have two stages: 33 clocks each (CLEAR
+  and CLRSTATUS too; 32 in M6).
+- **The testbench** (PLAN 1.3 "As built (M7)") compares every phase and every SHADE's runs; the pre-sorted passes come
+  from refsw3's render log (it shades them inside its walk); the free-running mode replays a recorded reference render.
+  M6's gate runs it with `--op-only`; M6's mutants file had three fragments the M7 text moved (same mutants).
+- `tools/gate/mutants.py`: a probe written `!name` marks a mutant that must pass (PLAN M7's per-tile barrier).
+- Inputs (quick): M6's pages, `tb/tile/subset_isp_tile.txt` (the M7 pages above), the tile subset's dumps and
+  `tb/tile/subset_isp_tile_dumps.txt` (the PT / translucent dumps it lacked), seeds 1-200 (chunk sizes 0, 1, 2, 0x20-0x40,
+  0x3ff; SHARED's PT_MV runs with mixed `rendered`; PTLONG). ptchunkcarry_races is not an input: its carrying cells are
+  T12's (P2_PTCARRY = 0).
+- **Gate** (quick, 12 shards; 625 renders: 52 pages at most 8 renders each, 40 dumps, seeds 1-200; 121,318 entries):
+  phase-halt 1,185,869 phase boundaries compared (1024 pixels each), 184,598 SHADE passes and 8,100,965 runs checked,
+  110,121 null eoe items, 11,273,547 feedback messages, 351,329 descriptors replayed by pcache, ptc full-walk 626,852 clk,
+  holding the next chunk 5,059,093 clk; free-running (`--vramvary 7`, random back-pressure) the same stream, records,
+  counts and the end-of-render state of every render, 254,215 raster rows held by the row barrier. 0 failures. 270 s
+  and 848 s (ispcache's last render alone takes ~440 s free-running: 301 entries of up to 256 sorted layers walked again
+  every pass after the cache overflows), so the quick gate takes ~19 minutes, not PLAN 0 rule 3's minute; the mutants
+  are their own target (`make isp-tile-mutants`).
+- **Clocks** (reported, not gated; VR_LAT 8, VR_ROW 2): phase-halt mean 1,246 clk an entry (accept to end, halts
+  excluded), max 1,075,479 (ispcache); free-running with `--vramvary 7` 3,289 clk an entry over a render (entries
+  overlap: the next entry's Z sweep starts behind the last SHADE, held only by the row barrier), the longest entry
+  4,749,115 from its accept to its end.
+- **Mutants** (`tb/isp_tile/mutants_m7.txt`, probes `tile` = phase-halt and `free` = free-running on
+  `tb/isp_tile/mutant_cases_m7.txt`, stopping at the first failure): PLAN M7's 17, the 16 bugs caught and the
+  per-tile barrier passing as it must (`!free`); and six of the structure (`valid-bypass-r2-off`, `ptc-gate-open-between-walks`,
+  `cut-eop-from-flops`, `fb-anyfail-pass-done-only`, `sweep-barrier-off`, `raster-barrier-off`), caught. The row barrier
+  mutants are caught only in free-running mode (phase-halt waits for the cutter at every halt).
+  `make isp-tile-mutants`: 23 of 23 (904 s, 4 at a time).
+- The other gates pass on this tree: `make scaffold`, `fp`, `isp-edge`, `isp-depth`, `isp-setup`, `refglue-selftest`
+  and `isp-tile-op` (M6's 24 + 3 mutants caught on the M7 testbench, its probes now stopping at the first failure).
+- **Full gate** (`make isp-tile-full`, once, 9,582 s): every fit/hw test (its first 256 renders; ta-probe and ta-tests
+  never render and are no input), 855 dumps, seeds 1-5000: 15,501 renders, 2,331,437 entries. Phase-halt (3,277 s)
+  20,467,351 phase boundaries, 3,311,895 SHADE passes, 131,848,921 runs, 33,575,803 feedback messages, 6,694,774 replayed
+  descriptors; free-running with `--vramvary 7` (6,287 s) the same stream, 4,265,575 rows held by the barrier. 0
+  failures. Clocks: phase-halt mean 774 an entry (max 1,072,009); free-running 1,738 an entry over a render (max
+  4,741,905 one entry).
 
 **Deliverables.**
 - `p2_isp_ctl` complete (with `p2_isp_ctl_tg` as a pass-through, `P2_PTCARRY = 0`).

@@ -40,6 +40,21 @@
 //     or 6 against the positive ones and the background: the signed order of the stored-depth keys (p2_isp_pix)
 //   - with STRIPS, object list words of type 110 (another object's word with bits 31:29 = 110) in the lists:
 //     refsw3 skips them (isp 15 #15, "Not handled object type"; GAP), so must the list walker
+// Drawn from a third generator (Rng::of(seed, 2), M7), after everything else is written, so that neither of the first
+// two moves:
+//   - PTLONG, with PT in one seed of 8: a punch-through chunk larger than the ISP's primitive cache (p2_isp_pcache,
+//     PCACHE_N = 256 descriptors): 272 .. 336 small triangles (triangle arrays of 16) in tile (0, 0), in front of
+//     the tile's own PT list, with ISP_FEED_CFG's chunk size 0x3ff (340 triangles a chunk) and alpha that passes or
+//     fails the test: the chunk's later passes are walks (p2_isp_ptc's full-walk mode)
+//   - PTROW, with PT in one seed of 3 without PTLONG: 10 triangles in tile (0, 0), on rows 8 .. 10 and 10 .. 12 in turn,
+//     overlapping on row 10, in front of its PT list, alpha passing or failing, chunk size 0x3ff, corner sampling
+//     (HALF_OFFSET[0] = 0): the passes after the first replay them from p2_isp_pcache one a clock, so one's last row
+//     and the next one's first, both with pixels, come one clock apart (p2_isp_pix's bypass of `valid`)
+//   - TWINS, with TRANS and without MODVOL in one seed of 3: in front of tile (0, 0)'s first sorted translucent list, a
+//     far translucent triangle and twice the same nearer one, once with the shadow bit (FPU_SHAD_SCALE's intensity
+//     mode: the same vertices, the same depth, the same sort bits, tags that differ in bit 27), the cache size 0x3ff:
+//     which twin a later sort pass takes depends on the replay's order (KeyAbove ties: the last in the list wins)
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -110,7 +125,8 @@ struct Scene {
     bool regionV2 = true;               // FPU_PARAM_CFG bit 21: 6-word entries with the punch-through list
     bool intensity = false;             // FPU_SHAD_SCALE bit 8
     Rng xr;                             // the second generator (see the header)
-    explicit Scene(uint64_t seed) : rng(Rng::of(seed, 0)), xr(Rng::of(seed, 1)) {}
+    Rng zr;                             // the third generator (see the header)
+    explicit Scene(uint64_t seed) : rng(Rng::of(seed, 0)), xr(Rng::of(seed, 1)), zr(Rng::of(seed, 2)) {}
     bool XC(unsigned perMille) { return xr.chance(perMille); }
 
     int R(int a, int b) { return (int)rng.range(a, b); }
@@ -632,6 +648,8 @@ struct Scene {
             auto again = order;
             for (auto& t : again) order.push_back(t);
         }
+        u32 pt00 = 0;                                     // tile (0, 0)'s first entry's PT pointer word
+        u32 tr00 = 0;                                     // ... its first sorted (not pre-sorted) entry's TR word
         for (size_t i = 0; i < order.size(); i++) {
             const int tx = order[i].first, ty = order[i].second;
             const int entries = cls[KEEPZ] && C(400) ? R(2, 3) : 1;
@@ -650,11 +668,134 @@ struct Scene {
                 };
                 const u32 op = lp(0), opm = (op & 0x80000000u) && C(800) ? 0x80000000u : lp(1);
                 const u32 tr = lp(2), trm = lp(3), pt = regionV2 ? lp(4) : 0x80000000u;
+                if (tx == 0 && ty == 0 && !pt00 && regionV2 && !zkeep)
+                    pt00 = ra + 20;
+                if (tx == 0 && ty == 0 && !tr00 && !presort)
+                    tr00 = ra + 12;
                 W32(ra, ctl); W32(ra + 4, op); W32(ra + 8, opm); W32(ra + 12, tr); W32(ra + 16, trm);
                 if (regionV2) { W32(ra + 20, pt); ra += 24; } else ra += 20;
             }
         }
+        if (cls[PT] && pt00 && zr.chance(125))
+            ptLong(pt00);
+        if (cls[PT] && pt00 && !ptLongUsed && zr.chance(333))
+            ptRow(pt00);
+        if (cls[TRANS] && !cls[MODVOL] && tr00 && zr.chance(333))
+            trTwins(tr00);
         (void)render;
+    }
+    // PTLONG (the header): a list of 17 .. 21 triangle arrays of 16 small triangles in tile (0, 0), linked in front of
+    // the entry's own PT list; only the third generator draws, and only memory past everything else is used
+    // a list of triangle array entries (one triangle each, flat at depth z, corners c) in front of the list a region array
+    // entry's word points at; the entry's word moved to it. Only the third generator draws
+    void frontList(u32 listWord, const std::vector<std::array<float, 6>>& tris, const std::vector<float>& zs,
+                   const std::vector<bool>& shadow, u32 tsp)
+    {
+        const u32 ispw = isp(7, 0, false, false, false, true, false, false, false);
+        const u32 a0 = listNext;
+        u32 a = a0;
+        u32 blk = 0;
+        for (size_t k = 0; k < tris.size(); k++) {
+            if (k == 0 || !(shadow[k] && k > 0 && tris[k] == tris[k - 1])) {
+                blk = alloc(15);
+                u32 b = blk;
+                W32(b, ispw); W32(b + 4, tsp); W32(b + 8, 0); b += 12;
+                for (int i = 0; i < 3; i++) {
+                    W32(b, F(tris[k][2 * i])); W32(b + 4, F(tris[k][2 * i + 1])); W32(b + 8, F(zs[k]));
+                    W32(b + 12, zr.u32());
+                    b += 16;
+                }
+            }
+            const u32 offs = ((blk - (paramBase & 0xF00000)) / 4) & 0x1fffff;
+            W32(a, 0x80000000u | 1u << 21 | (u32)shadow[k] << 24 | offs);
+            a += 4;
+        }
+        const u32 own = p2ref::vram32(listWord);
+        if (own & 0x80000000u)
+            W32(a, 0xF0000000u);
+        else
+            W32(a, 0xE0000000u | (own & 0xfffffc));
+        listNext = a + 8;
+        W32(listWord, a0 & 0xfffffc);
+    }
+    bool ptRowUsed = false;
+    void ptRow(u32 ptWord)
+    {
+        ptRowUsed = true;
+        auto Z = [&](float a, float b) { return a + (b - a) * (float)(zr.u32() >> 8) * (1.0f / 16777216.0f); };
+        std::vector<std::array<float, 6>> t;
+        std::vector<float> z;
+        std::vector<bool> sh;
+        for (int k = 0; k < 10; k++) {
+            // rows 8 .. 10 and 10 .. 12 in turn: one's last row is the next one's first, and both have pixels there
+            // (RowRange's last row is round(ymax): it has pixels only with corner sampling, HALF_OFFSET[0] = 0; the
+            // next one's first is floor(ymin): its top on the row's line, 10.0)
+            const float x0 = Z(0.0f, 16.0f), w = Z(8.0f, 16.0f);
+            if (k & 1)
+                t.push_back({ x0, 10.0f, x0 + w, 10.0f, x0, 12.4f });
+            else
+                t.push_back({ x0, 10.4f, x0 + w, 10.4f, x0, 8.0f });
+            z.push_back(Z(20000.0f, 40000.0f));
+            sh.push_back(false);
+        }
+        frontList(ptWord, t, z, sh, 1u << 29 | 2u << 22 | 1u << 20);
+        u32 ho;
+        memcpy(&ho, p2ref::regs() + HALF_OFFSET_addr, 4);
+        Reg(HALF_OFFSET_addr, ho & ~1u);                         // corner sampling (above)
+        Reg(ISP_FEED_CFG_addr, 0x3ffu << 4 | (p2ref::regs()[ISP_FEED_CFG_addr] & 1) |
+                               (*(u32*)(p2ref::regs() + ISP_FEED_CFG_addr) & 0xffc000u));
+    }
+    void trTwins(u32 trWord)
+    {
+        std::vector<std::array<float, 6>> t = { { 0.0f, 0.0f, 64.0f, 0.0f, 0.0f, 64.0f },
+                                                { 2.0f, 2.0f, 30.0f, 2.0f, 2.0f, 30.0f },
+                                                { 2.0f, 2.0f, 30.0f, 2.0f, 2.0f, 30.0f } };
+        std::vector<float> z = { 20000.0f, 40000.0f, 40000.0f };
+        std::vector<bool> sh = { false, false, true };
+        frontList(trWord, t, z, sh, 4u << 29 | 5u << 26 | 2u << 22 | 1u << 20);
+        u32 cfg;
+        memcpy(&cfg, p2ref::regs() + ISP_FEED_CFG_addr, 4);
+        Reg(ISP_FEED_CFG_addr, (cfg & 0x3fffu) | 0x3ffu << 14);
+        u32 sc;
+        memcpy(&sc, p2ref::regs() + FPU_SHAD_SCALE_addr, 4);
+        Reg(FPU_SHAD_SCALE_addr, sc | 1u << 8);              // no object has the shadow bit without MODVOL
+        twinsUsed = true;
+    }
+    bool twinsUsed = false;
+    bool ptLongUsed = false;
+    void ptLong(u32 ptWord)
+    {
+        ptLongUsed = true;
+        auto Z = [&](float a, float b) { return a + (b - a) * (float)(zr.u32() >> 8) * (1.0f / 16777216.0f); };
+        const u32 tsp = 1u << 29 | 2u << 22 | 1u << 20;          // ONE, ZERO, no fog, the vertex alpha
+        const u32 ispw = isp(7, 0, false, false, false, true, false, false, false);
+        const int arrays = 17 + (int)zr.below(5);
+        const u32 a0 = listNext;
+        u32 a = a0;
+        for (int k = 0; k < arrays; k++) {
+            const u32 blk = alloc(16 * 15);
+            u32 b = blk;
+            for (int t = 0; t < 16; t++) {
+                W32(b, ispw); W32(b + 4, tsp); W32(b + 8, 0); b += 12;
+                const float cx = Z(0.0f, 28.0f), cy = Z(0.0f, 28.0f), sz = Z(2.0f, 12.0f), z = Z(0.01f, 2.0f);
+                for (int i = 0; i < 3; i++) {
+                    W32(b, F(cx + (i == 1) * sz)); W32(b + 4, F(cy + (i == 2) * sz)); W32(b + 8, F(z * Z(0.9f, 1.1f)));
+                    W32(b + 12, zr.u32());
+                    b += 16;
+                }
+            }
+            const u32 offs = ((blk - (paramBase & 0xF00000)) / 4) & 0x1fffff;
+            W32(a, 0x80000000u | 15u << 25 | 1u << 21 | offs);
+            a += 4;
+        }
+        const u32 own = p2ref::vram32(ptWord);
+        if (own & 0x80000000u)
+            W32(a, 0xF0000000u);                                  // the entry had no PT list
+        else
+            W32(a, 0xE0000000u | (own & 0xfffffc));               // a link to it
+        listNext = a + 8;
+        W32(ptWord, a0 & 0xfffffc);
+        Reg(ISP_FEED_CFG_addr, 0x3ffu << 4 | (p2ref::regs()[ISP_FEED_CFG_addr] & 1));
     }
     int prims(int list) const
     {
@@ -711,6 +852,9 @@ int main(int argc, char** argv)
     }
     printf("scenegen %llu:", (unsigned long long)seed);
     for (int c = 0; c < NCLASSES; c++) if (s.cls[c]) printf(" %s", kClassName[c]);
+    if (s.ptLongUsed) printf(" ptlong");
+    if (s.ptRowUsed) printf(" ptrow");
+    if (s.twinsUsed) printf(" twins");
     printf("; %d render%s; %dx%d tiles; primitives op %d, op mod %d, tr %d, tr mod %d, pt %d\n", renders,
            renders > 1 ? "s" : "", s.tw, s.th, s.prims(0), s.prims(1), s.prims(2), s.prims(3), s.prims(4));
     return 0;

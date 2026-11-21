@@ -1,0 +1,17 @@
+# subset_isp_tile.txt: the test pages of make isp-tile (PLAN M7, gate inputs 3) beside M6's (tb/tile/subset_isp_op.txt,
+# which the gate reads too): the punch-through chunk, layer and run pages, OpInPt, the run cuts, the sorted and tie pages,
+# keep Z, the ISP cache and the dumped rules. At most 8 renders each (capture_prerender.sh --max 8).
+ptchunk        # chunk membership: 210 configurations of triangles and sprites at 0x20-0x25 and 0x40
+ptchunkq       # ... with quads at the boundary
+ptchunkm       # ... mixed
+ptchunkcost    # culled primitives and strip triangles outside the tile: no room in the chunk
+ptchunklag     # the culled lag and the quad lag
+ptlayers       # pass membership: a pixel resolved in pass p takes part in p + 1 only
+ptruns         # run-only pixels in a pass's runs; shading the same fragment again
+optrun         # OpInPt: opaque runs not cut at volume edges; opaque pixels in the PT_MV pass
+optcull        # OpInPt from a list that holds a primitive, drawn or not
+uvrun          # where runs end: volumes, PT_MV, translucent
+trtie          # the sort's and the passes' first reference (KeyAbove at equal depth, the background's tag)
+sort           # the translucent sort's order
+ispcache       # the translucent cache size (pcache overflow)
+dumprules      # the dumped rules pages (PT order, PT_MV alpha test)

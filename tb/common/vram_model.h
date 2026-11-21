@@ -110,6 +110,16 @@ struct VramModel {
         }
         return raceWords;
     }
+    // the requests and responses in flight dropped (the DUT was reset: a testbench's recovery after a failure)
+    void flush()
+    {
+        for (Half& x : h) {
+            x.q.clear();
+            x.out.clear();
+            x.openRow = ~0u;
+            x.free = now;
+        }
+    }
     bool busy() const { return !h[0].q.empty() || !h[1].q.empty() || !h[0].out.empty() || !h[1].out.empty(); }
 
     // this clock's inputs to the DUT

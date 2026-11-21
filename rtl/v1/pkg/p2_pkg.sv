@@ -200,11 +200,23 @@ package p2_pkg;
     logic [3:0]   prims;    // array: prims + 1 primitives
   } p2_isp_obj_t;
 
-  // the ISP buffer's sweeps (p2_isp_buf, ARCHITECTURE 3.4.7): one row a clock over the 32 rows. M6 has the entry's
-  // first two; PT_INIT, PT_CHUNK, PASS_START, PT_FINAL, PEEL, SAVE, RESTORE are M7's
+  // the ISP buffer's sweeps (p2_isp_buf, ARCHITECTURE 3.4.7): one row a clock over the 32 rows, each refsw3's per-pixel
+  // effect (refsw_tile.cpp)
   typedef enum logic [3:0] {
-    P2_SW_CLEAR    = 4'd0,   // ClearBuffers(ISP_BACKGND_T, bgkey(ISP_BACKGND_D), 0): depthA, tagA, stencil 0, valid 1
-    P2_SW_CLRSTATUS = 4'd1   // ClearParamStatusBuffer: valid = rendered = 0
+    P2_SW_CLEAR      = 4'd0,  // ClearBuffers(ISP_BACKGND_T, bgkey(ISP_BACKGND_D), 0): depthA, tagA, stencil 0, valid 1,
+                              // rendered 0
+    P2_SW_CLRSTATUS  = 4'd1,  // ClearParamStatusBuffer: valid = rendered = 0
+    P2_SW_PT_INIT    = 4'd2,  // PeelBuffersPTInitial: depthC = depthA, opTag = refTagC = tagA, tagB = TAG_BELOW,
+                              // valid = rendered = 0, stencil 0, everRendered = 0, rcur = rlp = 0 (resPass = -10)
+    P2_SW_PT_CHUNK   = 4'd3,  // PeelBuffersPTChunk: rendered: depthC = resDepth, refTagC = resTag; everRendered |=
+                              // rendered; valid = rendered = 0; tagB = TAG_BELOW; rcur = rlp = 0
+    P2_SW_PASS_START = 4'd4,  // a punch-through pass (PtPass = p): rlp = rcur (resolved in the pass before), rcur = 0
+    P2_SW_PT_FINAL   = 4'd5,  // PeelBuffersPTFinal: rendered |= everRendered; depthA, tagA = rendered ? resDepth,
+                              // resTag : depthC, opTag
+    P2_SW_PEEL       = 4'd6,  // PeelBuffers(key, 0): depthB, tagB = depthA, tagA; depthA = key; valid = rendered = 0;
+                              // stencil 0 (tagA kept)
+    P2_SW_SAVE       = 4'd7,  // SaveDepth: savedDepth = depthA
+    P2_SW_RESTORE    = 4'd8   // RestoreDepth: depthA = savedDepth
   } p2_sweep_t;
 
   // an assembled primitive in one tile (p2_isp_pfetch to p2_isp_setup, ARCHITECTURE 3.4.3 `asm`), valid/ready: the
