@@ -1,0 +1,45 @@
+# tb/isp_tile/mutants.txt: the planted bugs of M6's ISP tile units in rtl/v1/isp (PLAN M6 "Mutants", conventions.md 7.7),
+# run by tools/gate/mutants.py (make isp-tile-op-mutants). Every one must be caught by its probe and the unchanged folder
+# must pass first. p2_mem's are in tb/isp_tile/mutants_mem.txt (another folder: rtl/v1/mem).
+#
+# The probe `tile`: the phase-halt testbench on tb/isp_tile/mutant_cases.txt (pages of the M6 classes, three dumps, scenegen
+# seeds 1-200), a phase that takes more than 1M clocks failing (a walk that never ends); `vary`: the same with the VRAM
+# model's random latency (--vramvary 7).
+#
+# Format: <id> | <file in rtl/v1/isp> | <original fragment> | <mutated fragment> | <probe> [args] | <what it breaks>
+# (\n a newline, \| a bar, \\ a backslash in a fragment).
+@dir rtl/v1/isp ISP_DIR
+@obj ISP_TILE_OBJDIR
+@probe tile isp-tile-build tb --phase-limit 1000000 @tb/isp_tile/mutant_cases.txt
+@probe vary isp-tile-build tb --phase-limit 1000000 --vramvary 7 @tb/isp_tile/mutant_cases.txt
+
+# ---- PLAN M6's list
+odd-strip-swap-off | p2_isp_pfetch.sv | c0          = odd ? 3'(ei + 3'd1) : ei;\n    c1          = odd ? ei : 3'(ei + 3'd1); | c0          = ei;\n    c1          = 3'(ei + 3'd1); | tile | a strip's odd triangles keep the list's corner order (RenderTriangleStrip swaps the first two): the winding turns, CullMode 2 / 3 culls the other way
+twovol-no-intensity | p2_isp_pfetch.sv | assign in_two = ob.shadow && !shad_intensity; | assign in_two = ob.shadow; | tile | two volumes for every shadowed polygon, FPU_SHAD_SCALE[8] ignored: the vertices' stride and the header are wrong (sc_ingame2, scenegen MODVOL intensity)
+param-base-unmasked | p2_isp_pfetch.sv | assign pb = {param_base[23:20], 20'd0}; | assign pb = param_base[23:0]; | tile | PARAM_BASE taken whole on the ISP side, not & 0xF00000 (scenegen's PARAM_BASE 0x40)
+link-eol-ignored | p2_isp_olw.sv | if (w_link.end_of_list)\n          walking <= 1'b0;\n        else\n          fa | fa | tile | a link's end_of_list ignored: the walk follows its pointer (the list's end word 0xF0000000 points at 0)
+depthmode3-as-1 | p2_isp_pix.sv | 3'd3:    pass = $signed(r1_zk[i]) <= $signed(dA[i]); | 3'd3:    pass = $signed(r1_zk[i]) <  $signed(dA[i]); | tile | DepthMode 3 (less or equal) as 1 (less): ties with the background and coplanar polygons (bgtie, depth)
+modvol-ge | p2_isp_pix.sv | hit[i] = r1_rm == P2_RM_MODIFIER && r1_m[i] && $signed(r1_zk[i]) > $signed(dA[i]); | hit[i] = r1_rm == P2_RM_MODIFIER && r1_m[i] && $signed(r1_zk[i]) >= $signed(dA[i]); | tile | a volume's triangle flips the parity at equal depth (mode 4 is strictly greater)
+summary-or-and-swapped | p2_isp_pix.sv | (op == P2_SUM_OR) ? | (op == P2_SUM_AND) ? | tile | VolumeMode 1 summarized as AND and 2 as OR (inside last / outside last)
+summary-untouched | p2_isp_pix.sv | if (op == P2_SUM_NONE \|\| !s[2]) | if (op == P2_SUM_NONE) | tile | the summary applied to pixels the volume did not touch (stencil bit 2 clear)
+summary-rasterized-only | p2_isp_setup.sv | assign kill_d = (bad \|\| culled) && sum_op != P2_SUM_NONE; | assign kill_d = 1'b0; | tile | A2: the summary only for rasterized closers; a culled or bad-corner closing triangle does nothing (refsw3 summarizes after every VolumeMode 1 / 2 triangle)
+summary-before-parity | p2_isp_pix.sv | n_st[i] = f_sum(f_parity(st[i], hit[i]), r1_sum); | n_st[i] = f_parity(f_sum(st[i], r1_sum), hit[i]); | tile | the closer's summary applied before its own parity updates
+row-bypass-off | p2_isp_pix.sv | assign by2 = r2_v && r2_j == r1_j;\n  assign by3 = r3_v && r3_j == r1_j; | assign by2 = 1'b0;\n  assign by3 = 1'b0; | tile | no bypass of R1's read: back-to-back primitives on the same row read the row before the earlier one wrote it (scenegen ROWS)
+tag-29-bits | p2_isp_buf.sv | localparam int TAG_BITS = 32; | localparam int TAG_BITS = 29; | tile | tagA kept in 29 bits: a background tag's bits 31:29 lost (scenegen BGTAG); M7's KeyAbove would compare 29 bits
+tag-below-flag | p2_isp_buf.sv | wt[i] = sw_t; | wt[i] = (sw_t == 32'hFFFF_FFFF) ? 32'd0 : sw_t; | tile | TAG_BELOW as a separate flag: a background tag of 0xFFFFFFFF not kept as the word (scenegen BGTAG); M7's KeyAbove would tie it differently
+# ---- the structure
+row-bypass-r2-off | p2_isp_pix.sv | assign by2 = r2_v && r2_j == r1_j; | assign by2 = 1'b0; | tile | no bypass from the write of this clock (a primitive's last row and the next one's first, one clock apart)
+row-bypass-r3-off | p2_isp_pix.sv | assign by3 = r3_v && r3_j == r1_j; | assign by3 = 1'b0; | tile | no bypass from the write of the clock before (the F read sampled at that write's edge: rows two clocks apart)
+link-ahead-kept | p2_isp_olw.sv | drop <= AB'(ahead - AB'(1)); | drop <= '0; | tile | the words read ahead past a link used as the list's (OLW_AHEAD read-ahead not dropped)
+array-next-block | p2_isp_pfetch.sv | s_woff  <= s_vw + 24'(s_stride); | s_woff  <= s_vw; | tile | an array's next block one vertex early
+zwdis-ignored | p2_isp_pix.sv | n_dwe[i] = !r1_zw; | n_dwe[i] = 1'b1; | tile | ZWriteDis ignored: every passing fragment writes depth
+bgkey-plain | p2_isp_ctl.sv | sw_key    = p2_zword_pkg::bgkey(bg_depth); | sw_key    = p2_zword_pkg::bits(bg_depth); | tile | the background's depth as the register's word, not its 19-bit key (bgtie, bgspec, bgneg)
+clrstatus-clears-stencil | p2_isp_buf.sv | wswe = 1'b0;\n      wdwe = '0; | wswe = 1'b1;\n      wst  = '0;\n      wdwe = '0; | tile | keep Z clears the stencil (isp 15 #17: it keeps it)
+depthmode1-unsigned | p2_isp_pix.sv | 3'd1:    pass = $signed(r1_zk[i]) <  $signed(dA[i]); | 3'd1:    pass = $unsigned(r1_zk[i]) <  $unsigned(dA[i]); | tile | DepthMode 1 on the keys as unsigned numbers: a depth below zero above every positive one (scenegen's opaque primitives below zero, the second generator; bgneg). `r1_zk[i] < dA[i]` alone is no mutant: an element of a packed array of the signed p2_zkey_t is signed (IEEE 1800-2017 7.4.1)
+depthmode6-unsigned | p2_isp_pix.sv | 3'd6:    pass = $signed(r1_zk[i]) >= $signed(dA[i]); | 3'd6:    pass = $unsigned(r1_zk[i]) >= $unsigned(dA[i]); | tile | DepthMode 6 on the keys as unsigned numbers (as depthmode1-unsigned)
+type110-as-quads | p2_isp_olw.sv | (w_typ.type_ == 3'b100 \|\| w_typ.type_ == 3'b101) | (w_typ.type_[2] && w_typ.type_ != 3'b111) | tile | an ObjectListEntry of type 110 walked as a quad array (refsw3 skips it, isp 15 #15: scenegen STRIPS's type-110 words, the second generator)
+modvol-own-rows | p2_isp_setup.sv | .tile_y(pr.tiley), .modvol(modvol), | .tile_y(pr.tiley), .modvol(1'b0), | tile | a MODIFIER triangle stepped on its own rows, not all 32: the closer's summary misses the rows outside its range (caught on the values). The all-32 stepping is also why p2_isp_pix's stencil needs no R2 bypass; the testbench's t_mrow check fails a run where two volume rows of one row number come one clock apart (none did here)
+# Left out as equivalent: the stencil's bypass from R2 does not exist (a MODIFIER triangle steps all 32 rows, so two
+# volume rows of one row number are at least 32 clocks apart; the testbench's t_mrow check fails if that ever changes); valid's
+# bypass from R2 (vl) is read by no M6 rule (M7's punch-through rows); raster / pix idle without row_v / r2_v (pix's
+# idle covers the raster's row register, ctl's one-clock transition pix's R2).

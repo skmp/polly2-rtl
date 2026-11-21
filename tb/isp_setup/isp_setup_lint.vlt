@@ -34,3 +34,5 @@ lint_off -rule PINCONNECTEMPTY -file "*/p2_isp_setup.sv"
 // p2_isp_raster: the descriptor's quad is not a raster rule (a triangle's fourth edge is a constant inside; p2_rdesc_t
 // carries it for the testbench and the later units)
 lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_raster.sv" -match "*'rd'[775]*"
+// p2_isp_setup_tb_top: the setup's and the raster's idle outputs are M6's (p2_isp_ctl's walk end)
+lint_off -rule PINCONNECTEMPTY -file "*/p2_isp_setup_tb_top.sv" -match "*'idle'*"

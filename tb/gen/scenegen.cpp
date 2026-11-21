@@ -10,9 +10,12 @@
 // and after; tb/tile/subset_seeds.txt lists the seeds of the subset (conventions.md 7.8).
 //
 // Each seed draws a mix of the classes of PLAN 1.3, each with a chance of 28 % (every scene has opaque primitives):
-//   STRIPS     strips with masks (also all-zero masks), triangle and quad arrays, links between list blocks
+//   STRIPS     strips with masks (also all-zero masks), triangle and quad arrays, links between list blocks (five in
+//              17 to a block in the other VRAM half)
 //   MODVOL     modifier volumes: inside and outside, chains of volumes, culled and bad-corner closing triangles,
-//              shadow polygons (two volumes, or intensity mode with FPU_SHAD_SCALE)
+//              shadow polygons (two volumes, or intensity mode with FPU_SHAD_SCALE); a volume whose front depth is the
+//              tie value 0.5 has its first triangle on an opaque triangle's corners (the volume's strictly-greater
+//              compare at equal depth)
 //   PT         punch-through lists at chunk sizes 0, 1, 2, 0x20 .. 0x40 and 0x3ff, with culled primitives
 //   SHARED     the same parameter block in the opaque and the punch-through list; ISP_BACKGND_T pointing at a PT
 //              block (PT_MV runs with mixed `rendered`)
@@ -23,11 +26,20 @@
 //   EDGES      corners of +-0, denormals, 2^127, +-inf, NaN, slivers, points; far corners (steps of 2^123 and more,
 //              first row 28 .. 31, 32 sx near 2^131 and 2^132); column steps below zero at multiples of 2^124 .. 2^127;
 //              points and tiny triangles with the top corner in row 31
-//   ROWS       back-to-back small primitives on the same rows (the RTL's row bypass)
+//   ROWS       back-to-back small primitives on the same rows; pairs of a tall primitive (17 .. 25 rows in one tile,
+//              longer than the next one's setup) and one whose first rows are the tall one's last row or the row above
+//              it, behind it with DepthMode greater (or equal): the RTL's row bypass (p2_isp_pix R2 / R3), which the
+//              M6 gate's mutants need often (the dumps meet it in 3 tiles). Opaque only: a MODIFIER triangle steps
+//              all 32 rows, so two volume rows of one row number are at least 32 clocks apart (no stencil bypass)
 //   TSP        textures of every format (VQ, mipmaps, palettes, bump maps, YUV), filters, SupSample, fog, blend modes,
 //              the secondary buffer, depths across the range (the TSP's planes)
 //   FRAME      the write-out: pack modes, dither, clips, render to texture, the scaler, strip buffers; a second render
 //              (the tile buffers and offsKept carry over)
+// Drawn from a second generator (Rng::of(seed, 1)), so that the scenes of the first stay as they were:
+//   - opaque primitives whose corners' depths are below zero, all of them or some (a plane across 0), at DepthMode 1
+//     or 6 against the positive ones and the background: the signed order of the stored-depth keys (p2_isp_pix)
+//   - with STRIPS, object list words of type 110 (another object's word with bits 31:29 = 110) in the lists:
+//     refsw3 skips them (isp 15 #15, "Not handled object type"; GAP), so must the list walker
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -53,6 +65,7 @@ const char* const kClassName[NCLASSES] = { "strips", "modvol", "pt", "shared", "
 // parameter blocks: (PARAM_BASE & 0xF00000) .. + 0xF0000, PARAM_BASE 0 or 0x100000 (or 0x40: the ISP's 0)
 const u32 kListArea = 0x200000;         // object lists, 0x200000 .. 0x260000
 const u32 kRegionArea = 0x268000;       // the region array
+const u32 kListArea1 = 0x440000;        // object list blocks in the other half, 0x440000 .. 0x4f0000 (below the framebuffer)
 const u32 kFbArea = 0x500000;           // the framebuffer, 0x500000 .. 0x6c0000
 const u32 kRttArea = 0x5c0000;          // render to texture: physical 0x5c0000 .. 0x600000 (32-bit 0x2e0000 .., 0x6e0000 ..)
 const u32 kTexLo = 0x600000, kTexHi = 0x800000;   // 64-bit area
@@ -82,6 +95,8 @@ struct Obj {
     bool shadow;
     int prims;              // strip: vertices 3 .. 8; arrays: primitives 1 .. 16
     float x0, y0, x1, y1;   // the bounding box of its corners (for the tiles it is listed in; +-inf: all tiles)
+    bool tri0 = false;      // a triangle array: its first triangle's corners
+    Vtx c0[3];
 };
 
 struct Scene {
@@ -91,9 +106,12 @@ struct Scene {
     u32 paramBase = 0;                  // PARAM_BASE
     u32 paramNext = 0x100;              // the next free parameter word
     u32 listNext = kListArea;
+    u32 listNext1 = kListArea1;
     bool regionV2 = true;               // FPU_PARAM_CFG bit 21: 6-word entries with the punch-through list
     bool intensity = false;             // FPU_SHAD_SCALE bit 8
-    explicit Scene(uint64_t seed) : rng(Rng::of(seed, 0)) {}
+    Rng xr;                             // the second generator (see the header)
+    explicit Scene(uint64_t seed) : rng(Rng::of(seed, 0)), xr(Rng::of(seed, 1)) {}
+    bool XC(unsigned perMille) { return xr.chance(perMille); }
 
     int R(int a, int b) { return (int)rng.range(a, b); }
     bool C(unsigned perMille) { return rng.chance(perMille); }
@@ -183,11 +201,18 @@ struct Scene {
     }
 
     // ---- parameter blocks ----
+    // every other object's blocks go to the other VRAM half (absolute 0x400100 .. 0x440000, free for PARAM_BASE 0 and
+    // 0x100000: the ISP's offsets reach it in 21 bits): pfetch's reads then straddle the halves from object to object,
+    // which p2_mem's per-client order must keep (an object's own blocks stay together: an array's follow one another)
+    bool hi = false;
+    u32 paramNextHi = 0x400100;
+    void nextObject() { hi = !hi; }
     u32 alloc(u32 words)
     {
-        const u32 a = paramNext;
-        paramNext += words * 4;
-        if (paramNext > (paramBase & 0xF00000) + 0xF0000) {
+        u32& next = hi ? paramNextHi : paramNext;
+        const u32 a = next;
+        next += words * 4;
+        if (hi ? next > 0x440000 : next > (paramBase & 0xF00000) + 0xF0000) {
             fprintf(stderr, "scenegen: out of parameter memory\n");
             exit(1);
         }
@@ -249,8 +274,14 @@ struct Scene {
     }
     void poly(int list, bool translucent, bool pt)
     {
+        nextObject();
         Obj o;
-        const u32 ispw = polyIsp(translucent, pt);
+        u32 ispw = polyIsp(translucent, pt);
+        // depths below zero (opaque only: the second generator): 0 none, 1 every corner, 2 some corners
+        const int neg = list == 0 && XC(150) ? (XC(500) ? 1 : 2) : 0;
+        if (neg)
+            ispw = (ispw & 0x1fffffffu) | (XC(500) ? 1u : 6u) << 29;
+        auto negz = [&](Vtx& w) { if (neg == 1 || (neg == 2 && XC(500))) w.z ^= 0x80000000u; };
         // Translucent primitives keep their depth planes in range: a fragment whose stored depth is above the
         // largest finite float (a steep plane extrapolated: an overflow key) is above the autosort's empty reference
         // (PeelBuffers' 0x7f7fffff) every other pass, and refsw3's passes never end (nor, presumably, a console's).
@@ -276,6 +307,7 @@ struct Scene {
                     w.y = F(Fl(v.y) + (i & 1) * sy + U(-2, 2));
                     if (C(800) || tame) w.z = tame ? F(Fl(v.z) * U(0.95f, 1.05f)) : v.z;
                 }
+                negz(w);
                 vs.push_back(w);
             }
             o.paramAddr = block(ispw, two, o.prims, vs, translucent);
@@ -297,10 +329,16 @@ struct Scene {
                         if (C(700) || tame) w.z = tame ? F(Fl(c.z) * U(0.95f, 1.05f)) : c.z;
                     }
                     if (cls[ROWS] && !tame && p > 0) w.y = F(Fl(w.y) - Fl(c.y) + Fl(vs[0].y));     // the same rows
+                    negz(w);
                     pv.push_back(w);
                 }
-                if (p == 0)
+                if (p == 0) {
                     vs = pv;
+                    if (n == 3) {
+                        o.tri0 = true;
+                        for (int i = 0; i < 3; i++) o.c0[i] = pv[i];
+                    }
+                }
                 // the same ISP word for every primitive of the array (the list entry's skip walks the blocks)
                 const u32 a = block(ispw, two, n, pv, translucent);
                 if (p == 0)
@@ -313,6 +351,7 @@ struct Scene {
     // a modifier volume: closed or not, inside or outside, a chain of volumes
     void volume(int list)
     {
+        nextObject();
         const int tris = R(1, 8);
         const float cx0 = U(-8, tw * 32 + 8), cy0 = U(-8, th * 32 + 8), r = U(4, 48);
         const u32 zf = depth(), zb = depth();
@@ -323,6 +362,12 @@ struct Scene {
         o.prims = tris;
         o.paramAddr = 0;
         std::vector<Vtx> all;
+        // the tie: at the tie depth, the first triangle on an opaque triangle's corners (no draw of its own, so that the
+        // other seeds' scenes stay as they were)
+        const Obj* on = nullptr;
+        if (zf == F(0.5f))
+            for (const Obj& q : objs[0])
+                if (q.tri0) { on = &q; break; }
         for (int t = 0; t < tris; t++) {
             const bool last = t == tris - 1;
             const int mode = last ? (C(500) ? 1 : 2) : (C(30) ? R(1, 2) : 0);
@@ -337,6 +382,7 @@ struct Scene {
                 v.y = F(cy0 + r * sinf(a));
                 v.z = i == t % 3 ? zb : zf;
                 if (last && cls[EDGES] && C(200)) v.x = 0x7f800000;    // a bad-corner closing triangle
+                if (on && t == 0) { v.x = on->c0[i].x; v.y = on->c0[i].y; v.z = on->c0[i].z; }
                 vs.push_back(v);
                 all.push_back(v);
             }
@@ -349,6 +395,50 @@ struct Scene {
         // one triangle array; its primitives are the volume's triangles (at most 16 an entry)
         bbox(o, all);
         objs[list].push_back(o);
+    }
+
+    // ROWS: a tall primitive and one whose first rows meet its last row, behind it (see the header)
+    void rowPair()
+    {
+        nextObject();
+        Obj o;
+        o.kind = C(500) ? 2 : 1;
+        o.shadow = false;
+        o.prims = 2;
+        const int n = o.kind == 2 ? 4 : 3;
+        const u32 ispw = isp(C(500) ? 6 : 4, 0, false, false, C(300), C(500), false, false, false);
+        o.skip = skipOf(ispw);
+        const int tx = R(0, tw - 1), ty = R(0, th - 1);
+        const float x0 = tx * 32 + U(-4.0f, 20.0f), w = U(6.0f, 30.0f);
+        const float ya = ty * 32 + U(0.0f, 6.0f);
+        float yb = ya + U(17.0f, 25.0f), yc = yb + U(-1.5f, 0.3f);
+        if (C(500)) {
+            // the same row one clock apart (R2): with corner sampling (HALF_OFFSET[0] = 0) the tall one's last row r has
+            // its pixels when its bottom is r + 1/4, and the next one's top at r exactly starts in row r
+            yc = floorf(yb);
+            yb = yc + 0.25f;
+        }
+        const float yd = yc + U(2.0f, 10.0f);
+        const u32 zA = F(U(0.7f, 0.95f)), zB = F(U(0.5f, 0.6f));
+        std::vector<Vtx> all;
+        o.paramAddr = 0;
+        for (int p = 0; p < 2; p++) {
+            const float top = p ? yc : ya, bot = p ? yd : yb, l = p ? x0 + U(-3.0f, 3.0f) : x0;
+            std::vector<Vtx> pv;
+            for (int i = 0; i < n; i++) {
+                static const float qx[4] = { 0, 1, 1, 0 }, qy[4] = { 0, 0, 1, 1 }, tx3[3] = { 0, 1, 0.5f }, ty3[3] = { 0, 0, 1 };
+                Vtx v = vtx(false);
+                v.x = F(l + (n == 4 ? qx[i] : tx3[i]) * w);
+                v.y = F(top + (n == 4 ? qy[i] : ty3[i]) * (bot - top));
+                v.z = p ? zB : zA;
+                pv.push_back(v);
+                all.push_back(v);
+            }
+            const u32 a = block(ispw, false, n, pv, false);
+            if (!p) o.paramAddr = a;
+        }
+        bbox(o, all);
+        objs[0].push_back(o);
     }
 
     // ---- object lists ----
@@ -365,6 +455,7 @@ struct Scene {
     {
         const u32 a0 = listNext;
         u32 a = a0;
+        u32 end0 = 0;                                    // past the half-0 part when the list crosses (0: it does not)
         int inBlock = 0, blockLen = cls[STRIPS] ? R(2, 12) : 1000;
         for (const Obj& o : v) {
             const bool touches = o.x1 >= tx * 32 - 1 && o.x0 <= tx * 32 + 33 && o.y1 >= ty * 32 - 1 && o.y0 <= ty * 32 + 33;
@@ -376,17 +467,43 @@ struct Scene {
                 if (cls[STRIPS] && C(400)) mask &= rng.u32();
             }
             if (inBlock == blockLen) {                   // a link to the next block, some way off
-                const u32 next = a + 4 + 4 * R(0, 16);
+                const int gap = R(0, 16);
+                // five links in 17 go over to the other VRAM half (32-bit area a[22]: kListArea1), so that the
+                // walker has reads outstanding on both halves (p2_mem's per-client order); no extra draw
+                u32 next = a + 4 + 4 * gap;
+                if (gap >= 12 && a < kListArea1) {
+                    // the rest of the list is there; listNext1 moves past it at the end, listNext past the link
+                    // word and the gap here, so that the next tile's list does not start on this one's first block
+                    end0 = next;
+                    next = listNext1;
+                }
                 W32(a, 0xE0000000u | (next & 0xfffffc));
                 a = next;
                 inBlock = 0;
+            }
+            // a type-110 word (the second generator; see the header): another object's word with bits 31:29 = 110,
+            // so that a walker that took it for an array would draw that object here, out of its order
+            if (cls[STRIPS] && XC(80)) {
+                const Obj& q = v[xr.below(v.size())];
+                W32(a, (listWord(q, 63) & 0x1fffffffu) | 0xC0000000u);
+                a += 4;
             }
             W32(a, listWord(o, mask));
             a += 4;
             inBlock++;
         }
         W32(a, 0xF0000000u);                             // link, end of list
-        listNext = a + 4 + 4 * R(0, 4);
+        const u32 after = a + 4 + 4 * R(0, 4);
+        if (a >= kListArea1) {
+            listNext1 = after;
+            if (end0)
+                listNext = end0;
+            if (listNext1 > 0x4f0000) {
+                fprintf(stderr, "scenegen: out of list memory (the other half)\n");
+                exit(1);
+            }
+        } else
+            listNext = after;
         if (listNext > kListArea + 0x60000) {
             fprintf(stderr, "scenegen: out of list memory\n");
             exit(1);
@@ -415,12 +532,15 @@ struct Scene {
         for (auto& o : objs)
             o.clear();
         listNext = kListArea;
+        listNext1 = kListArea1;
         tw = R(1, 4);
         th = R(1, 3);
         fillTextures();
         // PARAM_BASE: the ISP takes bits 23:20, the TSP all of it (a base with low bits: the TSP reads elsewhere)
         paramBase = C(900) ? 0 : (C(500) ? 0x000040 : 0x100000);
         paramNext = (paramBase & 0xF00000) + 0x100;
+        paramNextHi = 0x400100;
+        hi = false;
         regionV2 = cls[PT] || cls[SHARED] || C(700);
 
         // registers
@@ -467,6 +587,7 @@ struct Scene {
         // primitives
         const int nOp = R(cls[ROWS] ? 6 : 3, 14);
         for (int i = 0; i < nOp; i++) poly(0, false, false);
+        if (cls[ROWS]) { const int k = R(2, 6); for (int i = 0; i < k; i++) rowPair(); }
         if (cls[MODVOL]) { const int n = R(1, 4); for (int i = 0; i < n; i++) volume(1); }
         if (cls[PT] || cls[SHARED]) {
             const int n = R(1, 12);

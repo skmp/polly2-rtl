@@ -308,6 +308,9 @@ cutter at the `eoe` item.
 `{kind: PIXEL | PASS_DONE, idx[9:0], fail, ro}`. PASS_DONE comes after the pass's last PIXEL message, when the
 `eop` item has left P11, and carries `anyfail`.
 
+**Inside the ISP (M6, `p2_pkg`).** `p2_isp_obj_t` (p2_isp_olw to p2_isp_pfetch: one object list entry that draws, §3.4.2
+"As built") and `p2_sweep_t` (p2_isp_ctl to p2_isp_buf: the sweep to run, §3.4.7; M6 has CLEAR and CLRSTATUS).
+
 ### 2.4 ISP setup to rasterizer descriptor (`p2_rdesc_t`)
 
 Per primitive per tile (edge.h `EdgeTile` and depth.h `DepthTileT`, both at `4f3efe15`):
@@ -419,6 +422,21 @@ Each unit lists:
 
 **Cycle.** `p2_mem` adds one clock (the request register). Everything else about VRAM timing is the testbench
 model's.
+
+**As built (M6, `rtl/v1/mem/p2_mem.sv`; PLAN M6).** Clients C1 and C2 are connected, the others tied off (`tb/isp_tile`).
+Where it differs from the text above:
+- **The client interface has a response ready**, `cN_rrdy`, and **the response buffer of a client is in `p2_mem`**: per
+  client an order FIFO (which halves each outstanding read waits for) and per client and half a response FIFO of
+  `RSP_N` = 8 [G] words. A client may have at most `RSP_N` reads outstanding from grant to its pop (`cN_rv && cN_rrdy`):
+  `cN_rdy` stays low past that, so the VRAM ports need no ready on their responses (§1.2 as written) and the FIFOs never
+  overflow (asserted). A client's reads come back in its own request order whichever half answers first (the
+  `order-by-arrival` mutant).
+- A 32-bit request takes half `a[22]`, word `a[21:2]`; bits 23 and up are dropped, which is `pvr_map32`'s 8 MB wrap
+  (its static bits are only `a[1:0]` with 8 MB). The 64-bit view (`cN_w64`) takes word `A[22:3]` of both halves.
+- The VRAM model (`tb/common/vram_model.h`, §3.2.1) has a request queue of 4 a half, `VR_LAT` 8, rows of 512 words with
+  `VR_ROW` 2 [G] (not fitted yet). `+vramvary` adds 0 .. 12 clocks to a request, drops `vh_req_rdy` one clock in four at
+  random, and stalls a half for up to 63 clocks one clock in 64. The hazard detector's bitmaps are there (no client
+  writes in M6).
 
 #### 3.2.1 The VRAM model (`tb/common/vram_model.h`; testbench, not RTL)
 
@@ -541,6 +559,13 @@ entry end: the last SHADE's last item carries eoe, or a null eoe item (§3.4.8)
 
 **State.** Phase, OpInPt, chunk, pass, `more`, the current entry.
 
+**As built (M6, `rtl/v1/isp/p2_isp_ctl.sv`).** The phases Z (CLEAR with `bgkey(ISP_BACKGND_D)` and ISP_BACKGND_T, all
+32 bits; CLRSTATUS for keep Z), OP and OP_MOD (only with an OP list); then the entry ends (OpInPt, the SHADE passes, PT
+and TR are M7's). A walk ends when olw, pfetch, setup, the raster and pix are all idle (each has an `idle` output; M6 added
+them to M4's `p2_isp_setup` and `p2_isp_raster`). **The phase halt** (sim, PLAN §1.3): with `halt_en`, after each phase
+the controller sits in a halt state with `halted` and `halt_phase` (tb/common/isp_live.h's numbers: Z 0, OP 1, OP_MOD 2)
+until `resume`; a phase the entry does not have neither runs nor halts. Each transition is one clock (`CTL_T`).
+
 **Cycle.**
 - Each controller transition takes one clock [G; §6 `CTL_T`, T13].
 - A pointer to an empty list costs 20-31 [M tim §3.1]: olw's first read.
@@ -598,6 +623,15 @@ entry end: the last SHADE's last item carries eoe, or a null eoe item (§3.4.8)
 - Following a link costs one more read latency [G].
 - Whether the walker reads in blocks is GAP T1.
 
+**As built (M6, `rtl/v1/isp/p2_isp_olw.sv`).**
+- olw hands pfetch **one item per list entry that draws** (`p2_pkg::p2_isp_obj_t`: kind STRIP / TRI / QUAD, `offs`,
+  `skip`, `shadow`, the strip's `mask`, the array's `prims`), not one per triangle: pfetch reads a strip's block once and
+  makes its triangles (§3.4.3). A strip with an empty mask, type 110 and links never leave olw.
+- The `OLW_AHEAD` = 8 read-ahead: olw requests consecutive words while fewer than 8 are requested and not consumed; the
+  words wait in `p2_mem`'s response buffer for C1. At a link (or the end) the words requested past it are counted and
+  dropped as they come back, in order; in the clock a link is consumed no new word is requested.
+- `scan` (ObjectListHasPrimitive, OpInPt) and the chunk pause are M7's.
+
 #### 3.4.3 `p2_isp_pfetch`: parameter fetch and primitive assembly
 
 **Function.** Owns isp §3.3, §3.4 and §3.5 (lists.cpp `RenderTriangleStrip` / `Array` / `QuadArray`,
@@ -628,6 +662,14 @@ entry end: the last SHADE's last item carries eoe, or a null eoe item (§3.4.8)
   hidden behind the 16-clk setup.
 - [M] Strips cost 16 for the first triangle, then alternately ~19 and 15 (18, 19, 15, 19, 15). The mechanism is GAP
   T2. Candidates: a strip block's 64-bit-aligned vertex reads; the odd triangles' corner swap costing a reload.
+
+**As built (M6, `rtl/v1/isp/p2_isp_pfetch.sv`).** Three stages: a **sequencer** (one word request a clock to C2, at most
+`PF_OUT` = 8 [G] outstanding, each with its role in a role FIFO: the ISP/TSP word, or vertex v's x, y or z), an
+**assembler** (the responses in order into one of **two vertex buffers**, 8 vertices x {x, y, z} and the ISP/TSP word;
+a buffer is handed on when its group's last word is in: a strip, or one array primitive) and an **emitter** (a strip's
+triangles one a clock, an array's primitive, into the `PF_AHEAD` = 2 asm FIFO). A strip's vertices are read up to the
+last one a set mask bit needs (refsw3 decodes all 8: the same corners). An array primitive's tag offset is its block's
+offset from the masked PARAM_BASE in words, cut to 21 bits; its next block follows its last vertex.
 
 #### 3.4.4 `p2_isp_setup`: per-primitive, per-tile setup (precalculation)
 
@@ -891,6 +933,21 @@ Out: `more`.
 - The per-pixel fragment order of isp §1 item 1 (list order) holds, because rows of one primitive are processed in
   order, and primitives in list order through one pipeline.
 
+**As built (M6, `rtl/v1/isp/p2_isp_pix.sv`).** The OPAQUE / TR_PRESORT rule and the MODIFIER rule with the folded
+summary; the PT and AUTOSORT rules are M7's. Stages: R0 is the raster's row register (pix issues buf's F read with its
+row); R1 has the read data, the lane decisions and the rules; R2 writes. **Two bypass sources, not one**: the RAM read
+is sampled at the edge that ends R0's clock, which is also the edge where the row two clocks ahead (R3) is written, so
+R1 takes per lane from R2's write data (this clock's write: the same row one clock apart) and from R3 (the write of the
+clock before: two clocks apart); the flip-flop fields (stencil, valid) are read in R1, where the write of the clock
+before is already in them, so only a row one clock apart would need a bypass from R2. valid has it (M7's punch-through
+rows write and read it). The stencil has none: only MODIFIER rows write it, and a MODIFIER triangle (a kill descriptor
+too) steps all 32 rows (`p2_isp_rowclip`), so two volume rows of one row number are at least 32 clocks apart; tb/isp_tile's
+`t_mrow` check fails a run where they are one clock apart (none in M6's inputs). The depth and tag bypasses: both
+occur in console data: the dumps hit the R3 case in 3 tiles (the row-31 shift: a primitive ending in row 31, the next
+starting in row 31, so in row 30); the R2 case needs the first primitive's pixels in its last stepped row, which with
+centre sampling only a tile clip gives (and the row-31 shift then moves the next one up a row), so corner sampling and
+an integer top (scenegen ROWS's pairs). The summary is `f_sum(f_parity(stencil, hit), sum_op)` per pixel of the row.
+
 #### 3.4.7 `p2_isp_buf`: per-pixel ISP state
 
 **Function.** Owns isp §10.1, §13 (per pixel), and the buffer operations of isp §4.2, §11.2, §11.4 and §11.6
@@ -948,6 +1005,13 @@ overlaps the next epoch's ISP work.
 - The sweeps' costs are GAP T13: "a pass that finds nothing still costs ~300", "Z clear + background setup 142".
 - [M tim §3.4] A background-only next tile hides 58 of 128 cut clocks, but only 11 of 256. The barrier predicts the
   CLEAR sweep (32) plus the list fetch (~26), about 58, in both cases. The 256 case is GAP T4.
+
+**As built (M6, `rtl/v1/isp/p2_isp_buf.sv`).** depthA and tagA (RAMs, one per lane, the F and C copies written
+together), stencil and valid (flip-flops), the one write port shared by the raster's R2 and the sweep engine (a raster
+write during a sweep is asserted against), the sweeps CLEAR (depthA = key, tagA = tag, stencil = 0, **valid = 1**:
+refsw3's ClearBuffers sets `tagStatus = {true, false}`, so the background is shaded) and CLRSTATUS (valid = 0), 32 clocks
+each. The debug port reads a row of every field and (sim only) writes one: the tile testbench's compare and its resync
+(PLAN §1.3 "As built"). The other fields, sweeps and the row barrier are M7's.
 
 #### 3.4.8 `p2_isp_cut`: the ISP side of a SHADE pass
 

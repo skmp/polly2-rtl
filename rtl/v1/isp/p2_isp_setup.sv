@@ -55,6 +55,8 @@ module p2_isp_setup
   output logic                         pc_v,
   output logic                         pc_culled,
   output logic                         pc_quad,
+  // no primitive in the program and none in the hand-off (p2_isp_ctl's walk end, M6)
+  output logic                         idle,
   // taps (the testbench's program trace; not a hardware interface)
   output logic                         t_issue,        // a program step executes this clock
   output logic [1:0]                   t_cls,
@@ -342,6 +344,7 @@ module p2_isp_setup
   end
 
   // ---------------------------------------------------------------------------------------------- ptc, taps
+  assign idle      = !act && ho_n == '0;
   assign pc_v      = done;
   assign pc_culled = culled;
   assign pc_quad   = pr.quad;

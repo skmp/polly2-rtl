@@ -19,7 +19,9 @@ ISP_EDGE_SHARDS  ?= 12
 # the edge units and the shared ISP modules; M4's microprogrammed units (p2_isp_setup, _alu, _raster: tb/mk/isp_setup.mk)
 # need the generated program package and are not compiled here
 ISP_M4_SRC        = %/p2_isp_setup.sv %/p2_isp_alu.sv %/p2_isp_raster.sv
-ISP_EDGE_SRC      = $(filter-out $(ISP_M4_SRC),$(sort $(wildcard $(ISP_DIR)/p2_isp_*.sv)))
+# M6's tile units (tb/mk/isp_tile.mk) are not compiled here either
+ISP_M6_SRC        = %/p2_isp_ctl.sv %/p2_isp_olw.sv %/p2_isp_pfetch.sv %/p2_isp_pix.sv %/p2_isp_buf.sv
+ISP_EDGE_SRC      = $(filter-out $(ISP_M4_SRC) $(ISP_M6_SRC),$(sort $(wildcard $(ISP_DIR)/p2_isp_*.sv)))
 ISP_EDGE_LIB      = $(FP_PKG_SRC) rtl/v1/pkg/p2_hw_check.sv $(FP_SRC)
 ISP_EDGE_TB_SRC   = tb/isp_edge/p2_isp_edge_tb_top.sv
 ISP_EDGE_CFLAGS   = -CFLAGS "-I$(REFCORE) -I$(CWD)/tb/common -I$(CWD)/tb/isp_edge -I$(CWD)/tools/gate" -LDFLAGS "-lz"

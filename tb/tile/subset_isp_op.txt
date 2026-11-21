@@ -1,0 +1,48 @@
+# subset_isp_op.txt: the dreamcast-tests page tests of M6's gate (make isp-tile-op; PLAN M6 "Inputs"), at most 8 renders
+# (pages) each; the gate adds the tile subset's dumps (subset_dumps.txt) and scenegen seeds (subset_seeds.txt: culled and
+# bad-corner closing triangles, 32-bit background tags, back-to-back same-row primitives, keep-Z chains). The full gate
+# (isp-tile-op-full) runs M5's full set: every fit/hw test, every dump, seeds 1-5000.
+#
+# coverage, edges, culls, rows
+covmeas
+raster
+cullval
+sample
+huge
+slivers_tsp
+edge2_row31
+faredge_cull
+hugepos_v6
+# depth, DepthMode, ZWriteDis
+depth
+ztile
+zsign
+depth2_denorm
+depthgaps_ties
+depthgaps_mm
+perpeq
+perpmean_neg
+detinf
+zovf
+zovf_word
+zovf_creg
+zovf_neg
+nantr_pos
+nantr_fin
+nantr_word
+zbadbg
+# the background: its key (bgkey) and tag
+bgtie
+bgspec
+bgbig
+bgneg
+bgneg2
+depthgaps_bglow
+depthgaps_bglow2
+depthgaps_bglow3
+depthgaps_bgpin
+# modifier volumes, keep Z
+modvol
+volrun
+keepz
+optcull

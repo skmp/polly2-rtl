@@ -1,0 +1,13 @@
+# tb/isp_tile/mutants_mem.txt: the planted bugs of p2_mem (rtl/v1/mem; PLAN M6 "p2_mem clients C1 and C2 with the VRAM
+# model", conventions.md 7.7), run by tools/gate/mutants.py with make isp-tile-op-mutants; probes as tb/isp_tile/mutants.txt.
+# Left out as equivalent in M6: the per-client credit off (C1 and C2 never have more than RSP_N reads outstanding of
+# their own: OLW_AHEAD, PF_OUT), the arbitration's priority order (one grant per half a clock, no value depends on who
+# goes first while nothing writes).
+@dir rtl/v1/mem MEM_DIR
+@obj ISP_TILE_OBJDIR
+@probe tile isp-tile-build tb --phase-limit 1000000 @tb/isp_tile/mutant_cases.txt
+@probe vary isp-tile-build tb --phase-limit 1000000 --vramvary 7 @tb/isp_tile/mutant_cases.txt
+
+half-bit-21 | p2_mem.sv | need   = c_w64[c] ? 2'b11 : (c_addr[c][22] ? 2'b10 : 2'b01); | need   = c_w64[c] ? 2'b11 : (c_addr[c][21] ? 2'b10 : 2'b01); | tile | the 32-bit view's half from a[21], not a[22] (pvr_map32)
+word-index | p2_mem.sv | q_idx[h] <= c_w64[c] ? c_addr[c][22:3] : c_addr[c][21:2]; | q_idx[h] <= c_w64[c] ? c_addr[c][22:3] : {c_addr[c][22], c_addr[c][20:2]}; | tile | the 32-bit view's word index with the half's bit in it
+order-by-arrival | p2_mem.sv | w     = ord[c][ord_rp[c]]; | w     = rf_n[c][1] != '0 ? 2'b10 : 2'b01; | vary | a client's reads answered as the halves return them, not in its request order

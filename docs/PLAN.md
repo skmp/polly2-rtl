@@ -221,6 +221,17 @@ resTag row as a mutant):
   This is the mode that exercises the row barrier, the cutter running beside the next epoch's raster and sweeps, and
   pcache's replays.
 
+  **As built (M6, `tb/isp_tile`).** The phase-halt mode runs inside the M5 phase driver: `isp_tile_ref.cpp` (compiled
+  with refsw3-offline's flags beside the L2 glue) wraps `p2drv::render` and `p2ref::isp_pixel`, so the Verilated side
+  (`isp_tile_tb.cpp`) never includes libswirl. At the driver's Z hook the testbench feeds the entry the driver read to
+  `p2_isp_ctl` and runs the RTL to its halt; at OP and OP_MOD to the next one; at each it compares the live fields
+  through `p2_isp_buf`'s debug row port and checks that the RTL halted in the same phase; at OP_SHADE the RTL must end the
+  entry. Phases M6 does not have run on the reference only; **resync**: before a keep-Z entry that follows an entry
+  with such a phase (and before a case's first keep-Z entry), the testbench writes the reference's state at the end of
+  the entry before into the RTL's buffers through the debug port (counted in the report). A CLEAR entry needs none: it
+  writes every field M6 compares. Otherwise the state carries from entry to entry and render to render. A phase that
+  takes more than `--phase-limit` clocks fails. `--vramvary S` (or `+vramvary=S`) varies the VRAM model.
+
 **TSP tile testbench** (`tb/tsp_tile`, M9-M11).
 - The DUT is the TSP side: store, pfetch, setup, ALU, run start, pixel queue, pixel pipe, texture, and the tile
   buffers. The write-out is excluded.
@@ -673,6 +684,53 @@ As built: those two (the second as PT_MOD's walk moved before PT_FINAL), OpInPt 
 translucent volumes after the SHADE, TR_PS without its status clear, no RESTORE; and six unsound liveness masks.
 
 ### M6. ISP tile: list walk, fetch, opaque, modifier volumes
+
+**Status (2026-11-21): done.** `make isp-tile-op` (tools/gate/gate_isp_tile_op.sh,
+`tb/mk/isp_tile.mk`); results and scratch in `agents/m6/`. RTL: `rtl/v1/isp/p2_isp_ctl.sv` (Z, OP, OP_MOD, the phase
+halt), `p2_isp_olw.sv`, `p2_isp_pfetch.sv`, `p2_isp_buf.sv`, `p2_isp_pix.sv`, `rtl/v1/mem/p2_mem.sv`; `p2_pkg`'s
+`p2_isp_obj_t`, `p2_sweep_t`; `idle` outputs on M4's `p2_isp_setup` and `p2_isp_raster`. Testbench `tb/isp_tile/`
+(PLAN 1.3 "As built"), the VRAM model `tb/common/vram_model.h`, mutants `tb/isp_tile/mutants.txt` (24) and
+`mutants_mem.txt` (3, p2_mem; the credit limit and the priority order left out as equivalent while C1 and C2 only
+read). How it differs from the text below (ARCHITECTURE 3.2, 3.4.1-3.4.3, 3.4.6, 3.4.7 "As
+built (M6)"):
+- `p2_isp_buf` holds M6's fields only (depthA and tagA with both read copies, stencil, valid) and the CLEAR / CLRSTATUS
+  sweeps; the other fields, sweeps and the row barrier come with M7.
+- `p2_mem` has a response ready per client and keeps the clients' response buffers; olw's read-ahead waits there.
+- The bypass has two sources (R2 and R3), because of the registered RAM read. scenegen's ROWS class got pairs that hit
+  both (a tall primitive, then one starting on its last row or the row above; the R2 case needs corner sampling and an
+  integer top). Without them the bypass mutants survived: in the dumps only 3 tiles reach it, all R3 cases at the row-31
+  shift. MODVOL got a volume triangle on an opaque triangle's corners (`modvol-ge` survived without it). Both changes
+  draw no extra random numbers for seeds without those classes. The M5 captures of the seeds were redone.
+- p2_mem's per-client order (`order-by-arrival`) survived too. The pages and dumps read both halves, but a client
+  almost never has reads outstanding on both at once. So scenegen puts every other object's parameter blocks in the other
+  half (absolute 0x400100 .. 0x440000), and some list links go there as well (0x440000 ..). The VRAM model's
+  `+vramvary` now also stalls a half for up to 63 clocks, one clock in 64 (as refresh or display reads would).
+- scenegen's list links to the other half (above) had left `listNext` at the list's start, so the next tile's list
+  overwrote the crossing list's first block and its link: tiles drew other tiles' lists and most cross-half links were
+  never walked. `writeList` now moves `listNext` past the half-0 part (the link word and its gap); over seeds 1-200 no
+  two lists share a word and 102 cross-half links are walked. The seeds' M5 captures were redone again.
+- Three mechanisms had no input (the round-2 verifier's extra mutants). scenegen draws two more things from a second
+  generator (`Rng::of(seed, 1)`, so that the first generator's scenes stay as they were): opaque primitives with depths
+  below zero (all corners or some: planes across 0) at DepthMode 1 or 6, and, with STRIPS, type-110 list words (another
+  object's word with bits 31:29 = 110, which refsw3 skips: isp 15 #15). Mutants `depthmode1-unsigned`,
+  `depthmode6-unsigned` (`$unsigned` compares; `r1_zk[i] < dA[i]` alone is still signed, as an element of a packed
+  array of the signed `p2_zkey_t`, IEEE 1800-2017 7.4.1, so the verifier's version was equivalent; bgneg catches the
+  real one too) and `type110-as-quads`, all caught. The third, the stencil's bypass from R2, cannot be reached: only
+  MODIFIER rows write the stencil, and a MODIFIER triangle steps all 32 rows, so two volume rows of one row number are
+  at least 32 clocks apart. The bypass is gone from `p2_isp_pix`; the testbench's `t_mrow` tap fails a run where such
+  rows come one clock apart (0 over every input). `modvol-own-rows` (a volume triangle on its own rows) is caught.
+- The Makefile reads `tb/mk/refglue.mk` before the other fragments: `isp_tile.mk`'s prerequisites name
+  `$(REFGLUE_OBJS)` and `$(REFGLUE_REFDEPS)`, which make expands as it reads the rule, so in name order they were
+  empty (a clean build failed; the testbench objects were not rebuilt on a refcore change).
+- TAG_BELOW and 29-bit tags have no compare in M6 (KeyAbove is M7's). Their mutants change the stored word (a 0xFFFFFFFF
+  background tag kept as a flag; tagA in 29 bits) and are caught by scenegen BGTAG.
+- Inputs: `tb/tile/subset_isp_op.txt` (39 pages: the classes above plus the edge and depth pages of the tile subset), the
+  tile subset's 33 dumps, seeds 1-200; 520 renders, 88,513 entries, 189,194 phases compared. Not compared: phases M6
+  does not have. Keep-Z entries after one are resynced (2,375).
+- Clocks (reported, not gated; VR_LAT 8, VR_ROW 2): an entry with only its Z costs 35 clk (CLEAR / CLRSTATUS 32 + 3
+  transitions). An empty opaque list adds 22, inside the measured 20-31 (tim 3.1). Over the subset: mean 249 clk an
+  entry, max 42,245 (xtreme_intro), the dumps' mean 877. With `--vramvary 7` the mean is 838 (max 155,589) and the values are the same.
+  No VRAM-race render: nothing writes in M6.
 
 **Deliverables.**
 - `p2_isp_olw`, `p2_isp_pfetch`, `p2_isp_buf` (storage and ports of ARCHITECTURE §3.4.7), `p2_isp_pix` (OPAQUE,

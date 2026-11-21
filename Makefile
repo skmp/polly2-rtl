@@ -47,7 +47,10 @@ HOST_CXXFLAGS  = -std=c++17 -O2 -Wall -Wextra -I$(REFCORE) -I$(CWD)/tb/common
 help:
 	@sed -n '1,/^$$/s/^# \{0,1\}//p' Makefile
 
--include tb/mk/*.mk
+# refglue.mk first: its variables (REFGLUE_OBJS, REFGLUE_REFDEPS, P2REF_CXXFLAGS, ...) appear in other fragments'
+# prerequisite lists (isp_tile.mk), which make expands when it reads them; the rest in name order
+-include tb/mk/refglue.mk
+-include $(filter-out tb/mk/refglue.mk,$(sort $(wildcard tb/mk/*.mk)))
 
 clean:
 	rm -rf $(BUILD)

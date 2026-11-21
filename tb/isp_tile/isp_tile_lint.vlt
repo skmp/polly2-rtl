@@ -1,0 +1,21 @@
+// isp_tile_lint.vlt: verilator -Wall waivers for make lint-isp-tile (conventions.md 4.8): M6's units, p2_mem and the
+// tb/isp_tile top. Each waiver names its file and its reason.
+`verilator_config
+// p2_isp_ctl: the entry's no_writeout, pre_sort, last and idx are M7's (the cutter's flags and the entry record)
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_ctl.sv" -match "*'e'*"
+// p2_isp_olw: the views of one ObjectListEntry word (refsw_lists_regtypes.h's union); each view uses its own fields
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_olw.sv" -match "*'w_ent'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_olw.sv" -match "*'w_typ'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_olw.sv" -match "*'w_strip'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_olw.sv" -match "*'w_arr'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_olw.sv" -match "*'w_link'*"
+// p2_isp_pfetch: the ISP takes PARAM_BASE's bits 23:20 only (& 0xF00000); the TSP's fetch (M9) takes the rest
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_pfetch.sv" -match "*'param_base'*"
+// p2_isp_pix: the row's tagA and valid as R1 sees them (bypassed) are read by M7's punch-through and autosort rules
+// (KeyAbove, `valid`); M6's OPAQUE and MODIFIER rules read only depthA and the stencil
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_pix.sv" -match "*'tA'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_pix.sv" -match "*'vl'*"
+// p2_isp_tile_tb_top: the setup's ptc strobe and program trace (M4's testbench's and M7's ptc), the raster's row_last,
+// the buffer's C port (M7's cutter) and the register words' other fields are not M6's
+lint_off -rule PINCONNECTEMPTY -file "*/p2_isp_tile_tb_top.sv"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_isp_tile_tb_top.sv"

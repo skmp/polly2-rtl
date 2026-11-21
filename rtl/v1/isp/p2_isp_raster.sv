@@ -37,7 +37,9 @@ module p2_isp_raster
   output p2_rm_t                       row_rm,
   output logic [2:0]                   row_depth_mode,
   output logic                         row_zwdis,
-  output p2_sum_op_t                   row_sum_op
+  output p2_sum_op_t                   row_sum_op,
+  // no descriptor being stepped and no row in the output register (p2_isp_ctl's walk end, M6)
+  output logic                         idle
 );
   localparam int AW = P2_EDGE_LANE_BITS;
   localparam int TW = P2_ZT_T_BITS;
@@ -52,6 +54,7 @@ module p2_isp_raster
   assign last   = j == jl;
   assign rd_rdy = !act || (adv && last);
   assign take   = rd_v && rd_rdy && rd.rows_v;
+  assign idle   = !act && !row_v;
 
   // the descriptor's fields that ride with the rows
   logic        kill;

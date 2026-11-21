@@ -182,6 +182,31 @@ package p2_pkg;
     logic                   ro;
   } p2_fb_t;
 
+  // an object list entry that draws (p2_isp_olw to p2_isp_pfetch, ARCHITECTURE 3.4.2 `prim` as built in M6): one item a
+  // strip entry (its mask; pfetch reads the block once and makes the triangles) or a triangle / quad array entry (its
+  // count); links, type 110 and strips with an empty mask never leave olw (refsw_lists.cpp RenderObjectList)
+  typedef enum logic [1:0] {
+    P2_OBJ_STRIP = 2'd0,
+    P2_OBJ_TRI   = 2'd1,   // type 100: prims + 1 triangles
+    P2_OBJ_QUAD  = 2'd2    // type 101: prims + 1 quads
+  } p2_obj_kind_t;
+
+  typedef struct packed {
+    p2_obj_kind_t kind;
+    logic [20:0]  offs;     // param_offs_in_words: the strip's block, the array's first block
+    logic [2:0]   skip;
+    logic         shadow;
+    logic [5:0]   mask;     // strip: triangle i drawn when bit 5 - i is set
+    logic [3:0]   prims;    // array: prims + 1 primitives
+  } p2_isp_obj_t;
+
+  // the ISP buffer's sweeps (p2_isp_buf, ARCHITECTURE 3.4.7): one row a clock over the 32 rows. M6 has the entry's
+  // first two; PT_INIT, PT_CHUNK, PASS_START, PT_FINAL, PEEL, SAVE, RESTORE are M7's
+  typedef enum logic [3:0] {
+    P2_SW_CLEAR    = 4'd0,   // ClearBuffers(ISP_BACKGND_T, bgkey(ISP_BACKGND_D), 0): depthA, tagA, stencil 0, valid 1
+    P2_SW_CLRSTATUS = 4'd1   // ClearParamStatusBuffer: valid = rendered = 0
+  } p2_sweep_t;
+
   // an assembled primitive in one tile (p2_isp_pfetch to p2_isp_setup, ARCHITECTURE 3.4.3 `asm`), valid/ready: the
   // corners as the TA wrote them (raw IEEE single bits, rasterizer order; corner 4 for a quad only; the depth's three)
   typedef struct packed {
