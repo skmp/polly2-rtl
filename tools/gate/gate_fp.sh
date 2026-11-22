@@ -4,19 +4,28 @@
 #
 #   tools/gate/gate_fp.sh <round> [--full | --mutants]     round: a (M1a), b (M1b), c (M1c), all (every round)
 #
-#   quick (gate fp-a, fp)            check_ref_copies, check_ref_switches, the round's testbenches built (make -j), lint-fp,
-#                                    then every testbench in quick mode, one step each (seconds each; under a minute)
-#   --full (fp-a-full, fp-full)      the same with every testbench's exhaustive sweeps (--full), each sharded FP_SHARDS
-#                                    ways by tools/gate/run_shards.sh; a few minutes, under /tmp/polly2-rtl-gate.lock
+#   quick (gate fp-a, fp)            check_ref_copies, check_ref_switches, the round's testbenches built (make -j), then
+#                                    on one queue (PLAN 0 rule 8) lint-fp and every testbench in quick mode, an item each
+#                                    (seconds each; under a minute)
+#   --full (fp-a-full, fp-full)      the same with every testbench's exhaustive sweeps (--full), each in FP_SHARDS
+#                                    slices (--shard k/N), every slice of every testbench an item of the one queue,
+#                                    longest first; a few minutes, under /tmp/polly2-rtl-gate.lock
 #   --mutants (fp-a-mutants, ...)    tools/gate/mutants.py tb/fp/mutants.txt on the mutants whose probe is a testbench
 #                                    of the round, and for M1b also tb/fp/mutants_zword.txt (the mutants of
 #                                    rtl/v1/pkg/p2_zword_pkg.sv, which lives outside lib/fp), for M1c also
-#                                    tb/fp/mutants_rom.txt (the measured-table ROMs in rtl/v1/lib/rom); under the lock
+#                                    tb/fp/mutants_rom.txt (the measured-table ROMs in rtl/v1/lib/rom); builds and probe
+#                                    runs on one queue of FP_J slots; under the lock
 #   M1c and all (every mode) also run roms-check: the generated ROMs are what refcore gives (tb/mk/gen.mk)
 #
+# FP_SHARDS stays 12 by default: the testbenches' lockstep draws its idle clocks (gaps) from one generator per process,
+# so the number of checks (every idle clock is one) depends on how the vectors are split; at 12 the counts are the ones
+# M1 recorded. The slices of one testbench are the queue's longest items (fp-zword-full), so more slices would gain
+# little.
+#
 # Ends with "<gate>: PASS" or "<gate>: FAIL" (exit code to match); build/gate/<gate>/summary.txt with the revision
-# header and, under each testbench's step, its checks / failures line. Environment: FP_J (make -j, 12), FP_SHARDS (12),
-# FP_MUT_JOBS (parallel mutant builds, 6).
+# header, a line per testbench (its items, checks / failures, span, CPU, slowest item) and the time line (lib.sh).
+# Environment: FP_J (the queue's slots, make -j of the build: P2_J: tools/gate/jobs.sh), FP_SHARDS (12), FP_MUT_NJOBS (each
+# mutant build's make -j, 2).
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 
@@ -48,7 +57,7 @@ if [ "$mode" != quick ] && [ -z "${P2_GATE_LOCKED:-}" ]; then
 fi
 
 . "$HERE/lib.sh"
-J=${FP_J:-12}
+J=${FP_J:-$P2_J}
 SHARDS=${FP_SHARDS:-12}
 export P2_REFREV=${P2_REFREV:-$(git -C "$NULLDC3" rev-parse --short HEAD 2>/dev/null)}
 
@@ -57,7 +66,7 @@ tb_step() {   # tb_step <step name> <command ...>
   local name=$1; shift
   gate_step "$name" "$@"
   local line
-  line=$(grep -E ': [0-9]+ (shards, [0-9]+ )?checks, [0-9]+ failures' "$GATE_DIR/$name.log" | tail -1)
+  line=$(grep -E ': [0-9]+ ((shards|items), [0-9]+ )?checks, [0-9]+ failures' "$GATE_DIR/$name.log" | tail -1)
   [ -n "$line" ] && GATE_LINES+=("    $line") && echo "    $line"
 }
 
@@ -66,31 +75,34 @@ gate_step check_ref_copies   bash tools/check_ref_copies.sh
 gate_step check_ref_switches bash tools/check_ref_switches.sh
 case "$round" in c|all) gate_step roms-check $MAKE -s roms-check ;; esac
 if [ "$mode" = --mutants ]; then
-  tb_step mutants python3 tools/gate/mutants.py tb/fp/mutants.txt --jobs "${FP_MUT_JOBS:-6}" --probes "${prims// /,}"
-  grep -E 'caught|SURVIVED|ERROR|control' "$GATE_DIR/mutants.log" | sed 's/^/    /'
-  while IFS= read -r l; do GATE_LINES+=("    $l"); done < <(grep -E ' (caught|SURVIVED|ERROR)' "$GATE_DIR/mutants.log")
-  case "$round" in b|all)
-    tb_step mutants-zword python3 tools/gate/mutants.py tb/fp/mutants_zword.txt --jobs "${FP_MUT_JOBS:-6}"
-    grep -E 'caught|SURVIVED|ERROR|control' "$GATE_DIR/mutants-zword.log" | sed 's/^/    /'
-    while IFS= read -r l; do GATE_LINES+=("    $l"); done < <(grep -E ' (caught|SURVIVED|ERROR)' "$GATE_DIR/mutants-zword.log")
-  esac
-  case "$round" in c|all)
-    tb_step mutants-rom python3 tools/gate/mutants.py tb/fp/mutants_rom.txt --jobs "${FP_MUT_JOBS:-6}"
-    grep -E 'caught|SURVIVED|ERROR|control' "$GATE_DIR/mutants-rom.log" | sed 's/^/    /'
-    while IFS= read -r l; do GATE_LINES+=("    $l"); done < <(grep -E ' (caught|SURVIVED|ERROR)' "$GATE_DIR/mutants-rom.log")
-  esac
+  gate_mutants mutants tb/fp/mutants.txt --njobs "${FP_MUT_NJOBS:-2}" --probes "${prims// /,}"
+  case "$round" in b|all) gate_mutants mutants-zword tb/fp/mutants_zword.txt --njobs "${FP_MUT_NJOBS:-2}" ;; esac
+  case "$round" in c|all) gate_mutants mutants-rom tb/fp/mutants_rom.txt --njobs "${FP_MUT_NJOBS:-2}" ;; esac
 else
   targets=""
   for p in $prims; do targets="$targets fp-$p-build"; done
   gate_step build   $MAKE -s -j"$J" NJOBS=2 $targets
-  gate_step lint-fp $MAKE -s lint-fp
+  items=$GATE_DIR/items.txt
+  : > "$items"
+  gate_item "$items" lint-fp - 10 8 step lint-fp.log $MAKE -s lint-fp LINT_J=8
   for p in $prims; do
     if [ "$mode" = --full ]; then
-      tb_step "fp-$p-full" bash tools/gate/run_shards.sh "fp-$p-full" "$SHARDS" "$GATE_DIR/fp-$p-full" \
-        build/obj_fp/$p/tb --full
+      for k in $(seq 0 $((SHARDS - 1))); do
+        gate_item "$items" "fp-$p-full" "$k/$SHARDS" 60 1 tb "fp-$p-full/log_$k.txt" build/obj_fp/$p/tb --full --shard "$k/$SHARDS"
+      done
     else
-      tb_step "fp-$p" build/obj_fp/$p/tb
+      gate_item "$items" "fp-$p" - 1 1 tb "fp-$p.log" build/obj_fp/$p/tb
     fi
+  done
+  gate_queue tests "$items"
+  # each testbench's checks / failures line (the slices' summed for --full), as the M1 summaries had them
+  for p in $prims; do
+    if [ "$mode" = --full ]; then
+      l=$(shard_report "fp-$p-full" "fp-$p-full" "$SHARDS" | grep 'shards, ')
+    else
+      l=$(grep -E ': [0-9]+ checks, [0-9]+ failures$' "$GATE_DIR/fp-$p.log" | tail -1)
+    fi
+    [ -n "$l" ] && GATE_LINES+=("    $l") && echo "    $l"
   done
 fi
 gate_end

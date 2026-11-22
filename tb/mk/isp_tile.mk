@@ -62,7 +62,7 @@ isp-tile-op-mutants:
 	+@MAKE="$(MAKE)" bash tools/gate/gate_isp_tile_op.sh --mutants
 
 ISP_TILE_LINT = $(P2_LINT) tb/isp_setup/isp_setup_lint.vlt tb/isp_tile/isp_tile_lint.vlt
-lint: lint-isp-tile
+lint-units: lint-isp-tile
 lint-isp-tile:
 	@for t in p2_isp_ctl p2_isp_olw p2_isp_pfetch p2_isp_pix p2_isp_buf p2_isp_ptc p2_isp_pcache p2_isp_fb p2_isp_cut \
 	  p2_isp_entq; do \

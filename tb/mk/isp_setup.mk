@@ -19,12 +19,13 @@
 #   make lint-isp-setup     verilator -Wall on p2_isp_setup, p2_isp_raster and the tb top (a prerequisite of make lint)
 #
 # Overridable: ISP_DIR (the RTL folder), ISP_GEN_DIR (the generator's folder) and ISP_GEN_OBJDIR (where its binary goes):
-# tools/gate/mutants.py points them at mutated copies; ISP_SETUP_OBJDIR, ISP_SETUP_SHARDS, ISP_GRAPH_N.
+# tools/gate/mutants.py points them at mutated copies; ISP_SETUP_OBJDIR, ISP_SETUP_SHARDS, ISP_GRAPH_N, ISP_GRAPH_THREADS (8).
 ISP_SETUP_OBJDIR ?= $(BUILD)/obj_isp_setup
 ISP_SETUP_SHARDS ?= 12
 ISP_GEN_DIR      ?= tools/gen
 ISP_GEN_OBJDIR   ?= $(BUILD)/tools/gen
 ISP_GRAPH_N      ?= 1000000
+ISP_GRAPH_THREADS ?= 8
 ISP_PROG_PKG      = rtl/v1/pkg/p2_isp_prog_pkg.sv
 GEN_SETUP_BIN     = $(ISP_GEN_OBJDIR)/gen_setup_prog
 ISP_SETUP_SRC     = $(filter-out $(ISP_M6_SRC),$(sort $(wildcard $(ISP_DIR)/p2_isp_*.sv)))
@@ -66,7 +67,7 @@ isp-prog-sweep: $(GEN_SETUP_BIN)
 	$(GEN_SETUP_BIN) --sweep
 
 isp-setup-graph: $(GEN_SETUP_BIN)
-	$(GEN_SETUP_BIN) --check --n $(ISP_GRAPH_N) --vec $(BUILD)/vec --threads 8
+	$(GEN_SETUP_BIN) --check --n $(ISP_GRAPH_N) --vec $(BUILD)/vec --threads $(ISP_GRAPH_THREADS)
 
 isp-setup-build: $(BUILD)/gen/p2_isp_prog.h
 	@mkdir -p $(ISP_SETUP_OBJDIR)
@@ -85,7 +86,7 @@ isp-setup-mutants:
 	+@MAKE="$(MAKE)" bash tools/gate/gate_isp_setup.sh --mutants
 
 ISP_SETUP_LINT = $(P2_LINT) tb/isp_setup/isp_setup_lint.vlt
-lint: lint-isp-setup
+lint-units: lint-isp-setup
 lint-isp-setup:
 	@for t in p2_isp_setup p2_isp_raster; do \
 	  $(ISP_SETUP_LINT) --top-module $$t $(FP_PKG_SRC) $(ISP_PROG_PKG) $(FP_SRC) $(ISP_SETUP_SRC) || \

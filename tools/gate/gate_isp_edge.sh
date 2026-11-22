@@ -6,7 +6,9 @@
 #   quick (isp-edge)          hw-pkg-check (p2_hw_pkg at refsw3's EdgeHW / DepthHW), check_ref_copies on the edge
 #                             copies (tb/isp_edge/ref_copies_edge.h), check_ref_switches; the console pages' primitives
 #                             (make isp-edge-vec: refsw3-offline built from nulldc3, tools/gate/tria_extract.sh on every
-#                             fit/hw faredge*, hugepos*, edge2_* test); the build; lint-isp-edge; then the testbench in
+#                             fit/hw faredge*, hugepos*, edge2_* test; and make isp-depth-vec, M3's pages: the testbench
+#                             reads every build/vec/*.tri, so both sets are made here and the inputs do not depend on
+#                             what another gate left in build/vec); the build; lint-isp-edge; then the testbench in
 #                             quick mode, sharded ISP_EDGE_SHARDS ways (tools/gate/run_shards.sh): the five gate items
 #                             (directed facts, the covmeas sets, the pages' primitives, random and raster-only vectors with
 #                             the far class, the width claims asserted on every job) and the stream section
@@ -16,8 +18,13 @@
 #                             M1 library's rules the edge path depends on); under the lock
 #
 # Ends with "<gate>: PASS" or "<gate>: FAIL" (exit code to match); build/gate/<gate>/summary.txt with the revision
-# header, the enumerated inputs and each step's checks / failures line. Environment: ISP_EDGE_J (make -j, 12),
-# ISP_EDGE_SHARDS (12), ISP_EDGE_MUT_JOBS (parallel mutant builds, 6).
+# header, the enumerated inputs, each step's checks / failures line and the time line (lib.sh). Environment: ISP_EDGE_J (the
+# queue's slots and make -j: P2_J: tools/gate/jobs.sh), ISP_EDGE_SHARDS (the quick run's slices, 12), ISP_EDGE_FULL_SHARDS (the
+# full run's, 96: a fixed number, so that a run's report does not depend on J), ISP_EDGE_MUT_NJOBS (each mutant
+# build's make -j, 2). The slices and a calibration item run on one queue with lint (PLAN 0 rule 8); a slice's checks
+# include the ones its process makes once (loading the vector files), so the summed checks grow by that much for every
+# slice more; the checks of the vectors (sum less N times the calibration's) and the sections' cases do not depend on N.
+# The 'shard 0' lines are slice 0's (of N).
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 mode=${1:-quick}
@@ -33,22 +40,25 @@ if [ "$mode" != quick ] && [ -z "${P2_GATE_LOCKED:-}" ]; then
 fi
 
 . "$HERE/lib.sh"
-J=${ISP_EDGE_J:-12}
+J=${ISP_EDGE_J:-$P2_J}
 SHARDS=${ISP_EDGE_SHARDS:-12}
+[ "$mode" = --full ] && SHARDS=${ISP_EDGE_FULL_SHARDS:-96}
 export P2_REFREV=${P2_REFREV:-$(git -C "$NULLDC3" rev-parse --short HEAD 2>/dev/null)}
 
+tb_lines() {   # tb_lines <step name>: its checks / failures line and its sections into the summary
+  local name=$1
+  local line
+  while IFS= read -r line; do GATE_LINES+=("    $line"); echo "    $line"; done < <(
+    grep -E '^  section |: section |widths:|: [0-9]+ ((shards|items), [0-9]+ )?checks, [0-9]+ failures|: [0-9]+ checks of the vectors' "$GATE_DIR/$name.log" |
+    grep -v '^isp_edge: section' | sed 's/^isp_edge: //')
+}
 tb_step() {   # tb_step <step name> <command ...>: the step, its checks / failures line and its sections in the summary
   local name=$1; shift
   gate_step "$name" "$@"
-  local line
-  while IFS= read -r line; do GATE_LINES+=("    $line"); echo "    $line"; done < <(
-    grep -E '^  section |: section |widths:|: [0-9]+ (shards, [0-9]+ )?checks, [0-9]+ failures' "$GATE_DIR/$name.log" |
-    grep -v '^isp_edge: section' | sed 's/^isp_edge: //')
+  tb_lines "$name"
 }
 mut_step() {   # mut_step <step name> <mutants file>
-  tb_step "$1" python3 tools/gate/mutants.py "$2" --jobs "${ISP_EDGE_MUT_JOBS:-6}" --njobs 2
-  grep -E 'caught|SURVIVED|ERROR|control' "$GATE_DIR/$1.log" | sed 's/^/    /'
-  while IFS= read -r l; do GATE_LINES+=("    $l"); done < <(grep -E ' (caught|SURVIVED|ERROR)' "$GATE_DIR/$1.log")
+  gate_mutants "$1" "$2" --njobs "${ISP_EDGE_MUT_NJOBS:-2}"
 }
 
 gate_begin "$gate"
@@ -59,19 +69,21 @@ if [ "$mode" = --mutants ]; then
   mut_step mutants     tb/isp_edge/mutants.txt
   mut_step mutants-lib tb/isp_edge/mutants_lib.txt
 else
-  gate_step isp-edge-vec $MAKE -s isp-edge-vec
+  gate_step vec $MAKE -s isp-edge-vec isp-depth-vec   # both sets: the tb reads every build/vec/*.tri (self-contained on a clean build)
   n_tests=$(ls build/vec/*.tri 2>/dev/null | wc -l)
   n_sets=$(ls "$DCTESTS"/fit/covmeas_data/*.npz 2>/dev/null | wc -l)
   GATE_LINES+=("    inputs: $n_sets covmeas sets ($DCTESTS/fit/covmeas_data), $n_tests console tests' primitives (build/vec)")
   echo "    inputs: $n_sets covmeas sets, $n_tests console tests' primitives"
   gate_step build $MAKE -s -j"$J" NJOBS="$J" isp-edge-build
-  gate_step lint-isp-edge $MAKE -s lint-isp-edge
-  if [ "$mode" = --full ]; then
-    tb_step isp-edge-full bash tools/gate/run_shards.sh isp-edge-full "$SHARDS" "$GATE_DIR/shards" \
-      build/obj_isp_edge/tb --full
-  else
-    tb_step isp-edge-tb bash tools/gate/run_shards.sh isp-edge "$SHARDS" "$GATE_DIR/shards" build/obj_isp_edge/tb
-  fi
+  items=$GATE_DIR/items.txt
+  : > "$items"
+  gate_item "$items" lint-isp-edge - 2 1 step lint-isp-edge.log $MAKE -s lint-isp-edge
+  name=isp-edge flag=""
+  [ "$mode" = --full ] && name=isp-edge-full flag=--full
+  shard_items "$items" "$name" "$SHARDS" shards 1 10 build/obj_isp_edge/tb $flag
+  gate_queue queue "$items"
+  shard_report "$name" shards "$SHARDS" > "$GATE_DIR/$name.log"
+  tb_lines "$name"
   # the directed console pages (shard 0 runs the directed section): records, tiles off the console, mechanisms
   while IFS= read -r l; do GATE_LINES+=("    ${l#isp_edge: }"); echo "    ${l#isp_edge: }"; done < <(
     grep -h 'directed console ' "$GATE_DIR"/shards/log_0.txt 2>/dev/null | grep -v ': section ' | cut -c1-200)

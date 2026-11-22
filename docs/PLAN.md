@@ -24,7 +24,7 @@ reference for every gate.
    dreamcast-tests revision, and the runtime-switch check (§1.1). "Done" means the script says PASS. Prose does not
    count.
 3. **Quick and full.** The quick gate runs in under a minute and is what agents iterate on. The full gate (`-full`)
-   runs once at the end of the milestone (conv §7.8). Sharded with `--shard k/N`, `NJOBS=8`. A gate that takes
+   runs once at the end of the milestone (conv §7.8). Its work runs on one queue (rule 8). A gate that takes
    minutes runs under `flock /tmp/polly2-rtl-gate.lock`.
 4. **Pass criteria.**
    - **0 mismatches** against refsw3 in every compared field.
@@ -40,6 +40,43 @@ reference for every gate.
    happens once, in the milestone named in ARCHITECTURE §6, and is recorded in `docs/timing.md`.
 7. **refsw3 moves.** When a nulldc3 commit touches refcore, the next gate run re-runs `make fp`, the M2 / M3 quick
    gates and `check_ref_copies`, and updates ARCHITECTURE §0.1 if a spec falls behind.
+8. **Gates keep the cores busy** (2026-11-21; M7's quick gate had used ~4.5 of 32 cores: 12 static slices, one of them
+   holding ispcache). Every gate, quick, full and mutants, and the captures:
+   1. **One shared work queue**, not static slices: a free worker takes the next item (`tools/gate/pq.py`, through
+      `lib.sh`'s `gate_queue` / `gate_item`; `mutants.py` and `capture_prerender.sh` have their own queue). The
+      merged-verdict contract stays: a failing item never stops the others, the merged report decides, PASS iff every
+      item passes. An item whose result could depend on the load must fail rather than shrink: every stage's exit
+      status is checked (the captures: a test's PC build gives up a readback after 20 s, and a capture whose stream
+      program exits non-zero fails, is tried once more alone, and never counts as complete).
+   2. **Longest first**, by the cost recorded in the gate's last run (`build/gate/<gate>/cost.txt`: wall and CPU
+      seconds per item; `build/pre/<case>/secs` for the captures), else a static estimate.
+   3. **Heavy work is split** so that no single item sets the wall time: a case per item, a free-running case per run
+      of whole segments when its cost asks for it (`tools/gate/tile_items.py`, §1.3), a lockstep unit testbench per slice
+      (`--shard k/N`). A testbench may gain a selector for that (`--renders`); its comparison does not change. An
+      item's result must not depend on what ran before it in the process or on J: generators are seeded per case (and
+      segment), never per shard or process; where an item boundary may fall is fixed by the testbench (a segment), not
+      by the cost or J, so the stimulus a case gets does not depend on the cut. Where a testbench's counts depend on the slicing (a lockstep's idle clocks
+      drawn from one generator per process, the checks of the vector files each process loads), the gate keeps the
+      recorded slicing for the quick run or reports the slicing-independent number beside the raw one.
+   4. **One job budget**: J = `P2_J`, default nproc - 4 but no more than the physical cores (`tools/gate/jobs.sh`: on
+      the 16-core, 32-thread box N copies of one testbench item past 16 at once run slower in total, 22 s each at 24 against
+      6-8 s at 12-16), for the test items; a mutant build of `make -jB` holds B
+      slots of the same J, its probe runs one slot each. The gates' own variables (`FP_J`, `ISP_EDGE_J`,
+      `ISP_TILE_J`, `REFGLUE_J`, `*_SHARDS`, `*_FULL_SHARDS`, `*_MUT_NJOBS`) override; each script's header lists its
+      own. No Verilator `--threads` (useless at this size, shrike4). **Poles**: where the wall time is set by one
+      item that cannot be cut (the quick isp-tile gate's ispcache: 715 s free-running alone, 1294 s beside 15 others;
+      its phase-halt run 196 s alone, 814 s beside 15), more workers beside it only slow it; the queue then holds slots
+      back so that the other work ends about when the pole does (`tools/gate/pqlib.py`; `P2_POLE=0` turns it off).
+      The utilisation of such a gate is low by design; its wall is near the pole's own time.
+   5. **Every summary reports its time line**: wall, the summed CPU time, the utilisation CPU / wall / J and the
+      slowest item (`lib.sh` `gate_end`), so an imbalance shows.
+
+   A new milestone's gate follows this; a change to the gate infrastructure gives identical counts and verdicts on
+   every gate before and after (agents/gates/, 2026-11-21).
+9. **The HOLLY die shot** informs unit grouping, module boundaries and RAM sizes, as a tie-breaker: where the console's
+   measurements and refsw3 leave a choice, the design takes the one the die's blocks and RAM macros suggest, and says
+   so. Console measurements and refsw3 win over it. ARCHITECTURE §3.12 records where the units built so far agree with
+   the die and where they depart from it.
 
 ## 1. Testbench architecture
 
@@ -252,6 +289,18 @@ resTag row as a mutant):
   the next expected one, `eop` on each pass's last run, one eoe per entry (on its last pass's last run or as a null item
   after it), the epoch; the PT passes are answered from the recorded outcomes after a random delay. At the render's end
   the live fields of all pixels (depthA, tagA, stencil, valid) are compared.
+
+  **As built (gates on one queue, PLAN 0 rule 8, 2026-11-21).** The gates run a case per work item (`--shard i/N`, N
+  the list's cases), so the generators are seeded from the case's index in the list: phase-halt's back-pressure (as
+  before) and now its VRAM model's variation too (it had run on from case to case in a shard); a reset also clears the
+  TSP side's stall and feedback counters. In free-running mode a case runs in **segments of 8 renders**: within a
+  segment the RTL carries its own state from render to render (as before); at a segment's first render (8, 16, ...)
+  the RTL is reset, the reference's whole state written in (as for a case's first render), and the back-pressure's and
+  the VRAM model's generators restart from the case and the segment (segment 0's are the case's, as before). A
+  segment's numbers, clocks included, then do not depend on what ran before it in the process, and `--renders A-B` (A a
+  segment's first render) runs a case's segments A .. B alone (the renders before on the reference only), so a costly
+  case of the full gate is cut into several items wherever the cost asks, with identical results. Every case of the
+  quick gates has at most 8 renders: one segment, its state carried throughout, as M7's testbench ran it.
 
 **TSP tile testbench** (`tb/tsp_tile`, M9-M11).
 - The DUT is the TSP side: store, pfetch, setup, ALU, run start, pixel queue, pixel pipe, texture, and the tile

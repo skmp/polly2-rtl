@@ -87,6 +87,18 @@ struct VramModel {
             x.free = now;
         }
     }
+    // the variation's generator restarted for one piece of work (a, b: e.g. a case's index in its list and a render): a
+    // gate runs the pieces in any order and in any process, so a piece's clocks must not depend on what ran before it
+    void reseed(uint64_t a, uint64_t b)
+    {
+        uint64_t z = a * 0xD1B54A32D192ED03ull + b + 0x9E3779B97F4A7C15ull;    // splitmix64's finalizer
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+        z ^= z >> 31;
+        rs = (varySeed * 0x9E3779B97F4A7C15ull + 1) ^ z;
+        if (!rs)
+            rs = 1;
+    }
     // a new render: the hazard detector starts again
     void begin_render()
     {

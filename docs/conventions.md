@@ -684,9 +684,10 @@ This is the shrike4, wren7 and caique rule: every mechanism has a planted bug th
     first N".
   - Agents gate on the subset. They never run `-full` unless told to.
 - Your own verification runs stay well under a minute. Say how long a run takes when it is more than a few seconds.
-- **Sharding.** Every testbench that loops over cases takes `--shard k/N`. The make target runs N shards with
-  `xargs -P $(NJOBS)`, each writing `build/<gate>/log_<k>.txt`. A merged report decides the result, so a failing
-  shard may not stop make (shrike4 `V1_RUN_SHARDS`).
+- **Sharding.** Every testbench that loops over cases takes `--shard k/N`. The gates put the slices or the cases (a
+  case alone is `--shard i/N` with N the list's cases) on one work queue of `P2_J` workers, longest first
+  (`tools/gate/pq.py`, PLAN 0 rule 8), each item writing its own log. A merged report decides the result, so a
+  failing item does not stop the others (shrike4 `V1_RUN_SHARDS`).
 - **Reports.** Every gate writes `build/gate/<gate>/summary.txt`: the revision header of section 2, one line per case,
   and a last line `<gate>: PASS` or `<gate>: FAIL`. Its exit code matches.
 

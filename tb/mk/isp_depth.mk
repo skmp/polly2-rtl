@@ -39,7 +39,7 @@ isp-depth-tb: isp-depth-build
 
 # (tb/mk/isp_edge.mk defines TRIA_CONV and its rule; this fragment is read first, so the path is spelled out)
 isp-depth-vec: refsw3-offline $(BUILD)/tools/tria_conv
-	@bash tools/gate/tria_extract.sh -j 8 $(ISP_DEPTH_TESTS)
+	@bash tools/gate/tria_extract.sh -j $(P2_J) $(ISP_DEPTH_TESTS)
 
 isp-depth:
 	+@MAKE="$(MAKE)" bash tools/gate/gate_isp_depth.sh
@@ -49,7 +49,7 @@ isp-depth-mutants:
 	+@MAKE="$(MAKE)" bash tools/gate/gate_isp_depth.sh --mutants
 
 ISP_DEPTH_LINT = $(P2_LINT) tb/isp_depth/isp_depth_lint.vlt
-lint: lint-isp-depth
+lint-units: lint-isp-depth
 lint-isp-depth:
 	@for t in p2_isp_depth_setup p2_isp_depth_raster; do \
 	  $(ISP_DEPTH_LINT) --top-module $$t $(FP_PKG_SRC) $(FP_SRC) $(ISP_DEPTH_SRC) || { echo "lint-isp-depth: $$t FAILED"; exit 1; }; done

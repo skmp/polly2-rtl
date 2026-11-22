@@ -1658,6 +1658,29 @@ and RenderCORE's end-of-entry logic.
 Every primitive takes and returns the reference tuple as flat ports (num §6). Combinational by default. A unit may
 register a primitive's output as one of its pipeline stages; its lockstep testbench then compares at that latency.
 
+### 3.12 Die agreement (M2-M7)
+
+PLAN 0 rule 9: the HOLLY die shot (18 probable blocks, each labelled with a confidence; an interpretation of one
+optical image, not a reverse-engineering result) is a tie-breaker for grouping, boundaries and RAM sizes; console
+measurements and refsw3 win. The units built so far against it (die block numbers as the annotation's; no RTL was
+changed for this note):
+
+| unit (milestone) | die block | agrees | departs, or the die says nothing |
+|---|---|---|---|
+| ISP edge and depth raster, 32 lanes, one tile row a clock (`p2_isp_edge_raster` M2, `p2_isp_depth_raster` M3, joined under the row stepper `p2_isp_raster` M4) | 1 ISP PE array (high): 32 identical units, two halves of 16; 2 spine (plane broadcast, row control) | 32 identical lanes, one per tile column; one row stepper broadcasting the descriptor to all lanes, as the spine between the halves | the die's two halves of 16 are not a boundary here (one 32-lane array); the per-lane logic (edge sums, depth key) is not checked against the PE stripe's size |
+| `p2_isp_pix` (M6, M7) | 1 (the PE's logic stripe) | the fragment rules per lane, beside the lane's storage | - |
+| `p2_isp_buf` (M6, M7) | 1 (the PE's register tiles) | per-pixel state held per column (one RAM per lane and field, 32 rows deep), next to its lane; the second photo's ~6 small macros a PE (per-column state in RAM macros, not flip-flops) agree | the width: refsw3's state (64-bit depth keys, depthB / C, resTag, resDepth / savedDepth, two read copies of depthA / tagA) is far more than the die's register tiles look able to hold; the fields and widths follow refsw3 and the testbench's liveness compare, and which of them the console shares is open |
+| `p2_isp_cut` (M7) | 3 span RLC / PE row interface (low): the strip over the array | run-length cut of one 32-pixel row a clock, at the array's edge | - |
+| `p2_isp_setup` on one ALU (`ISP_NM` 3, `ISP_NA` 3, one reciprocal; M4) | 11 ISP setup FPU (low), apart from 12 TSP setup FPU; 10's "ISP precalc" beside the array | a setup datapath of the ISP's own, not shared with the TSP's; the three small macros stacked in 11 may be its constants / microprogram or operand store (here a ROM and registers) | 10 and 11 may split precalculation from setup; here they are one unit; operator counts are the scheduler's fit to the measured lengths, the die gives none |
+| `p2_isp_pcache` (`PCACHE_N` 256 descriptors in one array; M7) | 6 ISP primitive cache (low): one wide and one narrow SRAM | a dedicated ISP-side store of the replayed primitives | one array here, two macros there (a wide one and a narrow one: descriptors and a count or tag, or vertices and something else); what is stored and how many is T13 / GAP, the die gives no size |
+| `p2_isp_olw`, `p2_isp_pfetch` (M6) | none identified (probably near 15) | - | the die says nothing (no macro of their own) |
+| `p2_isp_ctl`, `p2_isp_ptc`, `p2_isp_fb` (M6, M7) | none: control logic | - | the die says nothing |
+| `p2_isp_entq` (the queue `p2_entq`, `ENT_N` 32 records; M7) | none identified (perhaps beside 7 span sorter queue) | - | the die says nothing; 32 records is [G] |
+| `p2_mem` (clients C1, C2; response FIFOs of `RSP_N` 8 per client and half; M6) | 15 texture memory arbiter / VRAM interface (low) | one arbiter for every VRAM client | no RAM macro is visible in 15 for the response buffers (small: flip-flops either way); the arbitration and buffer depths are GAP T9 / T14 |
+
+Outside M2-M7, for the units to come: 4 tile buffers (medium, four macros of the densest RAM) against `p2_tbuf`'s two
+1024 x 32 RAMs (§3.9), and 7 span sorter queue (two long SRAMs) against `p2_runq` / `p2_sort`.
+
 ## 4. Ordering and hazards: the observable orders and the mechanism that keeps each
 
 | observable order (spec) | mechanism |

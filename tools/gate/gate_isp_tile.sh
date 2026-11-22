@@ -7,8 +7,10 @@
 #                         scenegen, the ISP tile testbench); the captures of the inputs (tools/gate/capture_prerender.sh: M6's
 #                         pages tb/tile/subset_isp_op.txt and M7's tb/tile/subset_isp_tile.txt at most 8 renders a test, the
 #                         tile subset's dumps subset_dumps.txt and M7's subset_isp_tile_dumps.txt, scenegen seeds
-#                         subset_seeds.txt); lint-isp-tile; then the testbench (build/obj_isp_tile/tb) on every capture,
-#                         sharded 12 ways:
+#                         subset_seeds.txt); then on one queue (PLAN 0 rule 8) lint-isp-tile and the testbench
+#                         (build/obj_isp_tile/tb) on every capture in both modes, a work item per case (phase-halt) and
+#                         per case or run of segments (free-running: tools/gate/tile_items.py cuts the costly cases),
+#                         longest first by the last run's seconds (build/gate/<gate>/cost.txt):
 #                           phase-halt   the live ISP state of all 1024 pixels at every phase boundary of every entry,
 #                                        every SHADE pass's runs (tag, line, column, length, vmask, pmask, rm, epoch, eop,
 #                                        eoe) against refsw3's, the punch-through feedback from the reference's outcomes,
@@ -17,15 +19,20 @@
 #                           free-running the entries back to back with no halt, the run stream popped with random
 #                                        back-pressure, the punch-through passes answered after a random delay, the VRAM
 #                                        model varied (--vramvary 7): the run stream, the entry records, the counts and the
-#                                        live state at each render's end
+#                                        live state at each render's end; a case runs in segments of 8 renders (the RTL's
+#                                        state carried within one; at a segment's start the RTL reset and synced from the
+#                                        reference, generators seeded from the case and the segment), so the numbers
+#                                        (clocks too) do not depend on how a case is cut into items (whole segments) or on J
 #   --full                the same on the full set (every fit/hw test, its first 256 renders; every dump; seeds 1-5000),
 #                         both modes. Under /tmp/polly2-rtl-gate.lock
 #   --mutants             the builds, the captures the probes use, the mutants of tb/isp_tile/mutants_m7.txt (every one
-#                         caught, the per-tile barrier one passing: PLAN M7)
+#                         caught, the per-tile barrier one passing: PLAN M7): builds and probe runs (an item per case) on
+#                         one queue (tools/gate/mutants.py)
 #
 # Ends with "<gate>: PASS" or "<gate>: FAIL"; build/gate/<gate>/summary.txt with the revision header, the inputs and each
-# step's line, and the clocks per entry the RTL took (reported, not gated: PLAN 0 rule 6). Environment: ISP_TILE_J
-# (parallel jobs, 12), ISP_TILE_MUT_JOBS (parallel mutants, 4).
+# step's line, the clocks per entry the RTL took (reported, not gated: PLAN 0 rule 6) and the time line (lib.sh).
+# Environment: ISP_TILE_J (the queue's slots, the captures' and the builds' -j: P2_J: tools/gate/jobs.sh), ISP_TILE_MUT_NJOBS
+# (each mutant build's make -j, 4).
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 mode=${1:-quick}
@@ -41,7 +48,7 @@ if [ "$mode" = --full ] && [ -z "${P2_GATE_LOCKED:-}" ]; then
 fi
 
 . "$HERE/lib.sh"
-J=${ISP_TILE_J:-12}
+J=${ISP_TILE_J:-$P2_J}
 export P2_REFREV=${P2_REFREV:-$(git -C "$NULLDC3" rev-parse --short HEAD 2>/dev/null)}
 export POLLY2_DUMPS=${POLLY2_DUMPS:-$P2_ROOT/../dreamster/polly2-rtl/polly2-data/dumps}
 
@@ -84,9 +91,14 @@ captures() {
   local st=$?
   cat "$GATE_DIR/captures.out"
   [ $st = 0 ] && return 0
-  ! grep 'capture_prerender: ' "$GATE_DIR/captures.out" | grep -v ': [0-9]* renders captured\|: up to date\|: no render$' | grep -q .
+  # a case's last line decides (a case that failed is tried once more, alone)
+  ! grep '^capture_prerender: [^ ]*: ' "$GATE_DIR/captures.out" | grep -v ': once more, alone$' |
+    awk '{ n = $2; $1 = $2 = ""; last[n] = $0 } END { for (n in last) print n, last[n] }' |
+    grep -v ' [0-9]* renders captured\| up to date\| no render$' | grep -q .
 }
 gate_step captures captures
+retried=$(sed -n 's/^capture_prerender: \(.*\): once more, alone$/\1/p' "$GATE_DIR/captures.out" | sort -u)
+[ -n "$retried" ] && note "captures tried once more, alone: $(echo $retried)"
 norender=$(sed -n 's/^capture_prerender: \(.*\): no render$/\1/p' "$GATE_DIR/captures.out" | sort -u)
 [ -n "$norender" ] && note "no render (no input): $(echo $norender)"
 list=$GATE_DIR/cases.txt
@@ -112,18 +124,21 @@ clocks() {
 }
 
 if [ "$mode" != --mutants ]; then
-  gate_step lint-isp-tile $MAKE -s lint-isp-tile
-  gate_step phase-halt bash tools/gate/run_shards.sh phase-halt "$J" "$GATE_DIR/shards-halt" \
-    build/obj_isp_tile/tb --phase-limit 5000000 "@$list"
+  items=$GATE_DIR/items.txt
+  : > "$items"
+  gate_item "$items" lint-isp-tile - 4 1 step lint-isp-tile.log $MAKE -s lint-isp-tile
+  python3 tools/gate/tile_items.py --list "$list" --group phase-halt --logs shards-halt --cost "$GATE_DIR/cost.txt" \
+    --jobs "$J" -- build/obj_isp_tile/tb --phase-limit 5000000 >> "$items"
+  python3 tools/gate/tile_items.py --list "$list" --group free-running --logs shards-free --split render \
+    --cost "$GATE_DIR/cost.txt" --jobs "$J" -- build/obj_isp_tile/tb --mode free --vramvary 7 --phase-limit 500000000 \
+    >> "$items"
+  gate_queue queue "$items"
   note "phase-halt: $(summ "$GATE_DIR/shards-halt")"
   note "phase-halt: $(clocks "$GATE_DIR/shards-halt") (from the entry's accept to its end, halts excluded; VR_LAT 8)"
-  gate_step free-running bash tools/gate/run_shards.sh free-running "$J" "$GATE_DIR/shards-free" \
-    build/obj_isp_tile/tb --mode free --vramvary 7 --phase-limit 500000000 "@$list"
   note "free-running: $(summ "$GATE_DIR/shards-free")"
   note "free-running: $(clocks "$GATE_DIR/shards-free") (mean: a render's clocks per entry, the entries back to back; max: one entry's accept to its end; run stream back-pressure, --vramvary 7)"
 fi
 if [ "$mode" = --mutants ]; then
-  gate_step mutants python3 tools/gate/mutants.py tb/isp_tile/mutants_m7.txt --jobs "${ISP_TILE_MUT_JOBS:-4}" --njobs 3
-  while IFS= read -r l; do note "$l"; done < <(grep -E ' (caught|SURVIVED|ERROR|passes)|of [0-9]+ caught' "$GATE_DIR/mutants.log")
+  gate_mutants mutants tb/isp_tile/mutants_m7.txt --njobs "${ISP_TILE_MUT_NJOBS:-4}"
 fi
 gate_end

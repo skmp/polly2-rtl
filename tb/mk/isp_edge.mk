@@ -47,7 +47,7 @@ refsw3-offline:
 	@bash $(NULLDC3)/refsw3-offline/build.sh $(CWD)/$(BUILD)/refsw3-offline
 
 isp-edge-vec: refsw3-offline $(TRIA_CONV)
-	@bash tools/gate/tria_extract.sh -j 8 $(ISP_EDGE_TESTS)
+	@bash tools/gate/tria_extract.sh -j $(P2_J) $(ISP_EDGE_TESTS)
 
 isp-edge:
 	+@MAKE="$(MAKE)" bash tools/gate/gate_isp_edge.sh
@@ -57,7 +57,7 @@ isp-edge-mutants:
 	+@MAKE="$(MAKE)" bash tools/gate/gate_isp_edge.sh --mutants
 
 ISP_EDGE_LINT = $(P2_LINT) tb/isp_edge/isp_edge_lint.vlt
-lint: lint-isp-edge
+lint-units: lint-isp-edge
 lint-isp-edge:
 	@for t in p2_isp_edge_setup p2_isp_edge_raster; do \
 	  $(ISP_EDGE_LINT) --top-module $$t $(FP_PKG_SRC) $(FP_SRC) $(ISP_EDGE_SRC) || { echo "lint-isp-edge: $$t FAILED"; exit 1; }; done

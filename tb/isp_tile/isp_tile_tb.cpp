@@ -1,7 +1,7 @@
 // isp_tile_tb.cpp: the ISP tile testbench (PLAN 1.3 "ISP tile testbench", M6, M7; make isp-tile, isp-tile-op).
 //
 //   tb [--mode halt|free] [--seed S] [--vramvary S | +vramvary=S] [--vrlat N] [--phase-limit CLK] [--op-only]
-//      [--max-fails N] [--shard k/N] [--trace] <case folder> | @<list file> ...
+//      [--max-fails N] [--shard k/N] [--renders A[-B]] [--trace] <case folder> | @<list file> ...
 //
 // A case folder is a capture (tools/gate/capture_prerender.sh: r0, r1, ... each with the registers and video memory
 // before a render). Its renders run in order in one reference core (itref::reset_core first) and one RTL (reset first,
@@ -29,7 +29,20 @@
 // entries fed back to back as fast as it takes them, the run stream popped with random back-pressure (a stall chance
 // and burst length per case), the punch-through passes answered after a random delay; the stream, the entry records
 // and the counts are checked as above, and the live fields at the render's end. This is the mode that exercises the
-// row barrier: the cutter of a pass beside the next pass's or entry's raster and sweeps.
+// row barrier: the cutter of a pass beside the next pass's or entry's raster and sweeps. As in phase-halt mode the RTL
+// carries its own state from render to render, but in segments of SEG (8) renders: at the first render of a segment
+// (renders 0, 8, 16, ...) the RTL is reset and the reference's whole state written into its buffers (as for a case's
+// first render), and the run stream's and the VRAM model's random generators restart from the case and the segment. A
+// segment's result (its clocks too) then depends on nothing run before it in the process, and the gate may run a
+// case's segments as separate work items (tools/gate/gate_isp_tile.sh, tools/gate/tile_items.py). A case of at most
+// SEG renders (every case of the quick gates) runs as one segment, its state carried throughout. --renders A-B
+// (free-running only; A a segment's first render, a multiple of SEG): the renders A .. B of each case only (one
+// number: that render); the renders before A run on the reference alone, so that its state is the one render A starts
+// from.
+//
+// Work items (the gates' queue, tools/gate/pq.py): --shard i/N with N the list's case count selects case i alone, and
+// the generators are seeded from the case's index in the list (and the segment), never from the shard or what ran
+// before in the process: phase-halt's back-pressure and VRAM model variation per case, free-running's per segment.
 //
 // The VRAM model (tb/common/vram_model.h) serves C1 and C2 from refcore's emu_vram; --vramvary S varies its latency and
 // readiness at random (seed S): the values must not change (PLAN 1.6), only the clocks.
@@ -47,6 +60,9 @@
 #include <vector>
 
 #include "Vp2_isp_tile_tb_top.h"
+
+// free-running mode's segment (the header): the renders the RTL runs with its own state carried, from a sync
+static const int SEG = 8;
 #include "verilated.h"
 
 #include "isp_live.h"
@@ -222,17 +238,21 @@ struct Tb {
             pop_rec();
         if (t->busy && !t->halted)
             entClk++;
-        prims += t->t_asm;
-        descs += t->t_desc;
-        rowsN += t->t_row;
-        mrows += t->t_mrow;
-        vby += t->t_vby;
-        barStalls += t->t_bar;
-        ovfClk += t->t_ovf;
-        fwClk += t->t_fw;
-        replays += t->t_rp;
-        holdClk += t->t_hold;
-        drops += t->t_drop;
+        // the RTL's statistics taps, not during a reset (a flag the render before left set would count there, and a
+        // render's numbers would depend on what ran before it in the process)
+        if (!t->rst) {
+            prims += t->t_asm;
+            descs += t->t_desc;
+            rowsN += t->t_row;
+            mrows += t->t_mrow;
+            vby += t->t_vby;
+            barStalls += t->t_bar;
+            ovfClk += t->t_ovf;
+            fwClk += t->t_fw;
+            replays += t->t_rp;
+            holdClk += t->t_hold;
+            drops += t->t_drop;
+        }
         t->clk = 1;
         t->eval();
         if (fbSent) {
@@ -275,6 +295,11 @@ struct Tb {
 
     void reset()
     {
+        // the TSP side's state too: what ran before (another case, the render before) must not reach into this one
+        stallLeft = 0;
+        fbDelay = 0;
+        outc = nullptr;
+        recq.clear();
         vm.flush();
         t->rst = 1;
         t->ent_v = 0;
@@ -893,6 +918,7 @@ int main(int argc, char** argv)
     int lat = 8;
     bool freeMode = false, opOnly = false;
     long maxFails = 0;
+    long rFirst = 0, rLast = -1;        // --renders: every render (rLast < 0)
     std::vector<std::string> cases;
     for (size_t i = 0; i < a.rest.size(); i++) {
         const std::string& s = a.rest[i];
@@ -908,6 +934,16 @@ int main(int argc, char** argv)
             opOnly = true;
         else if (s == "--max-fails" && i + 1 < a.rest.size())
             maxFails = atol(a.rest[++i].c_str());
+        else if (s == "--renders" && i + 1 < a.rest.size()) {
+            const std::string v = a.rest[++i];
+            char* end = nullptr;
+            rFirst = strtol(v.c_str(), &end, 10);
+            rLast = *end == '-' ? strtol(end + 1, &end, 10) : rFirst;
+            if (*end || rFirst < 0 || rLast < rFirst) {
+                fprintf(stderr, "isp_tile: --renders A or A-B (0 <= A <= B): %s\n", v.c_str());
+                return 2;
+            }
+        }
         else if (s[0] == '@') {
             FILE* lf = fopen(s.c_str() + 1, "r");
             if (!lf) {
@@ -927,6 +963,14 @@ int main(int argc, char** argv)
             vary = strtoull(s.c_str() + 10, nullptr, 0);
         else if (s[0] != '+')
             cases.push_back(s);
+    }
+    if (rLast >= 0 && !freeMode) {
+        fprintf(stderr, "isp_tile: --renders is free-running mode's (phase-halt carries the RTL's state from render to render)\n");
+        return 2;
+    }
+    if (rFirst % SEG) {
+        fprintf(stderr, "isp_tile: --renders A-B: A must be a segment's first render (a multiple of %d)\n", SEG);
+        return 2;
     }
     p2tb::banner("isp_tile", a);
     printf("isp_tile: mode %s%s, vramvary %llu, VR_LAT %d\n", freeMode ? "free-running" : "phase-halt",
@@ -956,9 +1000,11 @@ int main(int argc, char** argv)
         const std::string& c = cases[ci];
         nCases++;
         // the case's TSP: a stall chance and burst length (none in a third of the cases)
-        tb.rng = Rng(a.seed * 1000003ull + ci);
+        const uint64_t caseSeed = a.seed * 1000003ull + ci;
+        tb.rng = Rng(caseSeed);
         tb.stallP = tb.rng.below(3) ? tb.rng.below(200) + 8 : 0;
         tb.burst = 1 + tb.rng.below(24);
+        tb.vm.reseed(ci, 0);            // the VRAM model's variation per case (free-running: per segment, below)
         itref::reset_core();
         tb.t->halt_en = freeMode ? 0 : 1;
         tb.reset();
@@ -971,16 +1017,27 @@ int main(int argc, char** argv)
         tb.freeClk = 0;
         std::fill(tb.clkHist.begin(), tb.clkHist.end(), 0);
         const uint64_t c0 = tb.cyc;
+        int seg = 0;                    // free-running: the segment the RTL is in
         for (int k = 0;; k++) {
             const std::string r = c + "/r" + std::to_string(k);
             if (!IsDir(r))
                 break;
+            if (rLast >= 0 && k > rLast)
+                break;
+            const bool refOnly = k < rFirst;    // before --renders' first: the reference alone
             if (IsFile(r + "/skipped")) {
-                skipped++;
+                if (!refOnly)
+                    skipped++;
                 continue;
             }
             if (!f.ok(itref::load_state(r.c_str()), "%s: cannot load the capture", r.c_str()))
                 break;
+            if (refOnly) {
+                tb.rec.clear();
+                f.ok(itref::render(Record, &tb, 1024), "%s: the reference's render did not end", r.c_str());
+                tb.rec.clear();
+                continue;
+            }
             tb.where = r;
             tb.set_regs(itref::regs());
             tb.vm.begin_render();
@@ -990,6 +1047,15 @@ int main(int argc, char** argv)
                 f.ok(ended, "%s: the reference's render did not end", r.c_str());
                 tb.renders++;
             } else {
+                // a segment's first render (the header): reset, the reference's state, the generators of the segment
+                // (segment 0's are the case's, drawn above); a segment begins at its first render that renders
+                if (k / SEG != seg) {
+                    seg = k / SEG;
+                    tb.rng = Rng(caseSeed * 0x100000001B3ull + (uint64_t)seg);
+                    tb.vm.reseed(ci, (uint64_t)seg);
+                    tb.reset();
+                    tb.needSync = true;
+                }
                 if (tb.needSync) {
                     tb.sync();
                     tb.needSync = false;

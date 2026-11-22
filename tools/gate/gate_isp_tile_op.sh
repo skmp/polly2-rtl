@@ -7,18 +7,21 @@
 #                         scenegen, the ISP tile testbench); the captures of the M6 inputs (tools/gate/capture_prerender.sh:
 #                         tb/tile/subset_isp_op.txt at most 8 renders a test, the tile subset's dumps subset_dumps.txt,
 #                         scenegen seeds subset_seeds.txt); lint-isp-tile; then the testbench (build/obj_isp_tile/tb) in
-#                         phase-halt mode on every capture, sharded 12 ways (--op-only: M7's testbench runs every phase,
+#                         phase-halt mode on every capture, a work item per case on one queue with lint (PLAN 0 rule 8;
+#                         longest first by the last run's seconds, build/gate/<gate>/cost.txt) (--op-only: M7's testbench runs every phase,
 #                         M6's gate compares these): after Z, OP and OP_MOD of every entry, depthA,
 #                         tagA, stencil and valid of all 1024 pixels against the M5 phase driver's (p2ref), once with the
-#                         VRAM model plain and once with --vramvary 7 (the values must not change); the mutants of
+#                         VRAM model plain and once with --vramvary 7 (the values must not change; the variation is seeded
+#                         per case, so its clocks do not depend on J or the order); the mutants of
 #                         tb/isp_tile/mutants.txt (rtl/v1/isp) and mutants_mem.txt (rtl/v1/mem), every one caught
 #   --full                the same on M5's full set (every fit/hw test, its first 256 renders; every dump; seeds 1-5000),
 #                         both VRAM modes; no mutants. Under /tmp/polly2-rtl-gate.lock
 #   --mutants             the builds, the captures the probes use, the mutants alone
 #
 # Ends with "<gate>: PASS" or "<gate>: FAIL"; build/gate/<gate>/summary.txt with the revision header, the inputs and each
-# step's line, and the clocks per entry the RTL took (reported, not gated: PLAN 0 rule 6). Environment: ISP_TILE_J
-# (parallel jobs, 12), ISP_TILE_MUT_JOBS (parallel mutants, 4).
+# step's line, the clocks per entry the RTL took (reported, not gated: PLAN 0 rule 6) and the time line (lib.sh).
+# Environment: ISP_TILE_J (the queue's slots, the captures' and the builds' -j: P2_J: tools/gate/jobs.sh), ISP_TILE_MUT_NJOBS
+# (each mutant build's make -j, 4).
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 mode=${1:-quick}
@@ -34,7 +37,7 @@ if [ "$mode" = --full ] && [ -z "${P2_GATE_LOCKED:-}" ]; then
 fi
 
 . "$HERE/lib.sh"
-J=${ISP_TILE_J:-12}
+J=${ISP_TILE_J:-$P2_J}
 export P2_REFREV=${P2_REFREV:-$(git -C "$NULLDC3" rev-parse --short HEAD 2>/dev/null)}
 export POLLY2_DUMPS=${POLLY2_DUMPS:-$P2_ROOT/../dreamster/polly2-rtl/polly2-data/dumps}
 
@@ -73,11 +76,17 @@ nren=$(while read -r d; do ls -d "$d"/r* 2>/dev/null; done < "$list" | wc -l)
 note "inputs: $(echo $tests | wc -w) test pages (at most $maxr renders each), $(echo $dumps | wc -w) dumps, $(echo $seeds | wc -w) scenegen seeds: $nren renders"
 
 if [ "$mode" != --mutants ]; then
-  gate_step lint-isp-tile $MAKE -s lint-isp-tile
+  items=$GATE_DIR/items.txt
+  : > "$items"
+  gate_item "$items" lint-isp-tile - 4 1 step lint-isp-tile.log $MAKE -s lint-isp-tile
   for v in 0 7; do
     name=phase-halt; [ $v != 0 ] && name=phase-halt-vramvary$v
-    gate_step "$name" bash tools/gate/run_shards.sh "$name" "$J" "$GATE_DIR/shards-$name" \
-      build/obj_isp_tile/tb --op-only --vramvary $v "@$list"
+    python3 tools/gate/tile_items.py --list "$list" --group "$name" --logs "shards-$name" --cost "$GATE_DIR/cost.txt" \
+      --jobs "$J" -- build/obj_isp_tile/tb --op-only --vramvary $v >> "$items"
+  done
+  gate_queue queue "$items"
+  for v in 0 7; do
+    name=phase-halt; [ $v != 0 ] && name=phase-halt-vramvary$v
     r=$(cat "$GATE_DIR"/shards-$name/log_*.txt | grep -h '^isp_tile: build/pre/' |
         awk '{ r += $3; e += $5; p += $7 } END { printf "%d renders, %d entries, %d phases compared (1024 pixels each; Z, OP, OP_MOD)", r, e, p }')
     note "$name: $r; $(cat "$GATE_DIR"/shards-$name/log_*.txt | grep -c '  FAIL ') failures shown"
@@ -87,9 +96,7 @@ if [ "$mode" != --mutants ]; then
   done
 fi
 if [ "$mode" != --full ]; then
-  gate_step mutants python3 tools/gate/mutants.py tb/isp_tile/mutants.txt --jobs "${ISP_TILE_MUT_JOBS:-4}" --njobs 3
-  while IFS= read -r l; do note "$l"; done < <(grep -E ' (caught|SURVIVED|ERROR)|of [0-9]+ caught' "$GATE_DIR/mutants.log")
-  gate_step mutants-mem python3 tools/gate/mutants.py tb/isp_tile/mutants_mem.txt --jobs "${ISP_TILE_MUT_JOBS:-4}" --njobs 3
-  while IFS= read -r l; do note "$l"; done < <(grep -E ' (caught|SURVIVED|ERROR)|of [0-9]+ caught' "$GATE_DIR/mutants-mem.log")
+  gate_mutants mutants tb/isp_tile/mutants.txt --njobs "${ISP_TILE_MUT_NJOBS:-4}"
+  gate_mutants mutants-mem tb/isp_tile/mutants_mem.txt --njobs "${ISP_TILE_MUT_NJOBS:-4}"
 fi
 gate_end

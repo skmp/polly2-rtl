@@ -80,13 +80,13 @@ fp-full:
 fp-mutants:
 	+@MAKE="$(MAKE)" bash tools/gate/gate_fp.sh all --mutants
 
-# every module alone (its default parameters) and every tb top (the instances' parameters), 8 at a time
+# every module alone (its default parameters) and every tb top (the instances' parameters), LINT_J at a time
 FP_LINT = $(P2_LINT) tb/fp/fp_lint.vlt
-lint: lint-fp
+lint-units: lint-fp
 lint-fp:
 	@printf '%s\n' $(notdir $(basename $(FP_SRC))) | \
-	  xargs -P 8 -I{} sh -c '$(FP_LINT) --top-module {} $(FP_PKG_SRC) $(FP_SRC) || { echo "lint-fp: {} FAILED"; exit 1; }'
+	  xargs -P $(LINT_J) -I{} sh -c '$(FP_LINT) --top-module {} $(FP_PKG_SRC) $(FP_SRC) || { echo "lint-fp: {} FAILED"; exit 1; }'
 	@printf '%s\n' $(FP_PRIMS) | \
-	  xargs -P 8 -I{} sh -c '$(FP_LINT) --top-module p2_fp_{}_tb_top $(FP_PKG_SRC) rtl/v1/pkg/p2_hw_check.sv \
+	  xargs -P $(LINT_J) -I{} sh -c '$(FP_LINT) --top-module p2_fp_{}_tb_top $(FP_PKG_SRC) rtl/v1/pkg/p2_hw_check.sv \
 	    $(FP_SRC) tb/fp/p2_fp_{}_tb_top.sv || { echo "lint-fp: p2_fp_{}_tb_top FAILED"; exit 1; }'
 	@echo "lint-fp: PASS"
