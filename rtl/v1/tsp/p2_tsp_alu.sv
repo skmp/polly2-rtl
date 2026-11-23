@@ -36,10 +36,16 @@
 // is in the register file from step s + L (L = P2_TSP_L_MUL, _ADD, _RCP). `issue` low (the step held: run start has the
 // ALU this clock, ARCHITECTURE 3.7.4 "run start first") issues nothing; results already on their way still land: every
 // value has its own register, so a held step cannot let a write overtake a read.
+//
+// Run start's port (M10, ARCHITECTURE 3.7.4 / 3.7.5): in a clock run start holds the ALU (rs_v, the setup's `hold`),
+// each multiplier makes one of its products, seen(A) x x0h exactly (16 x 13 bits, p2_fp_mul N 29: refcore
+// pvr_tsp_plane.h PlaneT::Value `Mul(a_, FromHalves(x0Halves), 62)`, the halves' 2^-1 left to run start), the result
+// P2_TSP_L_MUL clocks later on rs_p [M tim 3.8: "2 products a plane", 3.9 / 4.2 / 6.3 clk a run].
 module p2_tsp_alu
   import p2_hw_pkg::*;
   import p2_pkg::*;
   import p2_fp_pkg::*;
+  import p2_tsp_pkg::*;
   import p2_tsp_prog_pkg::*;
 (
   input  logic                                  clk,
@@ -50,6 +56,11 @@ module p2_tsp_alu
   input  p2_fp24_t [P2_TSP_NIN-1:0]             ld_val,
   input  logic [1:0][31:0]                      zbits,        // corners 1 and 2's raw depths (the mean's withZero)
   output p2_fp24_t [P2_TSP_NREG-1:0]            rf,
+  // run start's products (M10): operands this clock, products P2_TSP_L_MUL clocks later
+  input  logic                                  rs_v,
+  input  p2_fp16_t [P2_TSP_NM-1:0]              rs_a,         // seen(A) or seen(B) of a plane
+  input  logic [P2_TSP_NM-1:0][12:0]            rs_b,         // x0h or yh (half pixels)
+  output p2_tsp_rsp_t [P2_TSP_NM-1:0]           rs_p,
   // taps (the testbench's program trace): the register writes of this clock
   output logic [P2_TSP_NM+P2_TSP_NA:0]                  t_wv,
   output logic [P2_TSP_NM+P2_TSP_NA:0][P2_TSP_RW-1:0]   t_wrd
@@ -129,6 +140,34 @@ module p2_tsp_alu
         res[g].rd  = s.rd;
         res[g].val = r;
       end
+    end
+  endgenerate
+
+  // ---------------------------------------------------------------------------------------------- run start's products
+  generate
+    for (g = 0; g < P2_TSP_NM; g = g + 1) begin : g_rs
+      logic                       pn, pb;
+      logic signed [P2_FP_EW-1:0] pe;
+      logic [28:0]                pm;
+      p2_tsp_rsp_t                pipe [P2_TSP_L_MUL];
+      p2_tsp_rsp_t                prod;
+      p2_fp_mul #(.AW(16), .BW(13), .N(29)) u_rmul (
+        .a_neg(rs_a[g].neg), .a_bad(1'b0), .a_exp(rs_a[g].exp), .a_mant(rs_a[g].mant),
+        .b_neg(1'b0), .b_bad(1'b0), .b_exp('0), .b_mant(rs_b[g]),
+        .o_neg(pn), .o_bad(pb), .o_exp(pe), .o_mant(pm));
+      // a product of x0h = 0 is a zero on the coefficient's side (PlaneT::Value `if (ax.zero()) ax.neg = a_.neg`): Mul's
+      // sign is the operands' xor, x0h's is +, so the sign is seen(A)'s either way
+      always_comb begin
+        prod      = '0;
+        prod.neg  = pn;
+        prod.exp  = pe;
+        prod.mant = pm;
+      end
+      always_ff @(posedge clk) begin
+        if (rs_v) pipe[0] <= prod;
+        for (int k = 1; k < P2_TSP_L_MUL; k++) pipe[k] <= pipe[k - 1];
+      end
+      assign rs_p[g] = pipe[P2_TSP_L_MUL - 1];
     end
   endgenerate
 

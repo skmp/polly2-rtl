@@ -186,13 +186,17 @@ def read_cost(path):
 
 
 def write_cost(path, rows, groups):
-    """rows: (group, id, wall, cpu) of this run; the entries of the groups run are replaced as a whole (a group's items
-    may change from run to run: chunks), the others kept"""
+    """rows: (group, id, wall, cpu) of this run; merged into the file: an item that ran replaces its own entry, every
+    other entry is kept (a sampled run, PLAN 0 rule 10, runs part of a group: the items it did not draw keep their
+    costs; M9's verifier found a sampled run erasing them when a group's entries were replaced as a whole). `groups`
+    (the groups run) is no longer needed and kept for the callers. An item a later list no longer has keeps its line;
+    read_cost's users look items up by (group, id), so such a line is never read"""
+    ran = set((g, i) for g, i, _w, _c in rows)
     old = []
     try:
         for line in open(path):
             f = line.rstrip("\n").split("\t")
-            if len(f) >= 3 and f[0] not in groups:
+            if len(f) >= 3 and (f[0], f[1]) not in ran:
                 old.append(line.rstrip("\n"))
     except OSError:
         pass

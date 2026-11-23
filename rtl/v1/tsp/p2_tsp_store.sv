@@ -20,8 +20,11 @@
 //                    (`rel`: the pixel pipe's P10, M11; the testbench in M9) [G T6: pins to P10]
 //   across entries   entries are kept (STORE_KEEP [G T6]); `flush` (a render's start: the parameters and the registers
 //                    change) empties the store
-// Read port: one word a clock of an entry (0 the header, 1 K, 2 .. the planes), the data the clock after (synchronous
-// RAMs); run start's (M10) and the testbench's.
+// Read ports: one word a clock of an entry (0 the header, 1 K, 2 .. the planes), the data the clock after (synchronous
+// RAMs; the M9 testbench's); and run start's row read (M10, p2_tsp_rstart's coefficient reload): row r of an entry, the
+// planes 4r .. 4r + 3 from the four banks at once, with the header and K, the clock after [die: the four equal macros of
+// region 5 read side by side, ARCHITECTURE 3.12; M tim 3.8: a reload on a store-index change costs ~1-2 clk, not 11].
+// The row read has the banks' read ports when both ask in one clock.
 module p2_tsp_store
   import p2_regs_pkg::*;
   import p2_pkg::*;
@@ -71,6 +74,13 @@ module p2_tsp_store
   output p2_tsp_hdr_t                   rd_hdr,
   output p2_tsp_k_t                     rd_k,
   output p2_tsp_plane_t                 rd_plane,
+  // run start's row read
+  input  logic                          rw_v,
+  input  logic [P2_TSP_SIDX_BITS-1:0]   rw_idx,
+  input  logic [1:0]                    rw_row,         // planes 4 rw_row .. 4 rw_row + 3
+  output p2_tsp_hdr_t                   rw_hdr,
+  output p2_tsp_k_t                     rw_k,
+  output p2_tsp_plane_t [3:0]           rw_plane,
   // statistics (reported, not gated: T6)
   output logic [5:0]                    t_srq,          // SRQ occupancy
   output logic [4:0]                    t_pinned,       // entries pinned
@@ -275,6 +285,10 @@ module p2_tsp_store
       rd_hdr <= m_hdr[rd_idx];
       rd_k   <= m_k[rd_idx];
     end
+    if (rw_v) begin
+      rw_hdr <= m_hdr[rw_idx];
+      rw_k   <= m_k[rw_idx];
+    end
   end
   // the planes: four banks, plane p in bank p mod 4 at row (entry, p / 4); one plane written a clock, one read
   localparam int ROWS = 3;              // ceil(P2_TSP_NPLANE / 4)
@@ -289,9 +303,12 @@ module p2_tsp_store
       always_ff @(posedge clk) begin
         if (sp_v && sp_plane[1:0] == 2'(b))
           mem[sp_idx * ROWS + 32'(sp_plane[3:2])] <= sp_w;
-        if (rd_v && rd_word >= 4'd2 && rp[1:0] == 2'(b))
+        if (rw_v)
+          bank_q[b] <= mem[rw_idx * ROWS + 32'(rw_row)];
+        else if (rd_v && rd_word >= 4'd2 && rp[1:0] == 2'(b))
           bank_q[b] <= mem[rd_idx * ROWS + 32'(rp[3:2])];
       end
+      assign rw_plane[b] = bank_q[b];
     end
   endgenerate
   always_ff @(posedge clk)

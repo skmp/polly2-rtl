@@ -1,0 +1,15 @@
+# tb/tsp_run/mutants_fp.txt: M10's mutants of the TSP's value normalizer and divider in rtl/v1/lib/fp (PLAN M10 "Mutants":
+# a fixed-drop normalizer, the -1-unit value as 0, the negative-denominator rule off, 2^-128 for a zero denominator to
+# 2^-127), run by tools/gate/mutants.py (make tsp-run-mutants), on the run testbench's console sets.
+# Format: tb/tsp_run/mutants.txt's.
+@dir rtl/v1/lib/fp FP_DIR
+@obj TSP_RUN_OBJDIR
+@probe wtiny tsp-run-build tb --only console --set uvmeas/wtiny1 --stride 4 --max-fails 1
+@probe wzero1 tsp-run-build tb --only console --set uvmeas/wzero1 --max-fails 1
+@probe wneg tsp-run-build tb --only console --set uvmeas/wneg1 --stride 8 --max-fails 1
+@probe wzero2 tsp-run-build tb --only console --set uvmeas/wzero2 --stride 2 --max-fails 1
+
+fixed-drop | p2_fp_value_norm.sv | assign drop = (n > NW'(VB)) ? n - NW'(VB) : '0; | assign drop = (n > NW'(VB)) ? n - NW'(VB) : NW'(1); | wtiny | a fixed-drop normalizer: at least one low bit of k dropped (valueFixed 1), not 16 bits from the leading one
+m1-as-zero | p2_fp_value_norm.sv |       o_mant = 17'd1; |       o_mant = 17'd0; | wzero1 | the -1-unit value (every bit set: -2^-143) as 0
+neg-den-off | p2_fp_den_seen.sv | o_mant = MW'(neg15); | o_mant = MW'(m16); | wneg | the negative-denominator rule off: a 1/w below zero divided by its magnitude
+zero-den-127 | p2_fp_div_den.sv | ed = P2_FP_XW'(ZEXP + 1); | ed = P2_FP_XW'(ZEXP + 2); | wzero2 | a zero denominator read as 2^-127, not 2^-128

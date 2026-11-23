@@ -187,6 +187,35 @@ Color fog(bool offset, bool colorClamp, int fogCtrl, Color c, const pvrfp::Fp& i
                              FogAt<8>, FogAt<9>, FogAt<10>, FogAt<11>, FogAt<12>, FogAt<13>, FogAt<14>, FogAt<15> };
     return t[(offset ? 8 : 0) | (colorClamp ? 4 : 0) | (fogCtrl & 3)](c, invW, offsA);
 }
+// M10: the pixel's colours as PixelFlush_tsp makes them (refcore's InterpolateBase / InterpolateOffs on the volume's planes;
+// pp_CheapShadows FPU_SHAD_SCALE.intensity_shadow, as the dispatch chooses it), and the mip level through the verbatim
+// copy of PixelFlush_tsp's mipChoose (tb/tsp_run/ref_copies_run.h, copy tsp-mip-choose)
+Color interpolate_base(const FpuEntry* entry, PixPos p, const pvrfp::Fp& W, bool InVolume, bool useAlpha)
+{
+    const PlaneStepper3* col = entry->ips.Col[InVolume ? 1 : 0];
+    if (FPU_SHAD_SCALE.intensity_shadow)
+        return useAlpha ? InterpolateBase<true, true>(col, p, W, InVolume) : InterpolateBase<false, true>(col, p, W, InVolume);
+    return useAlpha ? InterpolateBase<true, false>(col, p, W, InVolume) : InterpolateBase<false, false>(col, p, W, InVolume);
+}
+Color interpolate_offs(const FpuEntry* entry, PixPos p, const pvrfp::Fp& W, bool InVolume)
+{
+    const PlaneStepper3* ofs = entry->ips.Ofs[InVolume ? 1 : 0];
+    if (FPU_SHAD_SCALE.intensity_shadow)
+        return InterpolateOffs<true>(ofs, p, W, InVolume);
+    return InterpolateOffs<false>(ofs, p, W, InVolume);
+}
+void mip_choose(const FpuEntry* entry, bool InVolume, const pvrfp::Fp& q, bool finer, uint32_t* levelOut, int* dTriOut)
+{
+    // PixelFlush_tsp's names, as the dispatch binds them (pp_CheapShadows is FPU_SHAD_SCALE.intensity_shadow)
+    const u32 two_voume_index = InVolume & !FPU_SHAD_SCALE.intensity_shadow;
+#include "../tsp_run/ref_copies_run.h"
+    u32 level = 0;
+    int dTri = 0;
+    mipChoose(q, finer, level, dTri);
+    *levelOut = level;
+    *dTriOut = dTri;
+}
+
 bool blend(int srcSel, int dstSel, int srcInstr, int dstInstr, bool atest, uint32_t idx, Color c)
 {
     return BlendingUnit_table[srcSel & 1][dstSel & 1][srcInstr & 7][dstInstr & 7][atest](idx, c);

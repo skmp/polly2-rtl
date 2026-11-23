@@ -139,6 +139,7 @@ module p2_tsp_setup_tb_top
     .jb_v, .jb_rdy, .jb,
     .sh_v, .sh_idx, .sh_w, .sp_v, .sp_idx, .sp_plane, .sp_w, .sk_v, .sk_idx, .sk_w, .done, .done_idx,
     .rd_v, .rd_idx, .rd_word, .rd_hdr, .rd_k, .rd_plane,
+    .rw_v(1'b0), .rw_idx('0), .rw_row('0), .rw_hdr(), .rw_k(), .rw_plane(),     // run start's row read (M10)
     .t_srq, .t_pinned, .t_la_wait, .t_job, .t_hit);
   assign out_idx0 = oidx[0];
   assign out_idx1 = oidx[1];
@@ -182,7 +183,7 @@ module p2_tsp_setup_tb_top
   p2_tsp_uword_t uw_tap;
   logic [P2_TSP_PC_BITS-1:0] pc_tap;
   p2_tsp_setup u_setup (
-    .clk, .rst, .pr_v, .pr_rdy, .pr, .fpu_shad_scale, .fpu_perp_val, .hold,
+    .clk, .rst, .pr_v, .pr_rdy, .pr, .fpu_shad_scale, .fpu_perp_val, .hold, .rs_a('0), .rs_b('0), .rs_p(),
     .sh_v, .sh_idx, .sh_w, .sp_v, .sp_idx, .sp_plane, .sp_w, .sk_v, .sk_idx, .sk_w, .done, .done_idx,
     .idle(t_setup_idle), .t_issue, .t_cls, .t_pc(pc_tap), .t_uw(uw_tap), .t_wv(), .t_wrd());
   assign t_pc     = 6'(pc_tap);

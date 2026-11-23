@@ -1369,6 +1369,12 @@ select.
   testbench (random back-pressure, run start holding the ALU ~18 % of clocks): at most 14 entries pinned, the SRQ full
   (32) behind setup-bound stretches.
 
+**As built (M10).** A second read port for run start's coefficient reload, the **row read** (`rw_*`): row r of an
+entry, the planes 4r .. 4r + 3 from the four banks at once, with the header and K, the clock after (the four equal
+macros of die region 5 read side by side, §3.12). It has the banks' read ports when it and M9's one-word port ask in one
+clock (only the M9 testbench uses the one-word port). The pins now go when a run's last point leaves the pixel pipe's
+end, P3 in M10 (`rel` from the tb top, `p2_tsp_run_tb_top`), P10 from M11.
+
 #### 3.7.2 `p2_tsp_pfetch`: TSP parameter fetch
 
 **Function.** Owns tsp §2.2 (tile.cpp `GetFpuEntry`, `decode_pvr_vertices` / `decode_pvr_vertex`).
@@ -1456,8 +1462,10 @@ colour the shading uses is 0, the console skips their setup.
 **Programs, generated as in §3.4.4.** `tools/gen/gen_setup_prog.cpp` holds the operation graph of `IPs3::Setup` and
 MipSelect's K part per class (untextured, textured, offset, bump, DCalcCtrl 1, each with or without the dropped
 offset planes). The graph check proves it against `fpu_entry`. The scheduler maps it onto `ALU_NM` / `ALU_NA` / one
-reciprocal, with the plane part's issue slots arbitrated against run start. The measured 39 / 48 / 64 / 49 and +5.00
-are checks on the parameters (MT4), not inputs.
+reciprocal, with the plane part's issue slots arbitrated against run start. The measured 39 / 48 / 64 / 48 (the offset
+planes dropped) and +5.00 are checks on the parameters (MT4), not inputs (the generator's sweep compares those five; the
+bump map's measured 49 runs the textured class's program, M10's fix of this line: it had quoted 49 where the sweep uses
+48).
 
 **Cycle.** [M tim §3.7] 39 clk a seen triangle untextured, 48 textured, 64 with a nonzero offset, 49 bump, 58 PT
 (565), 39 translucent; DCalcCtrl 1 adds 5.00.
@@ -1491,7 +1499,7 @@ are checks on the parameters (MT4), not inputs.
   ends with its last store write, and the next job is accepted in that clock (the generator checks that every result
   is written by then). At the §6 parameters (`TSP_NM` 4, `TSP_NA` 4, `L_MUL` 1, `L_ADD` 2, `L_RCP` 2) the lengths are
   UNTEX 20, TEX 26, TEX_M0 31, TEX_M1 32, TEX_O 39, TEX_O_M0 44, TEX_O_M1 45, TEX_D 29, TEX_D_M0 34, TEX_D_M1 36.
-  Against the measured 39 / 48 / 64 / 49 / +5 (MT4's check, not an input; PLAN 0 rule 6): no parameter set of the
+  Against the measured 39 / 48 / 64 / 48 (offsets dropped) / +5 (MT4's check, not an input; PLAN 0 rule 6): no parameter set of the
   sweep (`make tsp-prog-sweep`) comes within 16 (the nearest, 2 multipliers and 2 adders: 37 / 50 / 76, dropping the
   offsets 50); the measured offset planes cost 16 for four planes (4 a plane) where the graphs' 13 multiplies a plane
   cost 6.5 at two multipliers: the console's attribute plane is cheaper than PlaneT::Setup's operation count, or its
@@ -1524,6 +1532,13 @@ withZero), ADD_R (radd), ADD_N (the numerator: p2_fp_mip_minor), ADD_LX / ADD_LN
 comparisons, p2_fp_le), ADD_P (plain); RCP_T / RCP_M (p2_fp_rng_recip). The run-start port is `hold` only in M9 (M10
 adds run start's own issues).
 
+**As built (M10).** Run start's issues: in a clock run start holds the ALU (`rs_v` = the setup's `hold`; the setup's
+whole step waits, as in M9), each of the `P2_TSP_NM` 4 multipliers makes one exact product `seen(A) x x0h` (16 x 13
+bits, `p2_fp_mul` N 29: PlaneT::Value's `Mul(a_, FromHalves(x0Halves), 62)`, the halves' 2^-1 left to run start), the
+result on `rs_p` `P2_TSP_L_MUL` (1) clock later. In this RTL the run-start product is its own 16 x 13 array beside the
+slot's 24 x 24 ones, selected by the same issue (whether the console's multiplier array serves both is GAP T7; MQ may
+merge them). Two planes a clock (A' x0h and B' yh each).
+
 #### 3.7.5 `p2_tsp_rstart`: run start
 
 **Function.** Owns tsp §5.1-5.4 (plane.h `PlaneT::Value` up to the integer `k`) and num H4 `seen`, H7b, H11
@@ -1550,6 +1565,31 @@ FloorUnits. For each run at the SRQ head, and each plane of each referenced entr
 - lineshare (the alternation with the number of runs on a line, 3-12 clk) is GAP T7.
 - Mixed-`vmask` runs need both volumes' planes: double cost [G], not measured (T19).
 
+**As built (M10, `rtl/v1/tsp/p2_tsp_rstart.sv`; PLAN M10).** The text above, with the choices it left open:
+- **The tile** comes from the entries' records (`er_*`: one taken before an entry's first item, dropped after its eoe
+  item; `p2_entq`'s records in M12, the testbench's in M10): `p2_rs_t` has no tile. HALF_OFFSET[1] is an input.
+- **The coefficient cache**: per volume the last entry read, keyed by (tag, volume, tile) [G T7]: its header, K, and per
+  plane A', B' and the run-independent words (unit, F(C'), step, step2, hyd). A setup is a pure function of the key, the
+  parameter block and the registers, so a key in the cache needs no read whatever store index it has (new_drain is not
+  needed for it; `flush`, a render's start, empties it). A miss reloads the volume through the store's row read (§3.7.1):
+  rows 0 and 1, and row 2 when the class has the offset planes (its class from row 0's header, which arrives as row 1 is
+  read); **four lanes**, one a bank, each with seen (p2_fp_in_seen x 3), the grid (three bit lengths, `e`, `unit = e -
+  22`), F(C'), F(A'), F(A'/2) (p2_fp_floor, ZNEG) and the half line (p2_fp_half_line, H7b). The lanes take the run's tile,
+  not the record's (the next entry's record can arrive while an eoe run reloads: a bug the random section found).
+- **The products**: the run's planes (the entry's class: UNTEX 5, TEX* 7, TEX_O* / TEX_D* 11; a run with mixed vmask both
+  volumes', one volume after the other), two planes (four products) a clock on the ALU (§3.7.4), floored to the plane's
+  grid (p2_fp_floor MW 29, ZNEG: a product of x0h = 0 is a zero on the coefficient's side, F(-0) = -1) and summed with
+  F(C') into `base` (27 bits: `p2_tsp_pev_t`).
+- **The descriptor** (`p2_tsp_rdesc_t`: the item, the volumes and their store indices, the tile, per volume the header,
+  K and the 11 planes' `p2_tsp_pev_t {base 27, step 20, step2 20, hyd 21, unit 10}`) waits in an output register for
+  p2_pxq; the next head is taken in the clock it leaves. A null item passes with its flags.
+- **Clocks** (reported, not gated: T7, MT5; `make tsp-run`'s pitch item, runs of one pixel, the output never held):
+  4.00 / 5.00 / 7.00 clk a run within one triangle (5 / 7 / 11 planes: the product clocks + 1) against the measured
+  3.9 / 4.2 / 6.3; 8.08 / 9.10 / 12.10 across two triangles alternating (every run a reload: 2-3 row reads, a clock for
+  the last row's data, then the products) against ~4.7 / 6 / 8. The console reloads in about 1-2 clocks more than a run
+  within one triangle, this RTL in 4-5: its reload does not overlap the products (a row's planes could start their
+  products the clock after the row arrives). Left for MT5, with the alternation of lineshare (T7).
+
 #### 3.7.6 `p2_pxq`: the pixel queue
 
 **Function.** A FIFO of run descriptors. Functionally transparent.
@@ -1561,7 +1601,12 @@ and `len` pixel credits are free; P0 returns the credits as it issues pixels.
 `PXQ_PIX = 256`, `PXQ_RUNS = 48` [I, MT2].
 - Its position relative to texturing is GAP T7: the "after texturing" reading was withdrawn.
 
-#### 3.7.7 `p2_pp`: the pixel pipe
+**As built (M10, `rtl/v1/tsp/p2_pxq.sv`).** One RAM of `P2_PXQ_RUNS` descriptors and a show-ahead head register (the
+two together hold `P2_PXQ_RUNS` 48 runs), a credit counter of `P2_PXQ_PIX` 256 pixels: a run goes in when a run's place
+and its `len` credits are free (a null item takes no credit), P0 returns one credit at each pixel's last point. The
+credits are a timing mechanism only: the mutant without them passes the value comparison, as it must (`tsp-run-mutants`
+credits-off). In M10's testbench the queue reaches 48 runs and its 256 pixels (the console sets, P3's output held a
+third of the clocks).
 
 One pixel (or, with SupSample, one point) a clock through fixed stages, with one global stall. The stages and the
 units that own them:
@@ -1598,6 +1643,30 @@ It is control, not numbers.
   cost their pixels [M].
 - Divider, blend and fog cost nothing extra [M], because they are parallel lanes.
 - The stalls: texture (§3.8); the buffer-2 interlock (§3.9); SupSample's 4 clocks a pixel [G T16]; the pass drain.
+
+**As built (M10: P0-P3, `rtl/v1/tsp/p2_pp_issue.sv`, `p2_pp_plane.sv`, `p2_pp_div.sv`, `p2_pp_col.sv`, `p2_pp_mip.sv`).**
+One global stall (in M10 the end of P3 held: the testbench's back-pressure); every stage register holds while it is set.
+- **P0** takes the pxq head into its run register and emits one point a clock, the next run's first point the clock
+  after the last one's (no bubble between runs): the point's control `p2_pp_ctl_t` (the pixel, InVolume and the volume's
+  header and K, ro, atest, the SupSample point (hx, hy) in the order (0, 0), (1, 0), (0, 1), (1, 1), the run's last
+  point, eop / eoe on the item's last point; a null item one point of flags). The run's plane words go to P1 with its
+  first point. The pass drain: after the point that carries eop, P0 issues nothing until that point has left the pipe's
+  end (P3 here, P10 from M11). The mutant without the drain passes the values (a timing mechanism, MT6).
+- **P1** (`p2_pp_plane`): accumulators per plane and volume, `acc = base + n step` and `acc2 = base + 2n step2`, both
+  volumes stepping at every pixel's last point (a run with mixed vmask: either volume's value at every pixel; the
+  mutant that steps only the pixel's volume is caught); the point's k (`acc`, or `acc2 + hx step2 + hy hyd`), and 11
+  normalizers (p2_fp_value_norm, H12a).
+- **P2** (`p2_pp_div`): one p2_fp_div_den of W and 11 p2_fp_div_quot: U, V, the colours, the offset colours and the mip
+  level's w = Divide(1.0, W) (MipSelect's own, DenominatorSeen included).
+- **P3** (`p2_pp_col`, `p2_pp_mip`): ColorRounded (p2_fp_color_round: base MAX 65535 then the clamp to 255, UseAlpha;
+  offset MAX 255) and the level: w8 = cut8(|w|), ww = cut8(w8 w8) with the exponent at most 127, d = cut8(K8 ww) (two
+  8 x 8 p2_fp_mul and bit lengths), L, M, the determinant zero (dz: past the last level), and mipChoose (SupSample one
+  level finer, pass B + 1, the 1x1 clamp, raster level 0) for a textured volume whose TCW is mipmapped (PixelFlush_tsp
+  calls mipChoose only with pp_Texture).
+- The P3 point carries W and the values (for P8's fog in M11: the TSP's own 1/w), the quotients, the colours and the
+  level and k to the stages after it; a run's pins go at its last point's exit.
+- Clocks (reported, not gated: MT5 / MT6) in M10's testbench: 1.5 clk a pixel on the console sets (runs of ~13 pixels,
+  P3 held a third of the clocks by the testbench), the pass drain 3 clocks a pass (P1-P3).
 
 ### 3.8 Texture: `p2_tex_coord`, `p2_tex_addr`, `p2_tex_cache`, `p2_tex_decode`, `p2_tex_filter`
 
@@ -1766,7 +1835,7 @@ and RenderCORE's end-of-entry logic.
 Every primitive takes and returns the reference tuple as flat ports (num §6). Combinational by default. A unit may
 register a primitive's output as one of its pipeline stages; its lockstep testbench then compares at that latency.
 
-### 3.12 Die agreement (M2-M9)
+### 3.12 Die agreement (M2-M10)
 
 PLAN 0 rule 9: the HOLLY die shot (18 probable blocks, each labelled with a confidence; an interpretation of one
 optical image, not a reverse-engineering result) is a tie-breaker for grouping, boundaries and RAM sizes; console
@@ -1791,6 +1860,10 @@ changed for this note):
 | `p2_tsp_store`'s header and K: two RAMs of 16 words, 166 and 21 bits (M9) | 5's one wide and one narrow SRAM to the right of the 2 x 2 (second photo) | a wide word per entry (the ISP / TSP / TCW words and the fallbacks) beside a narrow one (K) | the keys, pins and the SRQ are flip-flops here (a 16-way key match and a pointer walk); the narrow macro could as well be the keys |
 | `p2_tsp_setup` on `p2_tsp_alu` (`TSP_NM` 4, `TSP_NA` 4, two reciprocal issues a K job; M9) | 12 TSP setup FPU (low), apart from 11 (ISP setup) with a visible boundary between them | a setup datapath of the TSP's own, not the ISP's: no unit is shared with p2_isp_alu (the TSP's adders' zero rule reaches below the range, the ISP's does not; one adder each) | operator counts are the scheduler's at §6's values, which do not reach the measured lengths (§3.7.3 As built); the die gives no count; run start sharing this ALU (§3.7.4) is the architecture's [I tim §3.8], not the die's |
 | `p2_tsp_pfetch` (client C3, M9) | none identified (near 15) | - | the die says nothing |
+| `p2_tsp_store`'s row read for run start (M10): the four banks read side by side, a row of four planes a clock | 5's 2 x 2 of equal macros | four macros with a port each make a four-plane row a clock natural; the reload's four lanes (one a bank) follow it | the die gives no port count; the console's reload cost (~1-2 clk, tim 3.8) says the reload reads wide, which agrees |
+| `p2_tsp_rstart` (M10): the coefficient cache (2 volumes x 11 planes of A', B', unit, F(C'), steps, hyd; flip-flops), four reload lanes, the products on 12's ALU | none of its own: logic between 5 and 12 | run start beside the parameter cache and the setup FPU it shares (12) | the cache is flip-flops here (it is read whole every run); the die shows no macro for it |
+| `p2_pxq` (M10): one RAM of 48 run descriptors (~2.7 Kbit each, 130 Kbit) and a credit counter | 9 TSP pixel datapath (low): the ~25 small light macros in its lower-left part (second photo) | a queue of runs inside the pixel datapath, in RAM | the size: this design's descriptor carries every plane's words of both volumes (2 x 11 x 98 bits); the console's is surely narrower (base per run, the steps per primitive), and 130 Kbit is more than 9's small macros look able to hold. Not changed: the values and the measured queue depths (45-70 runs, T7) do not depend on it |
+| `p2_pp_issue` .. `p2_pp_mip` (P0-P3, M10): the accumulators, 11 normalizers, one reciprocal (the 512 x 27-bit ROM, p2_fp_recip_rom) and 11 16 x 17 multipliers, the colour rounding, the level's two 8 x 8 multipliers | 9 TSP pixel datapath (low) | the per-pixel arithmetic in one datapath block; the reciprocal's ROM may be one of 9's small macros (or 18, "a small ROM") | the die gives no count of multipliers; one reciprocal a pixel is [I PIPELINE_SHAPE 5], not the die's |
 
 Outside M2-M9, for the units to come: 4 tile buffers (medium, four macros of the densest RAM) against `p2_tbuf`'s two
 1024 x 32 RAMs (§3.9).
@@ -1863,8 +1936,9 @@ Outside M2-M9, for the units to come: 4 tile buffers (medium, four macros of the
 | `STORE_N`, replacement, pin extent, `STORE_KEEP` across entries | 16, FIFO, to P10, kept | [M] / [G] | T6 |
 | `ALU_NM`, `ALU_NA`, `L_*` (TSP), arbitration | 4, 4, 1 / 2 / 2 (M9: lengths UNTEX 20, TEX 26, TEX_O 39, +5 for K, +1 for DCalcCtrl 1; none of the sweep reaches 39 / 48 / 64), run start first (a held step) | [I] / [G] | T7, MT4 |
 | `JOB_N` (store to pfetch), `PF_OUT`, `PF_AHEAD` (TSP fetch) | 2, 8, 2 (M9) | [G] | T6 |
-| `PXQ_PIX`, `PXQ_RUNS`, position | 256, 48, before texturing | [M] ispq + spanahead, fitted | MT2 (fit), T7 |
-| `D_PP`: the pass drain | 11 (the P0-P10 depth) | [M] B = 1035 | MT6 (fit) |
+| `PXQ_PIX`, `PXQ_RUNS`, position | 256, 48, before texturing (as built M10: `P2_PXQ_PIX`, `P2_PXQ_RUNS` in p2_tsp_pkg) | [M] ispq + spanahead, fitted | MT2 (fit), T7 |
+| `D_PP`: the pass drain | 11 (the P0-P10 depth; as built M10: the drain ends at P3's exit, 3 stages, until M11) | [M] B = 1035 | MT6 (fit) |
+| run start's coefficient cache and reload | as built M10: one entry a volume, keyed (tag, volume, tile); rows of four planes; the reload not overlapped with the products (4.00 / 5.00 / 7.00 within, 8.1 / 9.1 / 12.1 across, against 3.9 / 4.2 / 6.3 and ~4.7 / 6 / 8) | [I] / [G] | T7, MT5 |
 | SupSample points per clock | 1 | [G] | T16 |
 | texture cache organisation, miss latency, C5 coherence | direct-mapped 8 KB, 64 B lines, no snoop | [G] | T8 |
 | `VR_LAT`, `VR_ROW`, refresh, half contention, arbitration priority | 8, fitted, off, as §3.2 | [G] | T9, T14 |
