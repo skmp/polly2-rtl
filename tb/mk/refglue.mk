@@ -35,7 +35,7 @@ SCENEGEN         = $(BUILD)/tools/scenegen
 
 .PHONY: refglue-selftest refglue-selftest-full refglue-mutants refglue-build scenegen
 
-$(REFGLUE_LIBDIR)/refcore_glue.o: tb/ref/refcore_glue.cpp tb/ref/p2ref.h tb/ref/ref_copies.h tb/fp/ref_copies.h \
+$(REFGLUE_LIBDIR)/refcore_glue.o: tb/ref/refcore_glue.cpp tb/ref/p2ref.h tb/ref/ref_copies.h tb/fp/ref_copies.h tb/tsp_run/ref_copies_run.h \
                                   $(REFGLUE_REFDEPS)
 	@mkdir -p $(dir $@)
 	$(CXX) $(P2REF_CXXFLAGS) -Itb/ref -c $< -o $@

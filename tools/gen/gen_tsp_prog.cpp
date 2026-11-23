@@ -32,7 +32,9 @@
 //        schedule (a C++ header: the program consistency check) and a readable report
 //   gen_tsp_prog [params] --sweep
 //        the program lengths over the free parameters (TSP_NM, TSP_NA, L_MUL, L_ADD, L_RCP), against the measured 39
-//        (untextured), 48 (textured), 64 (offset), 49 (bump), +5 (DCalcCtrl 1) [M tim 3.7]: a check, not an input
+//        (untextured), 48 (textured), 64 (offset), 48 (offset planes dropped: "+16 a triangle disappears"), +5
+//        (DCalcCtrl 1) [M tim 3.7]: a check, not an input (the bump map's measured 49 is the textured class's program:
+//        a bump map reads no offset plane, so it has no class of its own)
 //   gen_tsp_prog --check [--n N] [--seed S] [--threads T] [--dcts <dreamcast-tests>]
 //        THE GRAPH CHECK (PLAN M9 item 1): every class's graph evaluated with pvr_softfp, its store words against
 //        PlaneT<PlaneHW>::Setup (pvr_tsp_plane.h) and the K copies, on N random primitives (1M) and the directed ones
@@ -827,8 +829,9 @@ void WriteSv(const Built& b, FILE* f, const std::string& cmd)
                "// with its operation, operand registers and result register (readable L_<unit> steps later); a store write names\n"
                "// its plane and its operands (W_PL: A0, B0, C0 and the flat branch's C). Every value has its own register; the\n"
                "// inputs (P2_TSP_R_X0 .. ) are loaded when a job starts. A program ends with its last store write\n"
-               "// (P2_TSP_LEN_<class> - 1). The lengths are the scheduler's, never padded: the measured 39 / 48 / 64 / 49 / +5\n"
-               "// [M tim 3.7] are a check on the parameters (gen_tsp_prog --sweep, MT4).\n", cmd.c_str());
+               "// (P2_TSP_LEN_<class> - 1). The lengths are the scheduler's, never padded: the measured 39 / 48 / 64 / 48 / +5\n"
+               "// (untextured, textured, offset, offset planes dropped, DCalcCtrl 1) [M tim 3.7] are a check on the parameters\n"
+               "// (gen_tsp_prog --sweep, MT4).\n", cmd.c_str());
     fprintf(f, "package p2_tsp_prog_pkg;\n\n");
     fprintf(f, "  // the free parameters (ARCHITECTURE 6: TSP_NM, TSP_NA, the latencies)\n");
     fprintf(f, "  localparam int P2_TSP_NM    = %d;\n  localparam int P2_TSP_NA    = %d;\n", P.nm, P.na);

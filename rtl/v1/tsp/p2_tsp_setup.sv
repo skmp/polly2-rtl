@@ -48,8 +48,11 @@ module p2_tsp_setup
   // the render's registers
   input  logic [31:0]                  fpu_shad_scale,   // FPU_SHAD_SCALE
   input  logic [31:0]                  fpu_perp_val,     // FPU_PERP_VAL
-  // run start has the ALU this clock: no step issues
+  // run start has the ALU this clock: no step issues; its products (M10: p2_tsp_rstart, p2_tsp_alu's run-start port)
   input  logic                         hold,
+  input  p2_fp16_t [P2_TSP_NM-1:0]     rs_a,
+  input  logic [P2_TSP_NM-1:0][12:0]   rs_b,
+  output p2_tsp_rsp_t [P2_TSP_NM-1:0]  rs_p,
   // the store's write ports
   output logic                         sh_v,             // the header, at the accept
   output logic [P2_TSP_SIDX_BITS-1:0]  sh_idx,
@@ -216,7 +219,7 @@ module p2_tsp_setup
   // ---------------------------------------------------------------------------------------------- the ALU
   p2_fp24_t [P2_TSP_NREG-1:0] rf;
   p2_tsp_alu u_alu (
-    .clk, .rst, .issue(step), .uw, .ld(take), .ld_val, .zbits, .rf, .t_wv, .t_wrd);
+    .clk, .rst, .issue(step), .uw, .ld(take), .ld_val, .zbits, .rf, .rs_v(hold), .rs_a, .rs_b, .rs_p, .t_wv, .t_wrd);
 
   // ---------------------------------------------------------------------------------------------- the store writes
   p2_fp24_t sdet, wa, wb, wc, wf;

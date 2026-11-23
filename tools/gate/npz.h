@@ -3,7 +3,7 @@
 // with -lz.
 //
 //   p2npz::Npz z;  z.open(path)            the zip's central directory (zip64 not supported: the sets are small)
-//   z.array(name, &arr)                     "<name>.npy": dtype ('<f8', '<f4', '<i8', '<i4', '|b1', '|u1'), shape,
+//   z.array(name, &arr)                     "<name>.npy": dtype ('<f8', '<f4', '<i8', '<i4', '<u4', '|b1', '|u1'), shape,
 //                                           the raw little-endian data; arr.f64(i), arr.i64(i), arr.u8(i)
 //   p2npz::JsonTop j;  j.parse(text)        the top-level object's scalar members as text (strings unquoted, numbers
 //                                           as written); nested values are skipped. j.str(key, dflt), j.num(key, dflt)
@@ -55,6 +55,7 @@ struct Array {
     {
         if (dtype == "<i8") { int64_t v; memcpy(&v, &data[8 * i], 8); return v; }
         if (dtype == "<i4") { int32_t v; memcpy(&v, &data[4 * i], 4); return v; }
+        if (dtype == "<u4") { uint32_t v; memcpy(&v, &data[4 * i], 4); return v; }   // (M10: the sets' tzbits)
         if (dtype == "|b1" || dtype == "|u1") return data[i];
         return (int64_t)f64(i);
     }

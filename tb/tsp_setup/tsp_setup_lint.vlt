@@ -27,3 +27,5 @@ lint_off -rule PINCONNECTEMPTY -file "*/p2_tsp_setup_tb_top.sv"
 lint_off -rule UNUSEDSIGNAL -file "*/p2_tsp_setup_tb_top.sv" -match "*'out_item'*"
 lint_off -rule UNUSEDSIGNAL -file "*/p2_tsp_setup_tb_top.sv" -match "*'rd_hdr'*"
 lint_off -rule UNUSEDSIGNAL -file "*/p2_tsp_setup_tb_top.sv" -match "*'uw_tap'*"
+// run start's products (M10): seen coefficients and half-pixel counts are never flagged
+lint_off -rule UNUSEDSIGNAL -file "*/p2_tsp_alu.sv" -match "*'pb'*"

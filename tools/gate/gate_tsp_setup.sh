@@ -6,7 +6,7 @@
 #   quick (tsp-setup)   hw-pkg-check; tsp-prog-check (rtl/v1/pkg/p2_tsp_prog_pkg.sv is the generator's output, the
 #                       testbench's copy of the schedule build/gen/p2_tsp_prog.h from the same run); check_ref_copies (every
 #                       copy, MipSelect's K part tb/tsp_setup/ref_copies_tsp.h among them), check_ref_switches; the schedule
-#                       (the lengths against the measured 39 / 48 / 64 / 49 / +5, reported: PLAN 0 rule 6) and the sweep;
+#                       (the lengths against the measured 39 / 48 / 64 / 48 / +5, reported: PLAN 0 rule 6) and the sweep;
 #                       the builds (the L2 glue, the generator, the testbench); then on one queue (PLAN 0 rule 8):
 #                         lint-tsp-setup;
 #                         gate item 1  the graph check: every class's graph and its store-write logic, evaluated with

@@ -1,0 +1,29 @@
+// tsp_run_lint.vlt: verilator -Wall waivers for make lint-tsp-run (conventions.md 4.8): M10's p2_tsp_rstart, p2_pxq, p2_pp_*
+// and the tb/tsp_run top. The lib/fp, the shared packages' and M9's units' waivers are tb/fp's, tb/isp_setup's and
+// tb/tsp_setup's (included by the rule); each waiver here names its file and its reason.
+`verilator_config
+// run start's floors: FloorUnits keeps no sticky (o_frac is the edge unit's)
+lint_off -rule PINCONNECTEMPTY -file "*/p2_tsp_rstart.sv" -match "*'o_frac'*"
+// the reload reads volume 1 after volume 0: whether volume 0 missed is known by where the reads start
+lint_off -rule UNUSEDSIGNAL -file "*/p2_tsp_rstart.sv" -match "*'r_miss'[0]*"
+// the class decides the rows: of the arriving header only its class is read
+lint_off -rule UNUSEDSIGNAL -file "*/p2_tsp_rstart.sv" -match "*'hdr_now'*"
+// seen() never flags (a zero and an infinity become numbers)
+lint_off -rule UNUSEDSIGNAL -file "*/p2_tsp_rstart.sv" -match "*'s?_bad'*"
+// the offset colour's round has MAX 255: its upper byte is always 0
+lint_off -rule UNUSEDSIGNAL -file "*/p2_pp_col.sv" -match "*'oc'[15:8]*"
+// the level reads of the point's control the header's ISP / TSP / TCW fields, K and the SupSample flag
+lint_off -rule UNUSEDSIGNAL -file "*/p2_pp_mip.sv" -match "*'i_ctl'*"
+// w's sign is dropped (MipSelect: wFull.neg = false); the 8-bit numbers are positive and finite
+lint_off -rule UNUSEDSIGNAL -file "*/p2_pp_mip.sv" -match "*'i_w'[28]*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_pp_mip.sv" -match "*'w8_*'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_pp_mip.sv" -match "*'w2_neg'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_pp_mip.sv" -match "*'w2_bad'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_pp_mip.sv" -match "*'d_neg'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_pp_mip.sv" -match "*'d_bad'*"
+// M's leading one (128): the fraction is M - 128
+lint_off -rule UNUSEDSIGNAL -file "*/p2_pp_mip.sv" -match "*'m'[7]*"
+// the testbench top: the taps and fields the testbench does not read, the M9 read port it does not use
+lint_off -rule PINCONNECTEMPTY -file "*/p2_tsp_run_tb_top.sv"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_tsp_run_tb_top.sv" -match "*'hd_nd'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_tsp_run_tb_top.sv" -match "*'p3_ctl'*"

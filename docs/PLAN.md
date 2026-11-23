@@ -123,7 +123,10 @@ PixelFlush_tsp in pieces), `core-put` (with `core-prev`, `core-writeout`, `core-
 the entries) and `core-perp`; the M1 / M2 rows were already in `tb/fp/ref_copies.h` (`fp-bgkey`, `fp-cull`) and
 `tb/isp_edge/ref_copies_edge.h`. The self-test runs every copy on every pixel it shades; M9 moved `tsp-mip-k` to
 `tb/tsp_setup/ref_copies_tsp.h` beside `tsp-mip-num` (the K part from the determinant on), where M9's graph check and
-testbench run them.
+testbench run them. M10's copy is `tsp-mip-choose` (PixelFlush_tsp's mipChoose lambda alone) in
+`tb/tsp_run/ref_copies_run.h`: a lambda local to PixelFlush_tsp, it is included inside `p2ref::mip_choose` in the glue's
+translation unit (TcwRaster, MipSelect in scope, PixelFlush_tsp's names bound as there), which the TSP run testbench calls
+on every point.
 
 **Runtime switches are pinned** (`tools/check_ref_switches.sh`, run by every gate, result in the summary):
 - the environment has `MIP_K` and `MIP_ARITH` unset or `0` (plane.h reads both with `getenv`);
@@ -169,6 +172,10 @@ namespace p2ref {
 }
 ```
 
+As built in M10 (tb/ref/p2ref.h): `interpolate_base(entry, p, W, InVolume, useAlpha)` and `interpolate_offs(entry, p, W,
+InVolume)` (refcore's InterpolateBase / InterpolateOffs with pp_CheapShadows from FPU_SHAD_SCALE, as the dispatch chooses
+it), `mip_choose(entry, InVolume, q, finer, &level, &dTri)` (the copy above).
+
 **The glue self-test** (`make refglue-selftest`, M5) proves that the glue is refsw3:
 - `tb/ref/phase_driver.cpp` walks a render through the p2ref calls, in RenderCORE's order, with a hook at every phase
   boundary (`tb/common/isp_live.h`'s phases).
@@ -198,6 +205,10 @@ namespace p2ref {
      | `fit/mipmeas_data/*` | 10 | M9 (K), M10 (level) |
      | `fit/mipk_data/*.observed.txt` | 4 | M9 |
      | `fit/wmeas_data`, `cmeas_data`, `uvspan_data`, `uvrun_data` | 4, 3, 4, 1 | M10 |
+
+     M10 reads them through `tb/tsp_run/tsp_sets.h` (npz.h, which gained the `<u4` dtype of the sets' `tzbits`):
+     uvmeas 24,681,778 readings, wmeas 2,320,996, cmeas 2,340,000 (three sets of 780,000 pixels, a pixel's colour one reading), uvspan
+     1,634,195, uvrun 1,170,000, mipmeas 12,504,237.
   3. **Random and edge vectors against the reference.** The vector classes of num §7.2.
   4. **A random stream with random gaps and back-pressure.** No value may change.
 - Values are compared as tuples: `neg`, `bad`, `mant`, and `exp` when `mant != 0` (num §1.3). Never as `double`.
@@ -1125,6 +1136,33 @@ CPU, and 141 s / 1,150 s with a 51.7 s build step and a 76 s queue on a busier b
 
 ### M10. Run start and pixel values
 
+**Status (2026-11-23): done (not committed: the owner's).** `make tsp-run` (tools/gate/gate_tsp_run.sh, `tb/mk/tsp_run.mk`),
+`make tsp-run-mutants`, `make tsp-run-full [SAMPLE=<seed>]`; scratch in `agents/m10/`. RTL in `rtl/v1/tsp/`:
+`p2_tsp_rstart.sv`, `p2_pxq.sv`, `p2_pp_issue.sv`, `p2_pp_plane.sv`, `p2_pp_div.sv`, `p2_pp_col.sv`, `p2_pp_mip.sv`; the
+formats in `p2_tsp_pkg` (`p2_tsp_pev_t`, `p2_tsp_rdesc_t`, `p2_pp_ctl_t`, the run-start product `p2_tsp_rsp_t`); M9's
+units gained run start's ports (p2_tsp_alu / p2_tsp_setup: the products on the shared multipliers; p2_tsp_store: the row
+read), with M9's gate and mutants unchanged. The testbench `tb/tsp_run/` (the DUT M9's store, fetch, setup and ALU with
+p2_mem and the VRAM model, then run start, the pixel queue and P0-P3; the reference `tsp_run_ref.cpp` on p2ref; the
+console sets `tsp_sets.h`; the mipChoose copy `ref_copies_run.h`). ARCHITECTURE 3.7.1 / 3.7.4-3.7.7 "As built (M10)" give
+the choices, 3.12 the die agreement. Where the tree differs from the text below:
+- **The pipe ends at P3 in M10**: the pins go and the pass drain ends when a point leaves P3 (P10 from M11). The tile of
+  an entry comes to run start from the entries' records (`er_*`; p2_entq's in M12).
+- **The console sets' readings** are compared through each reading's decoder applied to the TSP's numbers at the pixel
+  (`tsp_sets.h`): uv the texel of uvmeas's 1024-wide number texture (dreamcast-tests model/tspprobe's `texel()`), w the
+  green of wmeas's fog readout (refcore's FogUnit through p2ref::fog), c the colour, mip the level's colour times the
+  trilinear pass's coefficient (mipmeas/main.c's texture, ExpandToARGB8888, PixelFlush_tsp's fade). A reading's run is
+  the triangle's first covered pixel on the line in the tile (refsw3's edge setup), cut after uvspan's opaque bands and
+  uvrun's band columns in kinds 1, 2, 4, 5 (README "uvspan"; uvrun/main.c); with these refsw3 itself is the console's on
+  every reading of every set (agents/m10/score.cpp first, then every gate run: "refsw3 the console's on" all). The
+  uvmeas sets hold **24,681,778** readings at 36 sets (the 23.6M of this plan were the 29 sets of tspprobe's count);
+  mipmeas **12,504,237** (rgb 24 x 24, corner 6 x 6, tip 2 x 2 of every cell, the pixels a triangle covers).
+- **The full gate is cheap** (all 24.7M uvmeas readings in ~41 s wall at J 16), so `tsp-run-full` runs every item; with
+  SAMPLE=<seed> it goes through sample_items.py with every group `--whole` (all M10's own), the seed and the coverage in
+  its summary; `tools/gate/always_run.txt` names its mutant-probe sets.
+
+**Gate** (quick, J 16; build/gate/tsp-run/summary.txt; 2026-11-23, agents/m10/gates): see the numbers at the end of this
+section.
+
 **Deliverables.**
 - `p2_tsp_rstart` (`seen`, grid, the base / step / `hyd` integers).
 - `p2_pxq` (run entries and pixel credits).
@@ -1149,6 +1187,29 @@ CPU, and 141 s / 1,150 s with a 51.7 s build step and a 76 s queue on a busier b
 - the mip `ww` clamp off;
 - SupSample not one level finer;
 - mipChoose's pass-B +1 off.
+
+**Gate results (2026-11-23, J 16, agents/m10/gates).** `make tsp-run` PASS, 24.7 s wall, CPU 326 s (queue 22.3 s, 90 %
+utilisation; a build adds ~45 s): random 2,000,184 pixels (4,992,741 points, 3,990,076 SupSample; 2,657,056 mipmapped, 1,521,320
+with the offset planes), 96,248,779 checks; super 500,305 SupSample pixels, 38,592,133 checks, the half lines by num H7b's
+classes over both: 1,377,968 planes, 83,249 carrying, 257,051 beyond the 90 window, 47,481 truncated at 62 bits, 657,840
+with C' < 0; console 463,795,124 checks: every reading of uvspan (1,634,195), uvrun (1,170,000), wmeas (2,320,996), cmeas
+(2,340,000) and mipmeas (12,504,237), uvmeas every 8th run (3,085,384), each the console's, refsw3 the console's on every
+one; 0 failures. `make tsp-run-full SAMPLE=2162423843`: every item (216), every uvmeas reading, 24,681,778 of 24,681,778
+the console's; 37.3 s wall, CPU 529 s. Clocks (reported): run start 4.00 / 5.00 / 7.00 clk a
+run within one triangle and 8.08 / 9.10 / 12.10 across two, against the measured 3.9 / 4.2 / 6.3 and ~4.7 / 6 / 8 (MT5,
+ARCHITECTURE 3.7.5); 1.56 clk a pixel on the console sets with P3 held a third of the clocks.
+`make tsp-run-mutants` PASS (53 s): the 9 of this list (five in rtl/v1/tsp; the normalizer's two and the divider's two in
+tb/tsp_run/mutants_fp.txt) and 12 of the structure (the halves' 2^-1, step2 as step, hyd 0, the cache key without the
+tile, ex from the tile's top, row 2 never read, B' times x0h, only the pixel's volume stepping, InVolume in the PT
+passes, the SupSample points swapped, UseAlpha, dz) caught: 21 of 21; the pass drain off and the credits off pass, as
+they must (timing mechanisms). **Every earlier gate** (agents/m10/gates/all.log): scaffold, lint, fp, isp-edge, isp-depth,
+isp-setup, refglue-selftest, isp-tile-op, isp-tile, sort, tsp-setup PASS; every mutant gate in full PASS (fp 92, isp-edge 36,
+isp-depth 29, isp-setup 16, refglue 12, isp-tile-op 27, isp-tile 23, sort 11, tsp-setup 17: every one caught). **Sampled
+full gates** (rule 10, seed 820779215): `isp-tile-full` PASS, 3,159 s wall (CPU 42,776 s, 85 %): every one of the 6,084
+phase-halt items (18,386 renders, 66,820,640 checks) and 654 of 7,401 free-running segments (12 always-run, 642 drawn;
+1,579 renders), 6,739 of 13,486 items, 17.6 % of the weight, 0 failures, no draw dropped at the deadline; `sort-full`
+PASS, 201 s wall: 1,452 of 5,317 items (every stream under one SPAN_SORT_CFG, the 4 always-run streams, random blocks),
+16.3 % of the weight, 0 failures.
 
 ### M11. Pixel pipe: texture, shading, fog, SupSample, blend
 

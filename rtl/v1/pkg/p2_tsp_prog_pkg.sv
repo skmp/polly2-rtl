@@ -6,8 +6,9 @@
 // with its operation, operand registers and result register (readable L_<unit> steps later); a store write names
 // its plane and its operands (W_PL: A0, B0, C0 and the flat branch's C). Every value has its own register; the
 // inputs (P2_TSP_R_X0 .. ) are loaded when a job starts. A program ends with its last store write
-// (P2_TSP_LEN_<class> - 1). The lengths are the scheduler's, never padded: the measured 39 / 48 / 64 / 49 / +5
-// [M tim 3.7] are a check on the parameters (gen_tsp_prog --sweep, MT4).
+// (P2_TSP_LEN_<class> - 1). The lengths are the scheduler's, never padded: the measured 39 / 48 / 64 / 48 / +5
+// (untextured, textured, offset, offset planes dropped, DCalcCtrl 1) [M tim 3.7] are a check on the parameters
+// (gen_tsp_prog --sweep, MT4).
 package p2_tsp_prog_pkg;
 
   // the free parameters (ARCHITECTURE 6: TSP_NM, TSP_NA, the latencies)

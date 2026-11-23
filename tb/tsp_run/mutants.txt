@@ -1,0 +1,43 @@
+# tb/tsp_run/mutants.txt: the planted bugs of M10's run start, pixel queue and pixel pipe to P3 in rtl/v1/tsp (PLAN M10
+# "Mutants", conventions.md 7.7), run by tools/gate/mutants.py (make tsp-run-mutants). Every one must be caught by its probe
+# (or, written !<probe>, must pass it: a timing choice the values may not see) and the unchanged folder must pass first.
+# The lib/fp ones (the normalizer, the divider's denominator) are tb/tsp_run/mutants_fp.txt.
+#
+# The probes (tb/tsp_run/tsp_run_tb.cpp, stopping at the first failure): `random` 100,000 random pixels; `super` 50,000
+# SupSample pixels; `steep` uvmeas usteep3 every 8th run (steep planes: the grid set by B y); `wext` mipmeas mwext1 every
+# 4th run (1/w of 2^-126 .. 2^127: w x w past 2^127); `mip` mipmeas det3 (both passes, every level).
+#
+# Format: <id> | <file in rtl/v1/tsp> | <original fragment> | <mutated fragment> | <probe> [args] | <what it breaks>
+# (\n a newline, \| a bar, \\ a backslash in a fragment).
+@dir rtl/v1/tsp TSP_DIR
+@obj TSP_RUN_OBJDIR
+@probe random tsp-run-build tb --only random --n 100000 --max-fails 1
+@probe super tsp-run-build tb --only super --n 50000 --max-fails 1
+@probe steep tsp-run-build tb --only console --set uvmeas/usteep3 --stride 8 --max-fails 1
+@probe wext tsp-run-build tb --only console --set mipmeas/mwext1 --stride 4 --max-fails 1
+@probe mip tsp-run-build tb --only console --set mipmeas/det3 --stride 2 --max-fails 1
+
+# ---- PLAN M10's list (the lib/fp ones in mutants_fp.txt)
+grid-21 | p2_tsp_rstart.sv | localparam int GB  = P2_TSP_PLANE_GRID_BITS; | localparam int GB  = P2_TSP_PLANE_GRID_BITS - 1; | steep | gridBits 22 to 21: the grid one bit coarser
+fneg0-0 | p2_tsp_rstart.sv | p2_fp_floor #(.MW(29), .OW(P2_TSP_KBITS), .ZNEG(1'b1), .CLAMP(0)) u_fp ( | p2_fp_floor #(.MW(29), .OW(P2_TSP_KBITS), .ZNEG(1'b0), .CLAMP(0)) u_fp ( | random | F(-0) = 0: a product of x0h = 0 (tile 0, column 0, HALF_OFFSET[1] 0) on a negative coefficient floored to 0, not -1
+ww-clamp-off | p2_pp_mip.sv | if (w2_mant != '0 && t1 > P2_FP_XW'(127)) | if (1'b0 && w2_mant != '0 && t1 > P2_FP_XW'(127)) | wext | the mip ww clamp off: w x w above 2^127 keeps its exponent
+ss-not-finer | p2_pp_mip.sv | if (i_ctl.super_) begin | if (1'b0) begin | super | SupSample not one level finer
+passb-off | p2_pp_mip.sv | (i_ctl.hdr.tsp[14:13] == 2'd3) ? 18'sd1 : 18'sd0 | (i_ctl.hdr.tsp[14:13] == 2'd3) ? 18'sd0 : 18'sd0 | mip | mipChoose's pass-B +1 off
+
+# ---- the structure
+halves-off | p2_tsp_rstart.sv | assign pe = rs_p[g].exp - P2_FP_EW'(1); | assign pe = rs_p[g].exp; | random | the products A' x0h, B' yh floored without the half pixels' 2^-1
+step2-whole | p2_tsp_rstart.sv | .i_neg(ln_a[g].neg), .i_exp(a2_exp), | .i_neg(ln_a[g].neg), .i_exp(ln_a[g].exp), | super | SupSample's half step F(A'/2) taken as the whole step F(A')
+hyd-zero | p2_tsp_rstart.sv | c_hyd[pd_vol][p]   <= P2_TSP_HYDBITS'(ln_hyd27[b]); | c_hyd[pd_vol][p]   <= '0; | super | SupSample's half line hyd dropped (the points half a line down at the centre's line)
+key-no-tile | p2_tsp_rstart.sv | && c_tx[v] == tile_x && c_ty[v] == tile_y); | ); | random | the coefficient cache keyed without the tile: a primitive's grid and its F(C') from another tile
+ex-from-y | p2_tsp_rstart.sv | assign xl16 = 11'({r_tx, 5'd0}) + 11'd16; | assign xl16 = 11'({r_ty, 5'd0}) + 11'd16; | random | the grid's x exponent from the tile's top
+row2-never | p2_tsp_rstart.sv | ? 4'd3 : 4'd2; | ? 4'd2 : 4'd2; | random | the reload never reads row 2: the offset planes OG, OR, OA stale
+yh-as-x0h | p2_tsp_rstart.sv | rs_b[1] = r_yh; | rs_b[1] = r_x0h; | random | B' multiplied by the run's x, not its line
+acc-own-volume | p2_pp_plane.sv | if (p_ctl.pxlast) begin\n            acc[v][p]  <= ka[v][p] + KB'(w_step[v][p]); | if (p_ctl.pxlast && v == 32'(p_ctl.vsel)) begin\n            acc[v][p]  <= ka[v][p] + KB'(w_step[v][p]); | random | only the pixel's volume steps: a run with mixed vmask has the other volume's value stale
+pt-volume | p2_pp_issue.sv | assign vol_ok  = cur.item.tag.shadow && !pt_pass; | assign vol_ok  = cur.item.tag.shadow; | random | InVolume in the punch-through passes (refsw3: false there)
+ss-order | p2_pp_issue.sv | p_ctl.hx     = sup && pt[0];\n    p_ctl.hy     = sup && pt[1]; | p_ctl.hx     = sup && pt[1];\n    p_ctl.hy     = sup && pt[0]; | super | the SupSample points (1, 0) and (0, 1) swapped
+usealpha-off | p2_pp_col.sv | i_ctl.hdr.tsp[20] ? b8[3] : 8'd255 | b8[3] | random | UseAlpha 0 not read as A = 255
+dz-off | p2_pp_mip.sv | rl = i_ctl.k.dz ? 18'sd65536 : 18'(l); | rl = 18'(l); | random | the determinant zero's level (dzForce: past the last level) taken from d
+
+# ---- timing choices the values may not see (each must pass)
+drain-off | p2_pp_issue.sv | if (cur.item.eop) draining <= 1'b1; | if (1'b0) draining <= 1'b1; | !random | the pass drain is a timing mechanism (D_PP, MT6): no value may change without it
+credits-off | p2_pxq.sv | && cred >= 9'(ilen); | ; | !random | the pixel credits are a timing mechanism (PXQ_PIX, MT2): no value may change without them

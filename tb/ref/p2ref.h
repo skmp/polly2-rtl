@@ -104,6 +104,11 @@ Color combiner(bool texture, bool offset, int shadInstr, Color base, Color tex, 
 Color bump(Color t, Color o);
 Color fog(bool offset, bool colorClamp, int fogCtrl, Color c, const pvrfp::Fp& invW, uint8_t offsA);
 bool blend(int srcSel, int dstSel, int srcInstr, int dstInstr, bool atest, uint32_t idx, Color c);
+// M10: InterpolateBase / InterpolateOffs (refcore's, pp_CheapShadows from FPU_SHAD_SCALE), and the level through the copy
+// of PixelFlush_tsp's mipChoose (tb/tsp_run/ref_copies_run.h): level, dTri
+Color interpolate_base(const FpuEntry* entry, PixPos p, const pvrfp::Fp& W, bool InVolume, bool useAlpha);
+Color interpolate_offs(const FpuEntry* entry, PixPos p, const pvrfp::Fp& W, bool InVolume);
+void mip_choose(const FpuEntry* entry, bool InVolume, const pvrfp::Fp& q, bool finer, uint32_t* level, int* dTri);
 void next_tile_buffers();
 
 // ---- state taps -----------------------------------------------------------------------------------------------------

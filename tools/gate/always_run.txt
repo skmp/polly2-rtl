@@ -21,3 +21,8 @@ sort-full subset-0x101 ^dump_thps2_ingame\.r0-0\.rs\.gz$   # window 95 / 97
 sort-full subset-0x101 ^dump_f1wgp_menu\.r0-0\.rs\.gz$   # window 95 / 97
 sort-full subset-0x101 ^dump_thps2_ingame2\.r0-0\.rs\.gz$   # window 95 / 97
 sort-full subset-0x101 ^dump_rayman_lights\.r0-0\.rs\.gz$   # window 95 / 97
+# tsp-run-full (M10): every item is M10's own (the gate passes --whole for every group); the sets whose readings the
+# mutants' probes are made of (usteep3: the grid; wtiny1, wzero1, wneg1, wzero2: the normalizer and the divider; mwext1,
+# det3: the level)
+tsp-run-full console-uvmeas ^(usteep3|wtiny1|wzero1|wneg1|wzero2)/
+tsp-run-full console-mipmeas ^(mwext1|det3)/
