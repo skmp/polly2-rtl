@@ -36,7 +36,7 @@
 // segment's result (its clocks too) then depends on nothing run before it in the process, and the gate may run a
 // case's segments as separate work items (tools/gate/gate_isp_tile.sh, tools/gate/tile_items.py). A case of at most
 // SEG renders (every case of the quick gates) runs as one segment, its state carried throughout. --renders A-B
-// (free-running only; A a segment's first render, a multiple of SEG): the renders A .. B of each case only (one
+// (free-running: A a segment's first render, a multiple of SEG; phase-halt: A = 0, a prefix): the renders A .. B of each case only (one
 // number: that render); the renders before A run on the reference alone, so that its state is the one render A starts
 // from.
 //
@@ -1021,8 +1021,9 @@ int main(int argc, char** argv)
         else if (s[0] != '+')
             cases.push_back(s);
     }
-    if (rLast >= 0 && !freeMode) {
-        fprintf(stderr, "isp_tile: --renders is free-running mode's (phase-halt carries the RTL's state from render to render)\n");
+    if (rLast >= 0 && !freeMode && rFirst != 0) {
+        fprintf(stderr, "isp_tile: --renders in phase-halt mode is a prefix 0-B (phase-halt carries the RTL's state from render to "
+                        "render: a sampled full gate's item, tools/gate/sample_items.py)\n");
         return 2;
     }
     if (!dumpDir.empty() && !freeMode) {

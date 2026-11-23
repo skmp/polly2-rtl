@@ -683,6 +683,9 @@ This is the shrike4, wren7 and caique rule: every mechanism has a planted bug th
   - The subset is defined in a file under `tb/<gate>/subset_*.txt`, with every class represented. It is never "the
     first N".
   - Agents gate on the subset. They never run `-full` unless told to.
+  - From M9 on (the owner): each milestone runs the exhaustive `-full` gates as a seeded **sample**,
+    `make <gate>-full SAMPLE=<seed>` (`tools/gate/sample_items.py`, `tools/gate/always_run.txt`; PLAN 0 rule 10), and
+    the exhaustive runs once, after the last milestone.
 - Your own verification runs stay well under a minute. Say how long a run takes when it is more than a few seconds.
 - **Sharding.** Every testbench that loops over cases takes `--shard k/N`. The gates put the slices or the cases (a
   case alone is `--shard i/N` with N the list's cases) on one work queue of `P2_J` workers, longest first

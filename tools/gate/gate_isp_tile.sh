@@ -26,6 +26,16 @@
 #                                        each item's run stream into build/sort/rs (--dump-runs: M8's sorter gate's input)
 #   --full                the same on the full set (every fit/hw test, its first 256 renders; every dump; seeds 1-5000),
 #                         both modes. Under /tmp/polly2-rtl-gate.lock
+#   --full --sample SEED  (make isp-tile-full SAMPLE=SEED) a seeded sample of the full set (PLAN 0 rule 10): every
+#                         phase-halt item (every case, in full), the always-run items (tools/gate/always_run.txt),
+#                         free-running segments drawn at random within SAMPLE_BUDGET (4000) s of queue wall at J
+#                         (tools/gate/sample_items.py: predictions from the cost file, else the static estimates times
+#                         SAMPLE_EST_SCALE, "phase-halt:0.25 free-running:1.0"); the drawn segments are optional: the
+#                         queue starts one only while its predicted end is within the budget (pq.py --deadline); the
+#                         coverage planned and run (items, weight %) in the summary; the run streams written into
+#                         build/sort/rs-full beside the ones there (its "sample" marker, not "complete").
+#                         SAMPLE_PH_RENDERS=R (not a default: an open decision of the owner's, PLAN D12) cuts phase-halt
+#                         cases of more than R renders to their first R
 #   --mutants             the builds, the captures the probes use, the mutants of tb/isp_tile/mutants_m7.txt (every one
 #                         caught, the per-tile barrier one passing: PLAN M7): builds and probe runs (an item per case) on
 #                         one queue (tools/gate/mutants.py)
@@ -37,6 +47,8 @@
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 mode=${1:-quick}
+SAMPLE=${SAMPLE:-}
+[ "${2:-}" = --sample ] && SAMPLE=${3:-}
 case "$mode" in
   quick)     gate=isp-tile ;;
   --full)    gate=isp-tile-full ;;
@@ -45,7 +57,7 @@ case "$mode" in
 esac
 if [ "$mode" = --full ] && [ -z "${P2_GATE_LOCKED:-}" ]; then
   export P2_GATE_LOCKED=1
-  exec flock /tmp/polly2-rtl-gate.lock bash "$0" "$@"
+  exec flock /tmp/polly2-rtl-gate.lock env SAMPLE="$SAMPLE" bash "$0" "$@"
 fi
 
 . "$HERE/lib.sh"
@@ -126,6 +138,7 @@ clocks() {
 
 if [ "$mode" != --mutants ]; then
   items=$GATE_DIR/items.txt
+  qopt=()
   : > "$items"
   gate_item "$items" lint-isp-tile - 4 1 step lint-isp-tile.log $MAKE -s lint-isp-tile
   python3 tools/gate/tile_items.py --list "$list" --group phase-halt --logs shards-halt --cost "$GATE_DIR/cost.txt" \
@@ -133,12 +146,28 @@ if [ "$mode" != --mutants ]; then
   # the free-running items write their run streams for M8's sorter gate (tools/gate/gate_sort.sh): build/sort/rs (quick),
   # build/sort/rs-full (full: cleared first; "complete" written when the gate passes)
   rsdir=build/sort/rs
-  if [ "$mode" = --full ]; then rsdir=build/sort/rs-full; rm -rf "$rsdir"; fi
+  if [ "$mode" = --full ]; then rsdir=build/sort/rs-full; [ -z "$SAMPLE" ] && rm -rf "$rsdir"; fi
   mkdir -p "$rsdir"
   python3 tools/gate/tile_items.py --list "$list" --group free-running --logs shards-free --split render \
     --cost "$GATE_DIR/cost.txt" --jobs "$J" -- build/obj_isp_tile/tb --mode free --vramvary 7 --phase-limit 500000000 \
     --dump-runs "$rsdir" >> "$items"
-  gate_queue queue "$items"
+  if [ "$mode" = --full ] && [ -n "$SAMPLE" ]; then
+    mv "$items" "$GATE_DIR/items_all.txt"
+    sscale=(); for x in ${SAMPLE_EST_SCALE:-phase-halt:0.25 free-running:1.0}; do sscale+=(--scale "$x"); done
+    gate_step sample python3 tools/gate/sample_items.py --seed "$SAMPLE" --gate isp-tile-full \
+      --budget "${SAMPLE_BUDGET:-4000}" --jobs "$J" --cost "$GATE_DIR/cost.txt" --always tools/gate/always_run.txt \
+      --whole lint-isp-tile --every phase-halt ${SAMPLE_PH_RENDERS:+--prefix "phase-halt:$SAMPLE_PH_RENDERS"} \
+      "${sscale[@]}" "$GATE_DIR/items_all.txt" "$items"
+    while IFS= read -r l; do note "$l"; done < <(grep '^sample: ' "$GATE_DIR/sample.log")
+    cp "$GATE_DIR/cost.txt" "$GATE_DIR/cost_before.txt" 2>/dev/null || : > "$GATE_DIR/cost_before.txt"
+    qopt=(--optional "$items.optional" --deadline "${SAMPLE_BUDGET:-4000}")
+  fi
+  gate_queue queue "$items" "${qopt[@]}"
+  if [ "$mode" = --full ] && [ -n "$SAMPLE" ]; then
+    python3 tools/gate/sample_items.py --coverage "$GATE_DIR/pq_results.tsv" --cost "$GATE_DIR/cost_before.txt" \
+      "${sscale[@]}" "$GATE_DIR/items_all.txt" "$items" > "$GATE_DIR/coverage.log"
+    while IFS= read -r l; do note "$l"; done < "$GATE_DIR/coverage.log"
+  fi
   note "phase-halt: $(summ "$GATE_DIR/shards-halt")"
   note "phase-halt: $(clocks "$GATE_DIR/shards-halt") (from the entry's accept to its end, halts excluded; VR_LAT 8)"
   note "free-running: $(summ "$GATE_DIR/shards-free")"
@@ -147,5 +176,8 @@ fi
 if [ "$mode" = --mutants ]; then
   gate_mutants mutants tb/isp_tile/mutants_m7.txt --njobs "${ISP_TILE_MUT_NJOBS:-4}"
 fi
-[ "$mode" = --full ] && [ "$GATE_FAILED" = 0 ] && echo "isp-tile-full $(date +%F)" > build/sort/rs-full/complete
+if [ "$mode" = --full ] && [ "$GATE_FAILED" = 0 ]; then
+  if [ -n "$SAMPLE" ]; then echo "isp-tile-full sample $SAMPLE $(date +%F)" > build/sort/rs-full/sample
+  else echo "isp-tile-full $(date +%F)" > build/sort/rs-full/complete; fi
+fi
 gate_end

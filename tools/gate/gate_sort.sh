@@ -20,6 +20,16 @@
 #                  last item of each pass and entry, p2_entq's records with the eoe items (tb/sort/sort_tb.cpp)
 #   --full         the same with 1,000,000 random streams and the run streams of M7's full set (build/sort/rs-full,
 #                  written by make isp-tile-full: its "complete" marker must be there). Under /tmp/polly2-rtl-gate.lock
+#   --full --sample SEED  (make sort-full SAMPLE=SEED) a seeded sample (PLAN 0 rule 10): the run streams in
+#                  build/sort/rs-full (an exhaustive or a sampled make isp-tile-full's: its "complete" or "sample" marker),
+#                  each stream at least once under one of the three SPAN_SORT_CFG (drawn), the always-run items
+#                  (tools/gate/always_run.txt: its sort-full streams are written by every sampled isp-tile-full, whose
+#                  always-run list holds their free-running items; a line naming no item fails the sample step), then
+#                  streams and random blocks drawn at random within SAMPLE_BUDGET (900) s of queue wall at J
+#                  (tools/gate/sample_items.py: predictions from the cost file, else the static estimates times
+#                  SAMPLE_EST_SCALE, subset 0.35 and random 9 a group); the drawn items are optional (pq.py --deadline:
+#                  one starts only while its predicted end is within the budget); the coverage planned and run (items,
+#                  weight %) in the summary
 #   --mutants      the builds, the captures and streams the probes use, and tb/sort/mutants.txt (tools/gate/mutants.py):
 #                  every mutant caught
 #
@@ -30,6 +40,8 @@
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 mode=${1:-quick}
+SAMPLE=${SAMPLE:-}
+[ "${2:-}" = --sample ] && SAMPLE=${3:-}
 case "$mode" in
   quick)     gate=sort ;;
   --full)    gate=sort-full ;;
@@ -38,7 +50,7 @@ case "$mode" in
 esac
 if [ "$mode" = --full ] && [ -z "${P2_GATE_LOCKED:-}" ]; then
   export P2_GATE_LOCKED=1
-  exec flock /tmp/polly2-rtl-gate.lock bash "$0" "$@"
+  exec flock /tmp/polly2-rtl-gate.lock env SAMPLE="$SAMPLE" bash "$0" "$@"
 fi
 
 . "$HERE/lib.sh"
@@ -64,9 +76,9 @@ streams=$GATE_DIR/streams.txt
 if [ "$mode" = --full ]; then
   nrandom=${SORT_RANDOM:-1000000}
   rsdir=build/sort/rs-full
-  if [ -f "$rsdir/complete" ]; then
+  if [ -f "$rsdir/complete" ] || { [ -n "$SAMPLE" ] && [ -f "$rsdir/sample" ]; }; then
     ls "$rsdir"/*.rs.gz > "$streams"
-    note "inputs: the run streams of make isp-tile-full ($(cat "$rsdir/complete")): $(wc -l < "$streams") files"
+    note "inputs: the run streams of make isp-tile-full ($(cat "$rsdir"/complete "$rsdir"/sample 2>/dev/null | paste -sd ';')): $(wc -l < "$streams") files"
   else
     : > "$streams"
     GATE_LINES+=("streams: FAIL (no $rsdir/complete: run make isp-tile-full first)"); GATE_FAILED=1
@@ -135,6 +147,7 @@ summ() {
 
 if [ "$mode" != --mutants ]; then
   items=$GATE_DIR/items.txt
+  qopt=()
   : > "$items"
   gate_item "$items" lint-sort - 2 1 step lint-sort.log $MAKE -s lint-sort
   nblk=$(( (nrandom + 999) / 1000 ))
@@ -152,7 +165,24 @@ if [ "$mode" != --mutants ]; then
         build/obj_sort/tb --cfg "$c" --random "$nrandom" --block 1000 --shard "$b/$nblk"
     done
   done
-  gate_queue queue "$items"
+  if [ "$mode" = --full ] && [ -n "$SAMPLE" ]; then
+    mv "$items" "$GATE_DIR/items_all.txt"
+    everyg=$(for c in $CFGS; do printf 'subset-%s,' "$c"; done)
+    sscale=(); for x in ${SAMPLE_EST_SCALE:-$(for c in $CFGS; do printf 'subset-%s:0.35 random-%s:9 ' "$c" "$c"; done)}; do
+      sscale+=(--scale "$x"); done
+    gate_step sample python3 tools/gate/sample_items.py --seed "$SAMPLE" --gate sort-full --budget "${SAMPLE_BUDGET:-900}" \
+      --jobs "$J" --cost "$GATE_DIR/cost.txt" --always tools/gate/always_run.txt --whole lint-sort --every "$everyg" \
+      --case-key stream "${sscale[@]}" "$GATE_DIR/items_all.txt" "$items"
+    while IFS= read -r l; do note "$l"; done < <(grep '^sample: ' "$GATE_DIR/sample.log")
+    cp "$GATE_DIR/cost.txt" "$GATE_DIR/cost_before.txt" 2>/dev/null || : > "$GATE_DIR/cost_before.txt"
+    qopt=(--optional "$items.optional" --deadline "${SAMPLE_BUDGET:-900}")
+  fi
+  gate_queue queue "$items" "${qopt[@]}"
+  if [ "$mode" = --full ] && [ -n "$SAMPLE" ]; then
+    python3 tools/gate/sample_items.py --coverage "$GATE_DIR/pq_results.tsv" --cost "$GATE_DIR/cost_before.txt" \
+      "${sscale[@]}" "$GATE_DIR/items_all.txt" "$items" > "$GATE_DIR/coverage.log"
+    while IFS= read -r l; do note "$l"; done < "$GATE_DIR/coverage.log"
+  fi
   for c in $CFGS; do
     note "SPAN_SORT_CFG $c, subset: $(summ "$GATE_DIR/shards-subset-$c" renders)"
     note "SPAN_SORT_CFG $c, random: $(summ "$GATE_DIR/shards-random-$c" streams)"

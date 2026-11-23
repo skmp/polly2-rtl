@@ -19,7 +19,8 @@
 //   the background key block of RenderCORE (M1)                             tb/fp/ref_copies.h fp-bgkey (p2ref::bg_key)
 //   PtChunkTake and the PT loop of RenderCORE (M7)                          here: core-pt-take, core-pt-loop
 //   the RenderParamTags loop (M5)                                           here: core-rpt (the whole body)
-//   MipSelect's K part (M9)                                                 here: tsp-mip-k
+//   MipSelect's K part (M9)                                                 tb/tsp_setup/ref_copies_tsp.h: tsp-mip-num,
+//                                       tsp-mip-k (L1, the whole K part; moved there by M9)
 //   the PixelFlush_tsp lambdas bumpLight, shade, mipChoose, fade and the
 //   SupSample block (M10, M11)                                              here: tsp-lambdas, tsp-super; with tsp-head,
 //                                       tsp-texture, tsp-tail and tsp-dispatch the whole of PixelFlush_tsp is copies
@@ -28,7 +29,7 @@
 //                                       core-perp: RenderCORE's first lines (FPU_PERP_VAL)
 //
 // Three sections. Section A (every L2 translation unit): p2ref::copy::RenderFrame, RenderCORE's frame around the phase
-// driver's entries (tb/ref/phase_driver.cpp), and the K part of MipSelect. Sections B1 and B2 name refcore's statics
+// driver's entries (tb/ref/phase_driver.cpp). Sections B1 and B2 name refcore's statics
 // and are compiled only in the glue's translation unit of their file: B1 (P2REF_GLUE_LISTS, tb/ref/refcore_glue_lists.cpp,
 // which #includes refsw_lists.cpp) PtChunkTake, which p2ref::check_pt_take drives beside refcore's own, the PT loop
 // (p2ref::pt_phase_copy) and RenderCORE's first lines; B2 (P2REF_GLUE_TILE, tb/ref/refcore_glue.cpp, which #includes
@@ -322,50 +323,6 @@ inline void RenderFrame(Phases phases)
     if (vfactor != 0x400 && vfactor != 0)
         endStream(true);
 // P2REF-END core-endframe
-}
-
-// MipSelect's K part (pvr_tsp_plane.h): K from the longer length `best` (after its product with 1/det^2), the texture's
-// size and the bias. ret: MipSelect returns r there (no level).
-struct MipKOut { pvrtsp::MipChoice r; pvrfp::Fp k8, kFull; bool ret; };
-inline MipKOut MipKPart(pvrfp::Fp best, bool ranged, int sizeLog2, int biasQuarters)
-{
-    using namespace pvrfp;
-    using pvrtsp::MipChoice;
-    using pvrtsp::MipK;
-    MipKOut out;
-    out.ret = true;
-    auto body = [&]() -> MipChoice {
-        MipChoice r = { 0, 0, Fp() };
-// P2REF-COPY tsp-mip-k pvr_tsp_plane.h Fp k8, kFull;
-    Fp k8, kFull;
-    if (best.bad) {
-        if (!ranged) return r;
-        k8 = Fp::Pow2(-128 + sizeLog2, false);          // field 255 plus the size, wrapped
-        kFull = k8;
-    } else if (best.zero()) {
-        if (!ranged) return r;
-        k8 = Fp::Pow2(-127 + sizeLog2, false);          // field 0 plus the size
-        kFull = k8;
-    } else {
-        k8 = Mul(best, Fp::FromHalves(2 * (int64_t)biasQuarters), 62);
-        k8.exp += sizeLog2 - 2;
-        kFull = k8;
-        k8 = k8.cut(8);
-        r.kFull = kFull;
-        if (MipK() == 98 || MipK() == 99) {                 // one step of 8 bits more, less
-            const int b = Fp::Bits(k8.mant), sh = b > 8 ? b - 8 : 0;
-            uint64_t m = (k8.mant >> sh) + (MipK() == 98 ? 1 : -1);
-            k8.mant = m << sh;
-        }
-    }
-// P2REF-END tsp-mip-k
-        out.k8 = k8;
-        out.kFull = kFull;
-        out.ret = false;
-        return r;
-    };
-    out.r = body();
-    return out;
 }
 
 }   // namespace copy

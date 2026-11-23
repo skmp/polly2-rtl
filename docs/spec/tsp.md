@@ -4,7 +4,10 @@ polly2-rtl, unit spec "TSP" (texture and shading processor, the tile colour buff
 Written 2026-11-20 from refsw3 (nulldc3 branch `skmp/refsw3`, commit 2d08a440, `refsw3/refcore`) and the console
 tests of dreamcast-tests (commit f7cb4e5); checked against refsw3 `708fb8cd` the same day: `pvr_tsp_plane.h` changed
 only by taking its 1/3 from `pvrfp::OneThird()`, the constant the ISP's depth mean shares (4.4, 20), so no TSP rule
-moved. Sections 4.4, 20 and 22 item 2 now also say how the ISP's depth adds treat a zero. refsw3 is the functional truth: it is the console, bit for bit, on every
+moved. **Re-transcribed to refsw3 `4f3efe15`** (M9, 2026-11-23; dreamcast-tests `a932980`): `2bee80f2` (the setup's
+adders take the ISP's zero rule in every addition, every zero sum +0: 4.1, 4.4; MipSelect with Sdet 0: 8.1, 8.2; a
+mipmapped texture declared taller than wide: 9.1) and `4f3efe15` (a determinant of 2^126 or more has a reciprocal of
+zero: 4.3). Sections 4, 8 and 22 are at `4f3efe15`; nothing else of the TSP moved. Sections 4.4, 20 and 22 item 2 now also say how the ISP's depth adds treat a zero. refsw3 is the functional truth: it is the console, bit for bit, on every
 regression test and on all 786 polly2-data dumps with a console frame. Everything below is what refsw3 does; each
 rule names the console test that pins it. Where refsw3 does something no test has measured, it is marked **GAP**.
 
@@ -298,14 +301,19 @@ denormal is zero, sign kept); field 255 is **infinity** (a NaN is one, sign kept
 |---|---|
 | load | `FromSingle(bits, ranged=1)`: field 0 -> ±0, 255 -> ±inf, else mant = 1.frac (24 bits), exp = field - 150 |
 | product `mul` | 24x24 exact, cut to 24 bits. 0 x anything (also x inf) = 0; inf x non-zero = inf. Result >= 2^128: inf; < 2^-126: zero. Sign = xor of the signs in every case |
-| sum `add` | align, drop an operand whose top is **25 or more** below the other's (`reach 25`), exact sum, cut to 24 bits. inf + x = inf; inf + (-inf) = +0. Result >= 2^128: inf (sign of the sum); < 2^-126: **+0** |
-| last addition of a three-term sum `(t1 + t2) + t3` | as `add`, but if one operand is zero and the other has top - 1 < -125 (i.e. 2^-126 <= abs(x) < 2^-125), the zero counts as **2^-127 with its own sign** (`zeroReach = 2`). In `t1 + t2` a zero is a zero |
+| sum `add` (`addTerm`, every addition: both of a three-term sum `(t1 + t2) + t3` and the coordinate differences) | align, drop an operand whose top is **25 or more** below the other's (`reach 25`), exact sum, cut to 24 bits. inf + x = inf; inf + (-inf) = +0. Result >= 2^128: inf (sign of the sum); < 2^-126: **+0**; **every sum that is zero is +0** (an exact cancellation, -0 + -0 too) |
+| a zero added to a number (`addTerm`'s zero rule, `2bee80f2`) | exactly one operand zero (an input, a product below 2^-126 with its sign, or a sum) and the other, v, with top - 1 < -127 + `zeroReach` (2: below 2^-125, below the range too), of the **other sign**, and below 1.5 x 2^(top - 1) (the bit under v's leading one clear): **+0**, as if the zero were 2^-127 with its sign and the sum then below the range; otherwise v, to the bit. The ISP's depth setup's rule (one adder; isp §6.3) |
 | `Recip(det, 24)` | 1/det truncated to 24 bits, sign of det |
 
 Pins: reach 25 [M uvmeas reach1: 95,453 readings, 25 all, 24 misses 554, 26 misses 785; polly2-data gundam_ingame,
-daytona_*, sa2_ingame2]; zero-as-2^-127 in the last addition [M cmeas cwsum1: 2,340,000 of 2,340,000 against
-2,335,162 with the rule in both additions, 2,318,225 without; uvmeas wtiny1 5 cells, cwext1 21]. **GAP**: whether
-the limit is 2^-125 or 2^-124 (zeroReach 2 or 3), probably not observable.
+daytona_*, sa2_ingame2]; the zero rule in every addition, every zero sum +0 [M tsp2_zadd: 9,600 slivers of
+determinant about 1 whose U / w x slope is a sum with a zero term and another of 1 .. 2 2^-126: 9,600 of 9,600; the
+rule before (a zero counted as 2^-127 in a sum's last addition only, -0 + -0 = -0, refsw3 `TSP_ZERO=1`): 1,463; only
+-0 + -0 = -0 changed: 7,203; 2^-127 kept in the last addition: 6,207; no rule in the first addition: 7,253; uvmeas
+(36 sets) and cmeas (c1, cwext1, cwsum1: 2,340,000 of 2,340,000) stay exact]. `zeroReach` 2: refsw3's
+(`PlaneHW::zeroReach`); 3 changes the planes of cmeas cwsum1's triangles (PLAN M9's mutant), whose console readings
+refsw3 has at 2. **GAP**: whether a zero from a denormal input brings its mantissa into an addition other than the
+mean's first (4.4).
 
 ### 4.2 The sums (indices 0, 1, 2 = v1, v2, v3 after the odd-strip swap; j = k+1, l = k+2 mod 3)
 
@@ -315,7 +323,7 @@ the limit is 2^-125 or 2^-124 (zeroReach 2 or 3), probably not observable.
     tb[k] = mul(Z[k], sub(X[l], X[j]))
     tc[k] = mul(Z[k], e[k])
     attribute plane only:  ta[k] = mul(AT[k], ta[k]);  tb[k] = mul(AT[k], tb[k]);  tc[k] = mul(AT[k], tc[k])
-    Sa   = (ta0 + ta1) + ta2          // sum3: the second + is the "last addition"
+    Sa   = (ta0 + ta1) + ta2          // sum3: both additions with 4.1's rules
     Sb   = (tb0 + tb1) + tb2
     Sc   = attribute ? (tc0 + tc1) + tc2  :  (tc0 + tc2) + tc1
     Sdet = (e0 + e1) + e2
@@ -330,15 +338,20 @@ sum orders of Sa/Sb are (t0 + t1) + t2 for both [M; the alternatives sumA/sumW 1
 
     det = Sdet; if Perpendicular(det): det = 0      (section 4.4)
     if det is zero (and not inf): flat planes, section 4.4
-    inv = det is inf ? zero(sign of det) : recip24(det);  if inv < 2^-126: inv = zero(sign of inv)
+    inv = det is inf ? zero(sign of det) : recip24(det)
+    if inv < 2^-126, or det is finite with top(det) - 1 >= 126 (2^126 itself included): inv = zero(sign of inv)
     A0 = mul(Sa, inv);  B0 = mul(Sb, inv);  C0 = mul(Sc, inv)        // 24 bits, with the range rules
     A = cut16(A0);  B = cut16(B0);  C = cut16(C0)                    // a zero keeps its sign
 
 [M uvmeas: coefficients are 16-bit floats, a flat U with 24 significant bits reads as its 16-bit truncation at
 every size 1 .. 2^22; a zero keeps its sign: a slope that cancels exactly, over a negative determinant, is -0 and
-floors one grid unit low: wmeas's 60 % of flat triangles one fog level low]. The reciprocal's range: a determinant
-above 2^126 gives coefficients that are zeros with the sign of sum x det [M hugepos triangle c 16 of 16 pages,
-triangle b exact].
+floors one grid unit low: wmeas's 60 % of flat triangles one fog level low]. The reciprocal's range (`4f3efe15`): a
+determinant of 2^126 or more, exactly 2^126 included (its reciprocal's exponent taken as -(e + 1) before a mantissa of
+exactly 1 moves it up, as the ISP's depth unit), or an infinite one, gives a zero reciprocal of its sign, and every
+coefficient is a zero with the sign of its sum times the determinant's (a sum of zero: the determinant's, the sum
+being +0) [M hugepos: triangle c, determinant -2^127.4, black, b, +2^127.7, white exactly where x <= y, a (infinite)
+white; trsort_recip pages 3, 11, 13: determinants of exactly +2^126, -2^126, +2^126, the colours of a zero reciprocal;
+with 2^-126 kept, 6 of 160 regions wrong].
 
 ### 4.4 Determinant zero, and FPU_PERP_VAL [M slivers_tsp, slivers_detzero, slivers_dzzero, slivers_dzspec, slivers_perp, perpmean_fogw, perpmean_uv, perpmean_ovf, perpval, perpeq, detinf]
 
@@ -350,8 +363,8 @@ Then every plane of the primitive is flat:
 
     A = B = +0
     third = OneThird() = 0xAAAAAB x 2^-25     // the single nearest 1/3, a hair above (24 bits); pvr_softfp.h
-    first = Z0 + Z1 (an ordinary add), except the zero rule below
-    mean  = mul( lastadd(first, Z2), third )  // (z1 + z2) + z3, the last addition with its zero-as-2^-127 rule
+    first = Z0 + Z1 (an ordinary add, 4.1), except the field-0 rule below
+    mean  = mul( add(first, Z2), third )      // (z1 + z2) + z3, the second addition with 4.1's zero rule; -0 + -0 = +0
     1/w plane:       C = cut16(mean)
     attribute plane: C = cut16( mul(AT[2], mean) )      // the third corner's attribute times the mean
     A0 = A, B0 = B, C0 = C
@@ -359,15 +372,19 @@ Then every plane of the primitive is flat:
 Zero rule of the first addition: when exactly one of z0, z1 has exponent field 0 (a zero, mantissa bits m), and the
 other, p, has top - 1 == -126 (2^-126 <= |p| < 2^-125) **and the opposite sign**: the zero is taken as
 (1 + m 2^-23) 2^-127 with its sign; if p + that is below 2^-126 (or 0) the sum is +0, otherwise the sum is p
-unchanged. Otherwise a zero is nothing. [M slivers_dzzero 9,600 of 9,600 (831 exactly on the boundary keep the
-depth; the alternatives 6,711 .. 7,564)]. **GAP**: the same question in the last addition (beyond the planes' rule).
+unchanged. Otherwise (both fields 0, neither, signs equal, or p elsewhere) 4.1's addition; with m = 0 this rule is
+4.1's zero rule. [M slivers_dzzero 9,600 of 9,600 (831 exactly on the boundary keep the depth; the alternatives 6,711 ..
+7,564)]. -0 + -0 = +0 in the mean too [M tsp2_mipdz2 row 14, column 0: three corners of -2^-127 (1 + j/16), the level's
+w that of its +0: 2 of 2 regions]. **GAP**: whether a denormal's mantissa counts in the second addition (refsw3: 4.1's
+rule; the mean of a sum below 2^-125 is below the range anyway).
 
-The ISP's depth mean (isp §9.4b) uses the same `OneThird()` and the same sum order, but its additions are the depth
-setup's (isp §6.3): in **every** addition a zero added to a number of 2^-126 .. 1.5 * 2^-126 of the other sign gives
-+0 and to any other number that number exactly, and every zero sum is +0. Its zero has no fraction (field 0 is a
-zero at `FromSingle`), so its threshold is 1.5 * 2^-126 where this rule's is (1.5 + m 2^-24) 2^-126, and it never
-adds a zero as ±2^-127 as the planes' last addition does (4.1) [depthgaps_zadd: 109 of 109 regions with the ISP's
-rule, 76 with the planes' last-addition rule; depthgaps_field1]. The two units do not share the rule.
+The ISP's depth mean (isp §9.4b) uses the same `OneThird()` and the same sum order, and since `2bee80f2` the same
+addition rule (isp §6.3, 4.1 here): in **every** addition a zero added to a number of 2^-126 .. 1.5 * 2^-126 of the
+other sign gives +0 and to any other number that number exactly, and every zero sum is +0 [depthgaps_zadd 109 of 109,
+depthgaps_field1; tsp2_zadd]. They differ in two places: the TSP's mean has the field-0 rule above in its first
+addition (a zero's fraction counts: threshold (1.5 + m 2^-24) 2^-126), the ISP's mean the infinite corners'
+fractions (isp §9.4b); and the TSP's zero rule reaches below the range (`zeroReach`: any v under 2^-125), the ISP's
+only v of 2^-126 .. 2^-125. One adder each (the TSP's p2_tsp_alu, the ISP's p2_isp_alu), not shared.
 
 Pins: the mean, not the third corner's depth [M slivers_tsp 3600 cells: 42 differ with z3; slivers_detzero 9,600
 of 9,600, against 8,143 with 0xAAAAAA, 9,474 with 25-bit sums, 9,413 / 9,379 other orders, 9,373 exact;
@@ -540,7 +557,7 @@ plane, section 4.2; their 24-bit coefficients A0, B0, C0), the texture size `siz
 
 Arithmetic: the setup's 24-bit truncating numbers with the range rules of section 4.1.
 
-    inv  = Sdet is inf ? 0 : recip24(Sdet);  if inv < 2^-126: inv = 0
+    inv  = Sdet is inf or zero ? 0 : recip24(Sdet);  if inv < 2^-126: inv = 0     // no 2^126 limit here (4.3's is the planes')
     undivided = (Sdet != 0) && (inv != 0)            // the normal case
     inv2 = mul24(inv, inv);  if inv2 < 2^-126: inv2 = 0          [M mipdump, mipdet: a determinant above 2^63 -> largest map]
 
@@ -564,7 +581,8 @@ Arithmetic: the setup's 24-bit truncating numbers with the range rules of sectio
                    L    = cut24( sub_reach25(sum, less) )         // about hi + (sqrt(2) - 1) lo, a sawtooth
     Lx = length(n_x(U), n_x(V));  Ly = length(n_y(U), n_y(V))
     best = Lx if Lx is inf or Ly <= Lx, else Ly
-    if undivided and best finite non-zero: best = mul24(best, inv2); >= 2^128 -> inf; < 2^-126 -> 0
+    Sdet zero (dzForce, 2bee80f2): best = 0xFFFFFF x 2^-23 (a length of all ones), not times inv2
+    else if undivided and best finite non-zero: best = mul24(best, inv2); >= 2^128 -> inf; < 2^-126 -> 0
     K8 = best inf  ? 2^(-128 + size)                                // field 255 + size, wrapped
        : best zero ? 2^(-127 + size)                                // field 0 + size
        : cut8( best x MipMapD x 2^(size - 2) )                     // bias/4 x size, then 8 bits toward zero
@@ -573,8 +591,15 @@ Not undivided (Sdet zero, or its reciprocal zero): the same with the divided 24-
 (`MIP_K=1`'s path): x: |C0_a A0_w - A0_a C0_w|, y: |B0_a C0_w - C0_a B0_w| (DCalcCtrl 1: the planes evaluated at
 the first vertex exactly, (A0 x1 + B0 y1) + C0, or u1 z1, v1 z1, z1 in the 24-bit ranged product when x1 or y1 is
 an infinity), limits judged on n itself; the zero / infinity decision for each product is still taken from the
-undivided sums as above, and no 1/det^2 product follows. For a determinant of exactly 0 the A0, B0 are 0, so
-K8 = 2^(-127 + size).
+undivided sums as above, and no 1/det^2 product follows. With the reciprocal zero (an infinite determinant, or one
+whose reciprocal is below 2^-126) every divided coefficient is a zero (4.3), so every product of this path is 0 and a
+numerator is 0 or, from the infinite products' rule, an infinity (the TSP setup's graph, gen_tsp_prog.cpp, takes it
+so: PLAN M9's graph check). A determinant of exactly 0 (and not an infinity) is dzForce: whatever the numerators,
+best is the length of all ones, K8 = cut8(0xFFFFFF 2^-23 x MipMapD x 2^(size - 2)), and the level is the last one
+whatever w is (8.2) [M tsp2_mipdz (1/w 2^-65 .. 2^-56) and tsp2_mipdz2 (2^-127 .. 2^126): 4,800 points, 3,722 /
+3,918 slivers each, 15 rows of sizes 8 .. 256, D adjust 1/4 .. 15/4, DCalcCtrl 1; the level and trilinear pass B's
+fraction 1,200 of 1,200 regions each; 1/det = +0 (polly2-rtl's D4 proposal, K = 2^(-127 + size)) 59, an infinity 36,
+a length of 1.FFFFFF 2^127 wrong from 1/w = 2^48 on]. (refsw3 divided by zero here before `2bee80f2`: num D1.)
 
 Pins: the undivided numerators, products and difference cut to 24 bits, the length rule with 0x95F612 (no other
 value at 2^-28), once times 1/det^2 [M mipk4 3,920 cells of mipk3 and mipk4; mipk5 1991 of 1991; mipk 2,401
@@ -594,6 +619,7 @@ original Sdet and sums, as if not perpendicular); K at a pixel whose 1/w is -1 u
     ww  = cut8(w8 x w8);  if top(ww) - 1 > 127: lower the exponent to 127 keeping the mantissa   [M mipmeas wext]
     d   = cut8(K8 x ww)
     L   = floor(log2 d);  M = d's top 8 bits (128 .. 255)
+    dzForce (8.1):  L = 2^16 (past the last level: mipChoose clamps it to 3 + TexU), M and k from d as below
     L < 0:  level 0, k = 0 (no blend below level 0)
     else:   level = L, f = M - 128 (of 128), k = (f == 127) ? 256 : 2 f        // k of 256: the next level's share
 
@@ -649,8 +675,11 @@ then shifted (arithmetic) by L [M mipbil 1120 of 1120; polly2-data sa_slow1-3: t
     vi = v0 >> L
 
 [M sample "declared": declared 16x8 sits a whole row higher than 16x16; texfar_decl 300 of 300 (scaling the
-declared coordinate up instead: 122 wrong, every one with d >= 4 + level); texfar_mip, texfar_mipv]. **GAP**: a
-mipmapped texture declared taller than wide at large -d, with fraction bits.
+declared coordinate up instead: 122 wrong, every one with d >= 4 + level); texfar_mip, texfar_mipv]. Declared
+taller (d < 0) the same holds the other way: V at the square's height less the declared half texel, 128 >> -d, the
+fraction bits the square's [M tsp2_tall (`2bee80f2`): 8 .. 128 texel squares declared up to 1024 tall, d = -1 .. -7,
+levels 0 .. 2, wrap, flip, clamp, both signs, bilinear and point: 300 of 300 regions; the square's own half texel 20;
+the declared coordinate's row shifted down with its own fraction as the weight 42].
 
 Clamp below zero first, then texel and weight:
 
@@ -1170,10 +1199,12 @@ per divided attribute a table reciprocal and a 16x17 multiplier; setup and run s
 ## 22. GAP list (refsw3 behaviour no console test pins)
 
 1. PARAM_BASE with bits below 20 set (TSP fetch base vs the ISP's).
-2. Last-addition zero rule's upper limit 2^-125 vs 2^-124; the determinant-zero mean's zero rule in the last addition
-   (the ISP's depth mean has its own rule in both additions, measured: isp §6.3, 4.4).
-3. Mip K: DCalcCtrl 1 adder reach 53; "first vertex" of an odd strip triangle; perpendicular triangles; the -1-unit 1/w pixel.
-4. Mipmapped texture declared taller than wide at large d with fraction bits.
+2. The setup adders' zero rule's limit, `zeroReach` 2 (2^-125) against 3 (refsw3's 2; the planes of cmeas cwsum1's
+   triangles tell them apart, their console readings are refsw3's at 2); a denormal's mantissa in an addition other
+   than the mean's first (4.1, 4.4). (Since `2bee80f2` the TSP's adders and the ISP depth setup's take the same rule.)
+3. Mip K: DCalcCtrl 1 adder reach 53; "first vertex" of an odd strip triangle; perpendicular triangles; the -1-unit 1/w
+   pixel (measured since: tsp2_m1, 6.2). A determinant of zero: measured (tsp2_mipdz, 8.1).
+4. ~~Mipmapped texture declared taller than wide~~: measured (tsp2_tall, 9.1).
 5. TEXT_CONTROL stride 0; bank bit 4 / reads past 8 MB; a code book within 2 KB of 8 MB.
 6. Index (or texel) reads into the framebuffer being written out (write-out timing).
 7. Pixel format 7 (reserved); framebuffer packmode 7.

@@ -9,8 +9,8 @@ Pins: refsw3 = nulldc3 `skmp/refsw3` @ `4f3efe15` (refcore clean); dreamcast-tes
 built and gated at `708fb8cd`; M1's range wrappers (H10: `p2_fp_rng_add`'s TSP zero rule and MIP flavour,
 `p2_fp_rng_recip`'s determinant of 2^126 or more and zero determinant) and `tb/fp/ref_copies.h` were brought to
 `4f3efe15` with M2 (`make fp`, `make scaffold` pass there). The specs' edge and depth sections are at `4f3efe15`,
-num §4 / H10 too; their TSP sections still lag (ARCHITECTURE §0.1, §0.1b); where they disagree, refsw3 is the
-reference for every gate.
+num §4 / H10 too, and since M9 the TSP sections (ARCHITECTURE §0.1b); where they disagree, refsw3 is the reference for
+every gate.
 
 ## 0. Rules for every milestone
 
@@ -77,6 +77,21 @@ reference for every gate.
    measurements and refsw3 leave a choice, the design takes the one the die's blocks and RAM macros suggest, and says
    so. Console measurements and refsw3 win over it. ARCHITECTURE §3.12 records where the units built so far agree with
    the die and where they depart from it.
+10. **Sampled full gates** (the owner, from M9 on). Every quick gate and every mutant gate runs in full each
+   milestone. An exhaustive gate (`isp-tile-full`, `sort-full`, any other `-full`) runs as a seeded SAMPLE
+   (`make <gate>-full SAMPLE=<seed>`, `tools/gate/sample_items.py` on the gate's own items through pqlib's queue): a
+   fresh seed logged in the summary; every case at least once (all phase-halt items, in full; every run stream under
+   one SPAN_SORT_CFG), a random subset of the rest (free-running segments, the other configurations, random blocks);
+   every item exercising the milestone's own modules in full (`--whole`); the permanent always-run list
+   `tools/gate/always_run.txt` (anything that ever failed; a line naming no item fails the sample, and a sort-full
+   stream's line comes with the isp-tile-full item that writes the stream); a budget of about 1-1.5 h wall at J 16 over
+   the sampled gates (`SAMPLE_BUDGET`, the queue's wall: isp-tile-full 4000 s, sort-full 900 s). The random draws are
+   optional items: the queue starts one only while its predicted end is within the budget (`pq.py --deadline`), so a
+   slow run drops some instead of overrunning; the mandatory items (whole, always-run, every case) always run, and a
+   "sample: WARNING" line says when they alone are predicted over the budget (see D12). Predictions come from the
+   gate's cost file, else the static estimates times `SAMPLE_EST_SCALE` (calibrated on every cost file kept, see
+   sample_items.py). The coverage, planned and run (items and weight %, per group, the dropped draws counted), is in the
+   summary. The exhaustive runs happen once, after the last milestone.
 
 ## 1. Testbench architecture
 
@@ -98,7 +113,7 @@ reference for every gate.
 | the background key block of `RenderCORE` (`bgZ`) | lists.cpp | M1 |
 | `PtChunkTake` and the PT loop of `RenderCORE` | lists.cpp | M7 |
 | the `RenderParamTags` loop | tile.cpp | M5 |
-| MipSelect's K part | plane.h | M9 |
+| MipSelect's K part (as built: all of it, from the determinant to K8: `tsp-mip-num`, `tsp-mip-k` in the L1 header `tb/tsp_setup/ref_copies_tsp.h`, M9) | plane.h | M9 |
 | the `PixelFlush_tsp` lambdas `bumpLight`, `shade`, `mipChoose`, `fade`, and the SupSample block | tile.cpp | M10, M11 |
 | the `put` / scaler lambdas of `RenderCORE` | lists.cpp | M5, M12 |
 
@@ -106,7 +121,9 @@ As built (M5, `tb/ref/ref_copies.h`): `core-pt-take`, `core-pt-loop`, `core-rpt`
 `tsp-mip-k`, `tsp-lambdas` and `tsp-super` (with `tsp-head`, `tsp-texture`, `tsp-tail` and `tsp-dispatch`: the whole of
 PixelFlush_tsp in pieces), `core-put` (with `core-prev`, `core-writeout`, `core-endframe`: RenderCORE's frame around
 the entries) and `core-perp`; the M1 / M2 rows were already in `tb/fp/ref_copies.h` (`fp-bgkey`, `fp-cull`) and
-`tb/isp_edge/ref_copies_edge.h`. The self-test runs every copy but `tsp-mip-k` (M9's) on every pixel it shades.
+`tb/isp_edge/ref_copies_edge.h`. The self-test runs every copy on every pixel it shades; M9 moved `tsp-mip-k` to
+`tb/tsp_setup/ref_copies_tsp.h` beside `tsp-mip-num` (the K part from the determinant on), where M9's graph check and
+testbench run them.
 
 **Runtime switches are pinned** (`tools/check_ref_switches.sh`, run by every gate, result in the summary):
 - the environment has `MIP_K` and `MIP_ARITH` unset or `0` (plane.h reads both with `getenv`);
@@ -978,6 +995,10 @@ the text below:
   key; emitting without the emit condition, which fails in the slow-cutter class; eop / eoe left where they came in)
   and 2 of the structure (the closed state forgotten when the eop item leaves early; the run queue reading over its
   output register): `make sort-mutants` 10 of 10 (69 s).
+- **new_drain** (the sorter's output to the TSP's look-ahead, ARCHITECTURE 3.6) was checked by nothing; since M9
+  `tb/sort/sort_tb.cpp` checks it on every item with the sorter on (1 exactly on a pass's first item and where the key,
+  the tag & ~7 with offset sort, differs from the item before it in the pass; 0 on a null item), and the mutant
+  `new-drain-every-item` (new_drain on every item) is caught: `make sort-mutants` 11 of 11.
 - **Full gate** (`make sort-full`, once, 1,801 s): the 7,401 run streams `make isp-tile-full` wrote (18,386 renders,
   3,125,873 entries, 4,343,983 passes, 165,883,262 runs, 2,931,313 null items; 179,425,106 checks a configuration) and
   1,000,000 random streams (8,142,709 passes, 363,720,964 runs; 381,944,185 checks a configuration), under 0x101, 0x001
@@ -1009,6 +1030,67 @@ the text below:
 - `eop` left on the item that came in last.
 
 ### M9. TSP fetch, set-up store, plane setup, mip K
+
+**Status (2026-11-23): done (not committed: the owner's).** `make tsp-setup` (tools/gate/gate_tsp_setup.sh,
+`tb/mk/tsp_setup.mk`), `make tsp-setup-mutants`; scratch in `agents/m9/`. RTL in `rtl/v1/tsp/`: `p2_tsp_store.sv`,
+`p2_tsp_pfetch.sv`, `p2_tsp_setup.sv`, `p2_tsp_alu.sv`; `rtl/v1/pkg/p2_tsp_pkg.sv` (the TSP's formats) and
+`p2_tsp_prog_pkg.sv` (GENERATED by `tools/gen/gen_tsp_prog.cpp`: `make tsp-prog`, `tsp-prog-check`, `tsp-prog-sweep`,
+`tsp-setup-graph`). The testbench `tb/tsp_setup/` (the DUT the store with fetch, setup and ALU behind it, p2_mem with the
+VRAM model; the reference `tsp_setup_ref.cpp` on p2ref::fpu_entry; the cases `tsp_cases.h`, shared with the graph check;
+the K copies `ref_copies_tsp.h`). ARCHITECTURE 3.7.1-3.7.4 "As built (M9)" give the choices, 3.12 the die agreement.
+Where the tree differs from the text below:
+- **Item 2 compares the live words**: a class sets up only the planes a pixel of the entry reads (untextured: the 1/w
+  plane and the colours; U, V when textured; the offset planes when Texture && Offset && not a bump map); refsw3's
+  others are made of words the fetch never decoded (decode_pvr_vertex leaves them) and no pixel reads them.
+- **Item 4's table at `4f3efe15`**: since `2bee80f2` every sum that is zero is +0, so a dropped plane's A, B, C are
+  zeros of the determinant's sign (flat: A = B = +0, C of the mean's sign); ARCHITECTURE 3.7.3's AND rule was the rule
+  before tsp2_zadd. The A3 class, the graph check and the testbench prove the new table; the mutant "the flat branch's
+  C sign from the AND rule" is caught.
+- **Item 5**: the mipk sets' observations (fit/mipk_data) are read as the console's K8 against MIP_K 1's (kfit's base;
+  mipk5's in its reached mode against cases.txt's steps); the RTL's K8 is the console's wherever refsw3's is, and
+  refsw3's everywhere (PLAN 0 rule 4). mipmeas's 10 sets: K8 against refsw3, which is the console's on them
+  (dreamcast-tests README); their pixel readings are M10's.
+- **Item 7**: refsw3 defines MipSelect with Sdet 0 since `2bee80f2` (D4 closed): those primitives are counted and
+  compared, not skipped.
+- **The program lengths** at ARCHITECTURE 6's parameters (UNTEX 20, TEX 26, TEX_O 39, +5 for K, +1 for DCalcCtrl 1) do
+  not reach the measured 39 / 48 / 64 / +5 with any parameter set of the sweep (nearest: 2 multipliers, 2 adders,
+  37 / 50 / 76): reported, not gated (rule 6); MT4.
+- **The setup class and the program length of every job** are checked (the program consistency check: the issue clocks
+  against the generated length, the class against the one the cases give; the class is not checked where a block's
+  vertices overlap, skip shorter than the fields).
+
+**Gate** (quick, J 16; build/gate/tsp-setup/summary.txt): 22.1 s wall, CPU 249.7 s with the testbench built (the
+queue 17.6 s, CPU 244.5 s; 2026-11-23, agents/m9/gates/q2); a run that builds it adds about 50 s wall (70.9 s / 982 s
+CPU, and 141 s / 1,150 s with a 51.7 s build step and a 76 s queue on a busier box):
+- graph check: 1,000,000 random jobs (seed 1), 2,800 of A3, 1,272 named, 59,400 console-set triangles: 1,063,472
+  evaluations, 0 failures (every class: UNTEX 208,083 .. TEX_D_M1 25,594).
+- named (item 3): 1,272 cases, 49,102 checks; a3 (item 4): 2,800 cases (4,008 TEX_D jobs, 494 TEX_O), 189,918 checks;
+  console (item 5): cmeas c1 / cwext1 / cwsum1 7,200 triangles, mipk / mipk2 / mipk3 / mipk5 9,600 cells (9,191 observed:
+  the RTL the console's on 9,028, refsw3's on the same 9,028; mipk 2,394 / 2,400, mipk2 2,400 / 2,400, mipk3 2,243 /
+  2,400, mipk5 1,991 / 1,991), mipmeas 10 sets 42,600 triangles; 79,705 K checked; 2,457,555 checks; random (item 6):
+  1,000,000 primitives, 1,457,463 setup jobs (every class), 848,261 K (166,002 with Sdet 0, item 7), 47,948,886 checks.
+  0 failures. Clocks (reported): 47.8 a job, 39.0 from a job's accept to its last store write, at most 14 entries
+  pinned.
+- Mutants (`make tsp-setup-mutants`, 23.1 s wall, CPU 66.3 s; earlier runs 38.8 s and 28.7 s): PLAN M9's 8 (the 1/w constant's order and the attribute product on the
+  graph check; zeroReach 3 on cmeas cwsum1; 0x95F612 + 1 on the mipk sets; bias 0 not 4; dropped planes as +0; the
+  flat C sign from the AND rule; the drop predicate on the sent colours, by the class check) and 9 of the structure and
+  the graphs (perpendicular not flat, the intensity entry's alpha scaled, the store key without the volume, the head
+  before its entries are ready, replacement ignoring pins, no odd swap, the ISP's masked PARAM_BASE, the determinant
+  without e2, a numerator's operands swapped): 17 of 17 caught.
+- **Every earlier gate** (2026-11-23, J 16, agents/m9/gates/q2, m2, full2): scaffold, lint, fp, isp-edge, isp-depth,
+  isp-setup, refglue-selftest, isp-tile-op, isp-tile, sort PASS; every mutant gate in full (fp 92, isp-edge 36,
+  isp-depth 29, isp-setup 16, refglue 12, isp-tile-op 27, isp-tile 23, sort 11 of 11 with new_drain's, tsp-setup 17:
+  every one caught) PASS. **Sampled full gates** (rule 10, seed 383029441, on a clean tree: no cost file, build/sort/
+  rs-full empty; 66 min together, 3,366 s + 614 s): `isp-tile-full` every one of the 6,084 phase-halt items in full
+  (18,386 renders, 66,820,640 checks, 0 failures; queue 3,255 s wall, 47,409 CPU s; the pole scalermeas 1,698 s) and the
+  12 always-run free-running items (47 renders, 0 failures), 6,097 of 13,486 items, 24.0 % of the predicted weight;
+  the mandatory items alone were predicted over `SAMPLE_BUDGET` (65,058 CPU s at the static estimates' 0.3 (now 0.25), measured
+  48,922: phase-halt 0.22), so no random free-running segment was drawn (the sample's WARNING line; D12); `sort-full`
+  on the 12 streams that run wrote (the 4 always-run window-95 / 97 streams among them: "4 matches of 4 lines"), each
+  under at least one SPAN_SORT_CFG, and 450 of 3,000 random blocks: 468 of 3,037 items, 15.1 % of the weight, 0
+  failures, 614 s wall (`SAMPLE_BUDGET` 900, predicted 765 s; no draw dropped at the deadline). With this run's cost
+  file the next isp-tile-full sample draws about 119 free-running segments beside the mandatory items (seed 12345:
+  6,216 items, predicted 3,400 s).
 
 **Deliverables.**
 - `p2_tsp_pfetch` (C3).
@@ -1247,9 +1329,10 @@ dreamcast-tests owner through `OPEN_ITEMS.md`. Never run from here. Ordered by w
 | dreamcast-tests | PC emission of the timemeas timed scenes, preceded by `echo T <scene>` (conv §7.6.2 option a) | MT0 |
 | dreamcast-tests | multi-run race logs for every `*_races` test as data, at least 3 runs (blendpos_races has 1) | MT8 |
 | dreamcast-tests | T1-T21, F1-F3, F7-F18 above | MT1-MT9, refsw3 GAPs |
-| polly2-rtl spec readers | re-transcribe isp §7-9, §15, num §3 (EdgeHW), H7a, H14, §4 (depth flavour), §8 (A1 edge site, A3, G3-G6, G12) to refsw3 `708fb8cd` (ARCHITECTURE §0.1): done; the edge sections to `4f3efe15` (§0.1b): done; the depth sections to `4f3efe15` (`0de9776b`, `4f3efe15`): done; the TSP sections to `4f3efe15` (`2bee80f2`, `4f3efe15`): open | M9 (the gates use refsw3 directly meanwhile) |
+| polly2-rtl spec readers | re-transcribe isp §7-9, §15, num §3 (EdgeHW), H7a, H14, §4 (depth flavour), §8 (A1 edge site, A3, G3-G6, G12) to refsw3 `708fb8cd` (ARCHITECTURE §0.1): done; the edge sections to `4f3efe15` (§0.1b): done; the depth sections to `4f3efe15` (`0de9776b`, `4f3efe15`): done; the TSP sections to `4f3efe15` (`2bee80f2`, `4f3efe15`): done (M9, tsp header, §4.1, §4.3, §4.4, §8.1, §8.2, §9.1, §22) | M9 |
 | nulldc3 | a hex depth field (the key, or the word and offset) in the render log (conv G6) | M13 depth diffs |
-| nulldc3 | a defined value for MipSelect with `Sdet == 0` (D4), once F1 answers | M9 |
+| nulldc3 | ~~a defined value for MipSelect with `Sdet == 0` (D4)~~: done by `2bee80f2` (dzForce, measured: tsp2_mipdz, tsp2_mipdz2) | M9 |
+| nulldc3 | GetFpuEntry's cache (refsw_tile.cpp `fpuCache`) starts each region array entry with every tag 0 (ClearFpuCache's memset), so a tag of 0x00000000 right after it finds slot 0's zeroed entry and is never set up (an all-zero entry: no words, no planes). The console has no such cache; the RTL sets the tag up like any other. Unreachable in practice (skip is at least 1 in every TA list and in all 6,085 captured background tags), but a frame with such a tag would differ from refsw3: a valid bit or an impossible initial tag in the cache (found by M9's random class) | M12 |
 | nulldc3 | SB_ISTERR bit 0 in refsw3, if D11 says the RTL models it | MT9 |
 
 ## 5. Decisions only the owner can make
@@ -1259,7 +1342,7 @@ dreamcast-tests owner through `OPEN_ITEMS.md`. Never run from here. Ordered by w
 | D1 | Is the TA in scope (conv G7)? p2-offline keeps refsw3-ta in C++, so TA input during a render is never exercised | out of scope for rtl/v1 |
 | D2 | Display and SPG stalls in scope (conv G9)? | VRAM-model option only, off for timemeas, on for rendertimes |
 | D3 | ~~The FLOAT depth regime~~ | **closed**: unreachable in refsw3 `708fb8cd` (startOnSlopes 1); the RTL has no float regime and asserts it |
-| D4 | num §8 DEFECT D1: MipSelect divides by zero for `Sdet == 0` | refsw3 adopts `inv = +0` (K = 2^(-127 + size)) until F1 measures it; the RTL follows |
+| D4 | ~~num §8 DEFECT D1: MipSelect divides by zero for `Sdet == 0`~~ | **closed** by refsw3 `2bee80f2`: measured (tsp2_mipdz, tsp2_mipdz2), a length of all ones and the last level (dzForce); the RTL follows (M9: K8 and dz compared on every such primitive) |
 | D5 | Races policy: gate only the deterministic cells? Model run-to-run sources (refresh)? | deterministic cells only, with `races_expected.txt` keyed by probe; refresh as a VRAM-model option |
 | D6 | Hangs: reproduce bumphang, the SPAN_SORT_CFG 0x100 / 0x10001 hangs, two empty keep-Z tiles, the SCALER_CTL stall? | yes where a mechanism is stated (bumphang counter, `p2_tbuf_hs`, scaler stall), behind `P2_HANGS=1`; not the 0x100 / 0x10001 hangs (no mechanism, each try costs a power cycle) |
 | D7 | timemeas scenes: the owner's PC emission, or our own emitter | the owner's emission |
@@ -1267,6 +1350,7 @@ dreamcast-tests owner through `OPEN_ITEMS.md`. Never run from here. Ordered by w
 | D9 | ~~When the depthgaps patch lands~~ | **closed**: landed as `708fb8cd`; the stored depth is the 64-bit key behind `p2_zword_pkg` |
 | D10 | Module prefix `p2_`, unit folder names, frame subsets | as conventions.md and ARCHITECTURE §1.1 |
 | D11 (new) | SB_ISTERR bit 0 ("ISP out of cache"): a CPU-visible register bit with a measured rule [M ispcache], which refsw3 does not model | model it in `p2_isp_pcache` behind `P2_ISTERR=1`, and ask nulldc3 to add it to refsw3 so that rule 1 (no rule refsw3 lacks) holds; off by default meanwhile |
+| D12 (new, M9) | Sampled full gates (rule 10): "all phase-halt items" and "1-1.5 h" do not leave room for the "random subset of free-running segments". The 6,084 phase-halt items in full cost 47,409 CPU s (3,255 s queue wall at J 16, 2026-11-23; 49,681 in M7's exhaustive run, 90,611 in M8's on a busier box), so a 4,000 s isp-tile-full budget draws about 119 of 7,401 free-running segments (1.9 % of their weight) beside the 12 always-run ones, and none on a clean tree | as built: every phase-halt item in full, the random draws whatever the budget leaves (the gates' default). Alternatives: (a) `SAMPLE_PH_RENDERS=8`, each phase-halt case's first 8 renders where it has more (130 cases; a third to a half of the phase-halt weight freed for free-running draws; phase-halt carries the RTL's state, so a case cannot be cut elsewhere); (b) a larger `SAMPLE_BUDGET` (each further hour at J 16 is about 55,000 CPU s; the free-running items in full cost 124,000 CPU s in M7's exhaustive run, 339,000 in M8's) |
 
 ## 6. Risks
 

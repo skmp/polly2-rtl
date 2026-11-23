@@ -26,3 +26,4 @@ eop-where-it-came | p2_sort.sv | out_d.eop = last;\n      out_d.eoe = last && (s
 # ---- the structure
 closed-from-window-only | p2_sort.sv | assign closed = sv_closed \|\| eops != '0; | assign closed = eops != '0; | random | the pass's closed state forgotten when its eop item leaves early: the drain waits for a full window (a hang at the end of the stream)
 runq-read-same-clock | p2_runq.sv | assign rd     = n_mem != '0 && (!ov \|\| take); | assign rd     = n_mem != '0; | random | the run queue reads its RAM while the output register still holds an item not taken: that item is overwritten (lost)
+new-drain-every-item | p2_sort.sv | out_new_drain = emit && !hnull && !dr_v; | out_new_drain = emit; | random | new_drain (the TSP look-ahead's drain start) on every item, not only where a drain starts

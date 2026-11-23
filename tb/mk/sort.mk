@@ -6,7 +6,8 @@
 #                         free-running mode on M7's quick inputs, --dump-runs; redone when the ISP or its testbench
 #                         changed), lint-sort, the sorter on every recorded stream and on 100k random streams under
 #                         SPAN_SORT_CFG 0x101, 0x001 and 0x000; "sort: PASS" last; build/gate/sort/summary.txt
-#   make sort-full        the same with 1M random streams and the streams of M7's full set (isp-tile-full's inputs)
+#   make sort-full        the same with 1M random streams and the streams of M7's full set (isp-tile-full's inputs);
+#                         SAMPLE=<seed>: a seeded sample of it (PLAN 0 rule 10)
 #   make sort-mutants     the M8 mutants (tb/sort/mutants.txt) alone
 #   make sort-build       build/obj_sort/tb
 #   make lint-sort        verilator -Wall on p2_runq, p2_sort and the tb top (a prerequisite of make lint)
@@ -34,7 +35,7 @@ sort-build: $(SORT_REFOBJ)
 sort:
 	+@MAKE="$(MAKE)" bash tools/gate/gate_sort.sh
 sort-full:
-	+@MAKE="$(MAKE)" bash tools/gate/gate_sort.sh --full
+	+@MAKE="$(MAKE)" bash tools/gate/gate_sort.sh --full $(if $(SAMPLE),--sample $(SAMPLE))
 sort-mutants:
 	+@MAKE="$(MAKE)" bash tools/gate/gate_sort.sh --mutants
 

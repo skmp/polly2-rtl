@@ -29,6 +29,9 @@
 // slow cutter (the input offered one clock in 3, held in bursts: the window starves, so the emit condition is what keeps
 // the order); a slow TSP (the output stalls often, in bursts of up to 24 clocks).
 //
+// new_drain (the sorter's output to the TSP's look-ahead, ARCHITECTURE 3.6) is checked on every item with the sorter on:
+// 1 exactly on a pass's first item and where the key differs from the item before it in the pass, 0 on a null item.
+//
 // Reports per case its renders / streams, entries, passes and items, and the clocks: per item, the clocks the window
 // was full, the steps held by the emit condition, the drains (new_drain) and the drain ends without an emit, the run
 // queue's deepest occupancy; then "sort: <n> checks, <m> failures" and PASS / FAIL.
@@ -114,6 +117,11 @@ struct Tb {
 
     // statistics
     long items = 0, nulls = 0, passes = 0, entries = 0, drains = 0, waits = 0, ends = 0, fullClk = 0;
+    // new_drain (ARCHITECTURE 3.6: the TSP's look-ahead): with the sorter on, 1 exactly on a pass's first item and where
+    // the key (the tag, & ~7 with offset sort) differs from the item before it in the pass; never on a null item
+    bool ndFirst = true;
+    uint32_t ndKey = 0;
+    long ndChecks = 0;
     uint64_t c0 = 0;
     unsigned occMax = 0;
     bool broken = false;
@@ -146,6 +154,7 @@ struct Tb {
         inHold = outHold = 0;
         pushed = popped = 0;
         broken = false;
+        ndFirst = true;
     }
 
     // the input side: an item into the stream; at a pass's eop its expected order (refsw3's SpanSort)
@@ -308,6 +317,23 @@ struct Tb {
                   e.len, e.rm, e.epoch, e.vmask, e.pmask, e.eop, e.eoe, curCls)) {
             broken = true;
             return;
+        }
+        if (cfg & 1) {
+            const uint32_t key = g.tag & ((cfg & 0x100) ? ~7u : ~0u);
+            const bool want = !g.null_ && (ndFirst || key != ndKey);
+            ndChecks++;
+            if (!f.ok((bool)t->out_new_drain == want, "%s: item %zu out {null %d tag %08x y %d x %d epoch %d}: new_drain %d, expected %d "
+                      "(%s)", where.c_str(), popped - 1, g.null_, g.tag, g.y, g.x, g.epoch, (int)t->out_new_drain, want,
+                      g.null_ ? "a null item" : ndFirst ? "the pass's first item" : key != ndKey ? "a new key" : "the key of the item before")) {
+                broken = true;
+                return;
+            }
+            if (!g.null_) {
+                ndFirst = false;
+                ndKey = key;
+            }
+            if (g.eop)
+                ndFirst = true;
         }
         if (g.eoe) {
             if (!f.ok(t->eq_v && !recs.empty(), "%s: an eoe item out with no record in p2_entq", where.c_str())) {

@@ -78,8 +78,7 @@ Found while re-transcribing, for this document (it is not edited here; the spec 
 
 Four refsw3 commits followed `708fb8cd` (nulldc3 r8 round 1, dreamcast-tests `a932980`: every regress test exact,
 hugepos_rules and hugepos_v5 included). The edge rows are transcribed (spec sync, 2026-11-20), the depth rows too
-(depth spec sync, 2026-11-20); the TSP rows wait for their own sync, and until then refsw3 `4f3efe15` is the
-reference there (conv §1). `pvr_softfp.h` did not change in any of the four: no shared primitive moved. The TSP's
+(depth spec sync, 2026-11-20), the TSP rows by M9 (2026-11-23): every spec is at `4f3efe15`. `pvr_softfp.h` did not change in any of the four: no shared primitive moved. The TSP's
 plane adds now take the depth setup's zero rule (`2bee80f2`) and its reciprocal the same 2^126 limit (`4f3efe15`),
 so H10's DEPTH and TSP flavours are closer than before (num §4.2); M2 already brought `p2_fp_rng_add` /
 `p2_fp_rng_recip` there.
@@ -88,8 +87,8 @@ so H10's DEPTH and TSP flavours are closer than before (num §4.2); M2 already b
 |---|---|---|
 | `1040c4aa` edge.h `EdgeTile::Setup`, `Walk`; tile.cpp `RasterizeTriangle` | a big edge (E cut to 129) keeps its start and steps in units of 2^(E - 27) = 2^102, cut toward zero, its ordinary rows too (`EdgeHW::cutUnitBits` 27); the walk uses those values (no finer grid: `f0 = t0`, `fx = tx`, `fy = ty`, `z = zero2`, `H = 2^30` half units); the end compares the far value against ZERO, not 0; the far value is `R + (32 sx mod 2^131)` for sx > 0, `R + 2^131` for sx < 0 a multiple of 2^126, `R` otherwise; the row-31 shift applies to every polygon | done: isp §0, §8.2-8.6, §15 #1, #24, #25, §16, §17; num header, §3.1, §4.2, §5.1, §5.4, H11 `unitsAt`, G13; this document §2.4, §3.4.4, §3.4.5, §7; PLAN M2 |
 | `0de9776b` depth.h `DepthTileT::Setup`, `At`; tile.cpp | the depth start at the tile's first sample point (the corner with HALF_OFFSET[0] clear), every pixel whole steps from it (`h = 0` in the hardware); the zero rule in the depth setup's coordinate differences, edge sums and determinant (`DepthHW::zeroRuleCoords`, `zeroRuleEdges`). **The edge unit is not affected**: its `c`, `dx`, `dy` and `EdgeWinding` determinant use plain `pvrfp::Add` / `Sub` (isp §6.2); the depth unit computes its own `e`, `det` and coordinate differences (§3.4.4 step 6). Measured, no code change: REG's off-grid negative slopes toward zero, positive denormals by value, Big cut to 19 bits, REG's words among other planes' depths | edge: isp §6.2, §6.3 note, §15 #26, num G7. Depth: **done** (depth spec sync): isp §0, §6.3, §9.1-9.7, §15 #5, #6, #13, #26, §16, §17; num header, §0, §1.4, §2.5, §3.2, §4.1-4.3, §5.2, §5.5, H10, H12b, H14, §7.1, §7.3, §8 (A4, A5, D2, G5-G7); this document §2.4 `p2_ztile_t`, §3.4.4 steps 6-7, §3.4.5 depth lanes; PLAN M3 |
-| `2bee80f2` plane.h, tile.cpp | the TSP's plane adds take the ISP's zero rule; MipSelect with Sdet 0 takes the last level; a mipmapped texture declared taller than wide | **pending** (tsp; PLAN M9-M11) |
-| `4f3efe15` depth.h, plane.h; tile.cpp (comment) | a depth determinant of 2^126 or more (exactly included), or infinite, has a reciprocal of zero: depth 0 at every pixel; the TSP planes follow (every coefficient zero); the translucent sort orders such depths as the depth test (KeyAbove, no code change) | depth: **done** (isp §6.3, §9.3 steps 1 and 1b, §10.3, §15 #7, §16; num §0, §1.4, §3.2, §3.5, §4.1-4.3, §5.2, H10, G5; this document §2.4 CONST, §3.4.4 step 7; PLAN M3). TSP: **pending** (tsp; PLAN M9) |
+| `2bee80f2` plane.h, tile.cpp | the TSP's plane adds take the ISP's zero rule; MipSelect with Sdet 0 takes the last level; a mipmapped texture declared taller than wide | **done** (TSP spec re-transcription, M9, 2026-11-23): tsp header, §4.1, §4.4, §8.1, §8.2, §9.1, §22; this document §3.7.3 (the dropped-offset table); PLAN M9 |
+| `4f3efe15` depth.h, plane.h; tile.cpp (comment) | a depth determinant of 2^126 or more (exactly included), or infinite, has a reciprocal of zero: depth 0 at every pixel; the TSP planes follow (every coefficient zero); the translucent sort orders such depths as the depth test (KeyAbove, no code change) | depth: **done** (isp §6.3, §9.3 steps 1 and 1b, §10.3, §15 #7, §16; num §0, §1.4, §3.2, §3.5, §4.1-4.3, §5.2, H10, G5; this document §2.4 CONST, §3.4.4 step 7; PLAN M3). TSP: **done** (M9: tsp §4.3; this document §3.7.3; PLAN M9) |
 
 ### 0.2 Rules this architecture follows
 
@@ -1341,6 +1340,35 @@ select.
 - Crowded lines (more than ~12 triangles a line, opaque only): store thrash under the sorter's sweeps [I], not
   checked (T6).
 
+**As built (M9, `rtl/v1/tsp/p2_tsp_store.sv`; PLAN M9).** The text above, with the choices it left open:
+- **The SRQ** is `P2_TSP_SRQ_N` = 32 items in flip-flops (`p2_tsp_pkg`), each with its `new_drain`, the volumes it
+  needs and their entry indices; three pointers: push, the look-ahead, the head. `new_drain` rides along to run start
+  (M10's coefficient reload); the look-ahead does not need it (it looks every run up).
+- **The look-ahead** takes one key a clock: the item's volume 0 first, then volume 1 (an item that needs both takes two
+  clocks); a null item passes at once. A run needs volume 1 when some pixel n < len has `vmask[n]` with the shadow bit
+  and rm not PT_PASS0 / PT_PASSN, volume 0 when some pixel has not (refsw3 RenderParamTags / PixelFlush_tsp's
+  `InVolume`; the intensity mode does not change which volume a pixel uses, only what volume 1's entry holds).
+- **Keys** are compared on all 32 tag bits and vsel in a 16-way match. A miss takes the first unpinned entry from the
+  one after the last taken (FIFO replacement [G T6]) and pushes a setup job into a queue of `JOB_N` 2 [G]; with no
+  unpinned entry or no room for the job the look-ahead waits (a storage limit, tim §3.7).
+- **Pins** are counts: +1 for each key the look-ahead resolves to the entry (hit or new), -1 for each volume of each
+  run released (`rel`, the run's last store read: the pixel pipe's P10 in M11; the testbench in M9). An entry is
+  ready from its job's last store write; the head leaves only when every entry it needs is ready.
+- **The words** of an entry: a header (`p2_tsp_hdr_t`: the ISP / TSP / TCW words of the volume, the fallbacks, the
+  setup class) and K (`p2_tsp_k_t`: K8, dz) in a RAM each, and the 11 planes (`p2_tsp_plane_t`: A, B, C as `p2_fp16_t`,
+  84 bits) in **four banks** (plane p in bank p mod 4, three rows an entry), one write and one read port each; the setup
+  writes one plane a clock, the read port gives one word a clock, the clock after (die: §3.12).
+- **Across entries and tiles** the entries are kept (`STORE_KEEP` [G T6]); `flush` (a render's start: the parameters
+  and registers change) empties the store.
+- **Not transparent in refsw3 for one tag**: GetFpuEntry's cache is cleared with its tags at 0, so a tag of
+  0x00000000 (param_offs 0, skip 0, no shadow, tag_offset 0) right after ClearFpuCache finds slot 0's zeroed entry and
+  is never set up there; the RTL sets it up like any other. Unreachable in practice (skip is at least 1 in every list a
+  TA writes and in all 6,085 captured background tags); M9's reference primes slot 0 first and the request to nulldc3
+  is PLAN §4's.
+- Statistics (reported, not gated: T6): SRQ occupancy, entries pinned, the look-ahead's waits, jobs, hits. In M9's
+  testbench (random back-pressure, run start holding the ALU ~18 % of clocks): at most 14 entries pinned, the SRQ full
+  (32) behind setup-bound stretches.
+
 #### 3.7.2 `p2_tsp_pfetch`: TSP parameter fetch
 
 **Function.** Owns tsp §2.2 (tile.cpp `GetFpuEntry`, `decode_pvr_vertices` / `decode_pvr_vertex`).
@@ -1357,6 +1385,14 @@ select.
 **Interfaces.** Job in (tag); decoded primitive out; memory C3.
 
 **Cycle.** [M sort-off] A first setup costs ~19 clk more than a later one [I]: this fetch.
+
+**As built (M9, `rtl/v1/tsp/p2_tsp_pfetch.sv`).** One job at a time: the header's 3 or 5 words, then (once the ISP
+word is back: the fields depend on it) the three vertices' x, y, z and the fields of the job's volume only (volume 1's
+u1, v1, col1, spc1 and TSP[1] / TCW[1] for vsel with two volumes; volume 0's otherwise, the intensity entry too), one
+word request a clock to C3, at most `PF_OUT` 8 outstanding, the responses in order; the odd tag_offset's swap of
+vertices 0 and 1 on the way out; a FIFO of `PF_AHEAD` 2 fetched primitives to the setup, so the next job's fetch runs
+beside a setup. The address is the full PARAM_BASE + param_offs x 4 (GAP isp §3.3), 24 bits (p2_mem drops bit 23: the
+8 MB view). An untextured primitive is 3 + 3 x 4 = 15 words, a textured offset one 3 + 3 x 7 = 24.
 
 #### 3.7.3 `p2_tsp_setup`: plane setup and mip K
 
@@ -1395,19 +1431,20 @@ colour the shading uses is 0, the console skips their setup.
   scaled or the sent values is GAP.)
 - The RTL then writes the planes' coefficients without multiplying. They must still equal refsw3's tuples exactly
   (`mant = 0`; the sign is visible through `seen(±0) = ±2^-127`, tsp §5.1). With `AT = +0` on all three corners,
-  refsw3 (plane.h `PlaneT::Setup`) gives, branch by branch:
+  refsw3 (plane.h `PlaneT::Setup` at `4f3efe15`) gives, branch by branch:
 
   | branch of PlaneT::Setup | A | B | C |
   |---|---|---|---|
   | `det` zero or perpendicular (and not bad): the flat branch | +0 | +0 | ±0 with the sign of the 1/w `mean` (a bad mean: its sign) |
-  | `det` bad (infinite): `inv = 0` with det's sign | `AND(sign ta_k) XOR det.neg` | `AND(sign tb_k) XOR det.neg` | `AND(sign tc_k) XOR det.neg` |
-  | reciprocal below 2^-126 (`|det| > 2^126`): `inv = 0` with det's sign | as above | as above | as above |
+  | `det` bad (infinite): `inv = 0` with det's sign | ±0, `det.neg` | ±0, `det.neg` | ±0, `det.neg` |
+  | reciprocal zero (below 2^-126, or `|det| >= 2^126`): `inv = 0` with det's sign | as above | as above | as above |
   | ordinary | as above | as above | as above |
 
-  Here `ta_k`, `tb_k`, `tc_k` are the 1/w plane's per-corner terms (each a ranged product; an infinite one keeps its
-  sign, since `+0 x ±inf = ±0` in the TSP flavour). The AND is that of the both-zero Add rule applied twice (the
-  third-addition rule needs a non-zero operand, so it never acts). The sign of `recip24(det)` and of the zero `inv`
-  is `det.neg`.
+  Each term `AT_k x t_k` is a zero (`+0 x ±inf = ±0` in the TSP flavour) and, since `2bee80f2`, **every sum that is
+  zero is +0** (`addTerm`), so every sum is +0 and every coefficient `+0 x inv` has inv's sign, `det.neg` (`recip24`'s
+  and the zero reciprocal's sign). The table before M9 had `AND(sign t_k) XOR det.neg` there: the AND of the
+  both-zero Add, which `addTerm` no longer returns (it was the rule before tsp2_zadd, refsw3 `TSP_ZERO=1`); M9's graph
+  check and its A3 class prove the table above.
 - PLAN M9 proves this table against `fpu_entry` on a directed class: all-zero offsets x {det 0, perpendicular, det
   bad, `|det| > 2^126`, ordinary} x {1/w terms of every sign, zero, infinite} x {Gouraud, flat} x {intensity on,
   off}.
@@ -1429,6 +1466,41 @@ are checks on the parameters (MT4), not inputs.
 - **PT's 58 against 48 has no structural cause** in this design, and the RTL does not add one: a PT primitive runs
   the textured program. MT4 reports 58 and does not gate it (GAP, T6).
 
+**As built (M9, `rtl/v1/tsp/p2_tsp_setup.sv`, `tools/gen/gen_tsp_prog.cpp` -> `rtl/v1/pkg/p2_tsp_prog_pkg.sv`).**
+- **Classes** (the generator's, chosen at the accept from the fetched words): UNTEX (the 1/w plane and the four
+  colour planes: an untextured polygon reads no other plane, PixelFlush_tsp); TEX (+ U, V); TEX_O (+ the four offset
+  planes: Texture && Offset && the volume's texture not a bump map, the only case PixelFlush_tsp interpolates them; a
+  bump map and Offset without Texture read only the fallback); TEX_D (the offset planes dropped: every offset colour the
+  entry uses is 0, Gouraud the three corners, flat v3, the intensity entry the scaled ones); each textured one with K
+  when the volume's TCW is mipmapped, DCalcCtrl 0 (_M0) or 1 (_M1): 10 programs. A plane the class leaves out is a
+  plane no pixel of the entry reads; the gate compares the live words.
+- **The graphs** are `PlaneT::Setup`'s per plane (the 1/w plane's e_k, terms, sums `Sc = (t0 + t2) + t1`, Sdet, inv,
+  A0 / B0 / C0, the mean with withZero in its first addition; each attribute plane `a_k (w_k d)` from the 1/w plane's
+  terms, `Sc = (t0 + t1) + t2`, A0 / B0 / C0 and the flat C `attr_3 x mean`) and MipSelect's K part: the numerators of
+  the undivided sums (kind and product, their difference, the quotient check against 1/det^2), the two lengths
+  (0x95F612), the longer, once times 1/det^2, with DCalcCtrl 1 the sums at the first vertex (radd, reach 53). MipSelect's
+  path for a zero reciprocal (the divided coefficients) needs no multiply: those coefficients are zeros (tsp §8.1), so
+  its numerators are 0 or, by the infinite products' rule, an infinity; `inv2` carries that case as a marker. Counts:
+  UNTEX 71 multiplies, 43 additions, 1 reciprocal; TEX 97, 55, 1; TEX_O 149, 79, 1; K adds 16 multiplies and 13
+  additions (DCalcCtrl 1: 22, 19) and a second reciprocal (MipSelect's has no 2^126 limit).
+- **The outputs are the store writes** (one a step, the store's write port, scheduled like a unit): W_PL a plane (flat:
+  Sdet zero, or perpendicular to FPU_PERP_VAL, read from Sdet's register by p2_fp_perp: A = B = +0, C = cut16 of the
+  flat C; else cut16 of A0, B0, C0), W_DR a dropped plane (the table above, from Sdet's and the mean's signs), W_K
+  (K8 from best, the bias, 0 read as 4, and the size; dzForce for Sdet zero). The header is written at the accept.
+- **Scheduling** as M4's (§3.4.4): every value has its own register (312 over the ten classes, 41 inputs); a program
+  ends with its last store write, and the next job is accepted in that clock (the generator checks that every result
+  is written by then). At the §6 parameters (`TSP_NM` 4, `TSP_NA` 4, `L_MUL` 1, `L_ADD` 2, `L_RCP` 2) the lengths are
+  UNTEX 20, TEX 26, TEX_M0 31, TEX_M1 32, TEX_O 39, TEX_O_M0 44, TEX_O_M1 45, TEX_D 29, TEX_D_M0 34, TEX_D_M1 36.
+  Against the measured 39 / 48 / 64 / 49 / +5 (MT4's check, not an input; PLAN 0 rule 6): no parameter set of the
+  sweep (`make tsp-prog-sweep`) comes within 16 (the nearest, 2 multipliers and 2 adders: 37 / 50 / 76, dropping the
+  offsets 50); the measured offset planes cost 16 for four planes (4 a plane) where the graphs' 13 multiplies a plane
+  cost 6.5 at two multipliers: the console's attribute plane is cheaper than PlaneT::Setup's operation count, or its
+  measured 39 includes a fetch the program does not. Not padded; MT4 / T6, T7.
+- **Run start's use of the ALU** (`hold`): a step waits while run start has the ALU [G: the whole step, not slot by
+  slot]; single assignment keeps that safe. M9's testbench holds it on random clocks (~18 %).
+- Clocks in M9's testbench (VR_LAT 8, run start holding ~18 %, the reader taking every word of every run): 47.8
+  clocks a setup job, 39.0 from a job's accept to its last store write.
+
 #### 3.7.4 `p2_tsp_alu`: the shared arithmetic unit
 
 **Function.** Implements no rule of its own. It is the num H5, H6, H10, H8 and H11 instances that setup and run start
@@ -1443,6 +1515,14 @@ use:
 **Cycle.** [I tim §3.8] ~4 products a clock.
 - Arbitration [G]: run start first, setup's plane part takes the free slots.
 - The multiplier count cannot be told from timing (GAP T7).
+
+**As built (M9, `rtl/v1/tsp/p2_tsp_alu.sv`).** `P2_TSP_NM` 4 multipliers, `P2_TSP_NA` 4 adders, one reciprocal and the
+operand register file, as M4's p2_isp_alu; the operations per issue: MUL_T (the setup's and MipSelect's ranged mul),
+MUL_K (MipSelect's kind with its product), MUL_Q (the numerator's quotient check), MUL_I2 (1/det^2), MUL_B (the longer
+length times 1/det^2), MUL_P (plain); ADD_T (addTerm: p2_fp_rng_add TSP), ADD_W (the mean's first addition with
+withZero), ADD_R (radd), ADD_N (the numerator: p2_fp_mip_minor), ADD_LX / ADD_LN / ADD_BS (the lengths' and K's
+comparisons, p2_fp_le), ADD_P (plain); RCP_T / RCP_M (p2_fp_rng_recip). The run-start port is `hold` only in M9 (M10
+adds run start's own issues).
 
 #### 3.7.5 `p2_tsp_rstart`: run start
 
@@ -1686,7 +1766,7 @@ and RenderCORE's end-of-entry logic.
 Every primitive takes and returns the reference tuple as flat ports (num §6). Combinational by default. A unit may
 register a primitive's output as one of its pipeline stages; its lockstep testbench then compares at that latency.
 
-### 3.12 Die agreement (M2-M8)
+### 3.12 Die agreement (M2-M9)
 
 PLAN 0 rule 9: the HOLLY die shot (18 probable blocks, each labelled with a confidence; an interpretation of one
 optical image, not a reverse-engineering result) is a tie-breaker for grouping, boundaries and RAM sizes; console
@@ -1707,7 +1787,12 @@ changed for this note):
 | `p2_runq` (one RAM of `RUNQ_N` 300 x 124 bits, 37 Kbit; M8) and `p2_sort` (96 places in flip-flops; M8) | 7 span sorter queue (low): two long SRAMs, about 0.93 mm² each (about 60 Kbit each at the palette RAM's density, research/REPORT.md "Region 16's size") | the run queue is one long RAM between the ISP's cut strip (3) and the TSP side, as one of 7's two macros; its size (37 Kbit at 124 bits a run) is below one macro's estimated 60 Kbit, and the console's run word is likely narrower (timing.md 3.6: ~40 bits; vmask / pmask are this design's, [A]) | the second macro has no counterpart: the window here is flip-flops, because it compacts (a freed place is reused at once, timemeas order) and a shift structure is the plain way to do that; the console may keep the window's payload in the second RAM, indexed by place, with only keys and an age order in logic. Not changed: the measurements fix the window's behaviour, not its storage, and the function and clocks here do not depend on it. That 7 holds the sorter at all is low confidence (REPORT.md: they could serve the write-out) |
 | `p2_mem` (clients C1, C2; response FIFOs of `RSP_N` 8 per client and half; M6) | 15 texture memory arbiter / VRAM interface (low) | one arbiter for every VRAM client | no RAM macro is visible in 15 for the response buffers (small: flip-flops either way); the arbitration and buffer depths are GAP T9 / T14 |
 
-Outside M2-M8, for the units to come: 4 tile buffers (medium, four macros of the densest RAM) against `p2_tbuf`'s two
+| `p2_tsp_store`'s planes: 16 entries x 11 planes x 84 bits (14.8 Kbit) in four banks, plane p in bank p mod 4 (M9) | 5 TSP parameter cache (low): four equal SRAMs in a 2 x 2 | the four equal macros: the store's planes split four ways, the setup writing one plane a clock and run start reading per plane; the banks are the die's choice where nothing measured decides (T6) | the size: 16 entries [G T6] and the 84-bit planes (A, B, C kept as tuples, `p2_fp16_t`) are this design's; the die's macros may hold fewer, narrower words (a 16-bit float as 1 + 8 + 15 bits would be 72 a plane) |
+| `p2_tsp_store`'s header and K: two RAMs of 16 words, 166 and 21 bits (M9) | 5's one wide and one narrow SRAM to the right of the 2 x 2 (second photo) | a wide word per entry (the ISP / TSP / TCW words and the fallbacks) beside a narrow one (K) | the keys, pins and the SRQ are flip-flops here (a 16-way key match and a pointer walk); the narrow macro could as well be the keys |
+| `p2_tsp_setup` on `p2_tsp_alu` (`TSP_NM` 4, `TSP_NA` 4, two reciprocal issues a K job; M9) | 12 TSP setup FPU (low), apart from 11 (ISP setup) with a visible boundary between them | a setup datapath of the TSP's own, not the ISP's: no unit is shared with p2_isp_alu (the TSP's adders' zero rule reaches below the range, the ISP's does not; one adder each) | operator counts are the scheduler's at §6's values, which do not reach the measured lengths (§3.7.3 As built); the die gives no count; run start sharing this ALU (§3.7.4) is the architecture's [I tim §3.8], not the die's |
+| `p2_tsp_pfetch` (client C3, M9) | none identified (near 15) | - | the die says nothing |
+
+Outside M2-M9, for the units to come: 4 tile buffers (medium, four macros of the densest RAM) against `p2_tbuf`'s two
 1024 x 32 RAMs (§3.9).
 
 ## 4. Ordering and hazards: the observable orders and the mechanism that keeps each
@@ -1776,7 +1861,8 @@ Outside M2-M8, for the units to come: 4 tile buffers (medium, four macros of the
 | sorter emit / fill per clock; emit condition | 1 / 1; full or oldest epoch closed | [G] | T5 |
 | `SRQ_N` | 32 | [G] | T6 |
 | `STORE_N`, replacement, pin extent, `STORE_KEEP` across entries | 16, FIFO, to P10, kept | [M] / [G] | T6 |
-| `ALU_NM`, `ALU_NA`, `L_*` (TSP), arbitration | 4, 4, scheduler, run start first | [I] / [G] | T7, MT4 |
+| `ALU_NM`, `ALU_NA`, `L_*` (TSP), arbitration | 4, 4, 1 / 2 / 2 (M9: lengths UNTEX 20, TEX 26, TEX_O 39, +5 for K, +1 for DCalcCtrl 1; none of the sweep reaches 39 / 48 / 64), run start first (a held step) | [I] / [G] | T7, MT4 |
+| `JOB_N` (store to pfetch), `PF_OUT`, `PF_AHEAD` (TSP fetch) | 2, 8, 2 (M9) | [G] | T6 |
 | `PXQ_PIX`, `PXQ_RUNS`, position | 256, 48, before texturing | [M] ispq + spanahead, fitted | MT2 (fit), T7 |
 | `D_PP`: the pass drain | 11 (the P0-P10 depth) | [M] B = 1035 | MT6 (fit) |
 | SupSample points per clock | 1 | [G] | T16 |

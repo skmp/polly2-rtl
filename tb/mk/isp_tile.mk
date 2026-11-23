@@ -7,7 +7,8 @@
 #                             the captures (M6's and M7's pages, the dumps, scenegen seeds 1-200), lint-isp-tile, the
 #                             testbench in phase-halt mode and in free-running mode (--vramvary 7); "isp-tile: PASS" last;
 #                             build/gate/isp-tile/summary.txt
-#   make isp-tile-full        the same on the full set (every fit/hw test, every dump, seeds 1-5000)
+#   make isp-tile-full        the same on the full set (every fit/hw test, every dump, seeds 1-5000); SAMPLE=<seed>: a seeded
+#                             sample of it (PLAN 0 rule 10; tools/gate/sample_items.py, tools/gate/always_run.txt)
 #   make isp-tile-mutants     the M7 mutants (tb/isp_tile/mutants_m7.txt) alone
 #
 #   make isp-tile-op          the M6 gate (tools/gate/gate_isp_tile_op.sh): check_ref_copies, check_ref_switches, the
@@ -51,7 +52,7 @@ isp-tile-build: $(ISP_TILE_REFOBJ)
 isp-tile:
 	+@MAKE="$(MAKE)" bash tools/gate/gate_isp_tile.sh
 isp-tile-full:
-	+@MAKE="$(MAKE)" bash tools/gate/gate_isp_tile.sh --full
+	+@MAKE="$(MAKE)" bash tools/gate/gate_isp_tile.sh --full $(if $(SAMPLE),--sample $(SAMPLE))
 isp-tile-mutants:
 	+@MAKE="$(MAKE)" bash tools/gate/gate_isp_tile.sh --mutants
 isp-tile-op:

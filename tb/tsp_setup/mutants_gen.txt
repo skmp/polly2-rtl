@@ -1,0 +1,13 @@
+# tb/tsp_setup/mutants_gen.txt: the planted bugs of M9's operation graphs in tools/gen/gen_tsp_prog.cpp (PLAN M9 "Mutants":
+# the 1/w constant's sum order, the attribute product; and one graph edge removed, as M4), run by tools/gate/mutants.py
+# (make tsp-setup-mutants). The probe `graph` builds the mutated generator and runs its graph check (gen_tsp_prog --check)
+# on 200,000 random jobs and every directed one.
+# Format: tb/tsp_setup/mutants.txt's.
+@dir tools/gen TSP_GEN_DIR
+@obj TSP_GEN_OBJDIR
+@probe graph tsp-setup-graph-bin gen_tsp_prog --check --n 200000 --threads 4
+
+w-const-t0t1t2 | gen_tsp_prog.cpp | g.op2("ScW02", ADD_T, wc[0], wc[2]), wc[1]) | g.op2("ScW02", ADD_T, wc[0], wc[1]), wc[2]) | graph | the 1/w constant summed (t0 + t1) + t2 (uvmeas: 2400 of 2400 with (t0 + t2) + t1, fog of flat quads)
+attr-product-aw-d | gen_tsp_prog.cpp | ta[k] = g.op2("ta" + nm + std::to_string(k), MUL_T, AT[k], wa[k]); | ta[k] = g.op2("ta" + nm + std::to_string(k), MUL_T, g.op2("aw" + nm + std::to_string(k), MUL_T, AT[k], Z[k]), g.find(S("dy", k))); | graph | the attribute product (a_i w_i) d instead of a_i (w_i d) (uvmeas wflat: 600 of 600 against 581)
+det-without-e2 | gen_tsp_prog.cpp | g.op2("Sdet01", ADD_T, e[0], e[1]), e[2]) | g.op2("Sdet01", ADD_T, e[0], e[1]), e[1]) | graph | one graph edge removed: the determinant without e2
+minor-swapped | gen_tsp_prog.cpp | const int mux = minor("ux", su, sums[P_U].Sa, sw, SaW) | const int mux = minor("ux", sums[P_U].Sa, su, sw, SaW) | graph | MipSelect's numerator along x with its operands swapped (Sa_u Sc_w - Sc_u Sa_w: the y form)

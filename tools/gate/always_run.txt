@@ -1,0 +1,23 @@
+# tools/gate/always_run.txt: the work items a sampled full gate always runs (PLAN 0 rule 10, the owner's rule from M9
+# on: "a permanent always-run list of anything that ever failed"), read by tools/gate/sample_items.py.
+#
+# A line: <gate> <group> <id regex> [# why]. Add a line for every item a full or sampled gate ever failed (and keep it:
+# the list only grows), and for the cases whose bugs the mutants were built from. A sort-full line needs the
+# isp-tile-full free-running item that writes its stream (build/sort/rs-full) on the list too. A line of the gate that
+# names no item of the full gate fails the gate's sample step.
+#
+# No full gate has failed an item so far (isp-tile-full M7 / M8, sort-full M8: PASS). The cases the mutants' probes are
+# made of (the cases where M7's and M8's planted bugs show), and the pole:
+isp-tile-full phase-halt ^build/pre/(ptchunklag|ptchunkq|ptlayers|trtie|keepz|sort)$
+isp-tile-full phase-halt ^build/pre/dump_(shenmue_intro|jgr_tree_shadows2|f1wgp_driver)$
+isp-tile-full free-running ^build/pre/(ptchunklag|ptchunkq|ptlayers|trtie|keepz|sort)/r0-7$
+isp-tile-full free-running ^build/pre/dump_(shenmue_intro|jgr_tree_shadows2|f1wgp_driver)/r0-
+isp-tile-full free-running ^build/pre/ispcache/r0-7$                    # the quick gates' pole (ispcache's cache overflow)
+# the free-running items that write the run streams sort-full's always-run lines name (below): a sampled sort-full
+# reads the streams a sampled isp-tile-full wrote, so these must run in every isp-tile-full sample
+isp-tile-full free-running ^build/pre/dump_(thps2_ingame|f1wgp_menu|thps2_ingame2|rayman_lights)/r0-0$   # window 95 / 97
+# one line a stream (a line naming no item fails the sample step, so a missing stream shows):
+sort-full subset-0x101 ^dump_thps2_ingame\.r0-0\.rs\.gz$   # window 95 / 97
+sort-full subset-0x101 ^dump_f1wgp_menu\.r0-0\.rs\.gz$   # window 95 / 97
+sort-full subset-0x101 ^dump_thps2_ingame2\.r0-0\.rs\.gz$   # window 95 / 97
+sort-full subset-0x101 ^dump_rayman_lights\.r0-0\.rs\.gz$   # window 95 / 97

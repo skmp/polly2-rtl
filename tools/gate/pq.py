@@ -3,7 +3,8 @@
 a failing item never stops the others, the merged report decides). It replaces the static --shard k/N slices of
 run_shards.sh: a free worker takes the next item, longest first.
 
-    tools/gate/pq.py --name <name> --dir <log dir> [--jobs J] [--cost <file>] [--cancel-group-on-fail] <items file>
+    tools/gate/pq.py --name <name> --dir <log dir> [--jobs J] [--cost <file>] [--cancel-group-on-fail]
+                     [--optional <file> --deadline <s>] <items file>
 
 The items file, one item a line, tab-separated:
 
@@ -27,6 +28,10 @@ utilisation <u> %, slowest <group> <id> <s> s" and "<name>: PASS" / "FAIL" (the 
 item passes). <dir>/pq_results.tsv: group, id, verdict, wall, CPU, start, end (seconds from the queue's start) per item.
 --cancel-group-on-fail: the first failure of a group drops the group's other items (a mutant's probe: one failure
 decides).
+--optional <file> --deadline <s> (a sampled full gate's random draws, tools/gate/sample_items.py): an item the file
+lists ("<group>\t<id>" lines) starts only while its predicted end (the queue's elapsed seconds + its prio) is within the
+deadline; else its verdict is "skipped" (neither a pass nor a failure, not in the cost file), counted in its group's
+line ("<k> not started (the deadline)") and in pq_results.tsv. The other items always run.
 """
 import argparse
 import os
@@ -59,9 +64,17 @@ def main():
     ap.add_argument("--jobs", type=int, default=0)
     ap.add_argument("--cost", default="")
     ap.add_argument("--cancel-group-on-fail", action="store_true")
+    ap.add_argument("--optional", default="")
+    ap.add_argument("--deadline", type=float, default=0.0)
     a = ap.parse_args()
     J = a.jobs or pqlib.default_jobs()
     cost = pqlib.read_cost(a.cost) if a.cost else {}
+    optional = set()
+    if a.optional:
+        for line in open(a.optional):
+            f = line.rstrip("\n").split("\t")
+            if len(f) >= 2:
+                optional.add((f[0], f[1]))
     items, groups = [], []
     for n, line in enumerate(open(a.items), 1):
         line = line.rstrip("\n")
@@ -73,6 +86,7 @@ def main():
         it = {"group": f[0], "id": f[1], "est": float(f[2]), "slots": int(f[3]), "kind": f[4],
               "log": os.path.join(a.dir, f[5]), "cmd": f[6]}
         it["prio"] = cost.get((it["group"], it["id"]), it["est"])
+        it["optional"] = (it["group"], it["id"]) in optional
         items.append(it)
         if it["group"] not in groups:
             groups.append(it["group"])
@@ -84,6 +98,10 @@ def main():
     def job(it):
         def fn():
             it["start"] = time.monotonic() - t0
+            if it["optional"] and a.deadline > 0 and it["start"] + it["prio"] > a.deadline:
+                it["verdict"] = "skipped"
+                it["end"] = it["start"]
+                return
             st, wall, cpu = pqlib.run_cmd(pool, it["cmd"], it["log"], group=it["group"])
             it["end"] = time.monotonic() - t0
             it["wall"], it["cpu"] = wall, cpu
@@ -134,7 +152,7 @@ def main():
                         sections[w[2]] = sections.get(w[2], 0) + int(w[3])
         for k in sorted(sections):
             print(f"  section {k} {sections[k]} cases")
-        bad = [it for it in gi if it["verdict"] != "PASS"]
+        bad = [it for it in gi if it["verdict"] not in ("PASS", "skipped")]
         ok_all = ok_all and not bad
         if len(gi) == 1 and gi[0]["kind"] == "step":
             it = gi[0]
@@ -142,11 +160,14 @@ def main():
                   + (f", exit {it.get('exit')}" if bad else "") + ")")
             continue
         cancelled = sum(1 for it in gi if it["verdict"] == "cancelled")
-        span = max(it["end"] for it in gi) - min(it["start"] for it in gi) if gi else 0.0
-        cpu = sum(it["cpu"] for it in gi)
-        slow = max(gi, key=lambda it: it["wall"])
-        extra = f", {cancelled} cancelled" if cancelled else ""
-        print(f"{g}: {len(gi)} items, {checks} checks, {fails} failures (span {span:.1f} s, CPU {cpu:.1f} s; slowest "
+        skipped = sum(1 for it in gi if it["verdict"] == "skipped")
+        gr = [it for it in gi if it["verdict"] != "skipped"] or gi
+        span = max(it["end"] for it in gr) - min(it["start"] for it in gr) if gr else 0.0
+        cpu = sum(it["cpu"] for it in gr)
+        slow = max(gr, key=lambda it: it["wall"])
+        extra = (f", {cancelled} cancelled" if cancelled else "") + \
+            (f", {skipped} not started (the deadline)" if skipped else "")
+        print(f"{g}: {len(gi) - skipped} items, {checks} checks, {fails} failures (span {span:.1f} s, CPU {cpu:.1f} s; slowest "
               f"{slow['id']} {slow['wall']:.1f} s{extra})")
         print(f"{g}: {'PASS' if not bad else 'FAIL'}")
     with open(os.path.join(a.dir, "pq_results.tsv"), "w") as f:

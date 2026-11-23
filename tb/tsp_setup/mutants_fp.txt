@@ -1,0 +1,10 @@
+# tb/tsp_setup/mutants_fp.txt: M9's mutant of the TSP setup's adder in rtl/v1/lib/fp (PLAN M9 "zeroReach 2 to 3 (this
+# must fail on cmeas cwsum1-style vectors)"), run by tools/gate/mutants.py (make tsp-setup-mutants). The probe is the
+# TSP setup testbench on the cmeas cwsum1 set alone (2,400 Gouraud colour triangles at depths of 1 .. 1.75 x 2^-126 ..
+# 2^-123: slopes whose terms are zeros and numbers of 2^-126 .. 2^-124).
+# Format: tb/tsp_setup/mutants.txt's.
+@dir rtl/v1/lib/fp FP_DIR
+@obj TSP_SETUP_OBJDIR
+@probe cwsum1 tsp-setup-build tb --only console --set cwsum1 --max-fails 1
+
+zero-reach-3 | p2_fp_pkg.sv | localparam int P2_FP_ZERO_REACH = 2; | localparam int P2_FP_ZERO_REACH = 3; | cwsum1 | the TSP adders' zero rule up to 2^-124 (zeroReach 3): a zero against 2^-125 .. 1.5 x 2^-125 of the other sign gives +0

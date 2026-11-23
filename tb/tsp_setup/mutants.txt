@@ -1,0 +1,31 @@
+# tb/tsp_setup/mutants.txt: the planted bugs of M9's TSP set-up side in rtl/v1/tsp (PLAN M9 "Mutants", conventions.md
+# 7.7), run by tools/gate/mutants.py (make tsp-setup-mutants). Every one must be caught by its probe and the unchanged
+# folder must pass first. The graphs' mutants are tb/tsp_setup/mutants_gen.txt, the lib/fp one mutants_fp.txt.
+#
+# The probes (tb/tsp_setup/tsp_setup_tb.cpp, stopping at the first failure): `a3` the dropped-offset class in full;
+# `named` the directed cases; `console` the mipk / mipmeas / cmeas sets; `random` 20,000 random primitives.
+#
+# Format: <id> | <file in rtl/v1/tsp> | <original fragment> | <mutated fragment> | <probe> [args] | <what it breaks>
+# (\n a newline, \| a bar, \\ a backslash in a fragment).
+@dir rtl/v1/tsp TSP_DIR
+@obj TSP_SETUP_OBJDIR
+@probe a3 tsp-setup-build tb --only a3 --max-fails 1
+@probe named tsp-setup-build tb --only named --max-fails 1
+@probe console tsp-setup-build tb --only console --max-fails 1
+@probe random tsp-setup-build tb --only random --n 20000 --max-fails 1
+
+# ---- PLAN M9's list (the graph's two, the 1/w constant's order and the attribute product, are mutants_gen.txt's;
+# zeroReach is mutants_fp.txt's)
+k2-plus-one | p2_tsp_setup.sv | k2.mant    = 24'h95F612; | k2.mant    = 24'h95F613; | console | MipSelect's length constant 0x95F612 changed by one (mipk4: no other value at 2^-28)
+bias0-not-4 | p2_tsp_setup.sv | assign bias = (j_mipd == 4'd0) ? 4'd4 : j_mipd; | assign bias = j_mipd; | random | D adjust 0 not read as 4/4 (Berserk, mipmeas --bias0): K of a zero
+dropped-as-plus-zero | p2_tsp_setup.sv | if (flat) begin\n        sp_w.c.neg = mean_neg;\n      end else begin\n        sp_w.a.neg = sdet.neg;\n        sp_w.b.neg = sdet.neg;\n        sp_w.c.neg = sdet.neg;\n      end | ; | a3 | dropped offset planes stored as +0 (the signs of the table lost: seen(-0) = -2^-127 floors one unit low)
+flat-c-and-rule | p2_tsp_setup.sv | sp_w.c.neg = mean_neg; | sp_w.c.neg = (rf[P2_TSP_R_WC0].neg & rf[P2_TSP_R_WC1].neg & rf[P2_TSP_R_WC2].neg) ^ sdet.neg; | a3 | the flat branch's C sign from the AND rule of the 1/w terms (the table before 2bee80f2) instead of the mean's
+drop-on-sent | p2_tsp_setup.sv | if (oc[k][ch] != 8'h00) zero = 1'b0; | if (pr.spc[gour ? k : 2][8*ch +: 8] != 8'h00) zero = 1'b0; | a3 | the drop predicate on the sent offset colours, not the scaled ones the intensity entry uses (the class: no value changes)
+# ---- the structure
+flat-without-perp | p2_tsp_setup.sv | assign flat = dz \|\| perp; | assign flat = dz; | named | FPU_PERP_VAL's triangles not flat (perpmean_uv, perpmean_ovf)
+intensity-alpha | p2_tsp_setup.sv | cc[k][ch] = (intensity && ch < 3) ? cs[15:8] : c0; | cc[k][ch] = intensity ? cs[15:8] : c0; | named | the intensity entry's alpha scaled too (jgr_tree_shadows2: it keeps its alpha)
+store-key-no-vsel | p2_tsp_store.sv | if (e_valid[i] && k_tag[i] == lk_tag && k_vsel[i] == lk_vsel) begin | if (e_valid[i] && k_tag[i] == lk_tag) begin | random | the key without the volume: a run in the volume takes the other volume's entry (allfs)
+head-before-ready | p2_tsp_store.sv | assign h_ok   = (!h_need[0] \|\| e_ready[h_idx[0]]) && (!h_need[1] \|\| e_ready[h_idx[1]]); | assign h_ok   = 1'b1; | random | a run leaves the SRQ before its entries are set up
+victim-pinned | p2_tsp_store.sv | if (e_pin[i] == '0) begin | if (1'b1) begin | random | replacement ignores the pins: an entry a run still reads is set up again for another key
+pfetch-no-swap | p2_tsp_pfetch.sv | if (j.tag.tag_offset[0] && k < 2) o = 3'(1 - k); | if (1'b0 && k < 2) o = 3'(1 - k); | random | the odd strip triangle's vertices not swapped (the setup's arithmetic depends on the order)
+pfetch-masked-base | p2_tsp_pfetch.sv | j_base   <= param_base[23:0] + {jb.tag.param_offs_in_words, 2'b00}; | j_base   <= {param_base[23:20], 20'd0} + {jb.tag.param_offs_in_words, 2'b00}; | random | the ISP's PARAM_BASE & 0xF00000 for the TSP's fetch (refsw3: the full PARAM_BASE)

@@ -1,0 +1,29 @@
+// tsp_setup_lint.vlt: verilator -Wall waivers for make lint-tsp-setup (conventions.md 4.8): M9's p2_tsp_alu, _setup, _pfetch,
+// _store and the tb/tsp_setup top. The lib/fp and the shared packages' waivers are tb/fp's and tb/isp_setup's (included
+// by the rule); each waiver here names its file and its reason.
+`verilator_config
+// the generated package: a register index per value of every class's graph, read by the ROM's micro-words (not by name)
+lint_off -rule UNUSEDPARAM -file "*/p2_tsp_prog_pkg.sv"
+// the TSP's formats: the store's sizes are documentation where a unit sizes from the struct
+lint_off -rule UNUSEDPARAM -file "*/p2_tsp_pkg.sv"
+// K's cut: its sign and flag are not ports of K8 (positive, finite: the infinite and zero cases are made beside it)
+lint_off -rule PINCONNECTEMPTY -file "*/p2_tsp_setup.sv" -match "*'o_neg'*"
+lint_off -rule PINCONNECTEMPTY -file "*/p2_tsp_setup.sv" -match "*'o_bad'*"
+// the micro-word's store-write slot is p2_tsp_setup's, not the ALU's
+lint_off -rule UNUSEDSIGNAL -file "*/p2_tsp_alu.sv" -match "*'uw'[42:0]*"
+// the intensity scale's product: (c * scale) >> 8 keeps the high byte
+lint_off -rule UNUSEDSIGNAL -file "*/p2_tsp_setup.sv" -match "*'cs'[7:0]*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_tsp_setup.sv" -match "*'os'[7:0]*"
+// FPU_SHAD_SCALE: bits 8 (intensity) and 7:0 (the scale) are the register's
+lint_off -rule UNUSEDSIGNAL -file "*/p2_tsp_setup.sv" -match "*'fpu_shad_scale'[31:9]*"
+// K: the longer length is a magnitude (its sign is not read)
+lint_off -rule UNUSEDSIGNAL -file "*/p2_tsp_setup.sv" -match "*'best'[35]*"
+// PARAM_BASE: the 8 MB of the 32-bit view (bits 23:0)
+lint_off -rule UNUSEDSIGNAL -file "*/p2_tsp_pfetch.sv" -match "*'param_base'[31:24]*"
+// the look-ahead reads of an item its tag, length, rm, vmask and null flag
+lint_off -rule UNUSEDSIGNAL -file "*/p2_tsp_store.sv" -match "*'la_item'*"
+// the testbench top: the taps and fields the testbench does not read
+lint_off -rule PINCONNECTEMPTY -file "*/p2_tsp_setup_tb_top.sv"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_tsp_setup_tb_top.sv" -match "*'out_item'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_tsp_setup_tb_top.sv" -match "*'rd_hdr'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_tsp_setup_tb_top.sv" -match "*'uw_tap'*"
