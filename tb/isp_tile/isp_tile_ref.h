@@ -38,6 +38,7 @@ struct Run {
 // the registers the ISP reads
 struct Regs {
     uint32_t param_base, fpu_shad_scale, fpu_cull_val, fpu_perp_val, half_offset, bg_tag, bg_depth, isp_feed_cfg;
+    uint32_t span_sort_cfg;     // not the ISP's: the run-stream dump (--dump-runs) records it for M8's sorter gate
 };
 
 // the phase hook: tb/common/isp_live.h's Phase numbers (Z 0, OP 1, OP_MOD 2, OP_SHADE 3, ..., END 18)

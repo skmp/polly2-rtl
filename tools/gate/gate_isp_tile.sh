@@ -22,7 +22,8 @@
 #                                        live state at each render's end; a case runs in segments of 8 renders (the RTL's
 #                                        state carried within one; at a segment's start the RTL reset and synced from the
 #                                        reference, generators seeded from the case and the segment), so the numbers
-#                                        (clocks too) do not depend on how a case is cut into items (whole segments) or on J
+#                                        (clocks too) do not depend on how a case is cut into items (whole segments) or on J;
+#                                        each item's run stream into build/sort/rs (--dump-runs: M8's sorter gate's input)
 #   --full                the same on the full set (every fit/hw test, its first 256 renders; every dump; seeds 1-5000),
 #                         both modes. Under /tmp/polly2-rtl-gate.lock
 #   --mutants             the builds, the captures the probes use, the mutants of tb/isp_tile/mutants_m7.txt (every one
@@ -129,9 +130,14 @@ if [ "$mode" != --mutants ]; then
   gate_item "$items" lint-isp-tile - 4 1 step lint-isp-tile.log $MAKE -s lint-isp-tile
   python3 tools/gate/tile_items.py --list "$list" --group phase-halt --logs shards-halt --cost "$GATE_DIR/cost.txt" \
     --jobs "$J" -- build/obj_isp_tile/tb --phase-limit 5000000 >> "$items"
+  # the free-running items write their run streams for M8's sorter gate (tools/gate/gate_sort.sh): build/sort/rs (quick),
+  # build/sort/rs-full (full: cleared first; "complete" written when the gate passes)
+  rsdir=build/sort/rs
+  if [ "$mode" = --full ]; then rsdir=build/sort/rs-full; rm -rf "$rsdir"; fi
+  mkdir -p "$rsdir"
   python3 tools/gate/tile_items.py --list "$list" --group free-running --logs shards-free --split render \
     --cost "$GATE_DIR/cost.txt" --jobs "$J" -- build/obj_isp_tile/tb --mode free --vramvary 7 --phase-limit 500000000 \
-    >> "$items"
+    --dump-runs "$rsdir" >> "$items"
   gate_queue queue "$items"
   note "phase-halt: $(summ "$GATE_DIR/shards-halt")"
   note "phase-halt: $(clocks "$GATE_DIR/shards-halt") (from the entry's accept to its end, halts excluded; VR_LAT 8)"
@@ -141,4 +147,5 @@ fi
 if [ "$mode" = --mutants ]; then
   gate_mutants mutants tb/isp_tile/mutants_m7.txt --njobs "${ISP_TILE_MUT_NJOBS:-4}"
 fi
+[ "$mode" = --full ] && [ "$GATE_FAILED" = 0 ] && echo "isp-tile-full $(date +%F)" > build/sort/rs-full/complete
 gate_end

@@ -1,0 +1,8 @@
+# tb/sort/mutant_cases.txt: the recorded run streams of tb/sort/mutants.txt's `subset` probe (make sort-mutants), written
+# by the ISP tile testbench (--dump-runs; tools/gate/gate_sort.sh makes them when missing). Of M7's 292 quick cases a
+# window of 95 places puts runs out of order in 59, one of 97 in 58 (agents/m8, 2026-11-22): every one of them a game
+# dump but depth2_denorm. These four are the cheapest where both fail.
+build/sort/rs/dump_thps2_ingame.r0-0.rs.gz
+build/sort/rs/dump_f1wgp_menu.r0-0.rs.gz
+build/sort/rs/dump_thps2_ingame2.r0-0.rs.gz
+build/sort/rs/dump_rayman_lights.r0-0.rs.gz

@@ -1,0 +1,2 @@
+// sort_lint.vlt: verilator -Wall waivers for make lint-sort (conventions.md 4.8). Each waiver names its file and its reason.
+`verilator_config

@@ -73,6 +73,7 @@ Regs regs()
     r.bg_tag = ISP_BACKGND_T.full;
     r.bg_depth = ISP_BACKGND_D.i;
     r.isp_feed_cfg = ISP_FEED_CFG.full;
+    r.span_sort_cfg = SPAN_SORT_CFG;
     return r;
 }
 

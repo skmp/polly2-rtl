@@ -199,7 +199,9 @@ These sit between unit and frame. They are the main bring-up tool for the ISP an
 **Inputs.**
 - **Pre-render captures.** `tools/gate/capture_prerender.sh <case>` writes `build/pre/<case>/r<k>/{vram.bin.gz,
   pvr_regs.bin}` for each render k, and refsw3-offline's video memory after it, `r<k>/post/vram.bin.gz` (gzipped: a
-  game frame is 3 MB that way, not 16; `p2ref::load_state` reads both forms). Sources:
+  game frame is 3 MB that way, not 16; `p2ref::load_state` reads both forms), the first `--max` renders; the max is
+  recorded in `build/pre/<case>/max` and a case is captured again when another max would capture other renders (M8).
+  Sources:
   - a dreamcast-tests page: its PC stream, with `save` inserted before and after each render trigger (readbacks
     answered by refsw3-offline, as in run2.sh `off`);
   - a polly2-data dump (`dump:<scene>`): `pvrdmp <file>`, or for legacy dumps `regs ...; vram ...`, then the render;
@@ -896,6 +898,13 @@ the barrier at its sweeps), `p2_isp_pix.sv` (PT and AUTOSORT rules, `more`, the 
   descriptors; free-running with `--vramvary 7` (6,287 s) the same stream, 4,265,575 rows held by the barrier. 0
   failures. Clocks: phase-halt mean 774 an entry (max 1,072,009); free-running 1,738 an entry over a render (max
   4,741,905 one entry).
+- **Full gate again (2026-11-23, M8's capture fix)**: that run had used the quick gates' 8-render captures of 48 fit/hw
+  tests (capture_prerender.sh did not check `--max`; M8 status). With each test's first 256 renders: 18,386 renders,
+  3,125,873 entries; phase-halt 27,137,146 phase boundaries, 4,343,983 SHADE passes, 165,883,262 runs, 2,931,313 null eoe
+  items, 73,867,702 feedback messages, 7,189,837 replayed descriptors; free-running (`--vramvary 7`) the same stream,
+  6,145,921 rows held by the barrier. 0 failures. Clocks: phase-halt mean 763 an entry (max 4,240,627); free-running
+  1,756 an entry over a render (max 18,876,166 one entry). 30,783 s wall at J 16 (89 %), its pole ispcache's renders
+  8-15 free-running (11,343 s: ispcache has 18 renders, not 8).
 
 **Deliverables.**
 - `p2_isp_ctl` complete (with `p2_isp_ctl_tg` as a pass-through, `P2_PTCARRY = 0`).
@@ -933,6 +942,50 @@ the barrier at its sweeps), `p2_isp_pix.sv` (PT and AUTOSORT rules, `more`, the 
   of a walk) that drops the overflowed primitives.
 
 ### M8. Run queue and span sorter
+
+**Status (2026-11-22): done**. `make sort` (tools/gate/gate_sort.sh, `tb/mk/sort.mk`), `make
+sort-mutants`, `make sort-full`; scratch in `agents/m8/`. RTL in `rtl/v1/sort/`: `p2_runq.sv` (one RAM of `RUNQ_N` 300,
+its read register the output), `p2_sort.sv` (the 96-place compacting window, the epoch key, the emit condition, the
+flags' re-attachment, null items, bypass); `p2_entq` is M7's `rtl/v1/isp/p2_isp_entq.sv`, hooked up in the testbench
+top `tb/sort/p2_sort_tb_top.sv` as in p2_core (pushed with the eoe item into the run queue, popped when it leaves the
+sorter). ARCHITECTURE 3.5 / 3.6 "As built (M8)" give the choices; 3.12 the die agreement. Where the tree differs from
+the text below:
+- **The subset's run streams** are M7's: the ISP tile testbench in free-running mode writes every item p2_isp_cut
+  emitted, after checking it against refsw3, with each eoe item's entry record and each render's SPAN_SORT_CFG
+  (`--dump-runs`, `tb/common/runstream.h`; build/sort/rs/<case>.r0-<n-1>.rs.gz). `make isp-tile` writes them, and `make
+  sort` makes the ones older than the ISP tile testbench or their capture (a work item a case; ispcache alone ~1,200 s,
+  the pole); `make isp-tile-full` writes the full set's into build/sort/rs-full for `make sort-full`.
+- **The reference** is refsw3's SpanSort itself (`p2ref::span_sort` through `tb/sort/sort_ref.cpp`, SPAN_SORT_CFG written
+  into the register block) on each pass of the stream (eop to eop); the expected stream is those passes in order with
+  the null items where they came. Passes run back to back with no barrier; only where the ISP tile testbench had reset
+  the RTL (a free-running segment's start, where p2_isp_cut's epoch restarts) the testbench waits for the sorter to empty.
+- **SPAN_SORT_CFG** is the run's (0x101, 0x001, 0x000), not the render's register; each stream runs under all three.
+- **Back-pressure** classes, per render (subset) or stream (random): none; random gaps on both sides; a slow cutter (the
+  input offered one clock in three, held in bursts); a slow TSP (stalls of up to 24 clocks).
+- **Random streams** as listed below, in blocks of 1,000 (a work item a block; epoch from a random start, carried and
+  wrapping across the block's streams); runs per row and the rows' density are drawn towards small numbers (~370 items
+  a stream) so that 100k fit the quick gate.
+- **Gate** (quick, J 16: 1,601 s when every stream is made, the streams 1,207 s of it; 344 s when they are there): every
+  check passes under each SPAN_SORT_CFG. Subset: 292 streams, 625 renders, 121,318 entries, 184,598 passes, 8,100,965
+  runs and 110,121 null items (M7's counts, every one), 8,638,904 checks a configuration. Random: 100,000 streams,
+  418,360 entries, 816,404 passes, 36,418,697 runs and 174,665 null items, 38,246,586 checks a configuration.
+- **Clocks** (reported, not gated; T5): items a clock under back-pressure 5.72 / 6.18 / 5.77 (subset, 0x101 / 0x001 /
+  0x000) and 5.44 / 5.53 / 5.24 (random); drains on the subset 356,982 (22.7 runs a drain) at 0x101, 447,275 (18.1) at
+  0x001; the drains ending with a clock of no emit 172,384 and 262,677; the run queue full (300) in both classes.
+- **Mutants** (`tb/sort/mutants.txt`, probes `subset` = 4 game dumps' streams, `random` = 4,000 random streams, both at
+  0x101): PLAN M8's 8 (window 95 and 97 on the subset: of the 292 streams 59 fail at 95 and 58 at 97, all game dumps but
+  depth2_denorm; the circular FIFO with holes; the youngest-first drain; the key without `& ~7`; the epoch out of the
+  key; emitting without the emit condition, which fails in the slow-cutter class; eop / eoe left where they came in)
+  and 2 of the structure (the closed state forgotten when the eop item leaves early; the run queue reading over its
+  output register): `make sort-mutants` 10 of 10 (69 s).
+- **Full gate** (`make sort-full`, once, 1,801 s): the 7,401 run streams `make isp-tile-full` wrote (18,386 renders,
+  3,125,873 entries, 4,343,983 passes, 165,883,262 runs, 2,931,313 null items; 179,425,106 checks a configuration) and
+  1,000,000 random streams (8,142,709 passes, 363,720,964 runs; 381,944,185 checks a configuration), under 0x101, 0x001
+  and 0x000: 0 failures. Items a clock 5.86 / 5.80 / 5.86 (streams), 5.48 / 5.58 / 5.24 (random).
+- **The captures' --max** (owner's decision, 2026-11-22): capture_prerender.sh records the max a case was captured with
+  (build/pre/<case>/max) and captures again unless that is the max asked for or the case's stream ended before both
+  (captures from before: max = their renders when 8 or more). The full gates no longer reuse the quick gates' 8-render
+  captures; the quick gates in turn capture again after a full one (their inputs stay their first 8 renders).
 
 **Deliverables.** `p2_runq`, `p2_sort` (epoch key, emit condition, flag re-attachment, bypass), `p2_entq`.
 

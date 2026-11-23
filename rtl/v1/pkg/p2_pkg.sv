@@ -102,7 +102,8 @@ package p2_pkg;
   // 2.2 words and tags
   // ---------------------------------------------------------------------------------------------------------------
   // the full ISP_BACKGND_T word (isp 3.5); refsw3 keeps all 32 bits in tagA, tagB, opTag, refTagC, resTag
-  // (ClearBuffers(ISP_BACKGND_T.full)). The sort key is bits 23:0. Fields as pvr_regs.h ISP_BACKGND_T_type.
+  // (ClearBuffers(ISP_BACKGND_T.full)). The span sorter's key is all 32 bits, & ~7 with offset sort (refsw3 SpanSort;
+  // p2_sort, M8; this comment said bits 23:0 before M8). Fields as pvr_regs.h ISP_BACKGND_T_type.
   typedef struct packed {
     logic [2:0]  hi;                    // [31:29] 0 for every primitive tag; the background tag keeps what software wrote
     logic        cache_bypass;          // [28]

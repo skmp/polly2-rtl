@@ -19,8 +19,12 @@
 # refsw3-offline did not render (it refuses a render that reads a register never written, or a region array with no
 # last entry); build/pre/<case>/info.txt. <case> is the test's name, dump_<scene> or gen_<seed>. Only the first R
 # renders (--max, default 64) are captured; after them the stream goes nowhere and a readback gets zeros (a binary
-# search by readbacks, zword's, runs thousands of renders otherwise). A case whose info.txt is newer than
-# refsw3-offline and its source (the test's main.c, the dump, scenegen) is not redone. CAP_TIMEOUT: seconds refsw3-offline
+# search by readbacks, zword's, runs thousands of renders otherwise). R is recorded in build/pre/<case>/max. A case whose
+# info.txt is newer than refsw3-offline and its source (the test's main.c, the dump, scenegen) is not redone if it is
+# what --max R would make (same_max below: its recorded max is R, or its stream ended before both caps); otherwise it is
+# captured again, also when R is smaller (the quick gates' --max 8 after the full gates' --max 256: a quick gate's
+# inputs stay its first 8 renders). Until 2026-11-22 the max was not checked, and the full gates reused the quick
+# gates' 8-render captures (48 fit/hw tests, e.g. ptchunkq: 200 renders, zovf_word: 256). CAP_TIMEOUT: seconds refsw3-offline
 # may take on one case (600). The cases run N at a time (-j, default tools/gate/jobs.sh's) from one queue, longest first: by the
 # seconds the case's last capture took (build/pre/<case>/secs), else by kind (a test, which may render up to R times,
 # before a dump before a seed): PLAN 0 rule 8. CAP_PRE: the output folder (build/pre; a scratch one for a comparison).
@@ -55,6 +59,17 @@ done
 [ -x "$OFF" ] || { echo "capture_prerender: no $OFF (make refsw3-offline)"; exit 1; }
 rev=$(git -C "$NULLDC3" rev-parse --short HEAD 2>/dev/null)
 
+# a capture made with --max M holds n = min(renders, M) renders; it is what --max MAXR would make iff n < M and n <= MAXR
+# (the stream ended before either cap), or M = MAXR. Captures from before the max was recorded (no max file): M = n
+# when n >= 8 (they were made with --max 8, 64 or 256), so they count only for MAXR = n; n < 8 is a stream that ended.
+same_max() {
+  local out=$1 n m
+  n=$(ls -d "$out"/r* 2>/dev/null | wc -l)
+  if [ -f "$out/max" ]; then m=$(cat "$out/max"); elif [ "$n" -lt 8 ]; then m=8; else m=$n; fi
+  [ "$m" = "$MAXR" ] || { [ "$n" -lt "$m" ] && [ "$n" -le "$MAXR" ]; }
+}
+export -f same_max
+
 one() {
   local c=$1 name src w out stream st
   case "$c" in
@@ -65,7 +80,7 @@ one() {
   esac
   [ -f "$src" ] || { echo "capture_prerender: $c: no $src"; return 1; }
   out=$PRE/$name
-  if [ -f "$out/info.txt" ] && [ "$out/info.txt" -nt "$OFF" ] && [ "$out/info.txt" -nt "$src" ]; then
+  if [ -f "$out/info.txt" ] && [ "$out/info.txt" -nt "$OFF" ] && [ "$out/info.txt" -nt "$src" ] && same_max "$out"; then
     echo "capture_prerender: $name: up to date ($(cat "$out/info.txt"))"; return 0
   fi
   rm -rf "$out" && mkdir -p "$out/work"
@@ -142,6 +157,7 @@ one() {
   s=$(ls "$out"/r*/skipped 2>/dev/null | wc -l)
   [ "$n" -gt 0 ] || { echo "capture_prerender: $name: no render"; tail -n 3 "$w/off.log"; : > "$out/norender"; return 1; }
   rm -rf "$w"
+  echo "$MAXR" > "$out/max"
   echo "$n renders captured ($s not rendered by refsw3-offline), refsw3 $rev" > "$out/info.txt"
   echo $((SECONDS - t0)) > "$out/secs"
   echo "capture_prerender: $name: $(cat "$out/info.txt")"

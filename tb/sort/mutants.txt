@@ -1,0 +1,28 @@
+# tb/sort/mutants.txt: the planted bugs of M8's run queue and span sorter in rtl/v1/sort (PLAN M8 "Mutants",
+# conventions.md 7.7), run by tools/gate/mutants.py (make sort-mutants). Every one must be caught by its probe and the
+# unchanged folder must pass first.
+#
+# The probes (tb/sort/sort_tb.cpp, SPAN_SORT_CFG 0x101 as every game sets it, stopping at the first failure):
+# `subset`, the recorded run streams of tb/sort/mutant_cases.txt (M7's tile subset as p2_isp_cut emitted it: the cases
+# where 95 and 97 places put runs out of order); `random`, 4,000 random streams (4 blocks), every back-pressure class (the
+# slow cutter's among them).
+#
+# Format: <id> | <file in rtl/v1/sort> | <original fragment> | <mutated fragment> | <probe> [args] | <what it breaks>
+# (\n a newline, \| a bar, \\ a backslash in a fragment).
+@dir rtl/v1/sort SORT_DIR
+@obj SORT_OBJDIR
+@probe subset sort-build tb --cfg 0x101 --max-fails 1 @tb/sort/mutant_cases.txt
+@probe random sort-build tb --cfg 0x101 --random 4000 --block 1000 --max-fails 1
+
+# ---- PLAN M8's list
+window-95 | p2_sort.sv | parameter int WIN = 96 | parameter int WIN = 95 | subset | a window of 95 places (timemeas order: 129 / 246 runs out of order against 6 / 20 at 96)
+window-97 | p2_sort.sv | parameter int WIN = 96 | parameter int WIN = 97 | subset | a window of 97 places (timemeas order: 150 / 276 out of order)
+circular-fifo | p2_sort.sv | assign kill_v = 1'b0;\n  assign rm_v   = take;\n  assign rm_i   = hnull ? '0 : sel; | assign kill_v = take && !hnull;\n  assign rm_v   = (take && hnull) \|\| (!take && cnt != '0 && hl[0]);\n  assign rm_i   = (hnull \|\| hl[0]) ? '0 : sel; | random | a circular FIFO with holes instead of compaction: a freed place is reused only when the head reaches it (timemeas order: 485-631 out of order)
+youngest-first | p2_sort.sv | for (int i = WIN - 1; i >= 0; i--) | for (int i = 0; i < WIN; i++) | random | the drain takes the primitive's youngest run in the window, not its oldest
+key-no-offset-mask | p2_sort.sv | assign kmask = cfg_offs ? ~32'h7 : ~32'h0; | assign kmask = ~32'h0; | random | offset sort (SPAN_SORT_CFG bit 8) ignored: the key keeps tag bits 2..0, a strip's triangles are primitives of their own (spansortcfg)
+epoch-out-of-key | p2_sort.sv | m[i]    = live[i] && !w[i].null_ && w[i].epoch == p_ep && (w[i].tag & kmask) == p_tag; | m[i]    = live[i] && !w[i].null_ && (w[i].tag & kmask) == p_tag; | random | the epoch left out of the key: a drain takes the next pass's runs of the same primitive (passes mix)
+no-emit-condition | p2_sort.sv | assign ok     = !cfg_on \|\| full \|\| closed; | assign ok     = 1'b1; | random | emitting without the emit condition: a drain runs on a window the cutter has not filled (the slow-cutter class)
+eop-where-it-came | p2_sort.sv | out_d.eop = last;\n      out_d.eoe = last && (sv_eoe \|\| w[sel].eoe); | out_d.eop = w[sel].eop;\n      out_d.eoe = w[sel].eoe; | random | eop / eoe left on the item that came in last, not moved to the pass's last item to leave
+# ---- the structure
+closed-from-window-only | p2_sort.sv | assign closed = sv_closed \|\| eops != '0; | assign closed = eops != '0; | random | the pass's closed state forgotten when its eop item leaves early: the drain waits for a full window (a hang at the end of the stream)
+runq-read-same-clock | p2_runq.sv | assign rd     = n_mem != '0 && (!ov \|\| take); | assign rd     = n_mem != '0; | random | the run queue reads its RAM while the output register still holds an item not taken: that item is overwritten (lost)

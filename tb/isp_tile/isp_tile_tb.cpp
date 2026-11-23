@@ -44,6 +44,11 @@
 // the generators are seeded from the case's index in the list (and the segment), never from the shard or what ran
 // before in the process: phase-halt's back-pressure and VRAM model variation per case, free-running's per segment.
 //
+// --dump-runs <dir> (free-running mode): every case's run stream as the TSP's side popped it, each item after it was
+// checked, the eoe items with their entry records, a record with SPAN_SORT_CFG before each render, into
+// <dir>/<case's folder name>.rs.gz, with --renders A-B <dir>/<case>.rA-B.rs.gz (tb/common/runstream.h; M8's sorter
+// gate reads them: tb/sort). A case with a failure writes none (its file is removed).
+//
 // The VRAM model (tb/common/vram_model.h) serves C1 and C2 from refcore's emu_vram; --vramvary S varies its latency and
 // readiness at random (seed S): the values must not change (PLAN 1.6), only the clocks.
 //
@@ -59,6 +64,8 @@
 #include <sys/stat.h>
 #include <vector>
 
+#include <zlib.h>
+
 #include "Vp2_isp_tile_tb_top.h"
 
 // free-running mode's segment (the header): the renders the RTL runs with its own state carried, from a sync
@@ -68,6 +75,7 @@ static const int SEG = 8;
 #include "isp_live.h"
 #include "isp_tile_ref.h"
 #include "p2tb.h"
+#include "runstream.h"
 #include "vram_model.h"
 
 namespace {
@@ -141,6 +149,16 @@ struct Tb {
     int expEpoch = 0;
     long eoeSeen = 0, recsSeen = 0;
     std::deque<std::pair<bool, uint32_t>> recq;   // eoe items popped whose record is due: (valid, tile) for messages
+
+    // --dump-runs: the case's stream file (null: none)
+    gzFile dump = nullptr;
+    uint32_t sortCfg = 0;               // the render's SPAN_SORT_CFG
+    bool resetSince = true;             // the RTL was reset since the last render record (its epoch restarts at 0)
+    void dump_rec(const p2rs::Rec& r)
+    {
+        if (dump)
+            gzwrite(dump, &r, sizeof r);
+    }
 
     // the case's state
     bool broken = false;                // the RTL lost step with the reference: the render's later entries are skipped
@@ -296,6 +314,7 @@ struct Tb {
     void reset()
     {
         // the TSP side's state too: what ran before (another case, the render before) must not reach into this one
+        resetSince = true;
         stallLeft = 0;
         fbDelay = 0;
         outc = nullptr;
@@ -762,6 +781,31 @@ struct Tb {
         }
     }
 
+    // an item checked against the reference, into the --dump-runs file; an eoe item with its entry's record
+    void dump_item(const Item& g, const EntryRec& r)
+    {
+        if (!dump)
+            return;
+        p2rs::Rec d{};
+        d.kind = p2rs::K_ITEM;
+        d.flags = (g.null_ ? p2rs::F_NULL : 0) | (g.eop ? p2rs::F_EOP : 0) | (g.eoe ? p2rs::F_EOE : 0);
+        d.y = (uint8_t)g.y;
+        d.x = (uint8_t)g.x;
+        d.len = (uint8_t)g.len;
+        d.rm = (uint8_t)g.rm;
+        d.epoch = (uint8_t)g.epoch;
+        d.tag = g.tag;
+        d.vmask = g.vmask;
+        d.pmask = g.pmask;
+        if (g.eoe) {
+            d.tilex = (uint8_t)r.e.tilex;
+            d.tiley = (uint8_t)r.e.tiley;
+            d.ent = (r.e.z_keep ? p2rs::E_ZKEEP : 0) | (r.e.no_writeout ? p2rs::E_NOWO : 0) |
+                    (r.e.last ? p2rs::E_LAST : 0) | (r.shadedAny ? p2rs::E_SHADED : 0);
+        }
+        dump_rec(d);
+    }
+
     // the RTL on the recorded render, no halt; the stream checked as it comes
     uint64_t freeClk = 0;
     void run_free()
@@ -776,6 +820,14 @@ struct Tb {
         char b[400];
         recExp.clear();
         recShaded.clear();
+        {
+            p2rs::Rec rr{};
+            rr.kind = p2rs::K_RENDER;
+            rr.flags = resetSince ? p2rs::R_RESET : 0;
+            rr.tag = sortCfg;
+            resetSince = false;
+            dump_rec(rr);
+        }
         while (!broken) {
             // the next entry, as soon as ctl takes one
             if (fed < rec.size() && t->ent_rdy) {
@@ -825,6 +877,7 @@ struct Tb {
                         break;
                     }
                     nulls++;
+                    dump_item(g, r);
                     ei++;
                     pi = ri = 0;
                     continue;
@@ -851,6 +904,7 @@ struct Tb {
                     break;
                 }
                 runsN++;
+                dump_item(g, r);
                 // a punch-through pass: the TSP answers its pixels as their runs come, PASS_DONE after the last
                 if (ps.rm == RM_PT0) {
                     if (ri == 0) {
@@ -919,6 +973,7 @@ int main(int argc, char** argv)
     bool freeMode = false, opOnly = false;
     long maxFails = 0;
     long rFirst = 0, rLast = -1;        // --renders: every render (rLast < 0)
+    std::string dumpDir;                // --dump-runs
     std::vector<std::string> cases;
     for (size_t i = 0; i < a.rest.size(); i++) {
         const std::string& s = a.rest[i];
@@ -932,6 +987,8 @@ int main(int argc, char** argv)
             freeMode = a.rest[++i] == "free";
         else if (s == "--op-only")
             opOnly = true;
+        else if (s == "--dump-runs" && i + 1 < a.rest.size())
+            dumpDir = a.rest[++i];
         else if (s == "--max-fails" && i + 1 < a.rest.size())
             maxFails = atol(a.rest[++i].c_str());
         else if (s == "--renders" && i + 1 < a.rest.size()) {
@@ -966,6 +1023,10 @@ int main(int argc, char** argv)
     }
     if (rLast >= 0 && !freeMode) {
         fprintf(stderr, "isp_tile: --renders is free-running mode's (phase-halt carries the RTL's state from render to render)\n");
+        return 2;
+    }
+    if (!dumpDir.empty() && !freeMode) {
+        fprintf(stderr, "isp_tile: --dump-runs is free-running mode's\n");
         return 2;
     }
     if (rFirst % SEG) {
@@ -1017,6 +1078,19 @@ int main(int argc, char** argv)
         tb.freeClk = 0;
         std::fill(tb.clkHist.begin(), tb.clkHist.end(), 0);
         const uint64_t c0 = tb.cyc;
+        const long f0 = f.n;
+        std::string dumpPath;
+        if (!dumpDir.empty()) {
+            std::string base = c;
+            while (!base.empty() && base.back() == '/')
+                base.pop_back();
+            base = base.substr(base.find_last_of('/') + 1);
+            dumpPath = dumpDir + "/" + base +
+                       (rLast >= 0 ? ".r" + std::to_string(rFirst) + "-" + std::to_string(rLast) : std::string()) +
+                       ".rs.gz";
+            tb.dump = gzopen(dumpPath.c_str(), "wb1");
+            f.ok(tb.dump != nullptr, "%s: cannot write %s", c.c_str(), dumpPath.c_str());
+        }
         int seg = 0;                    // free-running: the segment the RTL is in
         for (int k = 0;; k++) {
             const std::string r = c + "/r" + std::to_string(k);
@@ -1040,6 +1114,7 @@ int main(int argc, char** argv)
             }
             tb.where = r;
             tb.set_regs(itref::regs());
+            tb.sortCfg = itref::regs().span_sort_cfg;
             tb.vm.begin_render();
             tb.broken = false;
             if (!freeMode) {
@@ -1078,6 +1153,12 @@ int main(int argc, char** argv)
                 tb.t->halt_en = freeMode ? 0 : 1;
                 tb.reset();
             }
+        }
+        if (tb.dump) {
+            gzclose(tb.dump);
+            tb.dump = nullptr;
+            if (f.n != f0)
+                remove(dumpPath.c_str());
         }
         const uint64_t mean = tb.entries ? (freeMode ? tb.freeClk : tb.clkSum) / tb.entries : 0;
         printf("isp_tile: %s: %ld renders, %ld entries, %ld phases compared, %ld passes, %ld runs, %ld null items; "

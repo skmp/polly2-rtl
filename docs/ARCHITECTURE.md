@@ -1245,6 +1245,11 @@ The terms are: the run queue, the sorter window (full, §3.6), the SRQ, the pixe
   used in the fit (background 565: 437; one sprite: 435; 2 and 4 sprite rows: 434, 434) and spanahead (PLAN MT2).
 - Not explained by this: the 32 rows of 32x1 pace (1736 clk a tile, lead 2882), GAP T3.
 
+**As built (M8, `rtl/v1/sort/p2_runq.sv`).** One simple dual-port RAM of `RUNQ_N` = 300 words (a write port; a read
+port whose data register is the queue's output, read show-ahead by p2_sort: an M10K's shape) and a word count. A word
+written at clock t is read at t + 1 and is at the output at t + 2; `RUNQ_N` counts every place, the output register's
+too. `occ` (the places taken) is a statistics port for MT2's fit.
+
 ### 3.6 `p2_sort`: the span sorter
 
 **Function.** Owns tsp §3.2 and isp §12.2 (tile.cpp `SpanSort`).
@@ -1278,6 +1283,29 @@ The terms are: the run queue, the sorter window (full, §3.6), the SRQ, the pixe
 - Sort-off order: refsw3 has raster order; the console has near-raster order with timing-dependent early runs. GAP
   T5.
 - The SPAN_SORT_CFG 0x100 and 0x10001 hangs are not modelled (PLAN §5, D6).
+
+**As built (M8, `rtl/v1/sort/p2_sort.sv`).** The text above, with the choices it left open:
+- **The window** is 96 places of `p2_rs_t` in flip-flops, place 0 the oldest, compacting: the step that frees a place
+  moves every place above it down one, and the run queue's head goes behind the youngest in the same clock
+  (`in_rdy` = not full or a place freed this clock: one emit and one fill a clock).
+- **The key compare is all 32 tag bits** (`& ~7` with SPAN_SORT_CFG[8]), as refsw3's SpanSort (`(cfg & 0x100) ? ~7 :
+  ~0` on `parameter_tag_t`), not timing.md's "bits 23..3": the shadow bit and the skip field are in the key (the TWINS
+  class of scenegen relies on it; p2_pkg's tag comment said bits 23:0 and was corrected).
+- **A drain's first step** emits window[0] in the clock the drain starts (prim is taken from window[0] combinationally
+  and registered); a drain ends either on the pass's last item (no extra clock) or with a clock that finds no match.
+- **The emit condition** holds every step of a drain, its end included, with the sorter on; with it off (bypass)
+  window[0] leaves every clock and the flags stay where they came in (the general re-attachment rule gives the same).
+- **Closed**: the oldest pass is closed when an eop item is in the window or its eop item has left early (`sv_closed`,
+  with its eoe in `sv_eoe`); any eop item in the window is the oldest pass's or a later one's, and a later one came in
+  after the oldest's.
+- **A null item** matches no key and is not counted by the epoch match: it leaves alone when it reaches window[0] with
+  no drain in progress (p2_isp_cut gives it the epoch the next pass will have, so the epoch alone could not tell them
+  apart).
+- Ports: SPAN_SORT_CFG[0] and [8] as `cfg_on` / `cfg_offs`, `new_drain` with the item, and statistics (`t_full`,
+  `t_wait`: a step held by the emit condition, `t_end`: a drain end without an emit).
+- **p2_entq** stays `rtl/v1/isp/p2_isp_entq.sv` (M7; §1.1's folder list puts it under `tbuf/`, not moved): in M8's
+  testbench top it sits beside p2_runq / p2_sort as in p2_core, pushed with the eoe item going into the run queue and
+  popped when the eoe item leaves the sorter.
 
 ### 3.7 TSP
 
@@ -1658,7 +1686,7 @@ and RenderCORE's end-of-entry logic.
 Every primitive takes and returns the reference tuple as flat ports (num §6). Combinational by default. A unit may
 register a primitive's output as one of its pipeline stages; its lockstep testbench then compares at that latency.
 
-### 3.12 Die agreement (M2-M7)
+### 3.12 Die agreement (M2-M8)
 
 PLAN 0 rule 9: the HOLLY die shot (18 probable blocks, each labelled with a confidence; an interpretation of one
 optical image, not a reverse-engineering result) is a tie-breaker for grouping, boundaries and RAM sizes; console
@@ -1676,10 +1704,11 @@ changed for this note):
 | `p2_isp_olw`, `p2_isp_pfetch` (M6) | none identified (probably near 15) | - | the die says nothing (no macro of their own) |
 | `p2_isp_ctl`, `p2_isp_ptc`, `p2_isp_fb` (M6, M7) | none: control logic | - | the die says nothing |
 | `p2_isp_entq` (the queue `p2_entq`, `ENT_N` 32 records; M7) | none identified (perhaps beside 7 span sorter queue) | - | the die says nothing; 32 records is [G] |
+| `p2_runq` (one RAM of `RUNQ_N` 300 x 124 bits, 37 Kbit; M8) and `p2_sort` (96 places in flip-flops; M8) | 7 span sorter queue (low): two long SRAMs, about 0.93 mm² each (about 60 Kbit each at the palette RAM's density, research/REPORT.md "Region 16's size") | the run queue is one long RAM between the ISP's cut strip (3) and the TSP side, as one of 7's two macros; its size (37 Kbit at 124 bits a run) is below one macro's estimated 60 Kbit, and the console's run word is likely narrower (timing.md 3.6: ~40 bits; vmask / pmask are this design's, [A]) | the second macro has no counterpart: the window here is flip-flops, because it compacts (a freed place is reused at once, timemeas order) and a shift structure is the plain way to do that; the console may keep the window's payload in the second RAM, indexed by place, with only keys and an age order in logic. Not changed: the measurements fix the window's behaviour, not its storage, and the function and clocks here do not depend on it. That 7 holds the sorter at all is low confidence (REPORT.md: they could serve the write-out) |
 | `p2_mem` (clients C1, C2; response FIFOs of `RSP_N` 8 per client and half; M6) | 15 texture memory arbiter / VRAM interface (low) | one arbiter for every VRAM client | no RAM macro is visible in 15 for the response buffers (small: flip-flops either way); the arbitration and buffer depths are GAP T9 / T14 |
 
-Outside M2-M7, for the units to come: 4 tile buffers (medium, four macros of the densest RAM) against `p2_tbuf`'s two
-1024 x 32 RAMs (§3.9), and 7 span sorter queue (two long SRAMs) against `p2_runq` / `p2_sort`.
+Outside M2-M8, for the units to come: 4 tile buffers (medium, four macros of the densest RAM) against `p2_tbuf`'s two
+1024 x 32 RAMs (§3.9).
 
 ## 4. Ordering and hazards: the observable orders and the mechanism that keeps each
 
