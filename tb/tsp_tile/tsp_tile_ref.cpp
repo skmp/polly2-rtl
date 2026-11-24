@@ -131,6 +131,15 @@ void render(Render& R, int maxPasses)
     g.fog_clamp_min = FOG_CLAMP_MIN;
     g.pt_alpha_ref = PT_ALPHA_REF;
     g.span_sort_cfg = SPAN_SORT_CFG;
+    g.fb_w_ctrl = FB_W_CTRL.full;
+    g.fb_w_linestride = FB_W_LINESTRIDE.full;
+    g.fb_w_sof1 = FB_W_SOF1;
+    g.fb_w_sof2 = FB_W_SOF2;
+    g.fb_x_clip = FB_X_CLIP.full;
+    g.fb_y_clip = FB_Y_CLIP.full;
+    g.fb_r_ctrl = FB_R_CTRL.full;
+    g.scaler_ctl = SCALER_CTL.full;
+    g.y_coeff = Y_COEFF;
     for (int i = 0; i < 128; i++) g.fog_table[i] = FOG_TABLE[i];
     for (int i = 0; i < 1024; i++) g.palette[i] = PALETTE_RAM[i];
     for (int i = 0; i < 1024; i++) {
@@ -163,6 +172,7 @@ void render(Render& R, int maxPasses)
     R.wrote.assign((8u << 20) / 8 / 64, 0);
     const uint64_t* a = (const uint64_t*)R.vramPre.data();
     const uint64_t* b = (const uint64_t*)vram;
+    R.vramPost.assign(vram, vram + 8 * 1024 * 1024);
     for (uint32_t w = 0; w < (8u << 20) / 8; w++)
         if (a[w] != b[w]) {
             R.wrote[w >> 6] |= 1ull << (w & 63);

@@ -2,12 +2,14 @@
 // core from the sorter's items to the tile buffers, wired as ARCHITECTURE 1.1 / 3.7 draws it: the store, fetch (C3),
 // setup and ALU (M9), run start and the pixel queue (M10), the pixel pipe P0 - P11 (p2_tsp_pp: M10's P0 - P3, M11's
 // texture on C4, shade, fog, SupSample, blend and feedback) and the tile buffers (p2_tbuf), p2_mem with the VRAM model.
-// The write-out is not here (M12): the testbench swaps the buffers (`swap`) where refsw3's entries swap them, while the
-// pipe is idle, and loads / reads them through p2_tbuf's debug port. It feeds the runs of every SHADE pass of every entry,
-// the entries' records and the registers (PALETTE_RAM and FOG_TABLE through their write ports), takes the punch-through
-// feedback with random back-pressure, may hold the pipe (`ext_stall`), and checks every tile-buffer write (the tap
-// `wr_*`), every feedback message, offsKept after each pass (as the pass's eop point leaves P7) and the stuck alpha
-// (as it leaves P10).
+// M12: the tile buffers' controller (p2_tbuf_ctl: the actions on eoe, the buffer-2 interlock) and the write-out (p2_wout,
+// C5) are in, as in p2_core: the entries' records go into p2_entq with their eoe items (as p2_isp_cut pushes them) and the
+// controller pops each as its eoe point leaves P10; the testbench no longer swaps the buffers (the tap t_swap says when the
+// controller does). The testbench loads / reads the buffers through p2_tbuf's debug port. It feeds the runs of every
+// SHADE pass of every entry, the entries' tiles (er_*, run start's) and records, the registers (PALETTE_RAM and FOG_TABLE
+// through their write ports), takes the punch-through feedback with random back-pressure, may hold the pipe
+// (`ext_stall`), and checks every tile-buffer write (the tap `wr_*`), every feedback message, offsKept after each pass
+// (as the pass's eop point leaves P7), the stuck alpha (as it leaves P10) and every write-out read of buffer 2 (wo_*).
 module p2_tsp_tile_tb_top
   import p2_regs_pkg::*;
   import p2_pkg::*;
@@ -30,6 +32,15 @@ module p2_tsp_tile_tb_top
   input  logic [31:0]                       fog_clamp_max,
   input  logic [31:0]                       fog_clamp_min,
   input  logic [31:0]                       pt_alpha_ref,
+  input  logic [31:0]                       fb_w_ctrl,
+  input  logic [31:0]                       fb_w_linestride,
+  input  logic [31:0]                       fb_w_sof1,
+  input  logic [31:0]                       fb_w_sof2,
+  input  logic [31:0]                       fb_x_clip,
+  input  logic [31:0]                       fb_y_clip,
+  input  logic [31:0]                       fb_r_ctrl,
+  input  logic [31:0]                       scaler_ctl,
+  input  logic [31:0]                       y_coeff,
   input  logic                              pal_we,
   input  logic [9:0]                        pal_widx,
   input  logic [31:0]                       pal_wdata,
@@ -53,6 +64,13 @@ module p2_tsp_tile_tb_top
   input  logic                              in_eop,
   input  logic                              in_eoe,
   input  logic                              in_nd,
+  // the item's entry record (p2_entq's push with the eoe item)
+  input  logic [5:0]                        in_rec_tilex,
+  input  logic [5:0]                        in_rec_tiley,
+  input  logic                              in_rec_z_keep,
+  input  logic                              in_rec_no_writeout,
+  input  logic                              in_rec_last,
+  input  logic                              in_rec_shaded_any,
   // ---- the entries' records
   input  logic                              er_v,
   output logic                              er_rdy,
@@ -66,21 +84,23 @@ module p2_tsp_tile_tb_top
   output logic                              fb_fail,
   output logic                              fb_ro,
   input  logic                              ext_stall,
-  // ---- the tile buffers: the write tap, the swap, the debug port, the write-out's read
+  // ---- the tile buffers: the write tap, the controller's swap, the debug port, the write-out's read
   output logic                              wr_en,
   output logic                              wr_b2,
   output logic [9:0]                        wr_idx,
   output logic [31:0]                       wr_data,
-  input  logic                              swap,
+  output logic                              t_swap,
   output logic                              sel,
+  output logic                              t_idle,         // the controller has nothing pending, the write-out is idle
+  output logic                              ev_tsp,
   input  logic                              dbg_we,
   input  logic                              dbg_b2,
   input  logic [9:0]                        dbg_idx,
   input  logic [31:0]                       dbg_wdata,
   output logic [31:0]                       dbg_b1,
   output logic [31:0]                       dbg_b2_data,
-  input  logic                              wo_re,
-  input  logic [9:0]                        wo_idx,
+  output logic                              wo_re,
+  output logic [9:0]                        wo_idx,
   output logic                              wo_gnt,
   output logic [31:0]                       wo_data,
   // ---- VRAM
@@ -123,6 +143,8 @@ module p2_tsp_tile_tb_top
   output logic [5:0]                        t_srq
 );
   p2_rs_t in_item;
+  logic   st_in_rdy, eqi_rdy;
+  assign in_rdy = st_in_rdy && (!in_eoe || eqi_rdy);
   always_comb begin
     in_item        = '0;
     in_item.null_  = in_null;
@@ -158,7 +180,7 @@ module p2_tsp_tile_tb_top
   logic [1:0]            rw_row;
   p2_tsp_store u_store (
     .clk, .rst, .flush,
-    .in_v, .in_rdy, .in_item, .in_nd,
+    .in_v(in_v && (!in_eoe || eqi_rdy)), .in_rdy(st_in_rdy), .in_item, .in_nd,
     .out_v(hd_v), .out_rdy(hd_rdy), .out_item(hd_item), .out_nd(hd_nd), .out_need(hd_need), .out_idx(hd_idx),
     .rel_v, .rel_need, .rel_idx,
     .jb_v, .jb_rdy, .jb,
@@ -173,8 +195,10 @@ module p2_tsp_tile_tb_top
   logic [NC-1:0][23:0]  c_addr;
   logic [NC-1:0][7:0]   c_be;
   logic [NC-1:0][63:0]  c_wdata, c_rdata;
-  logic                 m3_v, m3_rrdy;
-  logic [23:0]          m3_addr;
+  logic                 m3_v, m3_rrdy, m5_v;
+  logic [23:0]          m3_addr, m5_addr;
+  logic [3:0]           m5_be;
+  logic [31:0]          m5_wdata;
   logic                 pr_v, pr_rdy;
   p2_tsp_prim_t         pr;
   p2_tsp_pfetch u_pfetch (
@@ -200,11 +224,16 @@ module p2_tsp_tile_tb_top
     c_v[P2_C_TEX]           = m4_v;
     c_addr[P2_C_TEX]        = m4_addr;
     c_rrdy[P2_C_TEX]        = m4_rrdy;
+    c_v[P2_C_WOUT]          = m5_v;
+    c_addr[P2_C_WOUT]       = m5_addr;
     c_we    = '0;
+    c_we[P2_C_WOUT] = 1'b1;
     c_w64   = '0;
     c_w64[P2_C_TEX] = 1'b1;
     c_be    = '1;
+    c_be[P2_C_WOUT] = {4'd0, m5_be};
     c_wdata = '0;
+    c_wdata[P2_C_WOUT] = {32'd0, m5_wdata};
   end
   logic [1:0][19:0] vidx;
   logic [1:0][3:0]  vbe;
@@ -259,11 +288,34 @@ module p2_tsp_tile_tb_top
     .tb_rd_en, .tb_rd_idx, .tb_rd_b2, .tb_rd_b1_data, .tb_rd_b2_data, .tb_wr_en(wr_en), .tb_wr_b2(wr_b2),
     .tb_wr_idx(wr_idx), .tb_wr_data(wr_data),
     .fb_v, .fb_rdy, .fb(fbm),
-    .rel_v, .rel_need, .rel_idx, .ext_stall, .stall(t_stall),
+    .rel_v, .rel_need, .rel_idx, .ext_stall, .tb_hold, .wo_busy, .stall(t_stall),
     .p3_v(), .p3_take(), .p3_ctl(), .p3_val(), .p3_q(), .p3_base(), .p3_offs(), .p3_level(), .p3_k(), .p3_rl(), .p3_rk(),
     .t_p7, .t_p7_ctl(p7c), .t_p10, .t_p10_ctl(p10c), .t_stuck, .t_at, .t_drain, .t_p0, .t_tex_stall, .t_fill,
     .t_miss, .t_fb_block);
-  p2_tbuf u_tbuf (.clk, .rst, .swap, .sel,
+  // the controller, the write-out (as in p2_core)
+  logic       tb_hold, wo_busy, wo_start, wo_eof, wo_rd_done, eqo_v, eqo_rdy, ctl_idle;
+  logic [5:0] wo_tx, wo_ty;
+  p2_entrec_t eqi_d, eqo_d;
+  always_comb begin
+    eqi_d             = '0;
+    eqi_d.tilex       = in_rec_tilex;
+    eqi_d.tiley       = in_rec_tiley;
+    eqi_d.z_keep      = in_rec_z_keep;
+    eqi_d.no_writeout = in_rec_no_writeout;
+    eqi_d.last        = in_rec_last;
+    eqi_d.shaded_any  = in_rec_shaded_any;
+  end
+  p2_isp_entq u_entq (.clk, .rst, .in_v(in_v && in_eoe && st_in_rdy), .in_rdy(eqi_rdy), .in_d(eqi_d), .out_v(eqo_v),
+    .out_rdy(eqo_rdy), .out_d(eqo_d));
+  p2_tbuf_ctl u_tctl (.clk, .rst, .flush, .p10_eoe(t_p10 && p10c.eoe), .eq_v(eqo_v), .eq_rdy(eqo_rdy), .eq(eqo_d),
+    .swap(t_swap), .hold(tb_hold), .wo_start, .wo_tx, .wo_ty, .wo_eof, .wo_busy, .wo_rd_done, .ev_tsp, .ev_vid(),
+    .idle(ctl_idle));
+  p2_wout u_wout (.clk, .rst, .flush, .fb_w_ctrl, .fb_w_linestride, .fb_w_sof1, .fb_w_sof2, .fb_x_clip, .fb_y_clip,
+    .fb_r_ctrl, .scaler_ctl, .y_coeff, .start(wo_start), .tx(wo_tx), .ty(wo_ty), .eof(wo_eof), .busy(wo_busy),
+    .rd_done(wo_rd_done), .rd_re(wo_re), .rd_idx(wo_idx), .rd_gnt(wo_gnt), .rd_data(wo_data),
+    .m_v(m5_v), .m_rdy(c_rdy[P2_C_WOUT]), .m_addr(m5_addr), .m_be(m5_be), .m_wdata(m5_wdata));
+  assign t_idle = ctl_idle && !wo_busy;
+  p2_tbuf u_tbuf (.clk, .rst, .swap(t_swap), .sel,
     .rd_en(tb_rd_en), .rd_idx(tb_rd_idx), .rd_b2(tb_rd_b2), .rd_b1_data(tb_rd_b1_data), .rd_b2_data(tb_rd_b2_data),
     .wr_en, .wr_b2, .wr_idx, .wr_data,
     .wo_re, .wo_idx, .wo_gnt, .wo_data,

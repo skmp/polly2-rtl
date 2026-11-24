@@ -23,9 +23,12 @@
 //     tap, against a hash of refsw3's), tspAlphaStuck (as the pass's eop point leaves P10) and offsKept (as it leaves P7);
 //   - at every render's end every word of both buffers read back through p2_tbuf's debug port (the shadow is the RAM),
 //     and offsKept.
-// The buffers swap where refsw3's swap them (NextTileAccumulationBuffers in its write-out, between entries: the
-// testbench pulses `swap` with the pipe idle; the controller is M12's). State carries from render to render within a case
-// (the case's first render starts from the reference's buffers and offsKept, written in through the debug ports).
+// The buffers swap where the controller swaps them (M12: p2_tbuf_ctl on each entry's record, which the testbench pushes
+// into p2_entq with the entry's eoe item, as p2_isp_cut does; the testbench mirrors each swap, t_swap, in its shadow, and
+// refsw3's NextTileAccumulationBuffers decide the expected buffers); the write-out (p2_wout, C5) runs as in p2_core: every
+// read it makes of buffer 2 is checked, and at every render's end video memory against refsw3-offline's, every word.
+// State carries from render to render within a case (the case's first render starts from the reference's buffers and
+// offsKept, written in through the debug ports).
 // A render whose texture reads (C4) touch a 64-bit word the render's write-out changed is VRAM-race (ARCHITECTURE 3.2.1:
 // refsw3 reads the framebuffer as written so far, the RTL the render's start): its differences are counted in their own
 // class, never as a pass or a fail.
@@ -70,6 +73,9 @@ struct Item {
     int y = 0, x = 0, len = 1, rm = 0;
     bool eop = false, eoe = false, nd = false;
     int ent = 0;
+    // the entry's record (p2_entq, with the eoe item)
+    int tx = 0, ty = 0;
+    bool zkeep = false, noWo = false, last = false, shaded = false;
 };
 struct ExpFb {
     bool done;
@@ -83,7 +89,7 @@ struct PassEnd {
 
 struct Stats {
     long renders = 0, raceRenders = 0, entries = 0, passes = 0, items = 0, nulls = 0, pixels = 0, writes = 0,
-         fbMsgs = 0, swaps = 0, woReads = 0, presortPasses = 0, raceDiffs = 0;
+         fbMsgs = 0, swaps = 0, woReads = 0, presortPasses = 0, raceDiffs = 0, vramWords = 0;
     uint64_t clk = 0, texStall = 0, fbBlock = 0, extStall = 0, misses = 0, fillClk = 0, drain = 0, p0 = 0;
 };
 
@@ -176,9 +182,7 @@ struct Tb {
         t->er_v = 0;
         t->fb_rdy = 0;              // the feedback is taken (and checked) in the clock loop only
         t->ext_stall = 0;
-        t->swap = 0;
         t->dbg_we = 0;
-        t->wo_re = 0;
         t->pal_we = 0;
         t->ft_we = 0;
         t->ok_we = 0;
@@ -208,6 +212,15 @@ struct Tb {
         t->fog_clamp_max = g.fog_clamp_max;
         t->fog_clamp_min = g.fog_clamp_min;
         t->pt_alpha_ref = g.pt_alpha_ref;
+        t->fb_w_ctrl = g.fb_w_ctrl;
+        t->fb_w_linestride = g.fb_w_linestride;
+        t->fb_w_sof1 = g.fb_w_sof1;
+        t->fb_w_sof2 = g.fb_w_sof2;
+        t->fb_x_clip = g.fb_x_clip;
+        t->fb_y_clip = g.fb_y_clip;
+        t->fb_r_ctrl = g.fb_r_ctrl;
+        t->scaler_ctl = g.scaler_ctl;
+        t->y_coeff = g.y_coeff;
         idle_inputs();
         for (int i = 0; i < 1024; i++) {
             t->pal_we = 1;
@@ -247,12 +260,9 @@ struct Tb {
         t->ok_we = 0;
         rtlSel = r.sel0;
     }
-    void swap_buffers()
+    // the controller swapped the buffers (t_swap at the edge just taken): the shadow follows
+    void mirror_swap()
     {
-        idle_inputs();
-        t->swap = 1;
-        tick();
-        t->swap = 0;
         for (int i = 0; i < 1024; i++)
             std::swap(sh[0][i], sh[1][i]);
         rtlSel ^= 1;
@@ -291,8 +301,7 @@ struct Tb {
             load_state(r);
         else {
             // the state the RTL ended the last render with is refsw3's at this one's start (the captures chain)
-            if (rtlSel != r.sel0)
-                swap_buffers();
+            ok(rtlSel == r.sel0, "the buffers at the render's start: buffer 1 is store %d, refsw3's %d", rtlSel, r.sel0);
             int bad = 0;
             for (int b = 0; b < 2; b++)
                 for (int i = 0; i < 1024; i++)
@@ -304,15 +313,11 @@ struct Tb {
         // the items, entry by entry; the expectations
         std::vector<Item> items;
         std::vector<int> entFirst;              // the entry's first item
-        std::vector<bool> swapBefore;
         std::vector<PassEnd> ends;
         std::deque<ExpFb> fbs;
-        int selNow = rtlSel;
         uint32_t lastTag = ~0u;
         for (size_t e = 0; e < r.ents.size(); e++) {
             const ttref::Entry& en = r.ents[e];
-            swapBefore.push_back(en.sel != selNow);
-            selNow = en.sel;
             entFirst.push_back((int)items.size());
             for (const ttref::Pass& p : en.passes) {
                 if (p.runs.empty())
@@ -346,8 +351,9 @@ struct Tb {
                     fbs.push_back({ true, 0, any, false });
                 }
             }
-            // the entry's end: on its last item, or a null item after it (at random)
-            if ((int)items.size() > entFirst.back() && rng.below(2))
+            // the entry's end: on its last item, or a null item after it (at random), with the entry's record
+            const bool shaded = (int)items.size() > entFirst.back();
+            if (shaded && rng.below(2))
                 items.back().eoe = true;
             else {
                 Item it;
@@ -357,6 +363,13 @@ struct Tb {
                 items.push_back(it);
                 st.nulls++;
             }
+            Item& ei = items.back();
+            ei.tx = en.tx;
+            ei.ty = en.ty;
+            ei.zkeep = en.zkeep;
+            ei.noWo = en.noWriteout;
+            ei.last = e + 1 == r.ents.size();
+            ei.shaded = shaded;
         }
         st.entries += (long)r.ents.size();
         st.items += (long)items.size();
@@ -366,11 +379,18 @@ struct Tb {
         size_t ii = 0, ei = 0, done = 0, px = 0, pe7 = 0, pe10 = 0;
         uint32_t inHold = 0;
         const uint64_t c0 = cyc;
-        const uint64_t limit = 400000 + 40ull * r.pix.size() + 400ull * items.size();
+        // a watchdog on progress (an item in, a point out, a write-out's VRAM write): the write-out of a scaled tile takes
+        // up to ~60,000 clocks (factor 0x80: eight rows a line)
+        const uint64_t limit = 2000000;
+        uint64_t lastProg = cyc, lastWr = vm.writes;
         while (!broken) {
-            if (ii == items.size() && done == items.size() && fbs.empty())
+            if (ii == items.size() && done == items.size() && fbs.empty() && t->t_idle)
                 break;
-            if (cyc - c0 > limit) {
+            if (vm.writes != lastWr) {
+                lastWr = vm.writes;
+                lastProg = cyc;
+            }
+            if (cyc - lastProg > limit) {
                 ok(false, "no progress in %" PRIu64 " clocks (%zu of %zu items in, %zu out, %zu of %zu pixels, %zu feedback "
                    "messages left; stall %d tex %d fb %d, pinned %d, srq %d, pxq %d)", limit, ii, items.size(), done, px,
                    r.pix.size(), fbs.size(), t->t_stall, t->t_tex_stall, t->t_fb_block, t->t_pinned, t->t_srq,
@@ -378,18 +398,11 @@ struct Tb {
                 broken = true;
                 break;
             }
-            // an entry whose buffers swap first: the pipe empties, then the swap
-            if (ii < items.size() && ii == (size_t)entFirst[items[ii].ent] && swapBefore[items[ii].ent] && done == ii) {
-                swapBefore[items[ii].ent] = false;
-                swap_buffers();
-                continue;
-            }
             vram_drive();
             t->in_v = 0;
-            const bool waitSwap = ii < items.size() && ii == (size_t)entFirst[items[ii].ent] && swapBefore[items[ii].ent];
             if (inHold)
                 inHold--;
-            else if (ii < items.size() && !waitSwap) {
+            else if (ii < items.size()) {
                 const Item& it = items[ii];
                 t->in_v = 1;
                 t->in_null = it.null_;
@@ -403,6 +416,12 @@ struct Tb {
                 t->in_eop = it.eop;
                 t->in_eoe = it.eoe;
                 t->in_nd = it.nd;
+                t->in_rec_tilex = it.tx;
+                t->in_rec_tiley = it.ty;
+                t->in_rec_z_keep = it.zkeep;
+                t->in_rec_no_writeout = it.noWo;
+                t->in_rec_last = it.last;
+                t->in_rec_shaded_any = it.shaded;
             }
             t->er_v = ei < r.ents.size();
             if (t->er_v) {
@@ -411,14 +430,12 @@ struct Tb {
             }
             t->fb_rdy = rng.below(1000) >= (uint64_t)fbPm;
             t->ext_stall = rng.below(1000) < (uint64_t)stallPm;
-            t->wo_re = rng.below(1000) < (uint64_t)woPm;
-            t->wo_idx = (uint32_t)rng.below(1024);
-            t->swap = 0;
             t->clk = 0;
             t->eval();
 
             const bool inTake = t->in_v && t->in_rdy;
             const bool erTake = t->er_v && t->er_rdy;
+            const bool p10Now = t->t_p10;
             // a pixel leaving P10, its write
             bool wr = false;
             int wb = 0, wi = 0;
@@ -498,6 +515,8 @@ struct Tb {
             const bool woNow = t->wo_re && t->wo_gnt;
             const uint32_t woE = woNow ? sh[1][t->wo_idx] : 0;
             const int woI = t->wo_idx;
+            const bool swapNow = t->t_swap;
+            ok(!swapNow || !t->t_p10, "the buffers swapped with a point leaving P10");
             if (t->t_tex_stall) st.texStall++;
             if (t->t_fb_block) st.fbBlock++;
             if (t->ext_stall) st.extStall++;
@@ -514,6 +533,8 @@ struct Tb {
                 sh[wb][wi] = wd;
                 st.writes++;
             }
+            if (swapNow)
+                mirror_swap();
             if (p10end && p10p)
                 ok(ttref::hash_buffers(sh[0], sh[1]) == p10p->hash,
                    "pass %zu (rm %d, %zu runs): the tile buffers after it differ from refsw3's", pe10 - 1, p10p->rm,
@@ -521,6 +542,8 @@ struct Tb {
             if (p7end && p7p)
                 ok(t->offs_kept == p7p->offsKept, "pass %zu (rm %d): offsKept %08x after it, refsw3 %08x", pe7 - 1, p7p->rm,
                    t->offs_kept, p7p->offsKept);
+            if (inTake || p10Now)
+                lastProg = cyc;
             if (inTake) {
                 ii++;
                 if (inGap && rng.below(4) == 0) inHold = (uint32_t)rng.below(inGap);
@@ -529,16 +552,35 @@ struct Tb {
         }
         idle_inputs();
         for (int k = 0; k < 8; k++) tick();
+        // the write-out's last writes still on their way to video memory
+        for (int quiet = 0; quiet < 16 && !broken;) {
+            tick();
+            quiet = (vm.busy() || t->vh_req_v) ? 0 : quiet + 1;
+        }
         if (broken)
             return;
         ok(px == r.pix.size(), "%zu pixels left P10, refsw3 shaded %zu", px, r.pix.size());
         ok(pe10 == ends.size() && pe7 == ends.size(), "%zu / %zu pass ends at P10 / P7, %zu passes", pe10, pe7, ends.size());
         ok(t->t_pinned == 0 && t->t_srq == 0 && t->t_pxq_runs == 0, "at the end %d entries pinned, SRQ %d, pixel queue %d",
            t->t_pinned, t->t_srq, t->t_pxq_runs);
-        // the render's end: the swap of its last write-out, then every word
-        if (rtlSel != r.selEnd)
-            swap_buffers();
+        // the render's end: the buffers as the controller left them, then every word; video memory after the write-out
+        ok(rtlSel == r.selEnd, "the render's end: buffer 1 is store %d, refsw3's %d", rtlSel, r.selEnd);
         read_back(r.bufEnd, "the render's end");
+        {
+            const uint32_t* a = (const uint32_t*)r.vramPre.data();      // the VRAM model's memory: the RTL's writes
+            const uint32_t* b = (const uint32_t*)r.vramPost.data();
+            long bad = 0;
+            int64_t first = -1;
+            for (uint32_t w = 0; w < (8u << 20) / 4; w++)
+                if (a[w] != b[w]) {
+                    if (first < 0) first = w;
+                    bad++;
+                }
+            st.vramWords += (8u << 20) / 4;
+            ok(bad == 0, "video memory after the render: %ld 32-bit words differ from refsw3-offline's, the first at physical "
+               "byte %06llx (%08x, refsw3 %08x)", bad, (long long)(first < 0 ? 0 : 4 * first), first < 0 ? 0 : a[first],
+               first < 0 ? 0 : b[first]);
+        }
         ok(t->offs_kept == r.offsKeptEnd, "offsKept at the render's end %08x, refsw3 %08x", t->offs_kept, r.offsKeptEnd);
         st.clk += cyc - c0;
         if (race) st.raceRenders++;

@@ -22,6 +22,14 @@
 //                that cannot put its messages in it holds the pipe (fb_block)
 // The point leaving P10 ends the pass drain (drain_done, on eop) and releases its run's store entries (rel, on the run's
 // last point: the pins' extent, ARCHITECTURE 3.7.1).
+// M12, the tile buffers' controller (p2_tbuf_ctl; ARCHITECTURE 3.9):
+//   hold9      the P9 register takes no point (a bubble; the stages before it hold): p2_tsp_pp raises it while an eoe
+//              point is in P10 (p10_eoe) and while the controller's action on that entry is pending, so that the next
+//              entry's first point reads the buffers after the swap [M tim 3.10: "they swap when the TSP starts the next
+//              tile"]
+//   dlock      the buffer-2 interlock: a point with DstSelect waits in P10 while the write-out is busy (wo_busy) [M accbuf:
+//              SEC WRITE +1025 a tile; the bands being written out are never damaged]; SrcSelect && DstSelect too (it
+//              writes nothing; whether it waits is GAP: [G] the interlock decodes the DstSelect bit). Into the global stall.
 module p2_pp_blend
   import p2_regs_pkg::*;
   import p2_pkg::*;
@@ -31,6 +39,10 @@ module p2_pp_blend
   input  logic                       rst,
   input  logic                       stall,
   input  logic [31:0]                pt_alpha_ref,     // PT_ALPHA_REF
+  input  logic                       hold9,
+  input  logic                       wo_busy,
+  output logic                       p10_eoe,
+  output logic                       dlock,
   input  logic                       i_v,
   input  p2_pp_pt_t                  i_pt,
   input  logic [31:0]                i_col,
@@ -69,7 +81,7 @@ module p2_pp_blend
   p2_pp_ctl_t  c;
   assign c = s_pt.ctl;
 
-  assign rd_en  = i_v && !stall;
+  assign rd_en  = i_v && !stall && !hold9;
   assign rd_idx = {i_pt.ctl.y, i_pt.ctl.x};
   assign rd_b2  = i_pt.ctl.hdr.tsp[25] || i_pt.ctl.hdr.tsp[24];
 
@@ -84,6 +96,8 @@ module p2_pp_blend
   assign setter = srcsel && dstsel && dsti == 3'd0 && (srci == 3'd1 || srci == 3'd4);
   assign ptpass = c.rm == P2_RM_PUNCHTHROUGH_PASS0 || c.rm == P2_RM_PUNCHTHROUGH_PASSN;
   assign adv    = s_v && !stall;
+  assign p10_eoe = s_v && c.eoe;
+  assign dlock   = s_v && !c.null_ && dstsel && wo_busy;
 
   function automatic logic [8:0] bmul(input logic [7:0] x, input logic inv);   // BlendMul
     logic [8:0] k;
@@ -189,13 +203,13 @@ module p2_pp_blend
       s_v   <= 1'b0;
       stuck <= 1'b0;
     end else begin
-      if (!stall) s_v <= i_v;
+      if (!stall) s_v <= i_v && !hold9;
       if (adv) begin
         if (c.eoe) stuck <= 1'b0;
         else if (!c.null_ && setter) stuck <= 1'b1;
       end
     end
-    if (i_v && !stall) begin
+    if (i_v && !stall && !hold9) begin
       s_pt  <= i_pt;
       s_col <= i_col;
       // the P10 forward: this point's write, read by the point entering now

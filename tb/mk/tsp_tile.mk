@@ -20,7 +20,9 @@
 # TSP_TILE_OBJDIR (the unit testbench builds into its unit/: one object folder for tools/gate/mutants.py).
 TSP_TILE_OBJDIR  ?= $(BUILD)/obj_tsp_tile
 TSP_UNIT_OBJDIR   = $(TSP_TILE_OBJDIR)/unit
-TSP_TILE_SRC      = $(TSP_RUN_SRC)
+# M12: the tile buffers' controller, the write-out and p2_entq, as in p2_core (the testbench no longer swaps the buffers)
+TSP_TILE_SRC      = $(TSP_RUN_SRC) $(TBUF_DIR)/p2_tbuf_ctl.sv $(TBUF_DIR)/p2_tbuf_hs.sv $(WOUT_DIR)/p2_wout.sv \
+                    $(WOUT_DIR)/p2_wout_put.sv rtl/v1/isp/p2_isp_entq.sv
 TSP_TILE_TB_SRC   = tb/tsp_tile/p2_tsp_tile_tb_top.sv
 TSP_UNIT_TB_SRC   = tb/tsp_tile/p2_tsp_unit_tb_top.sv
 # the glue with the lists half that routes the walk's RenderParamTags calls through the pass hook
@@ -71,7 +73,7 @@ tsp-tile-full:
 	+@MAKE="$(MAKE)" SAMPLE="$(SAMPLE)" bash tools/gate/gate_tsp_tile.sh --full
 
 TSP_TILE_LINT = $(P2_LINT) tb/fp/fp_lint.vlt tb/isp_setup/isp_setup_lint.vlt tb/tsp_setup/tsp_setup_lint.vlt \
-                tb/tsp_run/tsp_run_lint.vlt tb/tsp_tile/tsp_tile_lint.vlt
+                tb/tsp_run/tsp_run_lint.vlt tb/tsp_tile/tsp_tile_lint.vlt tb/wout/wout_lint.vlt rtl/v1/p2_lint.vlt
 lint-units: lint-tsp-tile
 lint-tsp-tile:
 	@for t in p2_tex_coord p2_tex_addr p2_tex_cache p2_tex_pal p2_tex_decode p2_tex_filter p2_pp_shade p2_pp_fog p2_pp_ss \

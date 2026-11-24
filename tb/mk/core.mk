@@ -16,5 +16,6 @@ lint:
 	+@$(MAKE) --no-print-directory -j$(LINT_J) -s lint-units
 	@echo "lint: PASS"
 
+# M12: p2_core instances every unit (P2_CORE_LIB, P2_CORE_VLT: tb/mk/core_units.mk)
 lint-core:
-	$(P2_LINT) rtl/v1/p2_lint.vlt --top-module p2_core $(P2_PKG_SRC) $(P2_CORE_SRC)
+	$(P2_LINT) $(P2_CORE_VLT) --top-module p2_core $(P2_CORE_LIB) $(P2_CORE_SRC)

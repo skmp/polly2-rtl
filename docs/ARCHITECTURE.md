@@ -211,6 +211,14 @@ Unit folders (conv §3): `regs/`, `mem/`, `seq/`, `isp/` (with `p2_isp_pcache`),
 
    Bit 0 is the TA's (out of scope, G7). The other bits are GAP.
 
+**As built (M12, `rtl/v1/p2_core.sv`; PLAN M12).** `start` is p2_regs' pulse the clock after the STARTRENDER write; it
+restarts p2_seq at REGION_BASE and is the per-render `flush` of p2_tsp_store, p2_tsp_rstart, the texture cache,
+p2_tbuf_ctl (prevWrittenOut, havePrev, the tile before) and p2_wout (the scaler stream, the strip number). The ISP, the
+tile buffers, `sel` and offsKept carry over; there is no other per-render reset. `ev_isp` is p2_isp_cut's eoe accept
+gated by the record's `last`; `ev_tsp` and `ev_vid` are p2_tbuf_ctl's (§3.9 As built (M12)): `ev_vid` at the write-out
+reader's last pixel of the last entry's tile when it is written out, else with `ev_tsp`. `soft_rst` is decoded (SOFTRESET
+bit 1) and wired to nothing yet: which state it clears is GAP F11, and p2-offline, like refsw3-offline, never sends it.
+
 ### 1.4 State that persists across renders
 
 | state | unit | cleared by | evidence |
@@ -303,6 +311,14 @@ entry's end is decided after its last run was pushed (§3.4.8).
 pushes it when it emits the `eoe` item; p2_tbuf pops it when the `eoe` item reaches it. A full `p2_entq` stalls the
 cutter at the `eoe` item.
 
+**As built (M12): the tile queue.** p2_tsp_rstart needs an entry's tile before the entry's first item (its plane values
+are tile-relative), but the record goes into `p2_entq` with the `eoe` item, which may come after more runs than the run
+queue holds: run start waiting on it would deadlock. So `p2_core` has a second queue of `ENT_N` records, `tileq` (a
+`p2_isp_entq`): the record (only its tile is read) is pushed when the cutter accepts the entry's first command (ctl issues
+an entry's commands in order, the last one a SHADE with `last` or END), and run start pops it before the entry's first item
+(`er_*`). A full `tileq` holds that command; it cannot deadlock (run start only waits for records of entries the cutter
+has started).
+
 **Feedback** (`p2_fb_t`, p2_pp_blend to p2_isp_fb, PT passes only), valid/ready, in pixel order:
 `{kind: PIXEL | PASS_DONE, idx[9:0], fail, ro}`. PASS_DONE comes after the pass's last PIXEL message, when the
 `eop` item has left P11, and carries `anyfail`.
@@ -391,6 +407,17 @@ Each unit lists:
   within ~5 px.
 - A CPU write never stalls a reader [G]. The ~1 glitch pixel a scene is GAP (tim §3.9).
 
+**As built (M12, `rtl/v1/regs/p2_regs.sv`).** A write takes effect at the next edge; ID and REVISION are read-only;
+STARTRENDER stores nothing and pulses `start`; SOFTRESET stores 0 (refsw3-offline's reg_write) and pulses `soft_rst` when
+bit 1 is set. The live registers the units read are flip-flops (PARAM_BASE, REGION_BASE, SPAN_SORT_CFG, FB_R_CTRL,
+FB_W_CTRL, FB_W_LINESTRIDE, FB_W_SOF1 / SOF2, FB_X_CLIP / FB_Y_CLIP, FPU_SHAD_SCALE, FPU_CULL_VAL, FPU_PARAM_CFG,
+HALF_OFFSET, FPU_PERP_VAL, ISP_BACKGND_D / T, ISP_FEED_CFG, FOG_COL_RAM / VERT, FOG_DENSITY, FOG_CLAMP_MAX / MIN,
+TEXT_CONTROL, SCALER_CTL, PAL_RAM_CTRL, Y_COEFF, PT_ALPHA_REF). FOG_TABLE and PALETTE_RAM writes go, registered, to
+p2_pp_fog's and p2_tex_pal's write ports (one clock: "a palette write is visible to a read in the next clock" [G]). A
+read returns the word as last written one clock later, from a read-back RAM of all 2048 words (one write port, one read
+port) [A: no unit's RAM is read back here; nothing reads the register port in p2-offline, whose `regdump` reads
+refsw3-offline's own register array; die note in §3.12].
+
 ### 3.2 `p2_mem`: VRAM clients and arbitration
 
 **Function.**
@@ -436,6 +463,12 @@ Where it differs from the text above:
   `VR_ROW` 2 [G] (not fitted yet). `+vramvary` adds 0 .. 12 clocks to a request, drops `vh_req_rdy` one clock in four at
   random, and stalls a half for up to 63 clocks one clock in 64. The hazard detector's bitmaps are there (no client
   writes in M6).
+
+**As built (M12).** All six clients are connected in `p2_core`: C0 p2_seq (32-bit reads), C1, C2 (M6), C3 (M9), C4 (M11, the
+64-bit view), C5 p2_wout: 32-bit-view writes with byte enables, the physical word {w, h} addressed as `{h, w, 2'b00}`, so
+that render to texture (the 64-bit order, `dst & VRAM_MASK`) and pvr_map32 writes both arrive as physical words
+(§3.10 As built (M12)). C5 has the highest priority, as above. The hazard detector is the VRAM model's (§3.2.1), read by
+p2-offline after each render (tb/frame/p2_rendercore.cpp).
 
 #### 3.2.1 The VRAM model (`tb/common/vram_model.h`; testbench, not RTL)
 
@@ -484,6 +517,12 @@ word that C5 writes in the same render can legitimately differ from refsw3, as i
 - One 32-bit read a word. Entries are fetched ahead.
 - [M] A tile with nothing to do costs 335 clk plus its write-out (tim §3.1). This unit's share is the entry fetch
   latency; the split is GAP T1.
+
+**As built (M12, `rtl/v1/seq/p2_seq.sv`).** `start` sets the next entry's address to REGION_BASE[23:0] (the 32-bit view's
+8 MB wrap); an entry's 5 or 6 reads (FPU_PARAM_CFG[21]) go back to back on C0 once the entry FIFO (`SEQ_AHEAD` 2) has room
+for it, the words are collected in order and the decoded entry pushed (tilex = control[7:2], tiley [13:8], no_writeout
+28, pre_sort 29 or ISP_FEED_CFG[0], z_keep 30, last 31; each list's ptr = word[23:2], empty = word[31]; a 5-word entry's PT
+list empty, pointer 0); the entry with `last` ends the render's reads. `idx` counts the entries.
 
 ### 3.4 ISP
 
@@ -1837,6 +1876,27 @@ and RenderCORE's end-of-entry logic.
   buffer while the pipe is idle.
 - Not yet: the actions on eoe, the write-out start, the DstSelect interlock (M12).
 
+**As built (M12, `rtl/v1/tbuf/p2_tbuf_ctl.sv`, `p2_tbuf_hs.sv`; PLAN M12).**
+- **The decision** when an entry's `eoe` point leaves P10: its record is popped from `p2_entq` (the cutter pushed it with
+  the `eoe` item) and the action decided as above (refsw3 RenderCORE's text: copies core-prev, core-writeout), with
+  prevWrittenOut, havePrev and the tile before reset at `start`.
+- **When the action happens.** From the clock the `eoe` point is in P10 until the action is done, P10 takes no point:
+  p2_tsp_pp's `hold9` (an `eoe` point in P10, or `hold` = an action pending) holds P0 - P9 and leaves a bubble in P10, so
+  the next entry's first point reads the buffers after the swap (its buffer reads are issued as it enters P10's register)
+  [M tim 3.10: the swap when the TSP starts the next tile]. NONE ends at once; SWAP and WRITE go when `p2_tbuf_hs` says:
+  `P2_HS` = 0 (refsw3's, the default) once the write-out is idle; a WRITE swaps and starts the write-out of the new
+  secondary buffer at `writeTile` in the same clock. `P2_HS` = 1 is the [G] collision mechanism (a SWAP does not wait, a
+  WRITE's start is lost when the write-out is busy): built, not used or gated (T11, MT8). The cost is one or two clocks a
+  tile beyond the WRITE wait (MT7 decides).
+- **The frame's end**: after the `last` entry's action, the frame's end to p2_wout (`eof`: endStream(stuck) with a stream
+  factor), then `ev_tsp` once the write-out is idle (its last VRAM write handed to p2_mem); `ev_vid` at the reader's last
+  pixel of the last tile written, else with `ev_tsp`.
+- **The buffer-2 interlock**: a point with DstSelect waits in P10 while the write-out is busy (`dlock`, into the pipe's
+  global stall: p2_pp_blend); SrcSelect && DstSelect waits too ([G], it decodes the bit). SrcSelect reads of buffer 2 take
+  the secondary port from the write-out for that clock (M11), so no picture is damaged and the values are refsw3's.
+- **The debug port** of p2_tbuf is simulation only (`ifndef SYNTHESIS`): each RAM has its one write and one read port in
+  synthesis.
+
 ### 3.10 `p2_wout`: write-out, scaler, clip, strip buffer
 
 **Function.** Owns tsp §17.2-17.4: refsw3 RenderCORE `put`, the dither table, pack modes 0-6, `putRow`,
@@ -1885,6 +1945,36 @@ and RenderCORE's end-of-entry logic.
   [M scalermeas]. [I] The scaler state survives renders and deadlocks a handshake when the factor changes under it.
   A hang feature: PLAN MT9, D6.
 
+**As built (M12, `rtl/v1/wout/p2_wout.sv`, `p2_wout_put.sv`; PLAN M12).** refsw3 RenderCORE's write-out at `4f3efe15`
+(copies core-put, core-writeout, core-endframe), gated by `make wout` against those copies and by `make frames`.
+- **Reader and line FIFO**: on a WRITE's start the reader issues buffer 2's words in tile raster order, one a clock on the
+  shared secondary port (a clock P10 reads buffer 2 the reader waits), into a line FIFO of `WO_FIFO` 64 pixels; with factor
+  0 nothing is read or written.
+- **0x400**: the FIFO's pixels go to put one a clock: pixel (x, y) at (32 tx + x, 32 ty + y); hscale pairs them ((a + b) >> 1
+  a channel at 16 tx + x / 2).
+- **The stream** (any other factor): a line of 32 pixels into the ring, `streamLines` up, then the row engine (emitRows):
+  E_CHECK decides from pos = streamRow x factor + start (40 bits), k, f and the end / non-end rule whether a row is
+  written; E_ROW reads the four lines k - 1 .. k + 2 at the same x in one clock (the ring is eight line RAMs of 32 words,
+  line i in RAM i mod 8; the line above the first is the first), filters (Y_COEFF, each product >> 4, the sum >> 4,
+  8 bits), blends the two with the 4-bit fraction, and puts the pixel out the clock after: one pixel a clock. With
+  `stuck` (endStream at the frame's end) a filtered() on the last line uses the row's pixel-0 words (kept as x = 0 goes by).
+  A tile at y = 0 first runs endStream(false) at the stream's x (with the filter the last line copied once more, a word a
+  two clocks) and restarts the stream (start 1024 with the filter, interlace and fieldselect). `streamX` is set after a
+  tile's lines. The row counter is the stream's, 10 bits (j & 1023).
+- **put** (p2_wout_put): the clip first (a clipped pixel does not move the strip), then the strip number, which only grows
+  (one strip a clock: the pixel waits), line = Y - strip x stripLines, below 0 nothing; FB_W_SOF2 for an odd strip; dst =
+  base + line x stride x 8 + X x bpp (32-bit wrap); the dither table and the cut per channel; the pack modes 0-6 (7 as 6,
+  GAP: refsw3 verify()s). The bytes go where refsw3's stores put them: a 16- or 32-bit pixel at pvr_map32(dst) and the
+  bytes after it in the physical order (an unaligned pixel runs on into the next physical word: the other half), the
+  888 packed pixel each byte at pvr_map32(dst + i); render to texture (FB_W_SOF1[24]) at dst & VRAM_MASK. A pixel's bytes
+  fall in at most two physical words.
+- **The writer**: consecutive pixels' bytes in one physical word are merged into one C5 request (byte enables; at 16 bpp
+  two pixels a word); a word goes when the next pixel's bytes go elsewhere or no pixel follows.
+- `busy` until the FIFO, the ring, the row engine, put and the writer are empty; `rd_done` when the reader has read the
+  tile's last pixel (ev_vid).
+- **Clocks** (reported, not gated: MT7, T9, T10): 0x400 at one pixel a clock with the reader one ahead; a stream tile
+  costs its rows (32 pixels a clock each) besides its 1024 pixels in; the scaler is untimed on the console (GAP).
+
 ### 3.11 `lib/fp`: the numerics primitives (num §6) and where they are instanced
 
 | primitive | instances (unit: site) |
@@ -1911,7 +2001,7 @@ and RenderCORE's end-of-entry logic.
 Every primitive takes and returns the reference tuple as flat ports (num §6). Combinational by default. A unit may
 register a primitive's output as one of its pipeline stages; its lockstep testbench then compares at that latency.
 
-### 3.12 Die agreement (M2-M11)
+### 3.12 Die agreement (M2-M12)
 
 PLAN 0 rule 9: the HOLLY die shot (18 probable blocks, each labelled with a confidence; an interpretation of one
 optical image, not a reverse-engineering result) is a tie-breaker for grouping, boundaries and RAM sizes; console
@@ -1945,6 +2035,19 @@ changed for this note):
 | `p2_pp_fog`'s FOG_TABLE (M11): 128 x 16 bits in the fog stage | 9's small macros, or 10 | a small table beside the fog arithmetic | the die gives no place for it (10 is too large for 2 Kbit) |
 | `p2_pp_shade`, `p2_pp_fog`, `p2_pp_ss`, `p2_pp_blend` (M11) | 9 TSP pixel datapath (low) | the per-pixel arithmetic in one block; the bump mapper inside it, no block of its own (NOTES "Corrections") | - |
 | `p2_tbuf` (M11): two RAMs of 1024 x 32 (8 KB), each one read and one write port; the secondary port shared by P10 and the write-out | 4 tile accumulation buffers (medium): four macros of the densest RAM, each two sub-arrays over a shared periphery (8 sub-arrays) | two buffers of 4 KB, 8 KB in all, and a dual-port macro type (one blended into while the other is written out) | four macros against two RAMs: each buffer may be two macros (16-bit halves, or half a tile each), the 8 sub-arrays a further split; not modelled (the ports and their sharing are the measured part, tim 3.10) |
+
+**M12's units** (PLAN M12; die regions as above; the measurements and refsw3 decided everything here, the die only
+where noted):
+
+| unit (M12) | die block | agrees | departs, or the die says nothing |
+|---|---|---|---|
+| `p2_tbuf_ctl` / `p2_tbuf_hs` (the actions on eoe, the hold, the interlock) | 4 tile accumulation buffers (medium): the control beside the four macros | control logic only, beside the buffers it switches; one read port shared by P10 and the write-out on the secondary buffer fits a dual-port macro type with one port each side (one blended into, one written out) | the die gives no place for the controller (logic, no macro) |
+| `p2_tbuf` in synthesis (M12: the debug port out) | 4 | two RAMs of 1024 x 32, each one write and one read port, as the "dual-port macro type" reading of block 4 | four macros there (two a buffer, 16-bit halves or half a tile each) against two RAMs: not split (the ports are the measured part) |
+| `p2_wout`: the line FIFO (64 x 32 bits), the ring (eight line RAMs of 32 x 32 bits, 8 Kbit), the row engine; `p2_wout_put` | 16 write-out / scaler / video out (low; "looks large" for the job, NOTES "Corrections") | a unit of its own on the tile buffers' side towards the VRAM interface (15); small RAMs only: the research's estimate of the scaler's line carry is 1.5 - 4 Kbit (research/REPORT.md "Display and write-out need little RAM") | the ring here is 8 Kbit (eight lines, read four at a time for one pixel a clock: the line count is refsw3's ring, [A] its width); the scaler's speed is not measured (GAP), so the four-line read is a choice, and a console ring of two or four lines read in steps would agree with the die's estimate better. Not changed: the values and the measured 0x400 write-out pace do not depend on it. Block 16's size is left unexplained (it may hold the display FIFO and the SPG, not modelled) |
+| `p2_seq` (C0, the entry FIFO of 2) | none identified (near 15 / 13) | - | the die says nothing (no macro of its own) |
+| `p2_regs`: live registers in flip-flops, the read-back RAM of 2048 x 32 | 13 system bus (medium) for the register port; 10 palette or fog RAM (low) | the register file as flip-flops beside the bus interface | the read-back RAM (64 Kbit) is this design's [A]: the die shows one long palette SRAM (10), so the console reads the palette back from the palette RAM itself and has no second copy; a register read-back is not exercised by any gate (refsw3-offline's `regdump` reads its own array). To change when the register port is used (a CPU model, MQ's area) |
+| `p2_mem` with C0 and C5 (M12) | 15 texture memory arbiter / VRAM interface (low) | one arbiter for all six clients, as one block | the write-out's writes merge two 16-bit pixels a word here; whether the console's write-out path has its own buffer in 15 or 16 is open (T9) |
+| `p2_core` (the whole) | 1-12, 15, 16 | the blocks above in the data-flow order the annotation placed them | the TA (14), the bus / DMA (13) and the video out (16's display part) are outside `p2_core` (D1, D2) |
 
 ## 4. Ordering and hazards: the observable orders and the mechanism that keeps each
 
@@ -1998,7 +2101,7 @@ changed for this note):
 
 | parameter | initial | evidence | fixed by |
 |---|---|---|---|
-| `SEQ_AHEAD`, `OLW_AHEAD`, `PF_AHEAD` | 2, 8, 2 | [G] | T1, T2 |
+| `SEQ_AHEAD`, `OLW_AHEAD`, `PF_AHEAD` | 2, 8, 2 (as built M12: p2_seq's entry FIFO of 2) | [G] | T1, T2 |
 | `CTL_T`: clocks a ctl transition | 1 | [G] | T13 |
 | `ISP_NM`, `ISP_NA`, `L_MUL`, `L_ADD`, `L_RCP` (ISP) | 3, 3, 1, 2, 2 (M4): the scheduler gives TRI 16, QUAD 18; no set gives 16 / 19 (3.4.4) | [M] lengths are the check; fitted on the triangle, so the 16 is reported, not gated | T2, MT1 |
 | row-skip rule for thin triangles | none | [M] anomaly | T2 |
@@ -2020,12 +2123,12 @@ changed for this note):
 | SupSample points per clock | 1 | [G] | T16 |
 | texture cache organisation, miss latency, C5 coherence | direct-mapped 8 KB, 64 B lines, no snoop (as built M11: four read ports, one fill at a time, the taps gathered; §3.8 As built (M11)) | [G] | T8 |
 | `VR_LAT`, `VR_ROW`, refresh, half contention, arbitration priority | 8, fitted, off, as §3.2 | [G] | T9, T14 |
-| `WO_FIFO` | 64 px | [G] | T10, T15 |
+| `WO_FIFO` | 64 px (as built M12, p2_wout's line FIFO) | [G] | T10, T15 |
 | write-out line overhead | in the VRAM model | [I] | T9, T10 |
 | SrcSelect && DstSelect waits for the write-out | yes | [G] | T10 |
-| `p2_tbuf_hs` handshake | as §3.9 | [G] | T11 |
+| `p2_tbuf_hs` handshake | as §3.9 (as built M12: `P2_HS` 0, refsw3's: every action waits for the write-out; 1 built, not gated) | [G] | T11 |
 | `P2_PTCARRY` (K1 / K2 / none) | none (refsw3) | [M] races | T12 |
-| `ev_vid` event | the reader's last pixel | [G] | T15 |
+| `ev_vid` event | the reader's last pixel (as built M12: of the last entry's tile when written out, else with ev_tsp) | [G] | T15 |
 | bumphang counter | 16 TR / 8 OP-PT quads | [M] count, [G] structure | T18 |
 | `p2_isp_ctl_tg` glitch rule | none | [M] once | T21 |
 

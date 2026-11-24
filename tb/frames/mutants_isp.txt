@@ -1,0 +1,9 @@
+# tb/frames/mutants_isp.txt: PLAN M12's ISP mutant through the frame gate (rtl/v1/isp), run by tools/gate/mutants.py (make
+# frames-mutants); the probe: tools/gate/frames_run.sh on a capture with the mutant's p2-offline.
+#
+# Format: <id> | <file in rtl/v1/isp> | <original fragment> | <mutated fragment> | <probe> [args] | <what it breaks>
+@dir rtl/v1/isp ISP_DIR
+@obj P2OFF_OBJDIR
+@probe keepz p2-offline-probe frames_probe build/pre/keepz base
+
+bg-not-shaded | p2_isp_buf.sv | st[sb_row] <= '0;\n          vl[sb_row] <= '1; | st[sb_row] <= '0;\n          vl[sb_row] <= '0; | keepz | PLAN M12: the background not shaded with keep Z off (the Z clear leaves no pixel valid)

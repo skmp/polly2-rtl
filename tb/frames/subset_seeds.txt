@@ -1,0 +1,8 @@
+# subset_seeds.txt: the scenegen seeds of the frame gate's subset (PLAN M12 "make frames"): the tile subset's 1-200, and
+# the seeds whose renders read words their write-out writes (VRAM-race renders in M11's tsp-tile-full: texture reads of
+# the framebuffer), the race class's inputs
+1-200
+1156
+1295
+2013
+3079

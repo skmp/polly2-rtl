@@ -10,5 +10,9 @@ lint_off -rule UNUSEDPARAM -file "*/p2_pkg.sv"
 // neither flag); regdepth() reads only the register's low 30 bits (the wrap at 2^131: RegDepth L702)
 lint_off -rule UNUSEDSIGNAL -file "*/p2_zword_pkg.sv" -match "*'v'[31:30]*"
 lint_off -rule UNUSEDSIGNAL -file "*/p2_zword_pkg.sv" -match "*'r'[31:30]*"
-// p2_core: the M0 shell; no unit reads its inputs yet. Remove when the units are instanced (M12).
+// p2_core (M12): the units' taps and the debug ports it leaves open (PINCONNECTEMPTY), the record and register fields no
+// unit reads (UNUSEDSIGNAL)
+lint_off -rule PINCONNECTEMPTY -file "*/p2_core.sv"
 lint_off -rule UNUSEDSIGNAL -file "*/p2_core.sv"
+// p2_tbuf_hs: P2_HS = 0 does not read the action's kind
+lint_off -rule UNUSEDSIGNAL -file "*/p2_tbuf_hs.sv" -match "*'is_*"

@@ -1,0 +1,37 @@
+// wout_lint.vlt: the -Wall waivers for M12's units (make lint-core, lint-wout; conventions.md 4.8)
+`verilator_config
+// p2_seq: REGION_BASE's bits 23 and up are dropped by the 32-bit view (pvr_map32's 8 MB wrap); FPU_PARAM_CFG and
+// ISP_FEED_CFG: one bit each (region_header_type, pre_sort)
+lint_off -rule UNUSEDSIGNAL -file "*/p2_seq.sv" -match "*'region_base'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_seq.sv" -match "*'fpu_param_cfg'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_seq.sv" -match "*'isp_feed_cfg'*"
+// p2_wout, p2_wout_put: the registers' unused fields (Y_COEFF 31:16 and SCALER_CTL 31:19 do nothing: RenderCORE; the other
+// registers' bits outside the fields put reads)
+lint_off -rule UNUSEDSIGNAL -file "*/p2_wout.sv" -match "*'y_coeff'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_wout.sv" -match "*'sc'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_wout_put.sv" -match "*'fb_*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_wout_put.sv" -match "*'ctl'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_wout_put.sv" -match "*'xc'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_wout_put.sv" -match "*'yc'*"
+
+// the row engine: a line number is kept to its ring place (3 bits); the filter's and the blend's sums keep the bits refsw3
+// keeps (>> 4, & 0xFF)
+lint_off -rule UNUSEDSIGNAL -file "*/p2_wout.sv" -match "*'km1'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_wout.sv" -match "*'s'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_wout.sv" -match "*'m'*"
+// put: a channel cut to 4, 5 or 6 bits keeps those; the physical address of 8 MB is 23 bits (VRAM_MASK, pvr_map32)
+lint_off -rule UNUSEDSIGNAL -file "*/p2_wout_put.sv" -match "*'b5'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_wout_put.sv" -match "*'g5'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_wout_put.sv" -match "*'r5'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_wout_put.sv" -match "*'g6'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_wout_put.sv" -match "*'b4'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_wout_put.sv" -match "*'g4'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_wout_put.sv" -match "*'r4'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_wout_put.sv" -match "*'a4'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_wout_put.sv" -match "*'a'*"
+// the row engine: filtered(k) reads lines k - 1 .. k + 1, filtered(k + 1) lines k .. k + 2 of the four
+lint_off -rule UNUSEDSIGNAL -file "*/p2_wout.sv" -match "*'la'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_wout.sv" -match "*'lb'*"
+// the write-out testbench's top: P10's read data and the read clients' responses are not looked at
+lint_off -rule PINCONNECTEMPTY -file "*/p2_wout_tb_top.sv"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_wout_tb_top.sv"

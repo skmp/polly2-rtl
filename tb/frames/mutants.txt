@@ -1,0 +1,10 @@
+# tb/frames/mutants.txt: PLAN M12's mutants the frame gate catches (tb/frame: the frame testbench's VRAM model use), run
+# by tools/gate/mutants.py (make frames-mutants); the probe: tools/gate/frames_run.sh on a capture with the mutant's
+# p2-offline (tools/gate/frames_probe.sh).
+#
+# Format: <id> | <file in tb/frame> | <original fragment> | <mutated fragment> | <probe> [args] | <what it breaks>
+@dir tb/frame FRAME_DIR
+@obj P2OFF_OBJDIR
+@probe race p2-offline-probe frames_probe build/pre/texctl_bank+0e4=900 vary
+
+hazard-off | p2_rendercore.cpp | const uint64_t race = vm.race_words(); | const uint64_t race = 0; | race | PLAN M12: the hazard detector off: texctl_bank with VQ index bytes in the framebuffer tile written just before (bank 9) fails under +vramvary, which shows that the race class is real

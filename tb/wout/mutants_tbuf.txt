@@ -1,0 +1,14 @@
+# tb/wout/mutants_tbuf.txt: the planted bugs of the tile buffers' controller rtl/v1/tbuf (PLAN M12), run by
+# tools/gate/mutants.py (make wout-mutants). The probe: the write-out testbench (random z_keep, no_writeout and empty
+# entries; the buffers and the swaps at the end, every word of video memory).
+#
+# Format: <id> | <file in rtl/v1/tbuf> | <original fragment> | <mutated fragment> | <probe> [args] | <what it breaks>
+@dir rtl/v1/tbuf TBUF_DIR
+@obj WOUT_OBJDIR
+@probe frames wout-build tb --n 700 --vramvary 3 --max-fails 1
+
+eanw-own-tile | p2_tbuf_ctl.sv | p_x       <= eanw ? prev_x : eq.tilex; | p_x       <= eq.tilex; | frames | PLAN M12: emptyAfterNoWrite writing at its own tile (x; refsw3: the entry before's)
+swap-after-nowo | p2_tbuf_ctl.sv | assign act    = eq.no_writeout ? A_NONE : (ekz ? A_SWAP : A_WRITE); | assign act    = eq.no_writeout ? A_SWAP : (ekz ? A_SWAP : A_WRITE); | frames | PLAN M12: a swap after a no-writeout entry
+ekz-no-prev | p2_tbuf_ctl.sv | assign ekz    = eq.z_keep && !eq.shaded_any && prev_wo; | assign ekz    = eq.z_keep && !eq.shaded_any; | frames | an empty keep-Z entry after one not written out swaps instead of writing the entry before's picture
+prev-wo | p2_tbuf_ctl.sv | prev_wo   <= !eq.no_writeout && !ekz; | prev_wo   <= !eq.no_writeout; | frames | prevWrittenOut set by an empty keep-Z entry
+no-wait | p2_tbuf_hs.sv | assign go   = !wo_busy; | assign go   = 1'b1; | frames | a WRITE swaps under the running write-out (the write-out reads the next tile)

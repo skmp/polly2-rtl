@@ -1347,6 +1347,80 @@ offspersist), at most 8 renders each: 93 pages, 33 dumps, 200 seeds, 326 cases, 
 
 ### M12. Tile buffers, write-out, sequencer, `p2_core`, `p2-offline`
 
+**Status (2026-11-24): done (not committed: the owner's).** `make wout`, `make wout-mutants` (tools/gate/gate_wout.sh,
+`tb/mk/wout.mk`), `make frames`, `make frames-mutants` (tools/gate/gate_frames_off.sh, `tb/mk/frames.mk`), `make p2-offline`,
+`make p2-offline-dual`, `tools/p2-offline/build.sh`; scratch in `agents/m12/`. RTL: `rtl/v1/regs/p2_regs.sv`,
+`rtl/v1/seq/p2_seq.sv`, `rtl/v1/tbuf/p2_tbuf_ctl.sv` and `p2_tbuf_hs.sv`, `rtl/v1/wout/p2_wout.sv` and `p2_wout_put.sv`,
+`rtl/v1/p2_core.sv` (every unit; `tb/mk/core_units.mk` lists them); p2_pp_blend / p2_tsp_pp gained the P10 hold and the
+buffer-2 interlock, p2_tbuf's debug port is simulation only. Testbenches: `tb/wout/` (`p2_wout_tb_top`, `wout_tb.cpp`,
+the reference `wout_ref.cpp` on RenderCORE's frame from the copies core-put / core-prev / core-writeout / core-endframe),
+`tb/frame/p2_rendercore.cpp` (p2-offline, the dual mode). ARCHITECTURE 1.3, 2.3, 3.1-3.3, 3.9, 3.10 "As built (M12)" give
+the choices, 3.12 the die agreement. Where the tree differs from the text below:
+- **The tile queue** (ARCHITECTURE 2.3 As built (M12)): run start needs an entry's tile before its first item, `p2_entq`'s
+  record comes with the eoe item; a second queue of ENT_N tiles, pushed when the cutter takes the entry's first command.
+- **The action's point**: the eoe point in P10 and the pending action hold P0 - P9 (a bubble in P10), so the next entry's
+  first buffer read comes after the swap; every action waits for the write-out (`P2_HS` 0); one or two clocks a tile
+  (MT7's to fit).
+- **The TSP tile testbench** (make tsp-tile) has the controller and the write-out in place of its swaps (§1.3 As built
+  (M11): the testbench now pushes each entry's record into p2_entq with its eoe item and mirrors the controller's swaps);
+  it also checks every write-out read of buffer 2 and every word of video memory after each render against refsw3's.
+- **The frame gate runs refsw3-offline's own stream** (conventions 7.4.2 As built): capture_prerender.sh keeps it
+  (CAP_STREAM=1) and p2-offline replays it, because a test's PC build gives up a readback after 20 s.
+- **The race class's input**: no console page of the subset and no seed has a VRAM-race render that differs; the gate's
+  is `texctl_bank+0e4=900` (every TEXT_CONTROL write 0x900: bank 9 puts texture A's VQ index bytes in the framebuffer tile
+  the region array wrote just before; capture_prerender.sh builds `<test>+<reg>=<value>` with REG_OVERRIDE as run2.sh
+  does): its two renders differ from refsw3 in 64 and 48 words under every configuration, in their own class; the
+  hazard-detector-off mutant's probe.
+- **soft_rst** is decoded but wired to nothing (GAP F11); the register read-back is a RAM of all 2048 words [A].
+
+**Gate results (2026-11-24, J 16, agents/m12/gates).**
+- `make wout` PASS (34.5 s; CPU 382 s): 8,000 random frames under `--vramvary 7` and 2,000 without, every word of video
+  memory after every frame, the buffers and the swaps at the end: 10,000 frames, 203,253 entries, 160,091 write-outs,
+  80,498,705 VRAM writes, 20,971,550,000 checks, 0 failures; every pack mode (1,428-1,429 frames each), factor 0x400 1,404,
+  a stream 7,911 (0x401, 0x800, 0x6532, 0x80, 0x3FF, 0x200, 0x1000, random), 0 685; hscale 3,378, render to texture 1,272,
+  strips 1,688, clip 3,295, dither 4,960, unaligned bases 1,051; lint-wout PASS.
+- `make wout-mutants` PASS (49 s): 16 of 16 in rtl/v1/wout (PLAN's a dither entry, the row counter at 11 bits, the stuck
+  row off, strip parity swapped; hscale not halved, the field start without the filter, endStream's last-line row, the
+  filter's lead, the line above the first, the filter's sum, the blend weights, the stuck pixel, the clip's max, the
+  writer merging across halves, 888 by the physical order, the reader taking P10's word), 5 of 5 in rtl/v1/tbuf (PLAN's
+  emptyAfterNoWrite at its own tile and a swap after a no-writeout entry; emptyKeepZ without prevWrittenOut,
+  prevWrittenOut by an empty keep-Z, a WRITE not waiting for the write-out).
+- `make frames` PASS, 2,713 s wall (CPU 41,722 s, 96 %; the pole ispcache under +vramvary 1,620 s): tb/frames/subset_tests.txt
+  (99 pages, at most 8 renders each: the tile subset's tests, M11's TSP pages, scalermeas, sof2sweep, sof2field, fb555,
+  scaler, texctl_bank+0e4=900), subset_dumps.txt (33), subset_seeds.txt (1-200 and M11's four race seeds): 336 cases, 865
+  renders, each in four configurations (VR_LAT 8; +vramvary 7; VR_LAT 1; VR_LAT 16). In every configuration 850 renders
+  equal to refsw3-offline's in every word of video memory, 0 differ; 15 VRAM-race renders (the four seeds, the race
+  case's two, and others whose reads touch a word the write-out writes), 2 of them different (texctl_bank+0e4=900 r0, r1:
+  64 and 48 words, in every configuration), in their own class; 1,814,036,480 words compared a configuration. lint-core and
+  the dual mode (p2-offline-dual on f1wgp_driver: "p2-dual: render 0: equal") PASS. (`cliptest` dropped from the subset:
+  KallistiOS only, no PC build.)
+- `make frames-mutants` PASS (305 s): the hazard detector off (texctl_bank+0e4=900 under +vramvary), the background not
+  shaded with keep Z off (rtl/v1/isp, keepz), emptyAfterNoWrite at its own tile (keepz), a swap after a no-writeout entry
+  and the hold off (accbuf): 5 of 5 caught.
+- **The earlier gates with the controller in** (agents/m12/gates/all.txt): `make tsp-tile` PASS, 798 s wall (CPU 12,221 s,
+  96 %; the pole texctl_bankmip 324 s): 326 cases, 822 renders, 258,771,056 pixels, 174,664 swaps (the controller's), 178,759,680
+  write-out reads, 5,114,688,467 checks (now with every word of video memory after every render), 0 failures, 0 VRAM-race
+  renders; clocks 8.52 a pixel (the write-out's C5 traffic and the hold in; reported, not gated). `tsp-tile-mutants` 40 of 40
+  caught (M11's tbuf ones on the real write-out's reads). tsp-run PASS with M10's counts, its mutants 23 caught, the timing
+  ones passing; scaffold, lint (with lint-wout, lint-core on p2_core), fp, isp-edge, isp-depth, isp-setup, refglue-selftest,
+  isp-tile-op, isp-tile, sort, tsp-setup PASS and every mutant gate in full PASS with M11's counts.
+- **Sampled full gates** (rule 10; M12 has no -full gate of its own: frames-full is M13's): `tsp-run-full SAMPLE=2154751099`
+  PASS (62 s: every item, 24,681,778 uvmeas readings of 24,681,778); `isp-tile-full SAMPLE=3446901960` PASS, 1,946 s wall
+  (CPU 29,442 s, 95 %; the pole ispcache r0-7 free-running 962 s): every one of the 6,084 phase-halt items (18,386 renders,
+  66,820,640 checks) and 169 of 7,401 free-running items (12 always-run, 157 drawn), 0 failures; `sort-full SAMPLE=1482503106`
+  PASS, 220 s: 850 of 3,508 items, 20.5 % of the weight, 0 failures; `tsp-tile-full SAMPLE=759787260` PASS, 3,213 s wall
+  (CPU 48,884 s, 95 %; the pole sscolor r0-15 361 s), now with the controller, the write-out and the video memory check:
+  every case once (6,084 items), the always-run items and the unit sections whole, 6,117 of 7,410 items, 23.2 % of the
+  weight, 8,188 renders, 1,169,308,902 pixels, 736,162 swaps, 23,317,969,442 checks, 0 failures; 4 VRAM-race renders (the
+  seeds of M11), 0 differences there. The mandatory items alone were predicted over SAMPLE_BUDGET (1,800 s), so no
+  optional item was drawn (the sample's WARNING line, D12, as in M11).
+- Clocks (reported, not gated: MT7, MT9; ev_tsp from STARTRENDER at VR_LAT 8, no variation): the 865 renders 456,216,808
+  clocks; the 33 dumps 0.41-4.66 M clocks a frame, median 1.40 M (4-47 ms at 100 MHz; ISP 1-3 % ahead of the TSP's end);
+  a test page of 300 tiles about 0.4 M (1.4 k a tile: the write-out's 1,045-1,357 plus the hold). Under +vramvary the
+  same renders take 5.7 times the clocks (2,624,731,378), at VR_LAT 1 / 16 0.97 / 1.06 times. Simulation: ~180 k clk/s
+  for the whole core (clang -O3, no PGO).
+
+
 **Deliverables.**
 - The `p2_tbuf` controller: actions on `eoe`, the shared secondary port, the DstSelect interlock, `p2_tbuf_hs`
   (refsw3-equivalent until T11).

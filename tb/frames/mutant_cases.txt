@@ -1,0 +1,5 @@
+# tb/frames/mutant_cases.txt: the captures the frame gate's mutant probes run (tb/frames/mutants*.txt); make frames-mutants
+# captures them (at most 8 renders, with their streams)
+texctl_bank+0e4=900
+keepz
+accbuf

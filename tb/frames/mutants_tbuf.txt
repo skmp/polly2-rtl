@@ -1,0 +1,12 @@
+# tb/frames/mutants_tbuf.txt: the tile buffers' controller and the pixel pipe's hold through the frame gate (rtl/v1/tbuf,
+# rtl/v1/tsp), run by tools/gate/mutants.py (make frames-mutants); the probe: tools/gate/frames_run.sh on a capture.
+#
+# Format: <id> | <file in rtl/v1/tbuf> | <original fragment> | <mutated fragment> | <probe> [args] | <what it breaks>
+@dir rtl/v1/tbuf TBUF_DIR
+@obj P2OFF_OBJDIR
+@probe accbuf p2-offline-probe frames_probe build/pre/accbuf base
+@probe keepz p2-offline-probe frames_probe build/pre/keepz base
+
+eanw-own-tile | p2_tbuf_ctl.sv | p_x       <= eanw ? prev_x : eq.tilex; | p_x       <= eq.tilex; | keepz | PLAN M12: emptyAfterNoWrite writing at its own tile (keepz page 1)
+swap-after-nowo | p2_tbuf_ctl.sv | assign act    = eq.no_writeout ? A_NONE : (ekz ? A_SWAP : A_WRITE); | assign act    = eq.no_writeout ? A_SWAP : (ekz ? A_SWAP : A_WRITE); | accbuf | PLAN M12: a swap after a no-writeout entry
+hold-off | p2_tbuf_ctl.sv | assign hold     = p_v; | assign hold     = 1'b0; | accbuf | the next entry's points read the buffers before the swap

@@ -9,7 +9,7 @@
 //     its index, run-only, the alpha test's outcome, and the tile-buffer write the TSP makes (buffer, value);
 //   - after each pass: offsKept, tspAlphaStuck and a hash of both buffers (to prove the recorded writes are all of them);
 //   - the buffers and offsKept at the render's start and end, and the 64-bit words the render's write-out changed (the
-//     texture reads that meet them make a VRAM-race render, ARCHITECTURE 3.2.1).
+//     texture reads that meet them make a VRAM-race render, ARCHITECTURE 3.2.1); video memory after the render (M12).
 #pragma once
 #include <cstdint>
 #include <vector>
@@ -44,6 +44,8 @@ struct Entry {
 struct Regs {
     uint32_t param_base, fpu_shad_scale, fpu_perp_val, half_offset, text_control, pal_ram_ctrl;
     uint32_t fog_col_ram, fog_col_vert, fog_density, fog_clamp_max, fog_clamp_min, pt_alpha_ref, span_sort_cfg;
+    // the write-out's (M12)
+    uint32_t fb_w_ctrl, fb_w_linestride, fb_w_sof1, fb_w_sof2, fb_x_clip, fb_y_clip, fb_r_ctrl, scaler_ctl, y_coeff;
     uint32_t fog_table[128];
     uint32_t palette[1024];
 };
@@ -59,6 +61,7 @@ struct Render {
     int selEnd = 0;
     uint32_t offsKeptEnd = 0;
     std::vector<uint8_t> vramPre;          // emu_vram before the render (64-bit physical order)
+    std::vector<uint8_t> vramPost;         // ... and after it (M12: the write-out's result)
     std::vector<uint64_t> wrote;           // a bit per 64-bit word the render changed
     long changedWords = 0;
 };
