@@ -1,0 +1,13 @@
+# tb/tsp_tile/mutants_tbuf.txt: the planted bugs of the tile buffers rtl/v1/tbuf (PLAN M11: the RAMs and the secondary
+# port), run by tools/gate/mutants.py (make tsp-tile-mutants). The probe: the TSP tile testbench on blend's first renders
+# (both buffers, a swap a tile, random reads of the secondary port under random holds of the pipe).
+#
+# Format: <id> | <file in rtl/v1/tbuf> | <original fragment> | <mutated fragment> | <probe> [args] | <what it breaks>
+@dir rtl/v1/tbuf TBUF_DIR
+@obj TSP_TILE_OBJDIR
+@probe blend tsp-tile-build tb --vramvary 7 --renders 0-1 --max-fails 1 build/pre/blend
+
+wo-takes-p10 | p2_tbuf.sv | assign rp1    = sel ? rd_en : p2rd; | assign rp1    = sel ? rd_en : (p2rd \|\| wo_gnt); | blend | the write-out's read of buffer 2 into P10's register (a held P10 point loses its word)
+wo-wins | p2_tbuf.sv | assign wo_gnt = wo_re && !p2rd; | assign wo_gnt = wo_re; | blend | the secondary port granted to the write-out while P10 reads buffer 2
+swap-off | p2_tbuf.sv | else if (swap) sel <= !sel; | else if (1'b0) sel <= !sel; | blend | the buffers never change places
+write-unswapped | p2_tbuf.sv | if (wr_en && (wr_b2 ^ sel) == 1'b0) ram0[wr_idx] <= wr_data; | if (wr_en && wr_b2 == 1'b0) ram0[wr_idx] <= wr_data; | blend | P10's write to RAM 0 by the buffer number, not through sel

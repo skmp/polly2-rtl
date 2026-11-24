@@ -1,0 +1,48 @@
+# tb/tsp_tile/mutants.txt: the planted bugs of M11's shade, fog, SupSample, blend and feedback stages and the pipe in
+# rtl/v1/tsp (PLAN M11 "Mutants", conventions.md 7.7), run by tools/gate/mutants.py (make tsp-tile-mutants). Every one
+# must be caught by its probe (or, written !<probe>, must pass it: a timing mechanism the values may not see) and the
+# unchanged folder must pass first. The texture units' are tb/tsp_tile/mutants_tex.txt, the tile buffers'
+# mutants_tbuf.txt.
+#
+# The probes: `shade` the unit section P7 - P10 on 40,000 random pixels; the tile probes the TSP tile testbench on a
+# capture's first renders (tb/tsp_tile/mutant_cases.txt lists them for the captures): blend (7,200 pre-sorted passes a
+# render), blendsel2 (the stuck alpha), offspersist (offsKept in the TSP's order), ptruns (run-only pixels in the
+# punch-through passes), `presort` scenegen seed 180 (a pre-sorted primitive whose first pixel is the one before's last:
+# the only capture of the tile subset and M11's pages where the P10 forward shows, agents/m11 mutscan), `ptmv` seed 22
+# (PT_MV's opaque pixels with an alpha under PT_ALPHA_REF; none of the console pages has one).
+#
+# Format: <id> | <file in rtl/v1/tsp> | <original fragment> | <mutated fragment> | <probe> [args] | <what it breaks>
+# (\n a newline, \| a bar, \\ a backslash in a fragment).
+@dir rtl/v1/tsp TSP_DIR
+@obj TSP_TILE_OBJDIR
+@probe shade tsp-unit-build unit/tb --only shade --n 40000 --max-fails 1
+@probe blend tsp-tile-build tb --vramvary 7 --renders 0-1 --max-fails 1 build/pre/blend
+@probe blendsel2 tsp-tile-build tb --vramvary 7 --renders 0-7 --max-fails 1 build/pre/blendsel2
+@probe offspersist tsp-tile-build tb --vramvary 7 --renders 0-7 --max-fails 1 build/pre/offspersist
+@probe ptruns tsp-tile-build tb --vramvary 7 --renders 0-7 --max-fails 1 build/pre/ptruns
+@probe presort tsp-tile-build tb --vramvary 7 --renders 0-7 --max-fails 1 build/pre/gen_180
+@probe ptmv tsp-tile-build tb --vramvary 7 --renders 0-7 --max-fails 1 build/pre/gen_22
+
+# ---- PLAN M11's list (the texture ones in mutants_tex.txt)
+blend-255 | p2_pp_blend.sv | k = {1'b0, x} + ((x == 8'hFF) ? 9'd1 : 9'd0);\n    return inv | k = {1'b0, x};\n    return inv | shade | the blend's 255 not counted as 256
+stuck-never | p2_pp_blend.sv | else if (!c.null_ && setter) stuck <= 1'b1; | else if (1'b0) stuck <= 1'b1; | blendsel2 | stuck alpha never set
+offskept-p0 | p2_tsp_pp.sv | .o_v(p7_v), .o_pt(p7_pt), .o_col(p7_col), .o_fa(p7_fa), .offs_kept, .ok_we, .ok_wdata); | .o_v(p7_v), .o_pt(p7_pt), .o_col(p7_col), .o_fa(p7_fa), .offs_kept, .ok_we(ok_we \|\| (p0_v && !stall && !p0_ctl.null_ && p0_ctl.hdr.isp[25] && p0_ctl.hdr.isp[24])), .ok_wdata(ok_we ? ok_wdata : p0_ctl.hdr.ofs_fb)); | offspersist | offsKept loaded ahead of the pixel order (at P0, the run's issue: the setup / run start side) instead of at P7
+fog-index-no-1 | p2_pp_fog.sv | fidx = {e23[2:0], frac[22:19]}; | fidx = {3'(e23 - 13'sd1), frac[22:19]}; | shade | the fog table index without the +1 of the exponent
+fade-before-fog | p2_pp_fog.sv | assign fg_in  = i_col;\n  assign col    = fade(fg_out, c, i_pt.k); | assign fg_in  = fade(i_col, c, i_pt.k);\n  assign col    = fg_out; | shade | the trilinear fade before the clamp and the fog
+ss-sum-shr2 | p2_pp_ss.sv | s   = ({1'b0, s01[ch]} >> 1) + (s23 >> 1);\n      avg[8 * ch +: 8] = 8'(s >> 1); | s   = {1'b0, s01[ch]} + s23;\n      avg[8 * ch +: 8] = 8'(s >> 2); | shade | SupSample's average as the sum of four >> 2
+ro-write | p2_pp_blend.sv | assign wr_en   = adv && !c.null_ && !c.ro && !(srcsel && dstsel); | assign wr_en   = adv && !c.null_ && !(srcsel && dstsel); | ptruns | the run-only pixel's write not suppressed
+p10-forward-off | p2_pp_blend.sv | fw1 <= wr_en && !wr_b2 && wr_idx == rd_idx;\n      fw2 <= wr_en && wr_b2 && wr_idx == rd_idx; | fw1 <= 1'b0;\n      fw2 <= 1'b0; | presort | the P10 forward off: TR_PRESORT's back-to-back primitives over one pixel read the word before the write
+dst-b1 | p2_pp_blend.sv | dst = dstsel ? b2 : b1; | dst = b1; | blendsel2 | DstSelect's dst read from buffer 1
+ptmv-atest-all | p2_pp_issue.sv | p_ctl.atest  = pt_pass \|\| (cur.item.rm == P2_RM_PUNCHTHROUGH_MV && cur.item.pmask[n]); | p_ctl.atest  = pt_pass \|\| (cur.item.rm == P2_RM_PUNCHTHROUGH_MV); | ptmv | PT_MV alpha-testing every pixel of a run (the opaque ones of OpInPt too)
+
+# ---- the structure
+bump-light-interp | p2_pp_shade.sv | assign offs    = (texture && offset) ? (bump ? light : i_pt.offs) : offs_kept; | assign offs    = (texture && offset) ? i_pt.offs : offs_kept; | shade | a bump map lit by the interpolated offset colour, not the third vertex's (bumpLight)
+offskept-any-tex | p2_pp_shade.sv | else if (i_v && !stall && !c.null_ && texture && offset) | else if (i_v && !stall && !c.null_ && texture) | offspersist | offsKept loaded by a textured polygon without the offset bit
+decal-alpha-tex | p2_pp_shade.sv | 2'd2:       col[31:24] = b[31:24]; | 2'd2:       col[31:24] = t[31:24]; | shade | decal alpha (ShadInstr 2) taking the texel's alpha
+bump-quadrant | p2_pp_shade.sv | if (bm_a[7:6] == 2'd1 \|\| bm_a[7:6] == 2'd2) ii = ii | if (bm_a[7:6] == 2'd1) ii = ii | shade | BumpMapper's last term subtracted in quadrant 1 only
+vfog-no-offset | p2_pp_fog.sv | if (c.hdr.isp[24])                                              // pp_Offset | if (1'b1)                                              // pp_Offset | shade | vertex fog applied without the offset bit
+fog-neg-w | p2_pp_fog.sv | if (i_pt.w.neg \|\| i_pt.w.mant == '0 | if (i_pt.w.mant == '0 | shade | a 1/w below zero fogged by its magnitude (slivers_dzspec)
+anyfail-ro | p2_pp_blend.sv | assign pfail = !c.null_ && !at && !c.ro; | assign pfail = !c.null_ && !at; | shade | PASS_DONE's anyfail counting run-only pixels
+stuck-kept-eoe | p2_pp_blend.sv | if (c.eoe) stuck <= 1'b0;\n        else if | if (1'b0) stuck <= 1'b0;\n        else if | blendsel2 | the stuck alpha not cleared at the entry's end (refsw3 ClearFpuCache: a new tile starts clean)
+alpha-ref-8 | p2_pp_blend.sv | at = !(32'(col[31:24]) < pt_alpha_ref); | at = !(col[31:24] < pt_alpha_ref[7:0]); | shade | the alpha test against PT_ALPHA_REF's low byte only
+pass-drain-off | p2_pp_issue.sv | if (cur.item.eop && cur.item.rm != P2_RM_TRANSLUCENT_PRESORT) draining <= 1'b1; | if (1'b0) draining <= 1'b1; | !ptruns | the pass drain off: a timing mechanism (MT6), the values may not change

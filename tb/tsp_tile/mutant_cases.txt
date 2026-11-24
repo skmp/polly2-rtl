@@ -1,0 +1,9 @@
+# tb/tsp_tile/mutant_cases.txt: the captures the tsp-tile mutants' tile probes run (tb/tsp_tile/mutants*.txt); make
+# tsp-tile-mutants captures them (at most 8 renders).
+build/pre/blend
+build/pre/blendsel2
+build/pre/offspersist
+build/pre/ptruns
+build/pre/gen_180
+build/pre/gen_22
+build/pre/yuvbil

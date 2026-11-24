@@ -243,7 +243,7 @@ struct Tb {
             t->eval();
             const bool inTake = t->in_v && t->in_rdy;
             const bool erTake = t->er_v && t->er_rdy;
-            if (t->o_v && t->o_rdy) {
+            if (t->o_take) {
                 check_point(jb, ex, sect, seed);
                 if (!pts) tFirst = cyc;
                 tLast = cyc;
@@ -274,8 +274,10 @@ struct Tb {
         t->in_v = 0;
         t->er_v = 0;
         t->o_rdy = 0;
-        // the pipe is empty and every pin went: a few clocks for the last release, then the pins must be 0
-        for (int k = 0; k < 4; k++) tick();
+        // the pipe empties and every pin goes: since M11 the last points still go through P4 - P10 (the pins go at P10,
+        // a texture miss can hold them there), then a few clocks more; then the pins must be 0
+        for (int k = 0; k < 100000 && t->t_pinned != 0; k++) tick();
+        for (int k = 0; k < 16; k++) tick();
         if (!broken)
             f.ok(t->t_pinned == 0 && t->t_srq == 0 && t->t_pxq_runs == 0, "%s: job %" PRIu64 ": at the end %d entries pinned, SRQ %d, "
                  "pixel queue %d runs", sect, seed, t->t_pinned, t->t_srq, t->t_pxq_runs);

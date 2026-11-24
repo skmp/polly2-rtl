@@ -1373,7 +1373,8 @@ select.
 entry, the planes 4r .. 4r + 3 from the four banks at once, with the header and K, the clock after (the four equal
 macros of die region 5 read side by side, §3.12). It has the banks' read ports when it and M9's one-word port ask in one
 clock (only the M9 testbench uses the one-word port). The pins now go when a run's last point leaves the pixel pipe's
-end, P3 in M10 (`rel` from the tb top, `p2_tsp_run_tb_top`), P10 from M11.
+end, P3 in M10 (`rel` from the tb top, `p2_tsp_run_tb_top`), P10 from M11 (`p2_pp_blend`'s `rel`: a run's last point
+leaving P10, §3.7.7 As built (M11)).
 
 #### 3.7.2 `p2_tsp_pfetch`: TSP parameter fetch
 
@@ -1613,7 +1614,7 @@ units that own them:
 
 | stage | unit | function (spec) |
 |---|---|---|
-| P0 issue | `p2_pp_issue` | Takes a run from the pxq head and emits pixels `n = 0..len-1` (x = run.x + n). Per pixel: `InVolume = vmask[n] && tag.shadow && rm ∉ {PT_PASS0, PT_PASSN}`; `ro = rm ∈ {PT_PASS0, PT_PASSN} && pmask[n]`; `atest = rm ∈ {PT_PASS0, PT_PASSN} \|\| (rm == PT_MV && pmask[n])`; the store index for `vsel`. SupSample: 4 points (hx, hy) = (0,0), (1,0), (0,1), (1,1) [G T16]. **Pass drain**: after the `eop` item's last pixel, P0 issues nothing until that pixel has left P10 [G, below]. |
+| P0 issue | `p2_pp_issue` | Takes a run from the pxq head and emits pixels `n = 0..len-1` (x = run.x + n). Per pixel: `InVolume = vmask[n] && tag.shadow && rm ∉ {PT_PASS0, PT_PASSN}`; `ro = rm ∈ {PT_PASS0, PT_PASSN} && pmask[n]`; `atest = rm ∈ {PT_PASS0, PT_PASSN} \|\| (rm == PT_MV && pmask[n])`; the store index for `vsel`. SupSample: 4 points (hx, hy) = (0,0), (1,0), (0,1), (1,1) [G T16]. **Pass drain**: after the `eop` item's last pixel, P0 issues nothing until that pixel has left P10 [G, below] (M11: not after a TR_PRESORT pass, As built (M11) below). |
 | P1 plane | `p2_pp_plane` | Per plane `k = base + n step` (accumulator), or with SupSample `base + (2n + hx) step2 + hy hyd`. Then num H12a to `p2_pval_t` (tsp §5.3-5.5). 11 normalizers. |
 | P2 divide | `p2_pp_div` | `den = W` (the 1/w value): `DenominatorSeen`, the zero rule, `recip_mant` (512 x (t 18, n 9) ROM generated from the header, num H13). **One reciprocal a pixel**, shared by all quotients. Quotients U, V, base x4, offset x4 (16x17 multiplier, floored at 17 fraction bits). Mip `w = Divide(1, W)` (tsp §6, num H13). |
 | P3 colour, coordinate, level | `p2_pp_col`, `p2_pp_mip`, `p2_tex_coord` | ColorRounded (num H15, max 65535 then the `>> 8` multiply and 255 clamp of InterpolateBase); UseAlpha; offset colours (tsp §7). Mip `w8`, `ww`, `d`, level, `k`; mipChoose (pass B +1, 1x1 clamp, raster level 0, SupSample finer) (tsp §8.2-8.3). TexCoordFixed / CoordKeep, half texel, mip coordinate, declared V, clamp below 0, texel and 5-bit weights, ClampFlip (tsp §9.1). |
@@ -1668,6 +1669,43 @@ One global stall (in M10 the end of P3 held: the testbench's back-pressure); eve
 - Clocks (reported, not gated: MT5 / MT6) in M10's testbench: 1.5 clk a pixel on the console sets (runs of ~13 pixels,
   P3 held a third of the clocks by the testbench), the pass drain 3 clocks a pass (P1-P3).
 
+**As built (M11: P3's p2_tex_coord, P4-P11; `rtl/v1/tsp/p2_pp_shade.sv`, `p2_pp_fog.sv`, `p2_pp_ss.sv`, `p2_pp_blend.sv`;
+the texture units in `rtl/v1/tex/`, §3.8; the whole pipe `rtl/v1/tsp/p2_tsp_pp.sv`; PLAN M11).** The table above, with the
+choices it left open:
+- **One module for the pipe**, `p2_tsp_pp` (P0-P11 and the palette RAM; the tile buffers `p2_tbuf` beside it): the TSP tile
+  testbench, the M10 testbench (which reads P3's points as taps, its back-pressure the pipe's external stall) and
+  `p2_core` (M12) instance it. **The global stall** = P5's `tex_stall` || P11's `fb_block` || `ext_stall` (the testbench's
+  in M11; M12: the buffer-2 interlock). Every stage register holds while it is set.
+- **Stage registers** (each unit registers its outputs, as in M10): P3 (p2_pp_col, p2_pp_mip, p2_tex_coord), P4
+  (p2_tex_addr), P5 (p2_tex_cache), P6 (p2_tex_filter, behind p2_tex_decode), P7 (p2_pp_shade), P8 (p2_pp_fog), then
+  p2_pp_ss (combinational, with its keeping registers) into p2_pp_blend's P9 register, P10 the blend and the write,
+  P11 the feedback queue. A point carries `p2_pp_pt_t` (its control, the base and offset colours, W, the level and k,
+  TexCoordFixed's U, V) to P7; the colours after.
+- **P7 offsKept** is one register in p2_pp_shade, loaded by a non-null point of a volume with Texture && Offset (its light:
+  the header's `ofs_fb`) as it leaves P7, read by every point there (pixel order, tsp 3.4); no reset (it outlives renders
+  and resets; the testbench loads a capture's value through `ok_we`). The mutant that loads it at P0 instead is caught
+  (offspersist).
+- **P9**: SupSample's four points (0, 0), (1, 0), (0, 1), (1, 1) in P0's order; c0, then the first row's sum, then c2
+  kept; the fourth leaves the pixel with its control (the run's last, eop, eoe are on it).
+- **P10**: the tile-buffer words are read as a point enters the P9 register (buffer 1 always, buffer 2 when SrcSelect
+  or DstSelect: the secondary port, §3.9), the data in P10; the stuck alpha, the alpha test (alpha < PT_ALPHA_REF, the
+  whole register), BlendingUnit, the write (not for a run-only pixel, nor SrcSelect && DstSelect). **The P10 forward**:
+  a point's read issued in the clock the point before writes the same word of the same buffer takes the written value
+  (`fw1` / `fw2`); the mutant without it is caught on scenegen seed 180, a pre-sorted primitive whose first pixel is the
+  one before's last (no console page of M11's inputs has one; agents/m11 mutscan) and on the unit section's repeated
+  pixels. **tspAlphaStuck**: set after a setter's pixel (run-only too), cleared after the eoe point.
+- **P11**: a two-entry queue of `p2_fb_t`: PIXEL {idx, fail, ro} a punch-through-pass pixel, PASS_DONE {anyfail: the
+  pass's fail on pixels not run-only} after its eop point (a point that cannot put its one or two messages in holds the
+  pipe: `fb_block`).
+- **The pass drain and the pins at P10**: `drain_done` and `rel` when the point leaves P10. **The drain is not taken
+  after a TR_PRESORT pass** (M11's choice, §3.7.7 "Hazards"): pre-sorted primitives, a pass each, go through back to back,
+  the forward carrying the blended value [I: no stall measured; tim 3.3]. The drain after every other pass is P0 - P10
+  (11 stages; `D_PP` is MT6's fit); the mutant without it passes the values, as it must.
+- **Clocks** (reported, not gated: MT6, T8; `make tsp-tile` on the tile subset and M11's pages, VR_LAT 8 with
+  `--vramvary 7`, random feedback back-pressure and holds): see PLAN M11's gate results (2.44 clk a pixel over the
+  subset, 37 % of the clocks texture stalls, a line fill ~140 clk under --vramvary's random latency, ~18 without; 1.03 on
+  the untextured blend pages, 4-9 on SupSample and VQ-bank pages: four points a pixel, scattered texels).
+
 ### 3.8 Texture: `p2_tex_coord`, `p2_tex_addr`, `p2_tex_cache`, `p2_tex_decode`, `p2_tex_filter`
 
 **Function.**
@@ -1717,6 +1755,33 @@ One global stall (in M10 the end of P3 held: the testbench's back-pressure); eve
 - Cache organisation (line, ways, size, miss latency): GAP T8. Initial [G]: direct-mapped, 8 KB, 64-byte lines.
   SPAN_SORT_CFG bit 16 (bypass) changes time by ≤ 2 % and is not modelled.
 
+**As built (M11, `rtl/v1/tex/`; PLAN M11).** The text above, with the choices it left open:
+- **p2_tex_coord (P3)**: TexCoordFixed of U at 3 + TexU + 8 and of V at 3 + TexV + 8 (3 + TexU + 8 for a mipmapped texture
+  declared shorter), p2_fp_tex_coord (H11) twice, registered with P3; the half texel, the level's shift, CoordKeep of the
+  declared-shorter V and the clamp below zero are P4's (they need the level).
+- **p2_tex_addr (P4)**: the four taps of TextureFilter's order 00, 01, 10, 11 (tap 11 the point sample); the dispatch's
+  filter (FilterMode >= 2 without MipMapped is point); ClampFlip at the level's size (no flip when strided); twop as
+  bit interleaving (v bit i at 2i, u bit i at 2i + 1 up to the smaller size, the larger's bits on top: TexCache.cpp
+  twiddle_slow); MipPoint; the byte offset by fBitsPerPixel; the 64-bit word address (& 0x7FFFF8); VQ's index byte
+  address ((start + offset) ^ (bank << 19)) + 2048, ^ 1 with TEXT_CONTROL[16], and the code book's first word; the 5-bit
+  weights; YUV's 1x1 level as 565. Point sampling asks for tap 11 only (refsw3 fetches all four and uses one).
+- **p2_tex_cache (P5)**: the placeholder of §6: 128 lines x 64 B, direct-mapped (data 1024 x 64 bits with four read
+  ports, tags and valid bits in flip-flops), one fill at a time (eight 64-bit C4 reads, the line's valid bit cleared at
+  the first, set with its tag at the eighth response; RSP_N 8 lets the eight go back to back), invalidated at `flush`.
+  **The gather**: a tap's word is kept in its own register the clock its line is in, and the point leaves when every
+  tap it needs is kept or hits, so lines of one set that the four taps need in turn cannot evict each other for ever.
+  VQ: the index bytes (phase 0, one clock more), then the code book entries at code book + index (phase 1). The words
+  go to P6 with **TEXT_CONTROL[17]'s byte swap** applied here (the VQ index bytes are taken before it). No snooping of
+  C5; the bumphang counter (MT9, D6) is not here.
+- **p2_tex_decode, p2_tex_pal (P6)**: the palette RAM (1024 x 32, four asynchronous read ports, one write port from the
+  register side) read with the palette index taken off the word in the same clock; YUV paired by x; ExpandToARGB8888;
+  the strided bilinear widening. **p2_tex_filter (P6)**: point, the two-step bilinear, the bump angle round the circle,
+  IgnoreTexA; registered.
+- **Clocks** (reported, not gated: T8): a textured point that hits costs nothing more; a miss holds the pipe for the fill
+  (VR_LAT 8 + the arbiter: ~12-16 clk a line); VQ one clock more a point. The measured 1.11 clk/px (twiddled 565
+  bilinear), +1 for 8888 palette entries and YUV bilinear, +1 for a non-twiddled 2x2 across two rows are not modelled
+  beyond the gather and the misses (T8; MT6).
+
 ### 3.9 `p2_tbuf`: the two tile buffers and the entry-end controller
 
 **Function.** Owns tsp §17.1 and isp §4.4. refsw3: tile.cpp `NextTileAccumulationBuffers`, `GetColorOutputBuffer`,
@@ -1760,6 +1825,17 @@ and RenderCORE's end-of-entry logic.
 - refsw3's result holds whenever the write-out is idle at SWAP time. That is every deterministic accbuf cell.
 
 **Cycle.** Tile cost ≈ max(ISP, TSP, write-out) follows from the WRITE wait (back-pressure) [M tim §3.1].
+
+**As built (M11: the RAMs and the secondary port, `rtl/v1/tbuf/p2_tbuf.sv`; the controller is M12's).**
+- Two RAMs of 1024 x 32 (`ram0`, `ram1`), `sel` (which is buffer 1), `swap` (the testbench in M11, the controller from
+  M12). Each RAM one read port and one write port: buffer 1's read port is P10's; buffer 2's is the **secondary port**,
+  P10's address when P10 reads buffer 2 (the point's SrcSelect or DstSelect), else the write-out's (`wo_re`, `wo_gnt`).
+  Reads are registered and **the word goes to the register of the reader that asked** (P10's, held while its point is
+  held; the write-out's): a write-out read under a held P10 point does not take that point's word (a bug the tile
+  testbench found; the mutant `wo-takes-p10` is caught).
+- Writes: P10's, to either buffer through `sel`. A debug port (the testbench's) writes and reads any word by logical
+  buffer while the pipe is idle.
+- Not yet: the actions on eoe, the write-out start, the DstSelect interlock (M12).
 
 ### 3.10 `p2_wout`: write-out, scaler, clip, strip buffer
 
@@ -1835,7 +1911,7 @@ and RenderCORE's end-of-entry logic.
 Every primitive takes and returns the reference tuple as flat ports (num §6). Combinational by default. A unit may
 register a primitive's output as one of its pipeline stages; its lockstep testbench then compares at that latency.
 
-### 3.12 Die agreement (M2-M10)
+### 3.12 Die agreement (M2-M11)
 
 PLAN 0 rule 9: the HOLLY die shot (18 probable blocks, each labelled with a confidence; an interpretation of one
 optical image, not a reverse-engineering result) is a tie-breaker for grouping, boundaries and RAM sizes; console
@@ -1864,9 +1940,11 @@ changed for this note):
 | `p2_tsp_rstart` (M10): the coefficient cache (2 volumes x 11 planes of A', B', unit, F(C'), steps, hyd; flip-flops), four reload lanes, the products on 12's ALU | none of its own: logic between 5 and 12 | run start beside the parameter cache and the setup FPU it shares (12) | the cache is flip-flops here (it is read whole every run); the die shows no macro for it |
 | `p2_pxq` (M10): one RAM of 48 run descriptors (~2.7 Kbit each, 130 Kbit) and a credit counter | 9 TSP pixel datapath (low): the ~25 small light macros in its lower-left part (second photo) | a queue of runs inside the pixel datapath, in RAM | the size: this design's descriptor carries every plane's words of both volumes (2 x 11 x 98 bits); the console's is surely narrower (base per run, the steps per primitive), and 130 Kbit is more than 9's small macros look able to hold. Not changed: the values and the measured queue depths (45-70 runs, T7) do not depend on it |
 | `p2_pp_issue` .. `p2_pp_mip` (P0-P3, M10): the accumulators, 11 normalizers, one reciprocal (the 512 x 27-bit ROM, p2_fp_recip_rom) and 11 16 x 17 multipliers, the colour rounding, the level's two 8 x 8 multipliers | 9 TSP pixel datapath (low) | the per-pixel arithmetic in one datapath block; the reciprocal's ROM may be one of 9's small macros (or 18, "a small ROM") | the die gives no count of multipliers; one reciprocal a pixel is [I PIPELINE_SHAPE 5], not the die's |
-
-Outside M2-M9, for the units to come: 4 tile buffers (medium, four macros of the densest RAM) against `p2_tbuf`'s two
-1024 x 32 RAMs (§3.9).
+| `p2_tex_cache` (M11): 8 KB, 1024 x 64-bit data words with four read ports, 128 tags in flip-flops | 8 texture caches (low): two small (second photo: two long) SRAMs | a texture cache of its own, near the TSP datapath and the memory arbiter (15) | two macros there against one data array with four read ports here (bilinear's four taps a clock); the console's may be two banks (even / odd words, or data and tags) serving the taps in fewer ports over more clocks; the organisation is the placeholder of §6 [G T8], the values do not depend on it, and its clocks are not gated (T8). Not changed |
+| `p2_tex_pal` (M11): 1024 x 32 (32 Kbit), four read ports | 10 palette or fog RAM (low): the long SRAM, ~0.48 mm² | one RAM of 1024 x 32: the long macro's estimated size (research/REPORT.md: "if that SRAM is the 32-Kbit palette") agrees | four read ports here, one macro there; the measured +1 clk for an 8888 palette entry (tim 3.9) says a narrower path, read in steps: T8, not modelled |
+| `p2_pp_fog`'s FOG_TABLE (M11): 128 x 16 bits in the fog stage | 9's small macros, or 10 | a small table beside the fog arithmetic | the die gives no place for it (10 is too large for 2 Kbit) |
+| `p2_pp_shade`, `p2_pp_fog`, `p2_pp_ss`, `p2_pp_blend` (M11) | 9 TSP pixel datapath (low) | the per-pixel arithmetic in one block; the bump mapper inside it, no block of its own (NOTES "Corrections") | - |
+| `p2_tbuf` (M11): two RAMs of 1024 x 32 (8 KB), each one read and one write port; the secondary port shared by P10 and the write-out | 4 tile accumulation buffers (medium): four macros of the densest RAM, each two sub-arrays over a shared periphery (8 sub-arrays) | two buffers of 4 KB, 8 KB in all, and a dual-port macro type (one blended into while the other is written out) | four macros against two RAMs: each buffer may be two macros (16-bit halves, or half a tile each), the 8 sub-arrays a further split; not modelled (the ports and their sharing are the measured part, tim 3.10) |
 
 ## 4. Ordering and hazards: the observable orders and the mechanism that keeps each
 
@@ -1898,7 +1976,7 @@ Outside M2-M9, for the units to come: 4 tile buffers (medium, four macros of the
 | ISP bit 14.6 tiles early; 436 / 443 / 462 / 476 runs left (3.5) | cut blocked by full queues; `ev_isp` at the last accept; §3.5 formula | runq, sort, SRQ, pxq | `RUNQ_N`, `PXQ_PIX`, `PXQ_RUNS` (fitted, MT2) | T3 |
 | order: window 96, drains, passes / tiles apart (3.6) | sorter with the epoch key | sort | — (96 [M]) | T5 |
 | early drains, sort-off order (3.6) | GAP | sort, store | emit rule, rates | T5 |
-| TSP setup 39 / 48 / 64 / 49, +5 DCalcCtrl (3.7) | generated programs on the shared ALU | tsp_setup, tsp_alu | `ALU_NM`, `ALU_NA`, `L_*` | T6, T7 |
+| TSP setup 39 / 48 / 64 / 49, +5 DCalcCtrl (3.7; the 49 is the bump map's measured figure, which runs the textured class's program: §3.7.3 compares 48) | generated programs on the shared ALU | tsp_setup, tsp_alu | `ALU_NM`, `ALU_NA`, `L_*` | T6, T7 |
 | PT setup 58 (3.7) | none (GAP, not padded) | — | — | T6 |
 | look-ahead ~11-12, "keeps 16" sort-off (3.7) | 16-entry store, ~4 pinned | tsp_store | `STORE_N` 16, pin rule, `SRQ_N` | T6 |
 | ~2 clk a plane taken from run starts (3.8) | ALU arbitration | tsp_alu | priority | T7 |
@@ -1937,10 +2015,10 @@ Outside M2-M9, for the units to come: 4 tile buffers (medium, four macros of the
 | `ALU_NM`, `ALU_NA`, `L_*` (TSP), arbitration | 4, 4, 1 / 2 / 2 (M9: lengths UNTEX 20, TEX 26, TEX_O 39, +5 for K, +1 for DCalcCtrl 1; none of the sweep reaches 39 / 48 / 64), run start first (a held step) | [I] / [G] | T7, MT4 |
 | `JOB_N` (store to pfetch), `PF_OUT`, `PF_AHEAD` (TSP fetch) | 2, 8, 2 (M9) | [G] | T6 |
 | `PXQ_PIX`, `PXQ_RUNS`, position | 256, 48, before texturing (as built M10: `P2_PXQ_PIX`, `P2_PXQ_RUNS` in p2_tsp_pkg) | [M] ispq + spanahead, fitted | MT2 (fit), T7 |
-| `D_PP`: the pass drain | 11 (the P0-P10 depth; as built M10: the drain ends at P3's exit, 3 stages, until M11) | [M] B = 1035 | MT6 (fit) |
+| `D_PP`: the pass drain | 11 (the P0-P10 depth; as built M10: the drain ended at P3's exit, 3 stages; M11: at P10's exit, 11 stages, and none after a TR_PRESORT pass, §3.7.7 As built (M11)) | [M] B = 1035 | MT6 (fit) |
 | run start's coefficient cache and reload | as built M10: one entry a volume, keyed (tag, volume, tile); rows of four planes; the reload not overlapped with the products (4.00 / 5.00 / 7.00 within, 8.1 / 9.1 / 12.1 across, against 3.9 / 4.2 / 6.3 and ~4.7 / 6 / 8) | [I] / [G] | T7, MT5 |
 | SupSample points per clock | 1 | [G] | T16 |
-| texture cache organisation, miss latency, C5 coherence | direct-mapped 8 KB, 64 B lines, no snoop | [G] | T8 |
+| texture cache organisation, miss latency, C5 coherence | direct-mapped 8 KB, 64 B lines, no snoop (as built M11: four read ports, one fill at a time, the taps gathered; §3.8 As built (M11)) | [G] | T8 |
 | `VR_LAT`, `VR_ROW`, refresh, half contention, arbitration priority | 8, fitted, off, as §3.2 | [G] | T9, T14 |
 | `WO_FIFO` | 64 px | [G] | T10, T15 |
 | write-out line overhead | in the VRAM model | [I] | T9, T10 |
