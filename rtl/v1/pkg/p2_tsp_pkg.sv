@@ -141,4 +141,51 @@ package p2_tsp_pkg;
     p2_tsp_hdr_t                hdr;      // the volume's header words
     p2_tsp_k_t                  k;
   } p2_pp_ctl_t;
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // M11: texture, shading, fog, SupSample, blend (PLAN M11; ARCHITECTURE 3.7.7 P3-P11, 3.8, 3.9; refsw_tile.cpp
+  // TextureFilter / TextureFetch / ColorCombiner / BumpMapper / FogUnit / BlendingUnit / PixelFlush_tsp at 4f3efe15)
+  // ---------------------------------------------------------------------------------------------------------------
+  // TCW PixelFmt (core_structs.h; refsw_tile.cpp DecodeTextel, GetExpandFormat)
+  localparam logic [2:0] P2_PIX_1555 = 3'd0;
+  localparam logic [2:0] P2_PIX_565  = 3'd1;
+  localparam logic [2:0] P2_PIX_4444 = 3'd2;
+  localparam logic [2:0] P2_PIX_YUV  = 3'd3;
+  localparam logic [2:0] P2_PIX_BUMP = 3'd4;
+  localparam logic [2:0] P2_PIX_PAL4 = 3'd5;
+  localparam logic [2:0] P2_PIX_PAL8 = 3'd6;
+  localparam logic [2:0] P2_PIX_RSVD = 3'd7;
+  // the texture cache (ARCHITECTURE 3.8, 6: direct-mapped 8 KB, 64-byte lines [G T8]): 128 lines of 8 64-bit words
+  localparam int P2_TEXC_LINES = 128;
+  localparam int P2_TEXC_SETB  = 7;      // set index: word address bits [9:3]
+  localparam int P2_TEXC_TAGB  = 10;     // tag: word address bits [19:10] (8 MB of 64-bit words: 20 bits)
+
+  // a point after P3 (p2_pp_col, p2_pp_mip, p2_tex_coord): what the stages P4 - P10 read
+  typedef struct packed {
+    p2_pp_ctl_t         ctl;
+    logic [31:0]        base;     // InterpolateBase (ARGB8888)
+    logic [31:0]        offs;     // InterpolateOffs
+    p2_pval_t           w;        // the TSP's own 1/w (plane 0's value: the fog's W, tsp 15 [tspw])
+    logic [3:0]         level;    // mipChoose's level and k (k: of 256, the trilinear fade)
+    logic [8:0]         k;
+    logic signed [31:0] tu;       // TexCoordFixed of U and V in 1/256 texel at the full size (p2_tex_coord)
+    logic signed [31:0] tv;
+  } p2_pp_pt_t;
+
+  // P4's texel requests (p2_tex_addr to p2_tex_cache): four taps in TextureFilter's order 00 (u + 1, v + 1), 01 (u, v + 1),
+  // 10 (u + 1, v), 11 (u, v) = tap 3 (the point sample)
+  typedef struct packed {
+    logic [3:0]        need;      // the taps the filter reads: bilinear all four, point tap 3; none untextured
+    logic              vq;        // VQ: the index byte first, then the code book entry
+    logic [3:0][19:0]  waddr;     // the 64-bit word (address bits 22:3): the texel's, or the VQ index byte's
+    logic [3:0][2:0]   ibyte;     // VQ: the index byte in its word
+    logic [19:0]       cbase;     // VQ: the code book's first word ((TexAddr << 3) & 0x7FFFF8) >> 3
+    logic [3:0][3:0]   toff;      // the texel's offset & 15 (DecodeTextel's lane / byte / nibble)
+    logic [4:0]        ub;        // the 5-bit bilinear weights
+    logic [4:0]        vb;
+    logic [2:0]        fmt;       // the fetch's PixelFmt (YUV at the 1x1 level read as 565)
+    logic              twid;      // twiddled (DecodeTextel's YUV pairing)
+    logic              filt;      // bilinear (the dispatch's FilterMode != 0)
+    logic              strided;   // stride select (the shift-only widening when bilinear)
+  } p2_tex_req_t;
 endpackage

@@ -11,8 +11,9 @@
 //                      p2_mem ──► the VRAM model                                    rel (pins) ◄──┘
 //
 // The testbench drives the registers, the items (with random gaps) and the entries' records, takes P3's points with
-// random back-pressure (the pipe's global stall) and compares every point with refsw3. The pins of a run go at its last
-// point's exit from P3, and the pass drain ends there (P10 in M11).
+// random back-pressure (the pipe's external stall) and compares every point with refsw3. Since M11 the pipe goes on to
+// P10 (p2_tsp_pp, with the texture cache on C4 and the tile buffers): the pins of a run go at its last point's exit from
+// P10, and the pass drain ends there; the testbench still reads every point at P3 (o_take).
 module p2_tsp_run_tb_top
   import p2_regs_pkg::*;
   import p2_pkg::*;
@@ -49,6 +50,7 @@ module p2_tsp_run_tb_top
   // ---- P3's points
   output logic                              o_v,
   input  logic                              o_rdy,
+  output logic                              o_take,
   output logic                              o_null,
   output logic                              o_eop,
   output logic                              o_eoe,
@@ -182,8 +184,12 @@ module p2_tsp_run_tb_top
     c_v[P2_C_TSP_PFETCH]    = m3_v;
     c_addr[P2_C_TSP_PFETCH] = m3_addr;
     c_rrdy[P2_C_TSP_PFETCH] = m3_rrdy;
+    c_v[P2_C_TEX]           = m4_v;
+    c_addr[P2_C_TEX]        = m4_addr;
+    c_rrdy[P2_C_TEX]        = m4_rrdy;
     c_we    = '0;
     c_w64   = '0;
+    c_w64[P2_C_TEX] = 1'b1;
     c_be    = '1;
     c_wdata = '0;
   end
@@ -221,32 +227,40 @@ module p2_tsp_run_tb_top
   p2_pxq u_pxq (.clk, .rst, .i_v(rd_v), .i_rdy(rd_rdy), .i_d(rd_d), .o_v(q_v), .o_rdy(q_rdy), .o_d(q_d), .cred_ret,
     .t_runs(t_pxq_runs), .t_pix(t_pxq_pix));
 
-  // ---------------------------------------------------------------------------------------------- the pixel pipe, P0 - P3
-  logic                               stall, drain_done;
-  logic                               p0_v, p0_first, p1_v, p2_v, p3_v;
-  p2_pp_ctl_t                         p0_ctl, p1_ctl, p2_ctl, p3_ctl;
-  p2_tsp_pev_t [1:0][P2_TSP_NPL-1:0]  run_pl;
-  p2_pval_t [P2_TSP_NPL-1:0]          p1_val, p2_val, p3_val;
-  p2_quot_t [P2_TSP_NPL-1:0]          p2_q, p3_q;
-  assign stall = p3_v && !o_rdy;
-  p2_pp_issue u_issue (.clk, .rst, .stall, .q_v, .q_rdy, .q_d, .cred_ret, .p_v(p0_v), .p_ctl(p0_ctl), .p_first(p0_first),
-    .run_pl, .drain_done, .t_drain);
-  p2_pp_plane u_plane (.clk, .rst, .stall, .p_v(p0_v), .p_ctl(p0_ctl), .p_first(p0_first), .run_pl,
-    .o_v(p1_v), .o_ctl(p1_ctl), .o_val(p1_val));
-  p2_pp_div u_div (.clk, .rst, .stall, .i_v(p1_v), .i_ctl(p1_ctl), .i_val(p1_val),
-    .o_v(p2_v), .o_ctl(p2_ctl), .o_val(p2_val), .o_q(p2_q));
-  p2_pp_col u_col (.clk, .rst, .stall, .i_v(p2_v), .i_ctl(p2_ctl), .i_val(p2_val), .i_q(p2_q),
-    .o_v(p3_v), .o_ctl(p3_ctl), .o_val(p3_val), .o_q(p3_q), .o_base, .o_offs);
-  p2_pp_mip u_mip (.clk, .stall, .i_v(p2_v), .i_ctl(p2_ctl), .i_w(p2_q[0]), .o_level, .o_k, .o_rl, .o_rk);
-  assign t_p0 = p0_v && !stall;
-
-  // the end of the pipe in M10: the point leaves P3; its run's pins go with the run's last point; the drain ends with eop
-  logic take;
-  assign take       = p3_v && o_rdy;
-  assign drain_done = take && p3_ctl.eop;
-  assign rel_v      = take && p3_ctl.last && !p3_ctl.null_ && p3_ctl.need != 2'b00;
-  assign rel_need   = p3_ctl.need;
-  assign rel_idx    = p3_ctl.sidx;
+  // ---------------------------------------------------------------------------------------------- the pixel pipe, P0 - P11
+  // (M11: the whole pipe, p2_tsp_pp, with the tile buffers and C4; the testbench reads P3's points: o_take is a point
+  // leaving P3, its back-pressure the pipe's external stall, so that every point leaves P3 as in M10)
+  p2_pp_ctl_t                         p3_ctl;
+  p2_pval_t [P2_TSP_NPL-1:0]          p3_val;
+  p2_quot_t [P2_TSP_NPL-1:0]          p3_q;
+  logic                               p3_v, ext_stall;
+  logic                               m4_v, m4_rrdy;
+  logic [23:0]                        m4_addr;
+  logic                               tb_rd_en, tb_rd_b2, tb_wr_en, tb_wr_b2;
+  logic [P2_PIX_BITS-1:0]             tb_rd_idx, tb_wr_idx;
+  logic [31:0]                        tb_rd_b1_data, tb_rd_b2_data, tb_wr_data;
+  assign ext_stall = p3_v && !o_rdy;
+  p2_tsp_pp u_pp (
+    .clk, .rst, .flush,
+    .text_control('0), .pal_ram_ctrl('0), .half_tex(1'b0), .fog_col_ram('0), .fog_col_vert('0), .fog_density('0),
+    .fog_clamp_max('0), .fog_clamp_min('0), .pt_alpha_ref('0),
+    .pal_we(1'b0), .pal_widx('0), .pal_wdata('0), .ft_we(1'b0), .ft_idx('0), .ft_wdata('0),
+    .ok_we(1'b0), .ok_wdata('0), .offs_kept(),
+    .q_v, .q_rdy, .q_d, .cred_ret,
+    .m_v(m4_v), .m_rdy(c_rdy[P2_C_TEX]), .m_addr(m4_addr), .m_rv(c_rv[P2_C_TEX]), .m_rrdy(m4_rrdy),
+    .m_rdata(c_rdata[P2_C_TEX]),
+    .tb_rd_en, .tb_rd_idx, .tb_rd_b2, .tb_rd_b1_data, .tb_rd_b2_data, .tb_wr_en, .tb_wr_b2, .tb_wr_idx, .tb_wr_data,
+    .fb_v(), .fb_rdy(1'b1), .fb(),
+    .rel_v, .rel_need, .rel_idx, .ext_stall, .stall(),
+    .p3_v, .p3_take(o_take), .p3_ctl, .p3_val, .p3_q, .p3_base(o_base), .p3_offs(o_offs), .p3_level(o_level), .p3_k(o_k),
+    .p3_rl(o_rl), .p3_rk(o_rk),
+    .t_p7(), .t_p7_ctl(), .t_p10(), .t_p10_ctl(), .t_stuck(), .t_at(), .t_drain, .t_p0, .t_tex_stall(), .t_fill(),
+    .t_miss(), .t_fb_block());
+  p2_tbuf u_tbuf (.clk, .rst, .swap(1'b0), .sel(),
+    .rd_en(tb_rd_en), .rd_idx(tb_rd_idx), .rd_b2(tb_rd_b2), .rd_b1_data(tb_rd_b1_data), .rd_b2_data(tb_rd_b2_data),
+    .wr_en(tb_wr_en), .wr_b2(tb_wr_b2), .wr_idx(tb_wr_idx), .wr_data(tb_wr_data),
+    .wo_re(1'b0), .wo_idx('0), .wo_gnt(), .wo_data(),
+    .dbg_we(1'b0), .dbg_b2(1'b0), .dbg_idx('0), .dbg_wdata('0), .dbg_b1(), .dbg_b2_data());
 
   assign o_v     = p3_v;
   assign o_null  = p3_ctl.null_;

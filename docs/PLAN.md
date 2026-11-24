@@ -126,7 +126,10 @@ the entries) and `core-perp`; the M1 / M2 rows were already in `tb/fp/ref_copies
 testbench run them. M10's copy is `tsp-mip-choose` (PixelFlush_tsp's mipChoose lambda alone) in
 `tb/tsp_run/ref_copies_run.h`: a lambda local to PixelFlush_tsp, it is included inside `p2ref::mip_choose` in the glue's
 translation unit (TcwRaster, MipSelect in scope, PixelFlush_tsp's names bound as there), which the TSP run testbench calls
-on every point.
+on every point. M11's copies are `tsp-bump-light`, `tsp-shade`, `tsp-fade` (PixelFlush_tsp's bumpLight, shade and fade
+lambdas) and `tsp-super-avg` (the SupSample block's average loop) in `tb/tsp_tile/ref_copies_tile.h`, included the same
+way inside `p2ref::bump_light_copy`, `shade_copy`, `fade_copy` and `super_avg_copy` (one P2REF_TILE_* macro each, on an
+entry made of the volume's words), which the unit sections of make tsp-tile call on random inputs.
 
 **Runtime switches are pinned** (`tools/check_ref_switches.sh`, run by every gate, result in the summary):
 - the environment has `MIP_K` and `MIP_ARITH` unset or `0` (plane.h reads both with `getenv`);
@@ -343,6 +346,29 @@ resTag row as a mutant):
   - every tile-buffer word after every pass (debug mode: after every pixel, the word at `idx`);
   - the PT outcome per pixel;
   - `offsKept` and `alpha_stuck` at each pass end.
+
+**As built (M11, `tb/tsp_tile`; make tsp-tile).** The DUT is `p2_tsp_tile_tb_top`: M9's store, fetch, setup and ALU, M10's
+run start and pixel queue, the pipe `p2_tsp_pp` (P0-P11) and `p2_tbuf`, p2_mem with the VRAM model. The reference
+(`tsp_tile_ref.cpp`) renders each render of a capture through the M5 phase driver first, recording through two hooks the
+glue gained (`p2ref::set_pass_hook` around every `render_param_tags`, and M5's pixel hook): every entry (its tile, which
+store is buffer 1 at its start), every SHADE pass's runs in TSP order (`span_gen` + `span_sort` of the state before it,
+vmask / pmask from that state), every pixel (index, run-only, the alpha test, the write: buffer and word, or none) and
+after each pass offsKept, tspAlphaStuck and a hash of both buffers. **The pre-sorted passes** reach the hook because the
+testbench links its own lists half of the glue, `tb/tsp_tile/refcore_glue_lists_rpt.cpp`, which routes refsw_lists.cpp's
+RenderParamTags calls (the walk's, after every pre-sorted triangle) to `p2ref::render_param_tags`, i.e. through the
+verbatim copies of the loop and PixelFlush_tsp that the frames self-test proves (§1.1). Then the RTL runs the render's
+items: each pass's runs as `p2_rs_t` (eop on a pass's last run; eoe on the entry's last item or on a null item after it, at
+random), the entries' records, the registers (PALETTE_RAM, FOG_TABLE through their write ports), random gaps, random
+feedback back-pressure, random holds of the pipe, random secondary-port reads (each checked against the testbench's
+model of buffer 2). Checked in the RTL's order: every pixel leaving P10 (index, run-only, the alpha test, its write or
+none), every feedback message, after every pass every word of both buffers (the testbench's shadow of the RTL's buffers,
+kept from the write tap, against the reference's hash), the stuck alpha (as the pass's eop point leaves P10), offsKept (as
+it leaves P7), and at every render's end every word read back through p2_tbuf's debug port and offsKept. The buffers swap
+where refsw3's do (between entries, with the pipe idle: M12's controller does it from then on). A case's first render
+starts from the reference's buffers and offsKept (loaded through the debug ports); state carries from render to render;
+the generators are seeded per case and render (so `--renders A-B` cuts a case anywhere, the renders before on the
+reference alone). **VRAM-race**: a render whose C4 reads touch a 64-bit word its write-out changed (refsw3 texturing from
+the framebuffer as written so far, the RTL from the render's start) has its differences counted in their own class.
 
 ### 1.4 Frame testbench: `p2-offline` (conv §7.4)
 
@@ -1212,6 +1238,80 @@ PASS, 201 s wall: 1,452 of 5,317 items (every stream under one SPAN_SORT_CFG, th
 16.3 % of the weight, 0 failures.
 
 ### M11. Pixel pipe: texture, shading, fog, SupSample, blend
+
+**Status (2026-11-24): done (not committed: the owner's).** `make tsp-tile` (tools/gate/gate_tsp_tile.sh, `tb/mk/tsp_tile.mk`),
+`make tsp-tile-mutants`, `make tsp-tile-full [SAMPLE=<seed>]`; scratch in `agents/m11/`. RTL: `rtl/v1/tex/` (`p2_tex_coord`,
+`p2_tex_addr`, `p2_tex_cache`, `p2_tex_pal`, `p2_tex_decode`, `p2_tex_filter`), `rtl/v1/tsp/` (`p2_pp_shade`, `p2_pp_fog`,
+`p2_pp_ss`, `p2_pp_blend`, and `p2_tsp_pp`: the whole pipe P0-P11), `rtl/v1/tbuf/p2_tbuf.sv`; the formats in `p2_tsp_pkg`
+(`p2_pp_pt_t`, `p2_tex_req_t`, the PixelFmt and cache constants). M10's testbench top now has the whole pipe (its points
+still read at P3: `o_take`; the pins and the drain at P10), with M10's gate and mutants unchanged (one fragment updated:
+the drain's). Testbenches `tb/tsp_tile/`: the TSP tile testbench (`p2_tsp_tile_tb_top`, `tsp_tile_tb.cpp`, the reference
+`tsp_tile_ref.cpp` with the glue's lists half `refcore_glue_lists_rpt.cpp`, §1.3 As built (M11)) and the unit sections
+(`p2_tsp_unit_tb_top`, `tsp_unit_tb.cpp`, `tsp_unit_ref.cpp`); the copies `ref_copies_tile.h` (§1.1); the glue gained
+`set_pass_hook`, `tile_buffer_sel`, `set_color`, `set_offs_kept` and the copies' wrappers. ARCHITECTURE 3.7.7, 3.8, 3.9
+"As built (M11)" give the choices, 3.12 the die agreement. Where the tree differs from the text below:
+- **The pass drain is not taken after a TR_PRESORT pass.** With a drain after every pass (P0 waits for the eop point to
+  leave P10), pre-sorted primitives (a pass each) could never meet in the blend, and the P10 forward mutant could not
+  fail anywhere; ARCHITECTURE 3.7.7's hazard ("TR_PRESORT puts primitive k's last pixel and k+1's first pixel at the same
+  place, one clock apart") assumes they go back to back. So they do, the forward carrying the blended value; every other
+  pass is drained at P10. Timing only (the drain-off mutant passes the values).
+- **The P10 forward's case among the inputs**: no console page of M11's list and no dump of the tile subset has a
+  pre-sorted primitive whose first pixel is the one before's last (agents/m11/mutscan: the mutant without the forward
+  passes all of them); scenegen seed 180 has one, and the mutant's probe is that seed (always-run in tsp-tile-full). The
+  unit section's repeated pixels catch it too.
+- **The tile buffers swap** where refsw3's write-out swaps them (between entries), pulsed by the testbench with the pipe
+  idle, until M12's controller.
+- **offsKept is zero at power-on** (`rst`; refsw3's static starts at 0) and loaded by the testbench from a capture's state
+  (`ok_we`); never cleared otherwise.
+- **The texture path's choices** (placeholder organisation [G T8]): the cache gathers a point's taps into registers (four
+  read ports, one fill at a time); TEXT_CONTROL[17]'s byte swap is applied at the cache's output (the VQ index bytes are
+  read before it); the palette RAM has four asynchronous read ports. The bumphang counter (MT9, D6) is not built.
+
+**Gate results (2026-11-24, J 16, agents/m11/gates).** `make tsp-tile` PASS, 590.6 s wall, CPU 8,482 s, 90 %
+utilisation (the pole texctl_bankmip 457 s: VQ bank pages, scattered texels); inputs: the tile subset (tb/tile/subset_tests,
+subset_dumps, subset_seeds) and M11's console pages (tb/tsp_tile/subset_tsp_tile.txt: texfmt, sample, mip, mipbil, texctl*,
+texfar*, coordfix, yuvbil, bump*, env, alphatest, fog, tspw, supsample*, ss*, trimin, trifade, blend, blendsel*,
+offspersist), at most 8 renders each: 93 pages, 33 dumps, 200 seeds, 326 cases, 822 renders.
+- tile (--vramvary 7): 326 cases, 177,556 entries, 450,665 SHADE passes (229,509 pre-sorted), 14,797,090 items (89,905
+  null), 258,771,056 pixels, 253,972,223 tile-buffer writes, 10,425,939 feedback messages, 174,664 swaps, 61,504,332
+  secondary-port reads; 1,222,867,964 checks, 0 failures: every pixel's write, every feedback message, both buffers after
+  every pass, the stuck alpha and offsKept at every pass end, every word at every render's end. VRAM-race renders: 0.
+- unit-tex: 2,000,000 random texture points against p2ref::texture_filter, 0 failures; unit-shade: 1,000,000 random pixels
+  (SupSample's four points among them), 8,636,154 checks (P7 against the shade / bumpLight copies, P8 fade(fog), P9 the
+  average copy, P10 stuck, alpha test, BlendingUnit's write, the feedback), 0 failures; lint-tsp-tile PASS.
+- Clocks (reported, not gated: MT6, T8): 632,307,985, 2.444 a pixel; texture stalls 237,185,627 clk (1,534,637 line fills:
+  ~140 clk a fill under --vramvary's random latency, ~18 without), feedback block 5,196,880, the testbench's holds
+  10,939,305, the pass drain 3,406,787. Untextured pages 1.03 clk a pixel (blend); SupSample and VQ-bank pages 4-10.
+- `make tsp-tile-mutants` PASS (193.5 s): PLAN M11's list, all caught: the 10 of rtl/v1/tsp (the blend's 255, stuck alpha
+  never set, offsKept loaded at P0 instead of P7, the fog index without +1, fade before fog, SupSample's sum >> 2, the
+  run-only write, the P10 forward off (on seed 180's back-to-back pre-sorted primitives), DstSelect's dst from buffer 1,
+  PT_MV alpha-testing every pixel) and the 5 of rtl/v1/tex (bilinear as one sum, YUV by memory order, the VQ bank XOR
+  after +2048, the byte swap on index bytes, the 1x1 YUV level not as 565); of the structure 9 in tsp (bump light
+  interpolated, offsKept by any texture, decal alpha, the bump quadrant, vertex fog without Offset, fog of a negative
+  1/w, anyfail counting run-only pixels, stuck not cleared at eoe, PT_ALPHA_REF's low byte), 11 in tex (twiddle u / v,
+  strided flip, the half texel at the level's size, clamp below 0, declared V, the cache tag's top bit, no flush,
+  palette 8's bank, the strided widening, IgnoreTexA, the bump weight) and 4 in tbuf (the write-out's read into P10's
+  register, the write-out winning the secondary port, no swap, writes not through sel): 39 caught of 39; the timing one
+  (the pass drain off) passes, as it must.
+- **tsp-run with the longer pipe** PASS (88.4 s): every M10 count unchanged (random 96,248,779 checks, super 38,592,133,
+  console 463,795,124: every reading of every set the console's where refsw3's is), run start's pitch as in M10;
+  `tsp-run-mutants` 21 caught, the 2 timing ones passing. `make tsp-run-full SAMPLE=3315927` PASS (162 s): every item,
+  24,681,778 uvmeas readings of 24,681,778.
+- **Every earlier gate** (agents/m11/gates/all.txt): scaffold, lint, fp, isp-edge, isp-depth, isp-setup, refglue-selftest,
+  isp-tile-op, isp-tile, sort, tsp-setup PASS; every mutant gate in full PASS with M10's counts (fp 92, isp-edge 36,
+  isp-depth 29, isp-setup 16, refglue 12, isp-tile-op 27, isp-tile 23 (its per-tile barrier one passing, as it must), sort 11, tsp-setup 17).
+- **Sampled full gates** (rule 10): `isp-tile-full SAMPLE=2704611883` PASS, 5,730 s wall (CPU 83,958 s, 92 %; the pole
+  ispcache 2,757 s): every one of the 6,084 phase-halt items (18,386 renders, 66,820,640 checks) and 20 free-running items
+  (12 always-run; 92 drawn ones not started at the deadline), 0 failures; `sort-full SAMPLE=918274465` PASS, 498 s: 868
+  of 3,940 items, 15.9 % of the weight, 0 failures. `tsp-tile-full SAMPLE=1559023471` PASS, 4,218 s wall (CPU 60,490 s, 90 %; the
+  pole ssrare/r8-15 556 s; the captures at up to 256 renders first): every case once (one of its items at random: 231
+  pages, 855 dumps, 5,000 seeds, 6,084 cases), the always-run items and the unit sections whole: 6,117 of 7,434 items,
+  64.5 % of the predicted weight, 8,019 renders, 1,101,743,803 pixels, 7,121,268,683 checks, 0 failures; 4 VRAM-race
+  renders (scenegen seeds 1156, 1295, 2013, 3079: texture reads of words their write-out changed), 0 differences there. The
+  mandatory items alone were predicted over SAMPLE_BUDGET (no cost file: static estimates; the sample's WARNING line,
+  D12), so no optional item was drawn; the next sample has this run's cost file. Clocks 4.03 a pixel.
+
+
 
 **Deliverables.**
 - `p2_tex_coord`, `p2_tex_addr`, `p2_tex_cache` (C4; placeholder organisation, ARCHITECTURE §6), `p2_tex_decode`,

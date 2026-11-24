@@ -1,0 +1,44 @@
+// tsp_tile_lint.vlt: verilator -Wall waivers for make lint-tsp-tile (conventions.md 4.8): M11's p2_tex_* (rtl/v1/tex),
+// p2_pp_shade / fog / ss / blend and p2_tsp_pp (rtl/v1/tsp), p2_tbuf (rtl/v1/tbuf) and the tb/tsp_tile tops (also read by
+// make lint-tsp-run, whose top has the whole pipe since M11). Each waiver names its file and its reason.
+`verilator_config
+// the stages read of a point's control (p2_pp_ctl_t) only the fields their rules name (the header's words, the flags)
+lint_off -rule UNUSEDSIGNAL -file "*/p2_tex_addr.sv" -match "*'c'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_tex_coord.sv" -match "*'i_ctl'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_pp_shade.sv" -match "*'c'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_pp_fog.sv" -match "*'cx'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_pp_blend.sv" -match "*'s_pt'*"
+// TEXT_CONTROL: P4 reads the stride (4:0), the bank bits (12:8) and bit 16; bit 17 is P5's
+lint_off -rule UNUSEDSIGNAL -file "*/p2_tex_addr.sv" -match "*'text_control'*"
+// the VQ index address wraps at 8 MB (refsw_tile.cpp VQLookup: & VRAM_MASK)
+lint_off -rule UNUSEDSIGNAL -file "*/p2_tex_addr.sv" -match "*'ia'*"
+// the decode reads of the TCW the format and PalSelect
+lint_off -rule UNUSEDSIGNAL -file "*/p2_tex_decode.sv" -match "*'tcw'*"
+// the filter reads of the request the weights and its kind
+lint_off -rule UNUSEDSIGNAL -file "*/p2_tex_filter.sv" -match "*'i_req'*"
+// products shifted down: their low bits (and the top bit of a 17-bit product of two bytes) are dropped by the rule
+lint_off -rule UNUSEDSIGNAL -file "*/p2_tex_filter.sv" -match "*'p'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_tex_filter.sv" -match "*'o'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_pp_blend.sv" -match "*'ps'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_pp_blend.sv" -match "*'pd'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_pp_fog.sv" -match "*'s'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_pp_fog.sv" -match "*'fa'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_pp_shade.sv" -match "*'p2'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_pp_shade.sv" -match "*'p3'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_pp_shade.sv" -match "*'t3p'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_pp_shade.sv" -match "*'am'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_pp_shade.sv" -match "*'m'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_pp_shade.sv" -match "*'t1'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_pp_shade.sv" -match "*'t2'*"
+// the fog's index and blend factor take the fraction's top 12 bits (LookupFogTable)
+lint_off -rule UNUSEDSIGNAL -file "*/p2_pp_fog.sv" -match "*'frac'*"
+// |R - Q| is at most 255
+lint_off -rule UNUSEDSIGNAL -file "*/p2_pp_shade.sv" -match "*'bm_a'*"
+// BlendCoefs: an alpha coefficient reads the colour's alpha only
+lint_off -rule UNUSEDSIGNAL -file "*/p2_pp_blend.sv" -match "*'src'*"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_pp_blend.sv" -match "*'dst'*"
+// the testbench tops: taps and fields the testbenches do not read, the M9 / M10 ports they do not use
+lint_off -rule PINCONNECTEMPTY -file "*/p2_tsp_tile_tb_top.sv"
+lint_off -rule PINCONNECTEMPTY -file "*/p2_tsp_unit_tb_top.sv"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_tsp_tile_tb_top.sv"
+lint_off -rule UNUSEDSIGNAL -file "*/p2_tsp_unit_tb_top.sv"

@@ -14,7 +14,11 @@
 // A null item is one point with its flags and no pixel. The run's first point carries its plane words to P1
 // (p2_pp_plane loads its accumulators there). A pixel's credit returns to p2_pxq at its last point.
 // The pass drain [G, ARCHITECTURE 3.7.7 "Cycle": D_PP fitted on B = 1035 clk for 1024 px in MT6]: after the point that
-// carries eop, P0 issues nothing until that point has left the pipe (drain_done, from its end: P3 in M10, P10 in M11).
+// carries eop, P0 issues nothing until that point has left the pipe (drain_done, from its end: P3 in M10, P10 from M11).
+// M11: not after a pre-sorted translucent pass. TR_PRESORT shades every primitive in a pass of its own, and its
+// primitives' pixels go through the pipe back to back: primitive k's last pixel and k + 1's first at the same place one
+// clock apart, the blend's read of the second taking the first's write through the P10 forward (ARCHITECTURE 3.7.7
+// "Hazards") [I: no stall is measured there; tim 3.3 "pre-sorted translucent: drawn in list order"].
 module p2_pp_issue
   import p2_regs_pkg::*;
   import p2_pkg::*;
@@ -101,7 +105,7 @@ module p2_pp_issue
           cur_v <= 1'b0;
           n     <= '0;
           pt    <= '0;
-          if (cur.item.eop) draining <= 1'b1;
+          if (cur.item.eop && cur.item.rm != P2_RM_TRANSLUCENT_PRESORT) draining <= 1'b1;
         end else if (pxlast) begin
           n  <= n + 1'b1;
           pt <= '0;

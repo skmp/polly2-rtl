@@ -39,5 +39,5 @@ usealpha-off | p2_pp_col.sv | i_ctl.hdr.tsp[20] ? b8[3] : 8'd255 | b8[3] | rando
 dz-off | p2_pp_mip.sv | rl = i_ctl.k.dz ? 18'sd65536 : 18'(l); | rl = 18'(l); | random | the determinant zero's level (dzForce: past the last level) taken from d
 
 # ---- timing choices the values may not see (each must pass)
-drain-off | p2_pp_issue.sv | if (cur.item.eop) draining <= 1'b1; | if (1'b0) draining <= 1'b1; | !random | the pass drain is a timing mechanism (D_PP, MT6): no value may change without it
+drain-off | p2_pp_issue.sv | if (cur.item.eop && cur.item.rm != P2_RM_TRANSLUCENT_PRESORT) draining <= 1'b1; | if (1'b0) draining <= 1'b1; | !random | the pass drain is a timing mechanism (D_PP, MT6): no value may change without it
 credits-off | p2_pxq.sv | && cred >= 9'(ilen); | ; | !random | the pixel credits are a timing mechanism (PXQ_PIX, MT2): no value may change without them

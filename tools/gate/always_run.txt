@@ -26,3 +26,9 @@ sort-full subset-0x101 ^dump_rayman_lights\.r0-0\.rs\.gz$   # window 95 / 97
 # det3: the level)
 tsp-run-full console-uvmeas ^(usteep3|wtiny1|wzero1|wneg1|wzero2)/
 tsp-run-full console-mipmeas ^(mwext1|det3)/
+# tsp-tile-full (M11): the unit sections run whole (--whole); the captures the mutants' tile probes are made of (blend:
+# the tile buffers' ports; blendsel2: the stuck alpha, DstSelect; offspersist: offsKept's order; ptruns: run-only pixels;
+# yuvbil: YUV's pairing; scenegen seed 180: the P10 forward on back-to-back pre-sorted primitives; seed 22: PT_MV's
+# opaque pixels not alpha tested)
+tsp-tile-full tile ^build/pre/(blend|blendsel2|offspersist|ptruns|yuvbil)/r0-7$
+tsp-tile-full tile ^build/pre/gen_(180|22)/r0-

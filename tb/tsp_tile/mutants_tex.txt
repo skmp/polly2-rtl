@@ -1,0 +1,29 @@
+# tb/tsp_tile/mutants_tex.txt: the planted bugs of M11's texture units in rtl/v1/tex (PLAN M11 "Mutants", conventions.md
+# 7.7), run by tools/gate/mutants.py (make tsp-tile-mutants). The probes: `tex` the unit section P3 - P6 on 40,000 random
+# texture points; `yuvbil` the TSP tile testbench on yuvbil's renders.
+#
+# Format: <id> | <file in rtl/v1/tex> | <original fragment> | <mutated fragment> | <probe> [args] | <what it breaks>
+@dir rtl/v1/tex TEX_DIR
+@obj TSP_TILE_OBJDIR
+@probe tex tsp-unit-build unit/tb --only tex --n 40000 --max-fails 1
+@probe yuvbil tsp-tile-build tb --vramvary 7 --renders 0-7 --max-fails 1 build/pre/yuvbil
+
+# ---- PLAN M11's list
+bilinear-one-sum | p2_tex_filter.sv | o  = (r0 * 14'(nvb) + r1 * 14'(vb)) >> 5; | o  = 14'((20'(texel[3][8 * c +: 8]) * 20'(nub) * 20'(nvb) + 20'(texel[2][8 * c +: 8]) * 20'(ub) * 20'(nvb) + 20'(texel[1][8 * c +: 8]) * 20'(nub) * 20'(vb) + 20'(texel[0][8 * c +: 8]) * 20'(ub) * 20'(vb)) >> 10); | tex | bilinear as one sum of four
+yuv-memory-order | p2_tex_decode.sv | pu   = req.twid ? {1'b0, self[0]} : {self[1], 1'b0};\n      pv   = req.twid ? {1'b1, self[0]} : {self[1], 1'b1}; | pu   = {self[1], 1'b0};\n      pv   = {self[1], 1'b1}; | yuvbil | YUV paired by memory order in a twiddled texture
+vq-bank-after-2048 | p2_tex_addr.sv | ia = ({1'b0, b} ^ {2'b0, text_control[12:8], 19'd0}) + 26'd2048; | ia = ({1'b0, b} + 26'd2048) ^ {2'b0, text_control[12:8], 19'd0}; | tex | the VQ bank XOR after the +2048
+swap-index | p2_tex_cache.sv | vqi[t] <= word[t][8 * i_req.ibyte[t] +: 8]; | vqi[t] <= word[t][{i_req.ibyte[t] ^ {2'b0, swap16}, 3'b000} +: 8]; | tex | TEXT_CONTROL[17]'s byte swap applied to the VQ index bytes
+yuv-1x1-not-565 | p2_tex_addr.sv | req.fmt   = fyuv1 ? P2_PIX_565 : fmt; | req.fmt   = fmt; | tex | a YUV texture's 1x1 level not read as 565
+
+# ---- the structure
+twiddle-uv | p2_tex_addr.sv | 22'(twiddle(tu_[t], tv_[t], nu, nv)) | 22'(twiddle(tv_[t], tu_[t], nv, nu)) | tex | the twiddle with u and v exchanged
+strided-flip | p2_tex_addr.sv | c.hdr.tsp[18] && !strided) | c.hdr.tsp[18]) | tex | a strided texture flipped along U
+half-level-size | p2_tex_addr.sv | ui = (i_pt.tu + hp) >>> lvl; | ui = (i_pt.tu >>> lvl) + hp; | tex | the half texel of a mipmapped texture at the level's size
+clamp-below-zero | p2_tex_addr.sv | if (c.hdr.tsp[16] && ui < 0) ui = '0; | if (1'b0) ui = '0; | tex | ClampU without the coordinate below 0 made 0 first (texel 0 twice; the bump angle tells)
+declared-v | p2_tex_coord.sv | assign sv     = 5'd11 + ((mip && dpos) ? 5'(texu) : 5'(texv)); | assign sv     = 5'd11 + 5'(texv); | tex | a mipmapped texture declared shorter: V made at the declared height
+tag-short | p2_tex_cache.sv | hit[t]   = cval[st] && ctag[st] == ta[t][19:10]; | hit[t]   = cval[st] && ctag[st][8:0] == ta[t][18:10]; | tex | the cache tag without its top bit (lines 4 MB apart alias)
+no-flush | p2_tex_cache.sv | if (rst \|\| flush) begin\n      cval   <= '0; | if (rst) begin\n      cval   <= '0; | tex | the cache not invalidated at a render's start
+pal8-select | p2_tex_decode.sv | : {pal_sel[5:4], sw[t][8 * req.toff[t][2:0] +: 8]}; | : {2'b00, sw[t][8 * req.toff[t][2:0] +: 8]}; | tex | palette 8 bpp without PalSelect's bank
+widen-off | p2_tex_decode.sv | assign widen   = req.strided && req.filt | assign widen   = 1'b0 && req.strided && req.filt | tex | a strided bilinear texture widened by bit replication
+ignore-texa | p2_tex_filter.sv | if (i_pt.ctl.hdr.tsp[19]) tx[31:24] = 8'hFF; | if (1'b0) tx[31:24] = 8'hFF; | tex | IgnoreTexA off
+bump-weight | p2_tex_filter.sv | w     = (start == first) ? weight : (5'd31 - weight); | w     = weight; | tex | the bump angle's weight from the second texel not 31 - weight

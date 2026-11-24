@@ -103,8 +103,17 @@ int span_sort(const p2ref::SpanRec* in, int n, uint16_t* order)
         s[i] = { in[i].tag, in[i].y, in[i].x, in[i].len };
     return SpanSort(s, n, order);
 }
+static PassHook passHook = nullptr;
+static void* passUser = nullptr;
+void set_pass_hook(PassHook h, void* user)
+{
+    passHook = h;
+    passUser = user;
+}
 void render_param_tags(RenderMode rm, int left, int top)
 {
+    if (passHook)
+        passHook(false, rm, left, top, passUser);
     switch (rm) {
     case RM_OPAQUE: copy::loop::RenderParamTags<RM_OPAQUE>(left, top); break;
     case RM_PUNCHTHROUGH_PASS0: copy::loop::RenderParamTags<RM_PUNCHTHROUGH_PASS0>(left, top); break;
@@ -114,6 +123,8 @@ void render_param_tags(RenderMode rm, int left, int top)
     case RM_TRANSLUCENT_PRESORT: copy::loop::RenderParamTags<RM_TRANSLUCENT_PRESORT>(left, top); break;
     case RM_MODIFIER: copy::loop::RenderParamTags<RM_MODIFIER>(left, top); break;
     }
+    if (passHook)
+        passHook(true, rm, left, top, passUser);
 }
 void render_param_tags_core(RenderMode rm, int left, int top)
 {
@@ -262,7 +273,63 @@ void set_isp_pixel(int i, const IspPix& p)
     resPass[i] = p.resPass;
 }
 uint32_t color(int buffer, int idx) { return buffer == 2 ? colorBuffer2[idx] : colorBuffer1[idx]; }
+void set_color(int buffer, int idx, uint32_t w) { (buffer == 2 ? colorBuffer2 : colorBuffer1)[idx] = w; }
+int tile_buffer_sel() { return colorBuffer1 == colorBufferStore[0] ? 0 : 1; }
 Color offs_kept() { return offsKept; }
+void set_offs_kept(Color c) { offsKept = c; }
+
+// ---- M11: PixelFlush_tsp's lambdas through their verbatim copies (tb/tsp_tile/ref_copies_tile.h), on an entry made of
+// the volume's words (volume 0: InVolume false, two_voume_index 0), as the dispatch would bind PixelFlush_tsp's names
+static FpuEntry& WordsEntry(uint32_t isp, uint32_t tsp, uint32_t tcw, uint32_t ofsFallback)
+{
+    static FpuEntry e;
+    e.params.isp.full = isp;
+    e.params.tsp[0].full = tsp;
+    e.params.tcw[0].full = tcw;
+    for (int i = 0; i < 4; i++)
+        e.ips.Ofs[0][i].fallback = (ofsFallback >> (8 * i)) & 0xff;
+    return e;
+}
+Color bump_light_copy(uint32_t ofsFallback)
+{
+    const FpuEntry* entry = &WordsEntry(0, 0, 0, ofsFallback);
+    const bool InVolume = false;
+#define P2REF_TILE_BUMPLIGHT
+#include "../tsp_tile/ref_copies_tile.h"
+#undef P2REF_TILE_BUMPLIGHT
+    return bumpLight();
+}
+Color shade_copy(uint32_t isp, uint32_t tsp, uint32_t tcw, Color b, Color t, Color o)
+{
+    const FpuEntry* entry = &WordsEntry(isp, tsp, tcw, 0);
+    const u32 two_voume_index = 0;
+    const bool pp_Texture = entry->params.isp.Texture;
+    const bool bump = pp_Texture && entry->params.tcw[two_voume_index].PixelFmt == PixelBumpMap;
+    auto combiner = ColorCombiner_table[entry->params.isp.Texture][entry->params.isp.Offset]
+                                       [entry->params.tsp[two_voume_index].ShadInstr];
+#define P2REF_TILE_SHADE
+#include "../tsp_tile/ref_copies_tile.h"
+#undef P2REF_TILE_SHADE
+    return shade(b, t, o);
+}
+Color fade_copy(uint32_t isp, uint32_t tsp, uint32_t tcw, Color c, int dTri)
+{
+    const FpuEntry* entry = &WordsEntry(isp, tsp, tcw, 0);
+    const u32 two_voume_index = 0;
+    const bool pp_Texture = entry->params.isp.Texture;
+#define P2REF_TILE_FADE
+#include "../tsp_tile/ref_copies_tile.h"
+#undef P2REF_TILE_FADE
+    return fade(c, dTri);
+}
+Color super_avg_copy(const Color* c4)
+{
+    Color col;
+#define P2REF_TILE_SUPER_AVG
+#include "../tsp_tile/ref_copies_tile.h"
+#undef P2REF_TILE_SUPER_AVG
+    return col;
+}
 bool alpha_stuck() { return tspAlphaStuck; }
 
 }   // namespace p2ref

@@ -124,8 +124,24 @@ struct IspPix {
 IspPix isp_pixel(int idx);
 void set_isp_pixel(int idx, const IspPix& p);
 uint32_t color(int buffer, int idx);        // buffer 1: colorBuffer1 (being shaded), 2: colorBuffer2
+void set_color(int buffer, int idx, uint32_t w);
+int tile_buffer_sel();                      // 0: colorBuffer1 is colorBufferStore[0] (NextTileAccumulationBuffers swaps)
 Color offs_kept();
+void set_offs_kept(Color c);
 bool alpha_stuck();
+
+// ---- M11 (make tsp-tile) ----------------------------------------------------------------------------------------------
+// a hook around every SHADE pass of render_param_tags (before: after: true), the TSP tile testbench's: the pass's runs are
+// span_gen + span_sort of the state before it; the pre-sorted passes come here too when the walk's RenderParamTags calls
+// are routed to render_param_tags (tb/tsp_tile/refcore_glue_lists_rpt.cpp, the tsp-tile reference's lists half)
+typedef void (*PassHook)(bool after, RenderMode rm, int left, int top, void* user);
+void set_pass_hook(PassHook h, void* user);
+// PixelFlush_tsp's lambdas bumpLight, shade, fade and the SupSample average, through their verbatim copies
+// (tb/tsp_tile/ref_copies_tile.h), on an entry of the volume's words (InVolume false)
+Color bump_light_copy(uint32_t ofsFallback);
+Color shade_copy(uint32_t isp, uint32_t tsp, uint32_t tcw, Color b, Color t, Color o);
+Color fade_copy(uint32_t isp, uint32_t tsp, uint32_t tcw, Color c, int dTri);
+Color super_avg_copy(const Color* c4);
 
 // ---- checks of the copies no render reaches -------------------------------------------------------------------------
 // PtChunkTake (copy core-pt-take) beside refcore's on n random calls: the number that differ (then reset_core)

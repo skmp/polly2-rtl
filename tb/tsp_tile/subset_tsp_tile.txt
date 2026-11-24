@@ -1,0 +1,47 @@
+# subset_tsp_tile.txt: the test pages of make tsp-tile (PLAN M11, gate inputs) beside the tile subset's
+# (tb/tile/subset_tests.txt, subset_dumps.txt, subset_seeds.txt, which the gate reads too): the TSP's console tests
+# PLAN M11 names, every one of each wildcard as dreamcast-tests fit/hw has it at the pinned revision. At most 8 renders
+# each (capture_prerender.sh --max 8).
+texfmt          # texel formats, expansion, YUV conversion, strided widening
+sample          # point / bilinear sample points, half texel, weights, "declared" V, stride 32
+mip             # mipmap levels, raster mipmapped, 565 without mipmaps
+mipbil          # bilinear between levels
+texctl          # TEXT_CONTROL byte swap and index swap
+texctl_addr     # every address bit, bank bits, every format's place
+texctl_bank     # VQ bank bits
+texctl_bankbase # bank bits across 512 KB lines
+texctl_bankmip  # bank bits with mipmapped VQ
+texfar          # coordinates far out
+texfar_bits
+texfar_decl
+texfar_edge
+texfar_m1
+texfar_m1q
+texfar_mip
+texfar_mipv
+texfar_quot
+coordfix        # TexCoordFixed: rounded down in two's complement
+yuvbil          # YUV pairing by x, bilinear
+bump            # bump map with each shading instruction
+bumpbil         # the bump angle round the circle
+bumpclamp       # clamped bump coordinates
+bumpfn          # BumpMapper's SIN / COS
+bumpiso
+bumplight       # the bump light: the third vertex's offset colour, not interpolated
+env             # the texture environment (ColorCombiner)
+alphatest       # PT_ALPHA_REF
+fog             # table fog, vertex fog, clamp
+tspw            # the fog's 1/w: the TSP's own
+supsample       # SupSample's four points
+supsample2
+sscolor
+sshalf
+ssmip
+ssrare
+ssvol
+trimin          # the 1x1 level clamp, pass B
+trifade         # the trilinear fade of the finished colour
+blend           # BlendingUnit: every instruction pair
+blendsel        # the select bits; tspAlphaStuck
+blendsel2
+offspersist     # offsKept across tiles and renders

@@ -14,8 +14,16 @@
 #
 # Overridable: TSP_DIR (the RTL folder: tools/gate/mutants.py points it at a mutated copy), TSP_RUN_OBJDIR.
 TSP_RUN_OBJDIR   ?= $(BUILD)/obj_tsp_run
-TSP_RUN_SRC       = $(TSP_SETUP_SRC) $(TSP_DIR)/p2_tsp_rstart.sv $(TSP_DIR)/p2_pxq.sv $(TSP_DIR)/p2_pp_issue.sv \
-                    $(TSP_DIR)/p2_pp_plane.sv $(TSP_DIR)/p2_pp_div.sv $(TSP_DIR)/p2_pp_col.sv $(TSP_DIR)/p2_pp_mip.sv
+# M11: the whole pixel pipe (p2_tsp_pp, P0 - P11: the texture units of rtl/v1/tex, the shade, fog, SupSample and blend
+# stages) and the tile buffers (rtl/v1/tbuf); TEX_DIR and TBUF_DIR are overridable as TSP_DIR (tools/gate/mutants.py)
+TEX_DIR          ?= rtl/v1/tex
+TBUF_DIR         ?= rtl/v1/tbuf
+TSP_PP_SRC        = $(TSP_DIR)/p2_pp_issue.sv $(TSP_DIR)/p2_pp_plane.sv $(TSP_DIR)/p2_pp_div.sv $(TSP_DIR)/p2_pp_col.sv \
+                    $(TSP_DIR)/p2_pp_mip.sv $(TEX_DIR)/p2_tex_coord.sv $(TEX_DIR)/p2_tex_addr.sv $(TEX_DIR)/p2_tex_cache.sv \
+                    $(TEX_DIR)/p2_tex_pal.sv $(TEX_DIR)/p2_tex_decode.sv $(TEX_DIR)/p2_tex_filter.sv \
+                    $(TSP_DIR)/p2_pp_shade.sv $(TSP_DIR)/p2_pp_fog.sv $(TSP_DIR)/p2_pp_ss.sv $(TSP_DIR)/p2_pp_blend.sv \
+                    $(TSP_DIR)/p2_tsp_pp.sv $(TBUF_DIR)/p2_tbuf.sv
+TSP_RUN_SRC       = $(TSP_SETUP_SRC) $(TSP_DIR)/p2_tsp_rstart.sv $(TSP_DIR)/p2_pxq.sv $(TSP_PP_SRC)
 TSP_RUN_TB_SRC    = tb/tsp_run/p2_tsp_run_tb_top.sv
 TSP_RUN_REFOBJ    = $(BUILD)/tsp_run/tsp_run_ref.o $(REFGLUE_OBJS)
 TSP_RUN_CFLAGS    = -CFLAGS "-I$(REFCORE) -I$(CWD)/tb/common -I$(CWD)/tb/tsp_setup -I$(CWD)/tb/tsp_run -I$(CWD)/tools/gate" \
@@ -43,7 +51,8 @@ tsp-run-mutants:
 tsp-run-full:
 	+@MAKE="$(MAKE)" SAMPLE="$(SAMPLE)" bash tools/gate/gate_tsp_run.sh --full
 
-TSP_RUN_LINT = $(P2_LINT) tb/fp/fp_lint.vlt tb/isp_setup/isp_setup_lint.vlt tb/tsp_setup/tsp_setup_lint.vlt tb/tsp_run/tsp_run_lint.vlt
+TSP_RUN_LINT = $(P2_LINT) tb/fp/fp_lint.vlt tb/isp_setup/isp_setup_lint.vlt tb/tsp_setup/tsp_setup_lint.vlt tb/tsp_run/tsp_run_lint.vlt \
+               tb/tsp_tile/tsp_tile_lint.vlt
 lint-units: lint-tsp-run
 lint-tsp-run:
 	@for t in p2_tsp_rstart p2_pxq p2_pp_issue p2_pp_plane p2_pp_div p2_pp_col p2_pp_mip; do \

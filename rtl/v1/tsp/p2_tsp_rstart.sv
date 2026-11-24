@@ -26,8 +26,9 @@
 //     rows 0, 1, and 2 when the class has the offset planes), four lanes of seen / grid / floors / half line, one a
 //     bank. The setup is a pure function of the key, the parameters and the registers, so a key in the cache needs no
 //     read; `flush` (a render's start) empties it.
-//   - the products: two planes a clock on the shared ALU's P2_TSP_NM = 4 multipliers (A' x0h, B' yh each; p2_tsp_alu's
-//     run-start port, the setup's step held: `hold`), the results P2_TSP_L_MUL later floored and summed into base. The
+//   - the products: two planes a clock on the shared ALU's run-start port (p2_tsp_alu: one exact 16 x 13 array beside each
+//     of its P2_TSP_NM = 4 slots' 24 x 24 multipliers, selected by the same issue, ARCHITECTURE 3.7.4; A' x0h, B' yh each;
+//     the setup's step held: `hold`), the results P2_TSP_L_MUL later floored and summed into base. The
 //     planes are those the entry's class sets up (untextured 5: W and the colours; textured 7: + U, V; with the offset
 //     planes 11; tsp 2.3, PixelFlush_tsp); a run with mixed vmask needs both volumes' [G T19: double cost].
 //   - the run's descriptor (p2_tsp_rdesc_t) waits in an output register for p2_pxq; the next run is taken in the clock

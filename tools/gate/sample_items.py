@@ -260,8 +260,11 @@ def main():
             tags[why[i]] = tags.get(why[i], 0) + 1
         print(f"sample: {g}: {len(k)} of {len(idx)} items, {100.0 * wkg / wg if wg else 0:.1f} % of its weight ("
               + ", ".join(f"{v} {t}" for t, v in sorted(tags.items())) + ")")
-    print(f"sample: always-run ({a.always or 'none'}): {sum(1 for w in why if w == 'always')} items "
-          f"({sum(hits.values())} matches of {len(always)} lines)")
+    # (an item an always-run line names may already be in the sample as its group's whole: it runs all the same, and is
+    # counted under that reason; "drawn for the list" are the items the list alone added)
+    print(f"sample: always-run ({a.always or 'none'}): {len(always)} lines of this gate name {sum(hits.values())} items, "
+          f"every one run ({sum(1 for w in why if w == 'always')} drawn for the list alone, the others already in the "
+          f"sample: their group whole)")
     bad = [(n, g, rx) for n, g, rx, _ in always if hits[n] == 0]
     for n, g, rx in bad:
         print(f"sample: always-run FAIL: {a.always}:{n} ({g} {rx}) names no item of the full gate")
