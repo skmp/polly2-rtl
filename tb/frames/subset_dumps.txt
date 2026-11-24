@@ -1,0 +1,35 @@
+# subset_dumps.txt: the polly2-data dumps of the frame gate's subset (PLAN M12 "make frames"): the tile subset's
+# (tb/tile/subset_dumps.txt; underdefeat_ingame: the scaler with Y_COEFF 0x6532). One render each.
+shenmue_intro
+shenmue_intro2
+jgr_tree_shadows
+jgr_tree_shadows2
+jgr_car
+thps2_ingame
+thps2_menu
+sa2_ingame
+sa2_ingame2
+rez_ingame
+xtreme_intro
+sc_ingame2
+mvsc2_ingame
+logo
+menu2
+18wheel_select
+taxi3
+doa2_kasumi
+hotd2_zombies
+daytona_front
+rayman_lights
+sonic_title
+f1wgp_driver
+f1wgp_race
+vrally_rally4
+ff2_fight
+underdefeat_ingame
+outtrigger_menu
+mrdriller_ingame
+berserk_fight
+ikaruga_stage
+soulreaver_hall
+recv_tunnel

@@ -251,7 +251,7 @@ module p2_tsp_run_tb_top
     .m_rdata(c_rdata[P2_C_TEX]),
     .tb_rd_en, .tb_rd_idx, .tb_rd_b2, .tb_rd_b1_data, .tb_rd_b2_data, .tb_wr_en, .tb_wr_b2, .tb_wr_idx, .tb_wr_data,
     .fb_v(), .fb_rdy(1'b1), .fb(),
-    .rel_v, .rel_need, .rel_idx, .ext_stall, .stall(),
+    .rel_v, .rel_need, .rel_idx, .ext_stall, .tb_hold(1'b0), .wo_busy(1'b0), .stall(),
     .p3_v, .p3_take(o_take), .p3_ctl, .p3_val, .p3_q, .p3_base(o_base), .p3_offs(o_offs), .p3_level(o_level), .p3_k(o_k),
     .p3_rl(o_rl), .p3_rk(o_rk),
     .t_p7(), .t_p7_ctl(), .t_p10(), .t_p10_ctl(), .t_stuck(), .t_at(), .t_drain, .t_p0, .t_tex_stall(), .t_fill(),

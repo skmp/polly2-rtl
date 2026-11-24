@@ -27,8 +27,9 @@ hw-pkg: $(GEN_HW_BIN)
 	$(GEN_HW_BIN) $(REFCORE) > $(BUILD)/gen/p2_hw_pkg.sv.new
 	mv $(BUILD)/gen/p2_hw_pkg.sv.new rtl/v1/pkg/p2_hw_pkg.sv
 
-# the RTL file lists of core.mk, for the elaborations of the MODE check
-HW_PKG_CHECK_ENV = VERILATOR="$(VERILATOR)" P2_PKG_SRC="$(P2_PKG_SRC)" P2_CORE_SRC="$(P2_CORE_SRC)"
+# the RTL file lists of core.mk, for the elaborations of the MODE check (M12: p2_core has every unit, so its packages
+# and the numerics library are core_units.mk's P2_CORE_LIB)
+HW_PKG_CHECK_ENV = VERILATOR="$(VERILATOR)" P2_PKG_SRC="$(P2_CORE_LIB)" P2_CORE_SRC="$(P2_CORE_SRC)"
 
 hw-pkg-check: $(GEN_HW_BIN)
 	@$(HW_PKG_CHECK_ENV) bash tools/gen/check_hw_pkg.sh $(GEN_HW_BIN) $(REFCORE)

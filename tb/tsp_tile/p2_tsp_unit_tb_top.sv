@@ -274,7 +274,8 @@ module p2_tsp_unit_tb_top
   assign fb_fail = fbm.fail;
   assign fb_ro   = fbm.ro;
   logic [31:0]            tb_rd_b1_data, tb_rd_b2_data;
-  p2_pp_blend u_blend (.clk, .rst, .stall(b_stall), .pt_alpha_ref, .i_v(b9_v), .i_pt(b9_pt), .i_col(b9_col),
+  p2_pp_blend u_blend (.clk, .rst, .stall(b_stall), .pt_alpha_ref, .hold9(1'b0), .wo_busy(1'b0), .p10_eoe(), .dlock(),
+    .i_v(b9_v), .i_pt(b9_pt), .i_col(b9_col),
     .rd_en(tb_rd_en), .rd_idx(tb_rd_idx), .rd_b2(tb_rd_b2), .rd_b1_data(tb_rd_b1_data), .rd_b2_data(tb_rd_b2_data),
     .wr_en, .wr_b2, .wr_idx, .wr_data, .fb_v, .fb_rdy, .fb(fbm), .fb_block, .drain_done(), .rel_v(), .rel_need(), .rel_idx(),
     .t_out(p10_out), .t_ctl(b10_ctl), .t_stuck(b_stuck), .t_at(b_at));

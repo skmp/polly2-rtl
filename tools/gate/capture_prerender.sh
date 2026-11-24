@@ -9,6 +9,9 @@
 #                   (build/refsw3-offline, make refsw3-offline) with `save` inserted before and after each render
 #                   trigger (reg STARTRENDER, render). A test that reads video memory back (pvrio_read32) gets
 #                   refsw3-offline's answers, as in run2.sh `off`. The stream's png and log commands are dropped.
+#   <test>+<reg>=<value>[+...]   the test with every write of register <reg> (hex offset) made <value> (hex) instead, as
+#                   dreamcast-tests run2.sh builds it (pvrio.h REG_OVERRIDE); e.g. texctl_bank+0e4=800 (M12's frame gate:
+#                   VQ index bytes read from the framebuffer being written)
 #   dump:<scene>    a polly2-data dump ($POLLY2_DUMPS): <scene>.pvrdmp, or the older vram_<scene>.bin +
 #                   pvr_regs_<scene>.bin; one render
 #   gen:<seed>      a scene of tb/gen/scenegen.cpp (build/tools/scenegen <seed> <folder>: one or more renders, each a
@@ -46,6 +49,7 @@ GEN=$ROOT/build/tools/scenegen
 J=$(bash "$HERE/jobs.sh")
 MAXR=64
 CAP_TIMEOUT=${CAP_TIMEOUT:-600}
+CAP_STREAM=${CAP_STREAM:-}
 CAP_RETRY=${CAP_RETRY:-1}
 PRE=${CAP_PRE:-$ROOT/build/pre}
 while [ $# -gt 0 ]; do
@@ -76,11 +80,12 @@ one() {
     dump:*) name=dump_${c#dump:}; src=$POLLY2_DUMPS/${c#dump:}.pvrdmp
             [ -f "$src" ] || src=$POLLY2_DUMPS/vram_${c#dump:}.bin ;;
     gen:*)  name=gen_${c#gen:}; src=$GEN ;;
-    *)      name=$c; src=$DCTESTS/pvr-tests/$c/main.c; [ -f "$src" ] || src=$DCTESTS/ta-tests/$c/main.c ;;
+    *)      name=$c; t=${c%%+*}; src=$DCTESTS/pvr-tests/$t/main.c; [ -f "$src" ] || src=$DCTESTS/ta-tests/$t/main.c ;;
   esac
   [ -f "$src" ] || { echo "capture_prerender: $c: no $src"; return 1; }
   out=$PRE/$name
-  if [ -f "$out/info.txt" ] && [ "$out/info.txt" -nt "$OFF" ] && [ "$out/info.txt" -nt "$src" ] && same_max "$out"; then
+  if [ -f "$out/info.txt" ] && [ "$out/info.txt" -nt "$OFF" ] && [ "$out/info.txt" -nt "$src" ] && same_max "$out" &&
+     { [ -z "${CAP_STREAM:-}" ] || [ -f "$out/stream.txt" ]; }; then
     echo "capture_prerender: $name: up to date ($(cat "$out/info.txt"))"; return 0
   fi
   rm -rf "$out" && mkdir -p "$out/work"
@@ -97,7 +102,10 @@ one() {
       for d in $(ls -d "$w"/scene/r* | sort -V); do printf 'regs %s/pvr_regs.bin\nvram %s/vram.bin\nrender\n' "$d" "$d"; done > "$w/stream.txt"
       stream="cat $w/stream.txt" ;;
     *)
-      gcc -O1 -w -I"$DCTESTS/common" -o "$w/pc" "$src" || { echo "capture_prerender: $name: the PC build failed"; return 1; }
+      local ovr=()
+      [ "$c" != "${c%%+*}" ] && ovr=("-DREG_OVERRIDE=$(echo "${c#*+}" | tr '+' '\n' |
+                                       awk -F= '{ printf "%s{0x%s,0x%s}", (NR > 1 ? "," : ""), $1, $2 }')")
+      gcc -O1 -w -I"$DCTESTS/common" "${ovr[@]}" -o "$w/pc" "$src" || { echo "capture_prerender: $name: the PC build failed"; return 1; }
       stream="$w/pc $w" ;;
   esac
   # the renders' video memory compressed behind refsw3-offline (the header): r<k> once r<k>/post/pvr_regs.bin is there
@@ -129,7 +137,7 @@ one() {
         printf "save %s/r%d/post\necho P2CAP post %d\n", d, k, k
         k++; fflush(); next }
       { print }
-      $1 == "dump32" { fflush() }' | timeout "$CAP_TIMEOUT" "$OFF" - > "$w/off.log" 2>&1
+      $1 == "dump32" { fflush() }' | keep_stream "$out" | timeout "$CAP_TIMEOUT" "$OFF" - > "$w/off.log" 2>&1
   st=("${PIPESTATUS[@]}")
   rm -f "$w/running"
   wait "$zpid"
@@ -142,6 +150,10 @@ one() {
   fi
   # refsw3-offline exits 2 for a problem it reported (a register read but never written): the render it refused is
   # marked below; anything else is a failure
+  if [ "${st[2]}" != 0 ]; then
+    echo "capture_prerender: $name: the stream's copy (CAP_STREAM) exit ${st[2]}"; return 1
+  fi
+  st[2]=${st[3]}
   if [ "${st[2]}" = 124 ]; then
     echo "capture_prerender: $name: refsw3-offline did not finish in $CAP_TIMEOUT s (a render that does not end?)"; return 1
   fi
@@ -162,8 +174,13 @@ one() {
   echo $((SECONDS - t0)) > "$out/secs"
   echo "capture_prerender: $name: $(cat "$out/info.txt")"
 }
+# CAP_STREAM=1 (the frame gate, M12): the command stream as it went to refsw3-offline, its saves and the readback answers'
+# files included, is kept in build/pre/<case>/stream.txt (a capture without one is made again), so that p2-offline can
+# run the same stream (tools/gate/frames_run.sh) without the test's PC build waiting on its 20 s readbacks
+keep_stream() { if [ -n "${CAP_STREAM:-}" ]; then tee "$1/stream.txt"; else cat; fi; }
+export -f keep_stream
 export -f one
-export ROOT PRE DCTESTS POLLY2_DUMPS OFF GEN MAXR CAP_TIMEOUT rev
+export ROOT PRE DCTESTS POLLY2_DUMPS OFF GEN MAXR CAP_TIMEOUT rev CAP_STREAM
 mkdir -p "$PRE"
 # longest first: the last capture's seconds, else a test (up to R renders) 3, a dump 2, a seed 1
 for c in "$@"; do

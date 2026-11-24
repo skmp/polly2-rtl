@@ -551,6 +551,13 @@ For a polly2-data dump, both tools run `pvrdmp <file>; render; save <dir>`. Lega
 
 **Pass criterion:** every word of video memory equal, for every render, in every case of the subset.
 
+As built (M12, tools/gate/gate_frames_off.sh): the test's PC build runs once, into refsw3-offline, through
+capture_prerender.sh with CAP_STREAM=1, which keeps the stream it sent (readback answers included) as
+build/pre/<case>/stream.txt; p2-offline then runs that stream (tools/gate/frames_run.sh: the saves moved into its run
+folder), because a PC build gives up a readback after 20 s (pvrio.h) and a p2-offline render can take longer. If the RTL
+differs at a render, the stream after it is still refsw3's, which only matters for a render that already failed.
+tools/gate/frames_cmp.py compares; `<test>+<reg>=<value>` cases are built with REG_OVERRIDE as run2.sh does.
+
 #### 7.4.3 Frame vs console archives
 
 | archive | how many (2026-11-20) | comparison |

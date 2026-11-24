@@ -14,7 +14,10 @@
 //   reads are registered: the data the clock after the address, in the reader's own register (P10's hold it while
 //   its point is held; the write-out's)
 // The debug port (dbg_*) is the testbench's: it loads the state a capture starts from (the reference's buffers) and
-// reads every word back, by logical buffer (1 or 2), combinationally; it is not used while the pipe runs.
+// reads every word back, by logical buffer (1 or 2), combinationally; it is not used while the pipe runs. It is
+// simulation only (M12: `ifndef SYNTHESIS`; in synthesis its inputs are unused and its outputs 0), so that each RAM keeps
+// its one write port and one read port.
+// The swap is p2_tbuf_ctl's (M12), the controller of the actions on eoe.
 // [Die: region 4, four macros of two sub-arrays each, the densest RAM; two buffers of 1024 x 32 here (8 KB in all), the
 // sub-array split is not modelled (ARCHITECTURE 3.12).]
 module p2_tbuf
@@ -72,8 +75,10 @@ module p2_tbuf
     if (wo1) qw <= ram1[ra1];
     if (wr_en && (wr_b2 ^ sel) == 1'b0) ram0[wr_idx] <= wr_data;
     if (wr_en && (wr_b2 ^ sel) == 1'b1) ram1[wr_idx] <= wr_data;
+`ifndef SYNTHESIS
     if (dbg_we && (dbg_b2 ^ sel) == 1'b0) ram0[dbg_idx] <= dbg_wdata;
     if (dbg_we && (dbg_b2 ^ sel) == 1'b1) ram1[dbg_idx] <= dbg_wdata;
+`endif
   end
   assign rd_b1_data = sel ? qp1 : qp0;
   assign rd_b2_data = sel ? qp0 : qp1;
@@ -83,6 +88,11 @@ module p2_tbuf
     if (rst) sel <= 1'b0;
     else if (swap) sel <= !sel;
 
+`ifndef SYNTHESIS
   assign dbg_b1      = sel ? ram1[dbg_idx] : ram0[dbg_idx];
   assign dbg_b2_data = sel ? ram0[dbg_idx] : ram1[dbg_idx];
+`else
+  assign dbg_b1      = '0;
+  assign dbg_b2_data = '0;
+`endif
 endmodule

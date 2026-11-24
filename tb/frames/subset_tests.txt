@@ -1,0 +1,111 @@
+# subset_tests.txt: the dreamcast-tests page tests of the frame gate's subset (PLAN M12 "make frames", 1.4; conventions.md
+# 7.8): the tile subset's tests (tb/tile/subset_tests.txt), M11's TSP pages (tb/tsp_tile/subset_tsp_tile.txt) and the
+# write-out's pages; at most 8 renders (pages) of each (capture_prerender.sh --max 8). The full set (make frames-full,
+# M13) is every pvrtest2 page.
+#
+# the write-out (M12): the pack modes and the dither, the clip, the strip buffer, the scaler, Y_COEFF
+scalermeas      # 43 scaler settings
+sof2sweep       # strip buffers, every line
+sof2field       # FB_W_SOF2 and the field bits
+fb555
+scaler
+# the race class (ARCHITECTURE 3.2.1): texctl_bank with every TEXT_CONTROL write 0x900 (bank 9), so that texture A's VQ
+# index bytes are read from the framebuffer tile the region array wrote just before (pvrio.h REG_OVERRIDE, as
+# dreamcast-tests run2.sh builds it); its renders are VRAM-race and differ from refsw3-offline's (the write-out of that
+# tile still running), the hazard-detector-off mutant's probe
+texctl_bank+0e4=900
+# the tile subset
+accbuf
+keepz
+fbpack
+fb565
+scalertile
+ycoeff
+sof2probe
+bgtie
+bgneg2
+raster
+cullval
+edge2_row31
+faredge_cull
+hugepos_v6
+huge
+slivers_tsp
+sample
+depth
+depthgaps_ties
+depthgaps_mm
+depth2_denorm
+zovf_word
+zovf
+zsign
+ztile
+nantr_pos
+perpmean_neg
+perpeq
+detinf
+modvol
+volrun
+ptchunk
+ptchunkcost
+ptchunklag
+ptlayers
+ptruns
+optcull
+optrun
+sort
+trtie
+trsort_auto
+dumprules
+ispcache
+alphatest
+alphafilt
+blend
+blendsel2
+blendpos
+offspersist
+shade
+fog
+tspw
+env
+bump
+bumplight
+texfmt
+texctl
+yuvbil
+coordfix
+mipbil
+mipdump
+trifade
+trimin
+tsp2_mipdz
+supsample
+ssvol
+halfofs2
+uvrun
+planes
+# M11's TSP pages
+mip
+texctl_addr
+texctl_bank
+texctl_bankbase
+texctl_bankmip
+texfar
+texfar_bits
+texfar_decl
+texfar_edge
+texfar_m1
+texfar_m1q
+texfar_mip
+texfar_mipv
+texfar_quot
+bumpbil
+bumpclamp
+bumpfn
+bumpiso
+supsample2
+sscolor
+sshalf
+ssmip
+ssrare
+blendsel
