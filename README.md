@@ -1,4 +1,5 @@
 # polly2-rtl
+![daytona-broken](https://drk.emudev.org/images/polly2-rtl.jpg)
 
 A SystemVerilog model of the Dreamcast's PowerVR2 / CLX2 CORE that is **bit-exact and cycle-accurate** to a console:
 every pixel, depth word and register a console produces, at the clock a console produces it. The cycle timing is
@@ -21,3 +22,6 @@ Layout (as shrike4-rtl):
     agents/      agents' reports and scratch
 
 Status: started 2026-11-20.
+
+### Join the Impossible Ports Discord server for more
+[<img width="128" height="128" alt="impossibe" src="https://github.com/user-attachments/assets/70d49e4d-339d-4895-a8a3-182512c7c330" />](https://discord.gg/q4VMkcNJ39)
