@@ -13,7 +13,7 @@
 #
 # Overridable: ISP_DIR (the RTL folder; tools/gate/mutants.py points it at a mutated copy), ISP_EDGE_OBJDIR,
 # ISP_EDGE_SHARDS.
-ISP_DIR          ?= rtl/v1/isp
+ISP_DIR          ?= $(RTLV1)/isp
 ISP_EDGE_OBJDIR  ?= $(BUILD)/obj_isp_edge
 ISP_EDGE_SHARDS  ?= 12
 # the edge units and the shared ISP modules; M4's microprogrammed units (p2_isp_setup, _alu, _raster: tb/mk/isp_setup.mk)

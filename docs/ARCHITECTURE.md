@@ -418,6 +418,11 @@ read returns the word as last written one clock later, from a read-back RAM of a
 port) [A: no unit's RAM is read back here; nothing reads the register port in p2-offline, whose `regdump` reads
 refsw3-offline's own register array; die note in §3.12].
 
+**As built (M13).** ID (0x000) and REVISION (0x004) read their constants, 0x17FD11DB and 0x00000011 (refsw3-offline
+main.cpp `reset_all`), not the never-written read-back RAM word (M12's open item): a two-bit code registered with the
+read picks the constant after the RAM's output register, so the RAM keeps its registered read. Still nothing reads the
+port in p2-offline.
+
 ### 3.2 `p2_mem`: VRAM clients and arbitration
 
 **Function.**
@@ -498,6 +503,12 @@ word that C5 writes in the same render can legitimately differ from refsw3, as i
   first word.
 - The functional gates compare VRAM-race renders but report them in their own class, never as a pass or a fail
   (PLAN §1.6). They are race scenes, like the `*_races` tests.
+- **As built (M13): what the class can hide.** A flagged render may differ by any amount and still not fail. M13's
+  sequencer mutant "a 5-word entry read as 6" shows it: on scenegen seed 6 the misread region array sends the ISP to
+  words the write-out writes, the hazard detector flags the render (20 words) and its 8,041 differing words land in the
+  race class, so the frame gate passes that seed; on seed 18 the same mutant differs without a race and fails. Every
+  frame summary now lists each race render with its difference count per configuration; the rule itself is the
+  owner's (PLAN §5 D13).
 - `+vramvary` and every `VR_LAT` must give identical pictures on every render **not** marked VRAM-race. On marked
   renders the picture may change; that is the race.
 
@@ -2001,7 +2012,7 @@ and RenderCORE's end-of-entry logic.
 Every primitive takes and returns the reference tuple as flat ports (num §6). Combinational by default. A unit may
 register a primitive's output as one of its pipeline stages; its lockstep testbench then compares at that latency.
 
-### 3.12 Die agreement (M2-M12)
+### 3.12 Die agreement (M2-M13)
 
 PLAN 0 rule 9: the HOLLY die shot (18 probable blocks, each labelled with a confidence; an interpretation of one
 optical image, not a reverse-engineering result) is a tie-breaker for grouping, boundaries and RAM sizes; console
@@ -2048,6 +2059,11 @@ where noted):
 | `p2_regs`: live registers in flip-flops, the read-back RAM of 2048 x 32 | 13 system bus (medium) for the register port; 10 palette or fog RAM (low) | the register file as flip-flops beside the bus interface | the read-back RAM (64 Kbit) is this design's [A]: the die shows one long palette SRAM (10), so the console reads the palette back from the palette RAM itself and has no second copy; a register read-back is not exercised by any gate (refsw3-offline's `regdump` reads its own array). To change when the register port is used (a CPU model, MQ's area) |
 | `p2_mem` with C0 and C5 (M12) | 15 texture memory arbiter / VRAM interface (low) | one arbiter for all six clients, as one block | the write-out's writes merge two 16-bit pixels a word here; whether the console's write-out path has its own buffer in 15 or 16 is open (T9) |
 | `p2_core` (the whole) | 1-12, 15, 16 | the blocks above in the data-flow order the annotation placed them | the TA (14), the bus / DMA (13) and the video out (16's display part) are outside `p2_core` (D1, D2) |
+
+**M13** (PLAN M13) changes no grouping, module boundary or RAM, so the die adds nothing new: the depth tap
+(`+ztap`, conventions 7.5) is simulation only (a shadow of p2_isp_buf's depthA write port inside `` `ifndef SYNTHESIS ``
+in `p2_core`, no RAM in synthesis); `p2_regs`'s ID / REVISION constants sit after the read-back RAM's output register
+(the RAM unchanged, the block-13 / block-10 note above stands).
 
 ## 4. Ordering and hazards: the observable orders and the mechanism that keeps each
 

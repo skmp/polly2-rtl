@@ -132,13 +132,13 @@ module p2_core
   logic        cmd_v, cmd_rdy, cut_rdy, cmd_end, cmd_opinpt, cmd_last, cut_idle;
   p2_rm_t      cmd_rm;
   p2_entrec_t  cmd_rec;
-  logic        pass_done, anyfail;
+  logic        pass_done, anyfail, ent_done;
   p2_isp_ctl u_ctl (.clk, .rst, .ent_v, .ent_rdy, .ent, .bg_tag(isp_backgnd_t), .bg_depth(isp_backgnd_d),
     .sw_v, .sw_op, .sw_key, .sw_tag, .sw_busy, .walk_v, .walk_addr, .walk_scan, .walk_rm, .tilex, .tiley,
     .has_prim, .front_idle, .back_idle, .ho_take, .ho_block, .more, .more_clr, .pt, .pt_en, .pt_restart, .pt_set_cur,
     .pt_cur, .pt_fw_clr, .pt_fw, .pt_hold, .pt_more_chunks, .pc_reset, .pc_tr, .pc_fill_en, .pc_ovf, .rp_start,
     .rp_busy, .src_rp, .cmd_v, .cmd_rdy, .cmd_end, .cmd_rm, .cmd_opinpt, .cmd_last, .cmd_rec, .cut_idle, .pass_done,
-    .anyfail, .halt_en(1'b0), .resume(1'b0), .halted(), .halt_phase(), .busy(), .ent_done(), .st_chunks(), .st_passes(),
+    .anyfail, .halt_en(1'b0), .resume(1'b0), .halted(), .halt_phase(), .busy(), .ent_done, .st_chunks(), .st_passes(),
     .st_trpasses(), .st_ptshades());
 
   // ---------------------------------------------------------------------------------------------- ISP: front (C1, C2)
@@ -337,4 +337,33 @@ module p2_core
     .m_v(m5_v), .m_rdy(c_rdy[P2_C_WOUT]), .m_addr(m5_addr), .m_be(m5_be), .m_wdata(m5_wdata));
 
   assign ev_isp_ovf = 1'b0;
+
+`ifndef SYNTHESIS
+  // ---------------------------------------------------------------------------------------------- the depth tap (sim)
+  // PLAN M13, 1.4 / conventions 7.4.3 (fit/zdump_data): with +ztap=<file>, each entry's tile depths as the ISP leaves
+  // them (depthA's 64-bit keys, p2_zkey_t) when its ISP work is over (ctl's ent_done: the sweeps, walks and pass
+  // feedback of the entry are complete, the next entry's CLEAR not started), a line "ZTAP <tilex> <tiley>" and the 32 x
+  // 32 keys row by row. A shadow of p2_isp_buf's depthA write port (every writer goes through it), so that the tap reads
+  // nothing of the buffer's ports and changes no clock. tools/gate/ztap_cmp.cpp converts the keys to refsw3's bits
+  // (tb/common/zkey.h).
+  int         zt_fd = 0;
+  string      zt_fn;
+  p2_zkey_t   zt_sh [P2_TILE][P2_TILE];
+  initial if ($value$plusargs("ztap=%s", zt_fn)) zt_fd = $fopen(zt_fn, "w");
+  always_ff @(posedge clk)
+    if (zt_fd != 0) begin
+      if (u_buf.da_we)
+        for (int i = 0; i < P2_TILE; i++)
+          if (u_buf.da_ln[i])
+            zt_sh[u_buf.da_row][i] <= u_buf.da_wd[i];
+      if (ent_done) begin
+        $fwrite(zt_fd, "ZTAP %0d %0d\n", tilex, tiley);
+        for (int r = 0; r < P2_TILE; r++) begin
+          for (int i = 0; i < P2_TILE; i++)
+            $fwrite(zt_fd, "%016x%s", zt_sh[r][i], i == P2_TILE - 1 ? "\n" : " ");
+        end
+        $fflush(zt_fd);
+      end
+    end
+`endif
 endmodule

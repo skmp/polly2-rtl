@@ -2,9 +2,9 @@
 # (rtl/v1/regs), p2_seq (rtl/v1/seq), p2_tbuf_ctl / p2_tbuf_hs (rtl/v1/tbuf), p2_wout / p2_wout_put (rtl/v1/wout).
 # P2_CORE_LIB: the packages and the numerics library; P2_CORE_SRC (core.mk): p2_core's units. Overridable: REGS_DIR,
 # SEQ_DIR, WOUT_DIR (tools/gate/mutants.py points them at mutated copies; TBUF_DIR, TSP_DIR, ... as their fragments say).
-REGS_DIR ?= rtl/v1/regs
-SEQ_DIR  ?= rtl/v1/seq
-WOUT_DIR ?= rtl/v1/wout
+REGS_DIR ?= $(RTLV1)/regs
+SEQ_DIR  ?= $(RTLV1)/seq
+WOUT_DIR ?= $(RTLV1)/wout
 P2_CORE_LIB  = $(FP_PKG_SRC) $(ISP_PROG_PKG) $(TSP_PKG) $(TSP_PROG_PKG) $(FP_SRC)
 P2_M12_SRC   = $(REGS_DIR)/p2_regs.sv $(SEQ_DIR)/p2_seq.sv $(TBUF_DIR)/p2_tbuf_ctl.sv $(TBUF_DIR)/p2_tbuf_hs.sv \
                $(WOUT_DIR)/p2_wout.sv $(WOUT_DIR)/p2_wout_put.sv

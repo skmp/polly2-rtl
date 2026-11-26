@@ -13,7 +13,7 @@
 #   make lint-sort        verilator -Wall on p2_runq, p2_sort and the tb top (a prerequisite of make lint)
 #
 # Overridable: SORT_DIR (the RTL folder; tools/gate/mutants.py points it at a mutated copy), SORT_OBJDIR.
-SORT_DIR     ?= rtl/v1/sort
+SORT_DIR     ?= $(RTLV1)/sort
 SORT_OBJDIR  ?= $(BUILD)/obj_sort
 SORT_SRC      = $(SORT_DIR)/p2_runq.sv $(SORT_DIR)/p2_sort.sv rtl/v1/isp/p2_isp_entq.sv
 SORT_TB_SRC   = tb/sort/p2_sort_tb_top.sv

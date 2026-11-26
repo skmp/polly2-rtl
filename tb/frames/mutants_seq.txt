@@ -1,0 +1,20 @@
+# tb/frames/mutants_seq.txt: the tile sequencer (rtl/v1/seq/p2_seq.sv, PLAN M12; M13's verifier: no p2_seq mutant was
+# listed) through the frame gate, run by tools/gate/mutants.py (make frames-mutants); the probe: tools/gate/frames_run.sh
+# on a capture with the mutant's p2-offline (tools/gate/frames_probe.sh). The subset's console pages and dumps all have
+# 6-word entries with ISP_FEED_CFG bit 0 clear; scenegen draws the other forms, and make frames' seeds 1-200 have them:
+# seed 18 (5-word entries, ISP_FEED_CFG[0] 0), 78 (5-word, ISP_FEED_CFG[0] 1, translucent overlaps), 28 (6-word,
+# ISP_FEED_CFG[0] 1). Probes chosen so that no render of the probe is VRAM-race under the mutant (seed 6's misread region
+# array reads the framebuffer: its render is VRAM-race and differs in its own class, PLAN 5 D13). A 5-word entry's
+# punch-through list taken from another word's empty bit was tried and dropped: no seed of 1-200 shows it (scenegen's
+# 5-word entries have no punch-through list there to find).
+#
+# Format: <id> | <file in rtl/v1/seq> | <original fragment> | <mutated fragment> | <probe> [args] | <what it breaks>
+@dir rtl/v1/seq SEQ_DIR
+@obj P2OFF_OBJDIR
+@probe five p2-offline-probe frames_probe build/pre/gen_18 base
+@probe feed p2-offline-probe frames_probe build/pre/gen_78 base
+@probe six p2-offline-probe frames_probe build/pre/gen_28 base
+
+five-as-six | p2_seq.sv | assign nw     = six ? 3'd6 : 3'd5; | assign nw     = 3'd6; | five | M13: a 5-word entry read as 6 (the next entries' words shifted)
+presort-per-entry | p2_seq.sv | e.pre_sort    = six ? w[0][29] : isp_feed_cfg[0]; | e.pre_sort    = w[0][29]; | feed | M13: pre_sort per entry for 5-word entries (the control word's bit 29, not ISP_FEED_CFG[0])
+presort-global | p2_seq.sv | e.pre_sort    = six ? w[0][29] : isp_feed_cfg[0]; | e.pre_sort    = isp_feed_cfg[0]; | six | M13: pre_sort from ISP_FEED_CFG[0] for 6-word entries too (refsw3: the control word's bit 29)

@@ -9,6 +9,11 @@ sof2sweep       # strip buffers, every line
 sof2field       # FB_W_SOF2 and the field bits
 fb555
 scaler
+# the dither (FB_W_CTRL[3]): fbpack's dither pages (13-16) are past the 8-render cap, so every FB_W_CTRL write made 565
+# with dither (0x9) or 4444 with dither (0xa, the alpha dithered too), FB_W_LINESTRIDE 640 x 2 bytes (0xa0) to match
+# (pvrio.h REG_OVERRIDE, as run2.sh builds it); M13's verifier: a dither-table mutant passed make frames
+fbpack+048=9+04c=a0
+fbpack+048=a+04c=a0
 # the race class (ARCHITECTURE 3.2.1): texctl_bank with every TEXT_CONTROL write 0x900 (bank 9), so that texture A's VQ
 # index bytes are read from the framebuffer tile the region array wrote just before (pvrio.h REG_OVERRIDE, as
 # dreamcast-tests run2.sh builds it); its renders are VRAM-race and differ from refsw3-offline's (the write-out of that

@@ -1,0 +1,21 @@
+# tb/frames/unit_mutant_lists.txt: the M6-M12 mutant lists that make frames-unit-mutants runs through the frame gate's
+# subset (PLAN M13 "Mutants": to show the frame gate catches them too; tools/gate/frames_unit_mutants.py). A line:
+# <milestone> <mutants file>. Mutants whose folder is not part of p2_core's build (a generator) are listed as such.
+M6  tb/isp_tile/mutants.txt
+M6  tb/isp_tile/mutants_mem.txt
+M7  tb/isp_tile/mutants_m7.txt
+M8  tb/sort/mutants.txt
+M9  tb/tsp_setup/mutants.txt
+M9  tb/tsp_setup/mutants_fp.txt
+M9  tb/tsp_setup/mutants_gen.txt
+M10 tb/tsp_run/mutants.txt
+M10 tb/tsp_run/mutants_fp.txt
+M11 tb/tsp_tile/mutants.txt
+M11 tb/tsp_tile/mutants_tbuf.txt
+M11 tb/tsp_tile/mutants_tex.txt
+M12 tb/wout/mutants.txt
+M12 tb/wout/mutants_tbuf.txt
+M12 tb/frames/mutants.txt
+M12 tb/frames/mutants_isp.txt
+M12 tb/frames/mutants_tbuf.txt
+M12 tb/frames/mutants_seq.txt

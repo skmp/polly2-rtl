@@ -1,0 +1,14 @@
+# tb/frames/mutants_wout.txt: the write-out's dither (rtl/v1/wout/p2_wout_put.sv) through the frame gate, run by
+# tools/gate/mutants.py (make frames-mutants); the probe: tools/gate/frames_run.sh on a capture. M13's verifier: fbpack's
+# dither pages (13-16) are past make frames' 8-render cap, so a dither-table mutant passed it; the subset now has fbpack
+# with every FB_W_CTRL write made 565 + dither (fbpack+048=9+04c=a0) and 4444 + dither (fbpack+048=a+04c=a0).
+#
+# Format: <id> | <file in rtl/v1/wout> | <original fragment> | <mutated fragment> | <probe> [args] | <what it breaks>
+@dir rtl/v1/wout WOUT_DIR
+@obj P2OFF_OBJDIR
+@probe d565 p2-offline-probe frames_probe build/pre/fbpack+048=9+04c=a0 base
+@probe d4444 p2-offline-probe frames_probe build/pre/fbpack+048=a+04c=a0 base
+
+dither-entry | p2_wout_put.sv | 4'd9, 4'd1, 4'd11, 4'd3, | 4'd9, 4'd2, 4'd11, 4'd3, | d565 | M13: a dither entry changed (ditherAdd[1][1] 1 -> 2; tb/wout's mutant of the same name)
+dither-off | p2_wout_put.sv | add = ctl.fb_dither ? dt[{s_y[1:0], s_x[1:0]}] : 4'd0; | add = 4'd0; | d565 | M13: FB_W_CTRL's dither ignored
+dither-xy | p2_wout_put.sv | add = ctl.fb_dither ? dt[{s_y[1:0], s_x[1:0]}] : 4'd0; | add = ctl.fb_dither ? dt[{s_x[1:0], s_y[1:0]}] : 4'd0; | d4444 | M13: the dither table's rows as x (fbpack: rows are y)

@@ -1,0 +1,10 @@
+# tb/frames_hw/subset_sets.txt: make frames-hw's archived measurement sets (PLAN M13; fit/<test>_data/<set>.cases.json): one
+# small set of every test that has a reader, read by the test's reader and compared with compare_archive.py
+cmeas@c1
+covmeas@zprobe30
+covmeas@axis2
+mipmeas@det4
+uvmeas@reach1
+uvspan@cspan31
+wmeas@slopes4
+zmeas@cfirst24

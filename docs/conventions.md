@@ -556,7 +556,10 @@ capture_prerender.sh with CAP_STREAM=1, which keeps the stream it sent (readback
 build/pre/<case>/stream.txt; p2-offline then runs that stream (tools/gate/frames_run.sh: the saves moved into its run
 folder), because a PC build gives up a readback after 20 s (pvrio.h) and a p2-offline render can take longer. If the RTL
 differs at a render, the stream after it is still refsw3's, which only matters for a render that already failed.
-tools/gate/frames_cmp.py compares; `<test>+<reg>=<value>` cases are built with REG_OVERRIDE as run2.sh does.
+tools/gate/frames_cmp.py compares; `<test>+<reg>=<value>` cases are built with REG_OVERRIDE as run2.sh does. M13: the configurations are VR_LAT 8, +vramvary 7, VR_LAT 1, 4 and 16 (PLAN 1.6's sweep); every
+VRAM-race render is listed with its difference count per configuration (PLAN 5 D13); each case's checks (words
+compared) and failures (words that differ outside the race class) are the queue's per-group counts. `make frames-full`
+runs the same on every page and dump (`--full`, a seeded sample with SAMPLE).
 
 #### 7.4.3 Frame vs console archives
 
@@ -573,6 +576,47 @@ console. The console gate is still run on its own, for the archives that refsw3 
 per test in the dreamcast-tests README (for example `modvol` 187/192 before 2026-11-19, the `faredge` strips,
 `zovf`'s 2^128 cells, `detinf`). The gate prints them separately as `refsw3-known` and does not fail on them unless
 the RTL is *worse* than refsw3 there.
+
+**As built (M13, `tools/gate/gate_frames_hw.sh`).** Every archive kind is one work item on the shared queue
+(`tools/gate/frames_hw_run.sh`, judged by `tools/gate/frames_hw_cmp.py`):
+- `fit/hw/<test>`: the whole command stream refsw3-offline was given (`tools/gate/capture_hwstream.sh`: the test's PC
+  build exactly as run2.sh's worker makes it, `tee`d into `build/hwstream/<run>/stream.txt`, no render cap) replayed on
+  p2-offline into `build/frames-hw/<config>/<run>/`, then `compare2.py <run> ref off -a` unchanged (PVR_TESTS = that
+  folder's parent). A region that differs fails unless refsw3-known has it differing in at least as many pixels. A page
+  dumped after a VRAM-race render (the stream gives the renders before each page) is reported in the race class.
+  `off.crc` against `hw.crc` is reported (input-stale), not gated, as in refsw3-known.
+- **Readbacks** (M13 round 2: 36 fit/hw tests search by reading video memory back, `pvrio_read32`: depth2_*,
+  depthgaps_*, nantr_*, perpmean_*, zovf_*, zword, zstart, zexfil, probes_zs25z). The PC program computes what it sends
+  next, and so the pages it compares (depth2_cneg rows 470 / 471: the last probe the depth is above; depthgaps_zadd page 0:
+  the stored depths read out), from the answers it got. The captured stream is the one refsw3-offline's answers drove,
+  so its pages are the RTL's only if the RTL answers every readback as refsw3-offline did. capture_hwstream.sh numbers
+  each readback on the way to refsw3-offline (`dump32 <addr> <n> <folder>/readback.bin`, which the next one overwrites,
+  is also dumped to `rb.<k>.bin`) and keeps each answer's md5 in `build/hwstream/<run>/readbacks.txt`; frames_hw_run.sh
+  numbers the replay's readbacks the same way, and frames_hw_cmp.py compares the RTL's k-th answer with refsw3-offline's
+  k-th: one check each, a failure each that differs, the race class for a readback after a VRAM-race render. The
+  console's own answers are not archived (the console ran its own search), so a readback is compared with
+  refsw3-offline, and the pages through it with the console, where refsw3 is the console's (refsw3-known). Before this
+  (the first M13 round) the replay deleted the RTL's answers unchecked and only the last answer survived the capture.
+- Archived sets (`<test>@<set>`): the same replay; the tables come from regen.py's two ways (a gen.cpp generator is built
+  into `build/hwstream/.tools`, not in dreamcast-tests; zmeas's read.cpp too), then the test's reader and
+  `compare_archive.py <test> <set> off <folder>`: each measured quantity's DIFFER count no more than refsw3-known's.
+  `archive_check.sh` itself is not called: its `model/build.sh` builds the readers inside dreamcast-tests.
+- `<scene>.hw.png`: `pvrdmp; render; save`, the frame dumprender.sh dumps (FB_W_SOF1 & 0xfffffc, FB_W_LINESTRIDE x 8
+  bytes a line, FB_Y_CLIP's lines) against `framepng.py`'s `to_raw` of the PNG, pixel by pixel (rescore.py's logic).
+- `vram_out_<scene>.bin`: `--lax regs; vram; render; save`, all of video memory word by word and the framebuffer
+  (polly2dumps.py's `framebuffer`).
+- `fit/zdump_data/<scene>.txt`: the dump rendered with `+ztap` (section 7.5); every pixel the console read out against
+  the RTL's key in refsw3's bits. The `.zme` files (depthprobe records of the triangles) are not read: the `.txt` holds
+  the console's depths. ztap_cmp keeps a tile's last tapped entry (its depth buffer after the render); the two zdumps
+  never tap a tile twice, so `tools/gate/ztap_selftest.sh` (`make ztap-cmp-check`, a step of both hw gates) checks that
+  rule on synthetic taps (a tile tapped twice, an untapped tile, a key that is no stored depth). frames_hw_cmp.py reads
+  ztap_cmp's last line (`<n> of <N> depths`) first: a differing depth is counted as a failure, a tool failure is only a
+  run without that line.
+Each item has its own folder: a test's is `build/frames-hw/<config>/<run>` (compare2.py's PVR_TESTS layout), the other
+kinds' `build/frames-hw/<config>/<kind>/<name>` (a scene's vout and z items run side by side).
+refsw3-known (`tools/gate/refsw3_known.sh`, section "tests", "sets", "dumps") covers all four archive kinds; the gate runs
+it when the file's header is not the current nulldc3 / refsw3-dirty / dreamcast-tests revision. At `4f3efe15` /
+`a932980` refsw3 is the console's on all of them (237 tests, 185 sets, 786 frames, 63 vram_out).
 
 #### 7.4.4 The render log: first-difference tokens
 
@@ -604,6 +648,12 @@ other:
 
   The occupancy trace is how a timing mismatch is located (section 7.6).
 - **`+rendlog=file`** (section 7.4.4).
+- **`+ztap=file`** (M13, `rtl/v1/p2_core.sv`): the depth tap of section 7.4.3. Each entry's tile depths as the ISP leaves
+  them (when p2_isp_ctl's `ent_done` pulses: the entry's sweeps, walks and pass feedback complete, the next entry's CLEAR
+  not started), a line `ZTAP <tilex> <tiley>` and 32 lines of 32 keys (hex, `p2_zkey_t`), from a shadow of
+  p2_isp_buf's depthA write port: it reads none of the buffer's ports and changes no clock. `build/tools/ztap_cmp`
+  (`tools/gate/ztap_cmp.cpp`) turns a key into refsw3's `bits` with `tb/common/zkey.h`. p2-offline passes it through
+  `P2_PLUSARGS=+ztap=<file>`.
 - **`+fbdump[=file]`**: every framebuffer write with its address, as in polly2-rtl-lite `peel_core.sv`.
 - Per-unit taps named `+<unit>trace`.
 
@@ -713,9 +763,10 @@ and case names, and write to `build/gate/`. Times are estimates, to be replaced 
 | `make units` -> `gate_units.sh [unit ...]` | every unit's quick lockstep (`make <unit>`), then `make lint`, `hw-pkg-check` and `regs-pkg-check`. A few minutes | every unit PASS, lint clean, generated packages up to date |
 | `make units-mutants` | every `<unit>-mutants` | the control passes, no mutant survives |
 | `make frames` -> `gate_frames_off.sh --subset` | frame vs refsw3-offline (7.4.2) on `tb/frames/subset_tests.txt` (one or two pages per test class) and `subset_dumps.txt` (about 30 polly2-data frames across games and features) | every word of video memory equal after every render |
-| `make frames-full` | every pvrtest2.h test and every `.pvrdmp`. Hours | as above |
-| `make frames-hw` -> `gate_frames_hw.sh --subset` | frame vs console archives (7.4.3) on the same subsets | every compared region / pixel / reading equal, except the listed `refsw3-known` ones |
-| `make frames-hw-full` | all 137 `fit/hw` tests, all archived sets, all 786 frames, all `vram_out` scenes | as above |
+| `make frames-full` -> `gate_frames_off.sh --full` | every pvrtest2.h test (git-tracked, run2.sh's rule, but dumprender), fit/hw's register-override variants, every polly2-data dump (`.pvrdmp` and legacy), the first 256 renders; `SAMPLE=<seed>`: a seeded sample (PLAN 0 rule 10). Hours | as above |
+| `make frames-hw` -> `gate_frames_hw.sh --subset` | frame vs console archives (7.4.3) on `tb/frames_hw/subset_*.txt`: make frames' console pages with a fit/hw archive whose whole stream is short, one set per measuring test, make frames' dumps with a `hw.png` or a `vram_out`, both zdumps, the two shortest readback searches (depthgaps_zadd, depthgaps_detneg); base and +vramvary | every compared region / pixel / reading equal, except where the computed `refsw3-known` differs (not worse there); every readback's answer equal to refsw3-offline's (7.4.3); VRAM-race pages and readbacks in their own class |
+| `make frames-hw-full` -> `gate_frames_hw.sh --full` | every `fit/hw` directory at gate time (237 at `a932980`, `*_races` excluded), all 185 archived sets with a reader, all 786 `hw.png` frames, all 63 `vram_out` scenes, `fit/zdump_data`; `SAMPLE=<seed>`: a seeded sample (an item predicted over the budget by itself, a readback search of thousands of renders, is listed and left to the exhaustive run: `FRAMES_HW_MAX_ITEM`; an item may run `FRAMES_HW_TIMEOUT`, 86,400 s). Only this gate's exhaustive run checks the readbacks of those searches: frames-full stops at 256 renders | as above |
+| `make frames-unit-mutants` -> `gate_frames_off.sh --unit-mutants` | M13: the M6-M12 mutant lists through make frames' subset (base) | reported: which the frame gate catches, which only their unit gate; the control passes |
 | `make timing` -> `gate_timing.sh --subset` | the cycle gate (7.6.2) on the timemeas scenes that can be replayed, the deterministic cells of the `*_races` tests and a few `rendertimes.txt` scenes | as 7.6.2 |
 | `make timing-full` | every timed scene and every races cell | as 7.6.2 |
 | `gate_cycle.sh` | RTL against the clocked model (7.6.3) | identical event streams |

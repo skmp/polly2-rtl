@@ -8,7 +8,8 @@
 #                     memory after each render (r<k>/post/vram.bin.gz) and the command stream it ran (stream.txt: a test's
 #                     PC build's commands with refsw3-offline's readback answers, or a dump's); a scenegen case's stream is
 #                     its renders' registers and video memory (r<k>/pvr_regs.bin, vram.bin.gz), loaded before each render
-#   <config>          base (VR_LAT 8), vary (+vramvary: P2_VRAMVARY=7), lat1 (P2_VR_LAT=1), lat16 (P2_VR_LAT=16)
+#   <config>          base (VR_LAT 8), vary (+vramvary: P2_VRAMVARY=7), lat1 (P2_VR_LAT=1), lat4 (P2_VR_LAT=4), lat16
+#                     (P2_VR_LAT=16); PLAN 1.6's sweep 1, 4, 8, 16
 #   <run folder>      p2-offline's log and its saves (deleted once compared)
 #
 # The stream goes to p2-offline unchanged but for its saves: the one before each render is dropped, the one after it
@@ -27,6 +28,7 @@ case "$cfg" in
   base)  envs=() ;;
   vary)  envs=(P2_VRAMVARY=7) ;;
   lat1)  envs=(P2_VR_LAT=1) ;;
+  lat4)  envs=(P2_VR_LAT=4) ;;
   lat16) envs=(P2_VR_LAT=16) ;;
   *) echo "frames_run: unknown config $cfg"; exit 2 ;;
 esac
