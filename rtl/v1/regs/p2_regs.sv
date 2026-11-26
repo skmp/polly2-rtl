@@ -8,7 +8,8 @@
 //                                   refsw3-offline's reg_write never stores it, main.cpp)
 //             SOFTRESET (0x008)     `soft_rst` when bit 1 is set (ARCHITECTURE 1.3 item 5); bit 0 is the TA's (out of
 //                                   scope, conv G7); the register reads 0 afterwards (main.cpp stores 0)
-//             ID, REVISION          read-only: writes are dropped (main.cpp reg_write)
+//             ID, REVISION          read-only: writes are dropped (main.cpp reg_write); they read 0x17FD11DB and
+//                                   0x00000011 (main.cpp reset_all; M13, M12's open item)
 //             FOG_TABLE 0x200-0x3FC the 128 x 16-bit fog table (p2_pp_fog's RAM): ft_we, its low 16 bits
 //             PALETTE_RAM 0x1000-   the 1024 x 32 palette (p2_tex_pal's RAM): pal_we
 //   read    reg_rd: reg_rdata one clock later: the word as last written, from the read-back RAM (one write and one read
@@ -78,12 +79,19 @@ module p2_regs
   assign wr_ok = reg_wr && !ro && a != P2_REG_STARTRENDER;
   assign wv    = a == P2_REG_SOFTRESET ? 32'd0 : reg_wdata;
 
-  // the read-back RAM: one write, one registered read
+  // the read-back RAM: one write, one registered read; ID and REVISION are constants, chosen after the RAM's output
+  // register (the RAM keeps its registered read: conventions 4.2)
   logic [31:0] rb [2048];
+  logic [31:0] rb_q;
+  logic [1:0]  rd_k;
   always_ff @(posedge clk) begin
     if (wr_ok) rb[reg_addr] <= wv;
-    if (reg_rd) reg_rdata <= rb[reg_addr];
+    if (reg_rd) begin
+      rb_q <= rb[reg_addr];
+      rd_k <= a == P2_REG_ID ? 2'd1 : (a == P2_REG_REVISION ? 2'd2 : 2'd0);
+    end
   end
+  assign reg_rdata = rd_k == 2'd1 ? 32'h17FD11DB : (rd_k == 2'd2 ? 32'h00000011 : rb_q);
 
   // ---------------------------------------------------------------------------------------------- pulses, tables
   always_ff @(posedge clk) begin

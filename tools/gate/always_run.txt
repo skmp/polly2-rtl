@@ -32,3 +32,14 @@ tsp-run-full console-mipmeas ^(mwext1|det3)/
 # opaque pixels not alpha tested)
 tsp-tile-full tile ^build/pre/(blend|blendsel2|offspersist|ptruns|yuvbil)/r0-7$
 tsp-tile-full tile ^build/pre/gen_(180|22)/r0-
+# frames-full (M13): make frames' VRAM-race case under +vramvary (the race class and the hazard detector's probe) and the
+# frame mutants' probe cases in another configuration (ispcache under +vramvary is make frames' pole, its first 8 renders;
+# all 18 of them took 4,880 s in frames-full's first sample, beyond the budget by itself: left to the exhaustive run)
+frames-full frames-vary ^texctl_bank\+0e4=900$
+frames-full frames-lat4 ^(keepz|accbuf)$
+# frames-hw-full (M13): the depth tap under +vramvary, a console page with its tile buffers' carry-over (accbuf)
+frames-hw-full z-vary ^(sa2_ingame|shenmue_intro)$
+frames-hw-full test-vary ^accbuf$
+# frames-hw-full (M13 round 2): a readback search under +vramvary (every answer against refsw3-offline's; the
+# shortest, 24 readbacks; depthgaps_search, 116, took 4,855 s under +vramvary in the 2026-11-25 sample: dropped)
+frames-hw-full test-vary ^depthgaps_zadd$

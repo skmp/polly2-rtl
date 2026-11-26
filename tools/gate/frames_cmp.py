@@ -12,9 +12,11 @@ vramrace <w> [first <a>]" for its renders in order, and "p2: render <n> did not 
 Classes (PLAN 0 rule 4, ARCHITECTURE 3.2.1): a render whose vramrace is not 0 is VRAM-race: its differences are reported in
 their own class, never a pass or a fail; so are the renders after a VRAM-race render that differed in the same case (their
 video memory starts from the race's). Every other render must be equal in every word. Prints one line per render that
-is not equal, then
+is not equal and one per VRAM-race render (with its difference count, 0 too: PLAN 5 D13), then
     frames_cmp: <case> <config>: <n> renders, <e> equal, <d> differ; VRAM-race <r> (<rd> differ there), after a race <a>;
                 <isp> / <tsp> clk (ISP, TSP: sums), <words> words compared
+    frames_cmp: <case> <config>: <words> checks, <f> failures      (tools/gate/pq.py's per-group counts: f the words that
+                                                                    differ outside the race class)
 and "frames_cmp: PASS" / "FAIL" (exit 0 / 1). FAIL also when p2-offline did not exit 0 or 2 (2: a problem it reported,
 as refsw3-offline does) or a render did not end.
 """
@@ -44,7 +46,7 @@ def main():
     if fail:
         print(f"frames_cmp: {name} {cfg}: p2-offline exit {status}")
     n = eq = df = rc = rcd = after = 0
-    isp = tsp = words = 0
+    isp = tsp = words = failw = 0
     raced = False
     j = 0
     for k in ks:
@@ -82,8 +84,9 @@ def main():
             if diff.size:
                 rcd += 1
                 raced = True
-                print(f"frames_cmp: {name} {cfg}: r{k}: VRAM-race ({info['race']} words, the first at {info['first']}): "
-                      f"{diff.size} words differ (their own class)")
+            # every VRAM-race render, equal or not, with its difference count (PLAN 5 D13: reported in every summary)
+            print(f"frames_cmp: {name} {cfg}: r{k}: VRAM-race ({info['race']} words, the first at {info['first']}): "
+                  f"{diff.size} words differ (their own class)")
             continue
         if diff.size and raced:
             after += 1
@@ -91,6 +94,7 @@ def main():
             continue
         if diff.size:
             df += 1
+            failw += int(diff.size)
             i = int(diff[0])
             print(f"frames_cmp: {name} {cfg}: r{k}: {diff.size} words differ, the first at 32-bit-area address {4 * i:06x} "
                   f"({int(a[i]):08x}, refsw3-offline {int(b[i]):08x})")
@@ -99,6 +103,9 @@ def main():
             eq += 1
     print(f"frames_cmp: {name} {cfg}: {n} renders, {eq} equal, {df} differ; VRAM-race {rc} ({rcd} differ there), after a "
           f"race {after}; {isp} / {tsp} clk (ISP, TSP: sums), {words} words compared")
+    # the queue's per-group counts (tools/gate/pq.py): a check a word compared, a failure a word that differs outside the
+    # VRAM-race class (and a render that did not end or was not saved)
+    print(f"frames_cmp: {name} {cfg}: {words} checks, {failw + (1 if fail and not failw else 0)} failures")
     print("frames_cmp: " + ("FAIL" if fail else "PASS"))
     return 1 if fail else 0
 

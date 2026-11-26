@@ -397,6 +397,15 @@ the framebuffer as written so far, the RTL from the render's start) has its diff
   | `gate_frames_hw.sh` | `compare2.py <test> ref off`, `archive_check.sh`, `framepng.py raw` against `<scene>.hw.png`, `vram_out_<scene>.bin`, and `fit/zdump_data` through a depth tap (the key converted to refsw3's `bits` by `tb/common/zkey.h`) (conv §7.4.3). **Every directory of `fit/hw` is enumerated at gate time** (219 at `b54c934`, `*_races` excluded) |
   | `tools/gate/rendlog_diff.py` | aligns `+rendlog` against refcore's `log` on TILE / PASS / SPAN / PIXELS (conv §7.4.4) |
 
+  As built (M13): `gate_frames_hw.sh` enumerates 237 `fit/hw` directories at `a932980` (`*_races` excluded), 185
+  archived sets (every set of a test with a reader; uvrun has none), 786 `hw.png`, 63 `vram_out` and the two zdumps;
+  `archive_check.sh`'s steps are run, not the script (its `model/build.sh` builds inside dreamcast-tests), conventions
+  7.4.3 As built. refsw3-known has the sections tests, sets and dumps; the hw gate runs `refsw3_known.sh` itself when the
+  file is not of the current revisions (computed at gate time). A test that searches by readbacks (36 fit/hw tests)
+  also has every readback's answer compared with refsw3-offline's (conventions 7.4.3 "Readbacks", M13 round 2): the
+  stream after a readback is what the PC program computed from refsw3's answer, so its pages are the RTL's only where
+  the RTL answers alike.
+
 ### 1.5 Cycle testbench (MT0-MT9)
 
 - **The timing gate** (conv §7.6.2), for a timed scene:
@@ -438,7 +447,9 @@ the framebuffer as written so far, the RTL from the render's start) has its diff
   render. The `p2:` line reports it. Every gate puts such renders in their own class.
 - `+vramvary=<seed>` (random latency) is run on every functional gate. It must give identical values on every render
   not marked VRAM-race; only the clocks may differ.
-- `VR_LAT` sweeps (1, 4, 8, 16) on the frames subset from M12 on, with the same rule.
+- `VR_LAT` sweeps (1, 4, 8, 16) on the frames subset from M12 on, with the same rule. (As built: M12 ran 8, 1 and 16; M13 added
+  4: make frames' configurations are base (8), vary, lat1, lat4, lat16. frames-hw runs base and +vramvary: the sweep is
+  make frames'.)
 
 ## 2. Milestones
 
@@ -1449,6 +1460,136 @@ the choices, 3.12 the die agreement. Where the tree differs from the text below:
 
 ### M13. All frames, console archives
 
+**Status (2026-11-26): done; verified from a clean build (every gate above reproduced, the sampled -full gates on fresh seeds).** `make frames-hw` / `frames-hw-full`
+(tools/gate/gate_frames_hw.sh, `tb/mk/frames_hw.mk`), `make frames-full` and `make frames-unit-mutants`
+(tools/gate/gate_frames_off.sh `--full`, `--unit-mutants`), `make refsw3-known`, `make ztap-cmp`; scratch and gate logs in
+`agents/m13/`. New: tools/gate/capture_hwstream.sh (a run's whole stream, refsw3-offline's pages beside it),
+frames_hw_run.sh / frames_hw_cmp.py (one archive item and its verdict), ztap_cmp.cpp (the depth tap's keys in refsw3's
+bits, tb/common/zkey.h), frames_mprobe.sh and frames_unit_mutants.py (the M6-M12 lists on one control), the subsets
+`tb/frames_hw/subset_*.txt`, `tb/frames/mutants_seq.txt`, `unit_mutant_lists.txt`, `unit_mutant_reasons.txt`. RTL: the
+simulation-only depth tap in `rtl/v1/p2_core.sv` (`+ztap`, conventions 7.5), p2_regs' ID / REVISION constants (M12's
+open item, ARCHITECTURE 3.1 As built (M13)); the Makefile's `RTLV1` (every unit folder's default under it, so that one
+copy of rtl/v1 is one mutant control). Where the tree differs from the text below:
+- **refsw3-known has three sections** (tests, sets, dumps: §1.4 As built (M13)); at `4f3efe15` / `a932980` refsw3 is the
+  console's in all of them (237 tests, 185 sets, 786 frames, 63 vram_out), so every comparison of this milestone is
+  "equal to the console". A partial run (make refglue-selftest's README tests) writes `refsw3_known.partial.txt`: it had
+  overwritten the gate's file once (the hw gate then recomputed it, 480 s).
+- **The archived sets** are judged by archive_check.sh's steps, not the script (conventions 7.4.3 As built).
+- **frames-hw's subset** is make frames' 77 console pages with a fit/hw archive whose whole stream refsw3-offline renders
+  in 5 s or less, one set of each measuring test (8), make frames' dumps with a `hw.png` (11) or a `vram_out` (22), both
+  zdumps; base and +vramvary (the VR_LAT sweep is make frames').
+- **frames-full** takes every git-tracked pvrtest2 / pvrio test run2.sh accepts but dumprender (253; ta-perf, ta-probe,
+  ta-tests and yuvconv render nothing), fit/hw's override variants, make frames' race case, and every dump (855: the
+  .pvrdmp and the legacy ones), their first 256 renders (FRAMES_FULL_MAX).
+- **The sampled -full gates' mandatory items exceed the budget here too** (D12): frames-full's every case once in base
+  alone is 58,556 CPU s (13,008 renders), frames-hw-full's 224 tests, 185 sets, 849 dumps and 2 zdumps in base 68,140
+  predicted (the cost file's); no optional configuration was drawn. The fit/hw tests whose base item alone is predicted
+  over the budget (13 in the final sample: the readback searches, 1,100-6,600 renders at about 4 s a render) are listed
+  in the summary and left to the exhaustive run (`FRAMES_HW_MAX_ITEM`). The first frames-hw-full sample's estimates (30
+  times refsw3-offline's seconds) were too low for the readback searches (about 4 s a render: depth2_cneg's 2,096
+  renders 7,200 s), so it ran ten of them and depth2_cneg hit the item timeout of 7,200 s (p2-offline killed, its pages
+  incomplete: the one failing item, not a difference; every other item of that run passed). The estimate is now at
+  least 4 s a render, the cost file holds the measured seconds, the item timeout is FRAMES_HW_TIMEOUT (86,400 s), and the
+  sample was run again with a fresh seed (below): the items predicted over the budget alone, depth2_cneg among them,
+  are left to the exhaustive run.
+- **One folder per item**: frames_hw_run.sh gave a scene's vout and z items one run folder (`<root>/<scene>`); the first
+  frames-hw run happened to run them apart, the second (ordered by the cost file) ran them together, the vout item cleared
+  the folder the z item's tap was writing, and both z items failed (no `ztap.txt`). Tests keep `<root>/<run>`
+  (compare2.py's PVR_TESTS layout), the other kinds use `<root>/<kind>/<name>`; frames-hw and frames-hw-full were run
+  again.
+- **The M6-M12 mutants through the frame subset** (make frames-unit-mutants): 141 of 165 caught; the 24 others only by
+  their unit gates, each with its reason in `tb/frames/unit_mutant_reasons.txt` (9 change only state, order or timing
+  that never reaches video memory; 15 change values only on inputs the subset lacks). Five are outside p2_core's build
+  (tools/gen's four generator mutants, the frame testbench's hazard-detector mutant). The survivors' cost made the gate
+  13,986 s (a survivor runs every case: 5,346 CPU s).
+
+**Round 2 (2026-11-25, the verifier's second review; agents/m13/gates/r3).**
+- **Readbacks were not compared (blocking).** 36 fit/hw tests search by reading video memory back (depth2_*,
+  depthgaps_*, nantr_*, perpmean_*, zovf_*, zword, zstart, zexfil, probes_zs25z); the PC program computes the stream
+  after each readback, and pages such as depth2_cneg rows 470 / 471 or depthgaps_zadd page 0, from the answer. The
+  capture kept only the last answer and the replay deleted the RTL's answers unchecked, so those regions were refsw3's
+  numbers whatever the RTL did. Now capture_hwstream.sh numbers every readback (`rb.<k>.bin`) and keeps refsw3-offline's
+  answers' md5 (`readbacks.txt`), frames_hw_run.sh numbers the replay's, and frames_hw_cmp.py compares each (a check
+  each, a failure each that differs, the race class after a VRAM-race render), reported per kind and configuration
+  (conventions 7.4.3 "Readbacks"). make frames-hw's subset gains the two shortest searches (depthgaps_zadd 24
+  readbacks, depthgaps_detneg 58), always_run.txt depthgaps_zadd under +vramvary. Checked by hand: a reference answer
+  altered in the capture fails the item ("readback 5 ... differs", 1 failure). frames-full compares every word of video
+  memory after each of the first 256 renders, so it covers a search's answers only that far: the readbacks of the 18
+  searches left out of the sample (below) are checked only by frames-hw-full's exhaustive run.
+- **ztap_cmp's mismatch counted as a tool failure**: frames_hw_cmp.py reads its last line first (a tampered tap: "22 of 34
+  depths", 12 failures); a tool failure only without that line.
+- **The left-out list was cut at 1,500 characters**: the summary now names every item, per kind.
+- **Coverage**: make frames' subset gains fbpack with every page 565 + dither and 4444 + dither (REG_OVERRIDE of
+  FB_W_CTRL and FB_W_LINESTRIDE: its dither pages 13-16 are past the 8-render cap); tb/frames/mutants_wout.txt (dither
+  entry, dither off, rows as x) caught there. tools/gate/ztap_selftest.sh (make ztap-cmp-check, a step of both hw
+  gates) taps a tile twice: the verifier's first-entry-wins mutant of ztap_cmp fails it.
+- **The left-out tests depend on the cost file**: the sample leaves out the base items predicted over the budget alone,
+  from build/gate/frames-hw-full/cost.txt where it has them, else from the static estimate (4 s a render, 30 times
+  refsw3-offline's seconds). The round-2 sample left out 18 tests in base (not round 1's 13: the perpmean_* searches
+  had no measured cost): depth2_cneg, depthgaps_bigpos / bigslope / nanprod / rstart, nantr_fin2 / word / wreg,
+  perpmean_bg / negedge / negslope / negstore, zovf_creg / neg / neg2 / word, zstart, zword; on a clean tree the
+  static estimate decides.
+- Results: `make frames-hw` PASS, 2,911 s wall (CPU 42,153 s, 90 %; the pole depthgaps_detneg under +vramvary 2,348 s):
+  79 tests (79,673 regions, all the console's), readbacks 82 of 82 refsw3-offline's in 2 tests, 8 sets, 11 hw.png, 22
+  vram_out, 2 zdumps, base and +vramvary, 0 failures. `make frames-mutants` PASS (360 s): 11 of 11 caught (the three
+  dither mutants new). `make frames` PASS, 3,346 s wall (CPU 48,454 s, 90 %; the pole ispcache under +vramvary 1,638 s):
+  338 cases, 881 renders, in each of base / vary / VR_LAT 1 / 4 / 16 866 equal, 0 differ, 15 VRAM-race (texctl_bank+0e4=900
+  r0 64 and r1 48 words, the rest 0). `make frames-hw-full SAMPLE=3744104271` PASS, 5,220 s wall (CPU 72,635 s, 87 %; the
+  pole depthgaps_search under +vramvary 4,855 s, an always-run line since narrowed to depthgaps_zadd): in base 219 of
+  237 tests (340,214 regions, all the console's; readbacks 9,212 of 9,212 refsw3-offline's in the 18 searches that
+  fit), all 185 sets, 786 hw.png, 63 vram_out, both zdumps; under +vramvary accbuf, depthgaps_zadd, depthgaps_search
+  (140 readbacks) and the zdumps; 0 failures, 0 race items. RTL unchanged since round 1, so the unit gates' round-1
+  results below stand. make frames-unit-mutants was not run again in full (13,986 s): its 24 survivors were run on the
+  two cases the subset gained (agents/m13/um3: tools/gate/mutants.py --only, the control passing): 0 of 24 caught, so
+  the report (141 of 165 caught by frames, the 24 with their reasons) stands.
+
+**Gate results (2026-11-24 / 25, J 16, agents/m13/gates).**
+- `make frames` PASS, 3,214 s wall (CPU 47,688 s, 93 %; the pole ispcache under +vramvary 1,619 s): 336 cases, 865
+  renders, each in five configurations (VR_LAT 8; +vramvary 7; VR_LAT 1, 4, 16): in every one 850 equal to
+  refsw3-offline in every word of video memory, 0 differ; 15 VRAM-race renders, listed with their counts (gen_10,
+  gen_85, gen_1156, gen_1295, gen_2013, gen_3079 r0, texctl r7, texctl_bank+0e4=900 r0-r7: 0 words differ but
+  texctl_bank+0e4=900 r0 64 and r1 48, in every configuration); 1,814,036,480 words compared a configuration, now the
+  queue's per-group check counts (M12 note 3).
+- `make frames-mutants` PASS (286 s): 8 of 8 caught, M12's five and M13's three sequencer mutants (a 5-word entry read as
+  6 on seed 18; pre_sort per entry for 5-word entries on seed 78; pre_sort from ISP_FEED_CFG for 6-word entries on seed
+  28). A fourth (a 5-word entry's punch-through list from another word) reaches no seed of 1-200 and was dropped; the
+  first probe tried for the first, seed 6, hid it in the race class (D13).
+- `make frames-hw` PASS, 2,665 s wall (CPU 38,635 s, 91 %; the pole texfmt under +vramvary 1,977 s; the final run, after
+  the folder fix and the per-group counts; the first, 3,139 s, had the same results): 77 fit/hw tests (79,562 regions,
+  150,908,928 pixels a configuration, all the console's), 8 sets
+  (15,214,681 readings), 11 hw.png frames (3,379,840 pixels), 22 vram_out (46,137,344 words), the 2 zdumps (36 depths:
+  the depth tap equal to the console's read-out everywhere); 0 refsw3-known regions, 0 race pages, 0 input-stale; in
+  base and +vramvary; the queue's per-group check counts are the real ones (as M12 note 3 for make frames).
+- `make frames-unit-mutants` PASS (reported: 141 of 165 caught, above), 13,986 s.
+- Every earlier quick gate and mutant gate in full PASS: scaffold, lint, refglue-selftest, refglue-mutants (12 of 12), fp,
+  fp-mutants (92), isp-edge, isp-edge-mutants (36), isp-depth, isp-depth-mutants (29), isp-setup, isp-setup-mutants (16),
+  isp-tile-op, isp-tile-op-mutants (27), isp-tile, isp-tile-mutants (23), sort, sort-mutants (11), tsp-setup,
+  tsp-setup-mutants (17), tsp-run, tsp-run-mutants (23), tsp-tile, tsp-tile-mutants (40), wout, wout-mutants (21).
+- Sampled full gates (rule 10, fresh seeds): `isp-tile-full SAMPLE=198813313` PASS, 2,800 s wall (CPU 40,369 s, 90 %):
+  every one of the 6,084 phase-halt items (66,820,640 checks) and 1,017 of 7,401 free-running items (12 always-run,
+  1,005 drawn), 25.2 % of the weight, 0 failures; `sort-full SAMPLE=3845980285` PASS, 203 s: 1,869 of 6,622 items, 15.8 %
+  of the weight; `tsp-run-full SAMPLE=2096531798` PASS, 64 s: every item; `tsp-tile-full SAMPLE=4051064810` PASS, 3,180 s
+  (the unit sections whole, every case once: 6,117 of 7,434 items, 36.8 % of the weight, 8,026 renders, 1,100,075,612
+  pixels, 22,058,586,195 checks, 0 failures; 4 VRAM-race renders, 0 differences there; the mandatory items alone over its
+  1,800 s budget: the D12 WARNING); `frames-full SAMPLE=417147093` PASS, 6,312 s wall (CPU 68,204 s, 68 %; the pole
+  ispcache under +vramvary, all 18 renders, 4,880 s, an always-run line since dropped): every one of the 1,108 cases in
+  base (13,008 renders: 12,994 equal, 0 differ, 14 VRAM-race of which 3 differ: texctl_bank+0e4=900 r0 64, r1 48, r13
+  80 words; 27,279,753,216 words compared), the always-run items under +vramvary and VR_LAT 4;
+  `frames-hw-full SAMPLE=1650643084` PASS, 4,669 s wall (CPU 67,707 s, 91 %; the pole depth2_halfo 3,775 s): in base 224
+  of the 237 fit/hw tests (340,275 regions, 562,111,488 pixels, all the console's; 32,971 renders), all 185 archived sets
+  (495,262,334 readings), all 786 hw.png frames (231,063,040 pixels), all 63 vram_out (132,120,576 words), both zdumps;
+  the always-run items under +vramvary; 0 refsw3-known regions, 0 race pages, 0 input-stale. The 13 tests left out
+  (predicted over the budget alone: depth2_cneg, depthgaps_bigpos / bigslope / nanprod / rstart, zovf_creg / neg / neg2,
+  nantr_fin2 / word / wreg, zovf_word, zword) wait for the exhaustive run; the first sample (seed 2274194907, 7,830 s)
+  ran seven of them to a pass (depthgaps_bigpos, bigslope, nanprod, rstart, zovf_creg, neg, neg2) and depth2_cneg to its
+  item timeout (above). **Correction (round 2):** that run did not check any readback (below), so its 224 tests were
+  console-compared only where no readback steered the stream; the round-2 sample replaces it.
+- Clocks and frame times (reported, not gated: MT7, MT9; ev_tsp from STARTRENDER, VR_LAT 8): make frames' 865 renders
+  456,216,808 clocks (VR_LAT 1 / 4 / 16: 0.97 / 0.98 / 1.06 times, +vramvary 5.75 times); frames-full's 855 dumps 1.34 G
+  clocks, 0.06-36.0 M a frame (omikron_kayl2 the longest), median 1.28 M, mean 1.57 M: 13 ms a frame at 100 MHz (0.6-360
+  ms); frames-full's 13,008 renders 5.37 G. Simulation: about 93 k clk/s a process with 16 at once (1.34 G dump clocks in
+  14,318 process-seconds).
+
 **Gate.**
 - `make frames-hw` (subset), then once at the end:
   - `make frames-full`: every pvrtest2 page and all 786 dumps against refsw3-offline;
@@ -1586,6 +1727,7 @@ dreamcast-tests owner through `OPEN_ITEMS.md`. Never run from here. Ordered by w
 | D10 | Module prefix `p2_`, unit folder names, frame subsets | as conventions.md and ARCHITECTURE §1.1 |
 | D11 (new) | SB_ISTERR bit 0 ("ISP out of cache"): a CPU-visible register bit with a measured rule [M ispcache], which refsw3 does not model | model it in `p2_isp_pcache` behind `P2_ISTERR=1`, and ask nulldc3 to add it to refsw3 so that rule 1 (no rule refsw3 lacks) holds; off by default meanwhile |
 | D12 (new, M9) | Sampled full gates (rule 10): "all phase-halt items" and "1-1.5 h" do not leave room for the "random subset of free-running segments". The 6,084 phase-halt items in full cost 47,409 CPU s (3,255 s queue wall at J 16, 2026-11-23; 49,681 in M7's exhaustive run, 90,611 in M8's on a busier box), so a 4,000 s isp-tile-full budget draws about 119 of 7,401 free-running segments (1.9 % of their weight) beside the 12 always-run ones, and none on a clean tree | as built: every phase-halt item in full, the random draws whatever the budget leaves (the gates' default). Alternatives: (a) `SAMPLE_PH_RENDERS=8`, each phase-halt case's first 8 renders where it has more (130 cases; a third to a half of the phase-halt weight freed for free-running draws; phase-halt carries the RTL's state, so a case cannot be cut elsewhere); (b) a larger `SAMPLE_BUDGET` (each further hour at J 16 is about 55,000 CPU s; the free-running items in full cost 124,000 CPU s in M7's exhaustive run, 339,000 in M8's) |
+| D13 (new, M13; M12's verifier) | The VRAM-race class (§0 rule 4, §1.6) lets a render the hazard detector flags differ by any amount without failing. M13's sequencer mutant "a 5-word entry read as 6" passes scenegen seed 6 that way (the misread region array reads 20 framebuffer words; 8,041 words differ, all in the race class) and fails seed 18. In the tree the gates now list every race render with its difference count per configuration (frames, frames-full, frames-hw); frames-hw's readback check (M13 round 2) puts a readback after a VRAM-race render in the same class, counted per item and per configuration | as built: the class is reported, never a pass or a fail (the rule unchanged). Options: (a) a pinned expected-race list (`tb/frames/races_expected.txt`: case, render, configuration, the difference count or "equal"), failing when a render enters or leaves the list or its count changes; (b) failing when the number of race renders or of differing race renders of a configuration changes from the last accepted run (cheaper, weaker: a mutant that only changes the amount passes) |
 
 ## 6. Risks
 

@@ -1,0 +1,24 @@
+# tb/frames_hw/subset_vout.txt: make frames-hw's legacy dumps with the console's video memory (vram_out_<scene>.bin):
+# make frames' dumps (tb/frames/subset_dumps.txt) that have one
+shenmue_intro
+shenmue_intro2
+jgr_tree_shadows
+jgr_tree_shadows2
+jgr_car
+thps2_ingame
+thps2_menu
+sa2_ingame
+sa2_ingame2
+rez_ingame
+xtreme_intro
+sc_ingame2
+mvsc2_ingame
+logo
+menu2
+18wheel_select
+taxi3
+doa2_kasumi
+hotd2_zombies
+daytona_front
+rayman_lights
+sonic_title

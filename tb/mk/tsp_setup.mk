@@ -17,7 +17,7 @@
 #
 # Overridable: TSP_DIR (the RTL folder), TSP_GEN_DIR and TSP_GEN_OBJDIR (the generator's folder and binary's): tools/gate/
 # mutants.py points them at mutated copies; TSP_SETUP_OBJDIR, TSP_GRAPH_N, TSP_GRAPH_THREADS (8).
-TSP_DIR           ?= rtl/v1/tsp
+TSP_DIR           ?= $(RTLV1)/tsp
 TSP_SETUP_OBJDIR  ?= $(BUILD)/obj_tsp_setup
 TSP_GEN_DIR       ?= tools/gen
 TSP_GEN_OBJDIR    ?= $(BUILD)/tools/gen

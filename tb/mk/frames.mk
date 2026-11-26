@@ -7,8 +7,13 @@
 #                            first differing word reported (tb/frame/p2_rendercore.cpp)
 #   make frames              the M12 frame gate (tools/gate/gate_frames_off.sh --subset): every word of video memory after
 #                            every render against refsw3-offline on tb/frames/subset_*.txt, VRAM-race renders apart, also
-#                            under +vramvary and at VR_LAT 1 and 16; "frames: PASS" last
-#   make frames-mutants      PLAN M12's mutants through the frame gate's probes (tb/frames/mutants*.txt)
+#                            under +vramvary and at VR_LAT 1, 4 and 16; "frames: PASS" last
+#   make frames-mutants      PLAN M12's mutants and M13's sequencer mutants through the frame gate's probes
+#                            (tb/frames/mutants*.txt)
+#   make frames-full         M13: every pvrtest2 page and every dump against refsw3-offline; SAMPLE=<seed>: a seeded
+#                            sample (PLAN 0 rule 10), else the exhaustive run
+#   make frames-unit-mutants M13: the M6-M12 mutant lists (tb/frames/unit_mutant_lists.txt) through the frame subset's base
+#                            configuration; which the frame gate catches and which only their unit gate (reported)
 #
 # Overridable: FRAME_DIR (the folder p2_rendercore.cpp is compiled from), P2OFF_OBJDIR, P2OFF_DUAL_OBJDIR (mutants.py).
 FRAME_DIR         ?= tb/frame
@@ -21,7 +26,7 @@ P2OFF_SUP_OBJ      = $(P2OFF_LIBDIR)/main.o $(P2OFF_LIBDIR)/refta.o $(REFGLUE_SU
 P2OFF_DUAL_GLUE    = $(REFGLUE_LIBDIR)/refcore_glue.o $(REFGLUE_LIBDIR)/refcore_glue_lists.o $(REFGLUE_LIBDIR)/refcore_bgkey.o
 P2OFF_VCFLAGS      = -CFLAGS "-I$(CWD)/tb/common" -LDFLAGS "-lpthread -lz"
 
-.PHONY: p2-offline p2-offline-dual p2-offline-probe frames frames-mutants
+.PHONY: p2-offline p2-offline-dual p2-offline-probe p2-offline-mprobe frames frames-mutants frames-full frames-unit-mutants
 
 $(P2OFF_LIBDIR)/main.o: $(NULLDC3)/refsw3-offline/main.cpp $(REFGLUE_REFDEPS)
 	@mkdir -p $(dir $@)
@@ -48,11 +53,17 @@ p2-offline-dual: $(P2OFF_SUP_OBJ) $(P2OFF_DUAL_GLUE)
 	  $(P2_CORE_LIB) $(P2_CORE_SRC) $(CWD)/$(FRAME_DIR)/p2_rendercore.cpp \
 	  $(addprefix $(CWD)/,$(P2OFF_SUP_OBJ) $(P2OFF_DUAL_GLUE)) --Mdir $(P2OFF_DUAL_OBJDIR)/obj -o ../p2-offline
 
-# the frame gate's mutant probe beside p2-offline (tools/gate/frames_probe.sh)
+# the frame gate's mutant probes beside p2-offline (tools/gate/frames_probe.sh; frames_mprobe.sh: M13's unit lists)
 p2-offline-probe: p2-offline
 	@cp tools/gate/frames_probe.sh $(P2OFF_OBJDIR)/frames_probe
+p2-offline-mprobe: p2-offline
+	@cp tools/gate/frames_mprobe.sh $(P2OFF_OBJDIR)/frames_mprobe
 
 frames:
 	+@MAKE="$(MAKE)" bash tools/gate/gate_frames_off.sh --subset
 frames-mutants:
 	+@MAKE="$(MAKE)" bash tools/gate/gate_frames_off.sh --mutants
+frames-full:
+	+@MAKE="$(MAKE)" SAMPLE="$(SAMPLE)" bash tools/gate/gate_frames_off.sh --full
+frames-unit-mutants:
+	+@MAKE="$(MAKE)" bash tools/gate/gate_frames_off.sh --unit-mutants

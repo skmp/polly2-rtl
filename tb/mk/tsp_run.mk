@@ -16,8 +16,8 @@
 TSP_RUN_OBJDIR   ?= $(BUILD)/obj_tsp_run
 # M11: the whole pixel pipe (p2_tsp_pp, P0 - P11: the texture units of rtl/v1/tex, the shade, fog, SupSample and blend
 # stages) and the tile buffers (rtl/v1/tbuf); TEX_DIR and TBUF_DIR are overridable as TSP_DIR (tools/gate/mutants.py)
-TEX_DIR          ?= rtl/v1/tex
-TBUF_DIR         ?= rtl/v1/tbuf
+TEX_DIR          ?= $(RTLV1)/tex
+TBUF_DIR         ?= $(RTLV1)/tbuf
 TSP_PP_SRC        = $(TSP_DIR)/p2_pp_issue.sv $(TSP_DIR)/p2_pp_plane.sv $(TSP_DIR)/p2_pp_div.sv $(TSP_DIR)/p2_pp_col.sv \
                     $(TSP_DIR)/p2_pp_mip.sv $(TEX_DIR)/p2_tex_coord.sv $(TEX_DIR)/p2_tex_addr.sv $(TEX_DIR)/p2_tex_cache.sv \
                     $(TEX_DIR)/p2_tex_pal.sv $(TEX_DIR)/p2_tex_decode.sv $(TEX_DIR)/p2_tex_filter.sv \

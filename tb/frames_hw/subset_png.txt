@@ -1,0 +1,13 @@
+# tb/frames_hw/subset_png.txt: make frames-hw's dumps with a console frame (<scene>.hw.png, polly2-data): make frames' dumps
+# (tb/frames/subset_dumps.txt) that have one
+f1wgp_driver
+f1wgp_race
+vrally_rally4
+ff2_fight
+underdefeat_ingame
+outtrigger_menu
+mrdriller_ingame
+berserk_fight
+ikaruga_stage
+soulreaver_hall
+recv_tunnel

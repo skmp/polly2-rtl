@@ -22,6 +22,9 @@ REFCORE      ?= $(NULLDC3)/refsw3/refcore
 REFTA        ?= $(NULLDC3)/refsw3/refta
 DCTESTS      ?= $(abspath $(CWD)/../dreamcast-tests)
 POLLY2_DUMPS ?= $(abspath $(CWD)/../dreamster/polly2-rtl/polly2-data/dumps)
+# the RTL tree: every unit folder's default (ISP_DIR = $(RTLV1)/isp, ...) is under it, so that one copy of it can stand
+# for all of them (M13: make frames-unit-mutants mutates any unit of p2_core through one control)
+RTLV1        ?= rtl/v1
 # the nulldc3 revision the testbenches print (tb/common/p2tb.h banner)
 P2_REFREV    := $(shell git -C $(NULLDC3) rev-parse --short HEAD 2>/dev/null)
 export NULLDC3 REFCORE REFTA DCTESTS POLLY2_DUMPS P2_REFREV

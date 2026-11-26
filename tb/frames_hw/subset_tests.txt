@@ -1,0 +1,87 @@
+# tb/frames_hw/subset_tests.txt: make frames-hw's fit/hw tests (PLAN M13): make frames' console pages
+# (tb/frames/subset_tests.txt) that have a console archive in fit/hw and whose whole stream refsw3-offline renders in 5 s
+# or less (p2-offline ~30 times that: 2026-11-24), each compared with the console's pages region by region. Left out
+# (make frames-hw-full's): ptchunkcost, ptchunklag, sample, perpmean_neg, trifade, ss*, supsample*, scaler*, ispcache
+# (make frames' pole), zovf_word (3,348 renders).
+fb555
+accbuf
+keepz
+fbpack
+fb565
+ycoeff
+sof2probe
+bgtie
+bgneg2
+raster
+cullval
+edge2_row31
+faredge_cull
+hugepos_v6
+huge
+slivers_tsp
+depth
+depthgaps_ties
+depthgaps_mm
+depth2_denorm
+zovf
+zsign
+ztile
+nantr_pos
+perpeq
+detinf
+modvol
+volrun
+ptlayers
+ptruns
+optcull
+optrun
+sort
+trtie
+trsort_auto
+dumprules
+alphatest
+alphafilt
+blendsel2
+blendpos
+offspersist
+shade
+fog
+tspw
+env
+bump
+bumplight
+texfmt
+texctl
+yuvbil
+coordfix
+mipbil
+mipdump
+trimin
+tsp2_mipdz
+halfofs2
+uvrun
+planes
+mip
+texctl_addr
+texctl_bank
+texctl_bankbase
+texctl_bankmip
+texfar
+texfar_bits
+texfar_decl
+texfar_edge
+texfar_m1
+texfar_m1q
+texfar_mip
+texfar_mipv
+texfar_quot
+bumpbil
+bumpclamp
+bumpfn
+bumpiso
+blendsel
+# readback searches (M13's verifier: no subset test read video memory back, so the readback check had no quick item):
+# the two shortest fit/hw tests that search the depth buffer by readbacks, every one of their answers against
+# refsw3-offline's (24 and 58 readbacks; 33 and 58 renders)
+depthgaps_zadd
+depthgaps_detneg

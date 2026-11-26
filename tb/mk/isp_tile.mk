@@ -24,7 +24,7 @@
 # Overridable: ISP_DIR (the RTL folder), MEM_DIR (p2_mem's): tools/gate/mutants.py points them at mutated copies;
 # ISP_TILE_OBJDIR.
 ISP_TILE_OBJDIR ?= $(BUILD)/obj_isp_tile
-MEM_DIR         ?= rtl/v1/mem
+MEM_DIR         ?= $(RTLV1)/mem
 ISP_TILE_SRC     = $(sort $(wildcard $(ISP_DIR)/p2_isp_*.sv)) $(MEM_DIR)/p2_mem.sv
 ISP_TILE_LIB     = $(FP_PKG_SRC) $(ISP_PROG_PKG) rtl/v1/pkg/p2_hw_check.sv $(FP_SRC)
 ISP_TILE_TB_SRC  = tb/isp_tile/p2_isp_tile_tb_top.sv

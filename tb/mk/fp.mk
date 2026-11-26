@@ -21,7 +21,7 @@
 # testbenches take p2_zword_pkg.sv from: the same for tb/fp/mutants_zword.txt), ROM_DIR (the measured-table ROMs: the
 # same for tb/fp/mutants_rom.txt), FP_OBJDIR, FP_SHARDS.
 # A testbench's arguments: --seed S, --n N, --shard k/N, --only <section,...>, --full, --trace (tb/common/p2tb.h).
-FP_DIR      ?= rtl/v1/lib/fp
+FP_DIR      ?= $(RTLV1)/lib/fp
 FP_OBJDIR   ?= $(BUILD)/obj_fp
 FP_SHARDS   ?= 12
 ZW_DIR      ?= rtl/v1/pkg

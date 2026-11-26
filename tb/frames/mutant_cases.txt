@@ -3,3 +3,10 @@
 texctl_bank+0e4=900
 keepz
 accbuf
+# M13's sequencer mutants (mutants_seq.txt): scenegen seeds with 5-word entries (18, 78) and with ISP_FEED_CFG[0] set (78, 28)
+gen:18
+gen:78
+gen:28
+# the dither mutants (mutants_wout.txt): fbpack with dither on every page, 565 and 4444
+fbpack+048=9+04c=a0
+fbpack+048=a+04c=a0
