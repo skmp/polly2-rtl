@@ -1721,13 +1721,36 @@ dreamcast-tests owner through `OPEN_ITEMS.md`. Never run from here. Ordered by w
 | D4 | ~~num §8 DEFECT D1: MipSelect divides by zero for `Sdet == 0`~~ | **closed** by refsw3 `2bee80f2`: measured (tsp2_mipdz, tsp2_mipdz2), a length of all ones and the last level (dzForce); the RTL follows (M9: K8 and dz compared on every such primitive) |
 | D5 | Races policy: gate only the deterministic cells? Model run-to-run sources (refresh)? | deterministic cells only, with `races_expected.txt` keyed by probe; refresh as a VRAM-model option |
 | D6 | Hangs: reproduce bumphang, the SPAN_SORT_CFG 0x100 / 0x10001 hangs, two empty keep-Z tiles, the SCALER_CTL stall? | yes where a mechanism is stated (bumphang counter, `p2_tbuf_hs`, scaler stall), behind `P2_HANGS=1`; not the 0x100 / 0x10001 hangs (no mechanism, each try costs a power cycle) |
-| D7 | timemeas scenes: the owner's PC emission, or our own emitter | the owner's emission |
+| D7 | timemeas scenes: the owner's PC emission, or our own emitter | **decided** below: the PC emission, built by us in dreamcast-tests |
 | D8 | Render log hex depth field (conv G6) | yes |
 | D9 | ~~When the depthgaps patch lands~~ | **closed**: landed as `708fb8cd`; the stored depth is the 64-bit key behind `p2_zword_pkg` |
 | D10 | Module prefix `p2_`, unit folder names, frame subsets | as conventions.md and ARCHITECTURE §1.1 |
 | D11 (new) | SB_ISTERR bit 0 ("ISP out of cache"): a CPU-visible register bit with a measured rule [M ispcache], which refsw3 does not model | model it in `p2_isp_pcache` behind `P2_ISTERR=1`, and ask nulldc3 to add it to refsw3 so that rule 1 (no rule refsw3 lacks) holds; off by default meanwhile |
 | D12 (new, M9) | Sampled full gates (rule 10): "all phase-halt items" and "1-1.5 h" do not leave room for the "random subset of free-running segments". The 6,084 phase-halt items in full cost 47,409 CPU s (3,255 s queue wall at J 16, 2026-11-23; 49,681 in M7's exhaustive run, 90,611 in M8's on a busier box), so a 4,000 s isp-tile-full budget draws about 119 of 7,401 free-running segments (1.9 % of their weight) beside the 12 always-run ones, and none on a clean tree | as built: every phase-halt item in full, the random draws whatever the budget leaves (the gates' default). Alternatives: (a) `SAMPLE_PH_RENDERS=8`, each phase-halt case's first 8 renders where it has more (130 cases; a third to a half of the phase-halt weight freed for free-running draws; phase-halt carries the RTL's state, so a case cannot be cut elsewhere); (b) a larger `SAMPLE_BUDGET` (each further hour at J 16 is about 55,000 CPU s; the free-running items in full cost 124,000 CPU s in M7's exhaustive run, 339,000 in M8's) |
 | D13 (new, M13; M12's verifier) | The VRAM-race class (§0 rule 4, §1.6) lets a render the hazard detector flags differ by any amount without failing. M13's sequencer mutant "a 5-word entry read as 6" passes scenegen seed 6 that way (the misread region array reads 20 framebuffer words; 8,041 words differ, all in the race class) and fails seed 18. In the tree the gates now list every race render with its difference count per configuration (frames, frames-full, frames-hw); frames-hw's readback check (M13 round 2) puts a readback after a VRAM-race render in the same class, counted per item and per configuration | as built: the class is reported, never a pass or a fail (the rule unchanged). Options: (a) a pinned expected-race list (`tb/frames/races_expected.txt`: case, render, configuration, the difference count or "equal"), failing when a render enters or leaves the list or its count changes; (b) failing when the number of race renders or of differing race renders of a configuration changes from the last accepted run (cheaper, weaker: a mutant that only changes the amount passes) |
+
+**Decided (2026-11-26, delegated by the owner on 2026-11-25: "decide as you see fit; the console is available").**
+These answers replace the proposals in the table where they differ.
+- **D1:** the TA is out of scope for the CORE milestones (M0-M13, MT0-MT9, MQ and the exhaustive run). The owner has
+  made the TA **the follow-up track once the CORE is done**. Keep the CORE's interfaces clean for it: the TA list input,
+  and p2-offline's refsw3-ta seam.
+- **D2:** as proposed. Display and SPG stalls are a VRAM-model option, off for timemeas and on for rendertimes.
+- **D5:** as proposed. Only deterministic cells are gated, through `tb/timing/races_expected.txt` keyed by probe. Refresh
+  is a VRAM-model option.
+- **D6:** as proposed. Hangs with a stated mechanism are reproduced behind `P2_HANGS=1`; the SPAN_SORT_CFG 0x100 /
+  0x10001 hangs are not.
+- **D7:** option (a), the PC emission, **built by this project in dreamcast-tests**. timemeas `main.c` is compiled for the
+  PC, and each scene is preceded by `echo T <scene>`. Commit it in dreamcast-tests, which is ours (commit regularly,
+  push only when asked). It replaces both the §4 request and the `tm_emit.cpp` fallback.
+- **D8:** yes. **D10:** as conventions.md. **D12:** as built.
+- **D11:** model SB_ISTERR bit 0 in `p2_isp_pcache` behind `P2_ISTERR=1`. Add the same rule to refsw3 on nulldc3 branch
+  `skmp/refsw3`, so that rule 1 holds.
+- **D13:** option (a). `tb/frames/races_expected.txt` is pinned, with case, render, configuration and the difference
+  count or "equal". The gate fails when a render enters or leaves the list, or its count changes.
+- **Console:** from MT0 on, the MT milestones may run their own console probes (T1-T21; §3 said "never run from here").
+  - Use only dreamcast-tests `run2.sh hw=` (or `hwrun.sh`), under `/tmp/pvr_tests/console.lock`.
+  - Never run two console jobs at once, and never use `dc-tool-ip -r`.
+  - Archive every result in dreamcast-tests like the existing `fit/hw` tests.
 
 ## 6. Risks
 
