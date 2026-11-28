@@ -1,0 +1,32 @@
+# tb/timing/gate.txt: the checks of the timing gate (PLAN 1.5, MT0; conventions.md 7.6.2), read by
+# tools/timing/gate_timing.py. One check a line: <group> | <kind> | <field> | <keys ...> (gate_timing.py's header).
+# The keys are timemeas scenes ("<what> a b c d", main.c measure()); the console's numbers are the least of
+# fit/timemeas_logs/timemeas_run*.log, the RTL's p2-offline's under tb/timing/k.txt's VRAM configuration.
+#
+# MT0 (make timing-harness): the fits and the write-out's format dependence (tim 3.1, 3.11), the cutter (tim 3.4).
+
+# the fits (make timing-fit, once; recorded in tb/timing/k.txt and docs/timing.md 11): VR_ROW on the write-out's per-line
+# excess at 0888 (the tile written out against the same tile clipped away entirely, FB_X_CLIP: "clip" k 0 against k 4),
+# then K on the empty 0888 tile (five empty lists, the background only: 2998.5 clk, REPORT's 2998-3005)
+vrrow  | fitdiff | tsp | clip 0 0 0 0 - clip 4 0 0 0
+fit    | fit     | tsp | bgonly 0 0 0 0
+
+# the absolute times against the one K: the fit scene itself, then the 16-bit (565) and the 888 tile (tim 3.1: 2695 /
+# 2755 in REPORT's rounding; the archived least 2686.5 / 2745.5): the write-out's format dependence (words a tile line
+# against the reader's pixel a clock, tim 3.11)
+wout   | abs     | tsp | bgonly 0 0 0 0
+wout   | abs     | tsp | wout 1 1 0 0
+wout   | abs     | tsp | wout 4 1 0 0
+
+# the cutter (tim 3.4, REPORT "How fast the ISP's side cuts"): the ISP's bit of K sprites 1 x h seen (ALWAYS) against the
+# same not seen (NEVER: only the background's 32 runs); one clock a run whatever its length: the slope over 64 .. 384 more
+# runs in 32 lines, and the single differences of the placements that agree (k 0 - 5). Placements 6 and 7 (a line of 32
+# one-pixel runs, 4 and 8 lines) are reported in the table, not gated here (RTL +8 / +6 against the console: MT2's cut
+# tables)
+cut    | slope   | isp | 64 = cut 0 0 0 0 - cut 0 1 0 0 | 128 = cut 1 0 0 0 - cut 1 1 0 0 | 256 = cut 2 0 0 0 - cut 2 1 0 0 | 384 = cut 3 0 0 0 - cut 3 1 0 0
+cut    | diff    | isp | cut 0 0 0 0 - cut 0 1 0 0
+cut    | diff    | isp | cut 1 0 0 0 - cut 1 1 0 0
+cut    | diff    | isp | cut 2 0 0 0 - cut 2 1 0 0
+cut    | diff    | isp | cut 3 0 0 0 - cut 3 1 0 0
+cut    | diff    | isp | cut 4 0 0 0 - cut 4 1 0 0
+cut    | diff    | isp | cut 5 0 0 0 - cut 5 1 0 0

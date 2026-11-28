@@ -20,6 +20,6 @@ filter-sum | p2_wout.sv | s  = 14'(pa >> 4) + 14'(pv >> 4) + 14'(pb >> 4); | s  
 blend-weights | p2_wout.sv | m  = 13'(fa) * (13'd16 - 13'(f)) + 13'(fb) * 13'(f); | m  = 13'(fb) * (13'd16 - 13'(f)) + 13'(fa) * 13'(f); | frames | the line blend's weights swapped
 stuck-pixel0 | p2_wout.sv | if (ov && ox == 5'd0)\n              z <= lw; | if (ov && ox == 5'd1)\n              z <= lw; | frames | the stuck line reads pixel 1, not pixel 0
 clip-max | p2_wout_put.sv | s_x > 12'(xc.max) | s_x >= 12'(xc.max) | frames | FB_X_CLIP.max excluded (refsw3: both ends in)
-merge-other | p2_wout_put.sv | assign merge   = p_v && g_v && g_w == p_w; | assign merge   = p_v && g_v && g_w[20:1] == p_w[20:1]; | frames | the writer merges bytes of the other half's word
+merge-other | p2_wout_put.sv | assign merge   = p_v && g_v && g_w == p_w && !both; | assign merge   = p_v && g_v && g_w[20:1] == p_w[20:1] && !both; | frames | the writer merges bytes of the other half's word
 packed-map | p2_wout_put.sv | if (bpp == 3'd3) pa[i] = phys(dst + 32'(i), rtt); | if (1'b0) pa[i] = phys(dst + 32'(i), rtt); | frames | 888 packed: the bytes after map(dst) in the physical order (refsw3 maps each byte)
 reader-loses | p2_wout.sv | rd_pend <= rd_re && rd_gnt; | rd_pend <= rd_re; | frames | the reader takes a word when P10 had the secondary port

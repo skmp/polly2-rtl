@@ -18,6 +18,8 @@ Layout (as shrike4-rtl):
                  refsw3-offline and the console's archived dumps
     model/       timing models and analysis tools
     tools/hw/    console runs (through dreamcast-tests run2.sh)
+    tools/timing/ the timing harness: the timemeas scenes on p2-offline against the console's logs (make timing-harness)
+    tools/occview/ the +occlog viewer
     docs/        the specification per unit, timing, architecture
     agents/      agents' reports and scratch
 

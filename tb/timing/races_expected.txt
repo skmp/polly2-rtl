@@ -1,0 +1,1695 @@
+# tb/timing/races_expected.txt: the deterministic cells of the *_races tests (not in races_variable.txt)
+# whose console picture the RTL does not give because the mechanism is not fitted yet, each keyed by its
+# probe (PLAN 1.5, 5 D5; docs/probes.txt). Written by tools/timing/races_check.py --write from the RTL's run
+# under tb/timing/k.txt's configuration (make timing-harness checks it). A probe that lands removes its lines.
+# <probe> <test> <page> <cell> | <label> | <pixels that differ>
+T11 accbuf_races 0 11 | H: background, SEC COPY after a tile that was not written out | 1024 pixels differ
+T11 accbuf_races 1 11 | H: background, SEC COPY after a tile that was not written out | 1024 pixels differ
+T11 accbuf_races 2 3 | prime 3: grey 808080 | 1024 pixels differ
+T11 accbuf_races 2 5 | keep Z, nothing drawn | 713 pixels differ
+T11 accbuf_races 2 6 | keep Z, stripe 1 | 1024 pixels differ
+T11 accbuf_races 2 12 | keep Z, stripe 5 | 1024 pixels differ
+T11 keepz_races 0 10 | keep Z, a green stripe at x 0..3, not written out | 1024 pixels differ
+T12 ptchunkcarry_races 0 4 | A, 0 fillers on one spot | B (chunk size 5) | 19 pixels differ
+T12 ptchunkcarry_races 0 6 | A, 0 fillers on one spot | B (chunk size 5) | 18 pixels differ
+T12 ptchunkcarry_races 0 8 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 0 10 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 0 12 | A, 0 fillers on one spot | B (chunk size 5) | 63 pixels differ
+T12 ptchunkcarry_races 0 14 | A, 0 fillers on one spot | B (chunk size 5) | 78 pixels differ
+T12 ptchunkcarry_races 0 16 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 0 18 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 0 46 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 0 50 | A, 0 fillers on one spot | B (chunk size 5) | 80 pixels differ
+T12 ptchunkcarry_races 0 54 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 0 56 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 0 58 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 0 80 | A, 0 fillers on one spot | B (chunk size 5) | 23 pixels differ
+T12 ptchunkcarry_races 0 82 | A, 0 fillers on one spot | B (chunk size 5) | 17 pixels differ
+T12 ptchunkcarry_races 0 90 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 0 92 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 0 94 | A, 0 fillers on one spot | B (chunk size 5) | 70 pixels differ
+T12 ptchunkcarry_races 0 98 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 0 124 | A, 0 fillers on one spot | B (chunk size 5) | 76 pixels differ
+T12 ptchunkcarry_races 0 126 | A, 0 fillers on one spot | B (chunk size 5) | 123 pixels differ
+T12 ptchunkcarry_races 0 130 | A, 0 fillers on one spot | B (chunk size 5) | 20 pixels differ
+T12 ptchunkcarry_races 0 132 | A, 0 fillers on one spot | B (chunk size 5) | 99 pixels differ
+T12 ptchunkcarry_races 0 162 | A, 0 fillers on one spot | B (chunk size 5) | 78 pixels differ
+T12 ptchunkcarry_races 0 164 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 0 166 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 0 168 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 0 170 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 0 174 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 0 178 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 0 206 | A, 0 fillers on one spot | B (chunk size 5) | 74 pixels differ
+T12 ptchunkcarry_races 0 212 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 0 216 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 0 218 | A, 0 fillers on one spot | B (chunk size 5) | 51 pixels differ
+T12 ptchunkcarry_races 0 242 | A, 0 fillers on one spot | B (chunk size 5) | 18 pixels differ
+T12 ptchunkcarry_races 0 248 | A, 0 fillers on one spot | B (chunk size 5) | 70 pixels differ
+T12 ptchunkcarry_races 0 250 | A, 0 fillers on one spot | B (chunk size 5) | 20 pixels differ
+T12 ptchunkcarry_races 0 256 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 0 258 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 0 280 | A, 0 fillers on one spot | B (chunk size 5) | 23 pixels differ
+T12 ptchunkcarry_races 0 284 | A, 0 fillers on one spot | B (chunk size 5) | 120 pixels differ
+T12 ptchunkcarry_races 0 286 | A, 0 fillers on one spot | B (chunk size 5) | 97 pixels differ
+T12 ptchunkcarry_races 0 290 | A, 0 fillers on one spot | B (chunk size 5) | 20 pixels differ
+T12 ptchunkcarry_races 0 292 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 0 294 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 0 298 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 1 8 | A, 0 fillers on one spot | B (chunk size 5) | 18 pixels differ
+T12 ptchunkcarry_races 1 10 | A, 0 fillers on one spot | B (chunk size 5) | 21 pixels differ
+T12 ptchunkcarry_races 1 12 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 1 16 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 1 18 | A, 0 fillers on one spot | B (chunk size 5) | 18 pixels differ
+T12 ptchunkcarry_races 1 44 | A, 0 fillers on one spot | B (chunk size 5) | 37 pixels differ
+T12 ptchunkcarry_races 1 46 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 1 48 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 1 50 | A, 0 fillers on one spot | B (chunk size 5) | 81 pixels differ
+T12 ptchunkcarry_races 1 54 | A, 0 fillers on one spot | B (chunk size 5) | 80 pixels differ
+T12 ptchunkcarry_races 1 58 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 1 84 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 1 90 | A, 0 fillers on one spot | B (chunk size 5) | 78 pixels differ
+T12 ptchunkcarry_races 1 92 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 1 94 | A, 0 fillers on one spot | B (chunk size 5) | 80 pixels differ
+T12 ptchunkcarry_races 1 96 | A, 0 fillers on one spot | B (chunk size 5) | 41 pixels differ
+T12 ptchunkcarry_races 1 98 | A, 0 fillers on one spot | B (chunk size 5) | 19 pixels differ
+T12 ptchunkcarry_races 1 126 | A, 0 fillers on one spot | B (chunk size 5) | 94 pixels differ
+T12 ptchunkcarry_races 1 128 | A, 0 fillers on one spot | B (chunk size 5) | 82 pixels differ
+T12 ptchunkcarry_races 1 132 | A, 0 fillers on one spot | B (chunk size 5) | 21 pixels differ
+T12 ptchunkcarry_races 1 134 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 1 136 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 1 138 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 1 164 | A, 0 fillers on one spot | B (chunk size 5) | 19 pixels differ
+T12 ptchunkcarry_races 1 166 | A, 0 fillers on one spot | B (chunk size 5) | 45 pixels differ
+T12 ptchunkcarry_races 1 170 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 1 172 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 1 176 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 1 204 | A, 0 fillers on one spot | B (chunk size 5) | 41 pixels differ
+T12 ptchunkcarry_races 1 208 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 1 210 | A, 0 fillers on one spot | B (chunk size 5) | 82 pixels differ
+T12 ptchunkcarry_races 1 212 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 1 214 | A, 0 fillers on one spot | B (chunk size 5) | 37 pixels differ
+T12 ptchunkcarry_races 1 216 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 1 218 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 1 244 | A, 0 fillers on one spot | B (chunk size 5) | 41 pixels differ
+T12 ptchunkcarry_races 1 248 | A, 0 fillers on one spot | B (chunk size 5) | 115 pixels differ
+T12 ptchunkcarry_races 1 256 | A, 0 fillers on one spot | B (chunk size 5) | 80 pixels differ
+T12 ptchunkcarry_races 1 258 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 1 288 | A, 0 fillers on one spot | B (chunk size 5) | 45 pixels differ
+T12 ptchunkcarry_races 1 292 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 1 294 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 1 298 | A, 0 fillers on one spot | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 2 4 | A, 1 fillers on one spot | B (chunk size 8) | 19 pixels differ
+T12 ptchunkcarry_races 2 6 | A, 1 fillers on one spot | B (chunk size 8) | 18 pixels differ
+T12 ptchunkcarry_races 2 8 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 2 10 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 2 12 | A, 1 fillers on one spot | B (chunk size 8) | 63 pixels differ
+T12 ptchunkcarry_races 2 14 | A, 1 fillers on one spot | B (chunk size 8) | 78 pixels differ
+T12 ptchunkcarry_races 2 16 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 2 18 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 2 46 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 2 50 | A, 1 fillers on one spot | B (chunk size 8) | 80 pixels differ
+T12 ptchunkcarry_races 2 54 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 2 56 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 2 58 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 2 80 | A, 1 fillers on one spot | B (chunk size 8) | 23 pixels differ
+T12 ptchunkcarry_races 2 82 | A, 1 fillers on one spot | B (chunk size 8) | 17 pixels differ
+T12 ptchunkcarry_races 2 90 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 2 92 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 2 94 | A, 1 fillers on one spot | B (chunk size 8) | 70 pixels differ
+T12 ptchunkcarry_races 2 98 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 2 124 | A, 1 fillers on one spot | B (chunk size 8) | 76 pixels differ
+T12 ptchunkcarry_races 2 126 | A, 1 fillers on one spot | B (chunk size 8) | 123 pixels differ
+T12 ptchunkcarry_races 2 130 | A, 1 fillers on one spot | B (chunk size 8) | 20 pixels differ
+T12 ptchunkcarry_races 2 132 | A, 1 fillers on one spot | B (chunk size 8) | 99 pixels differ
+T12 ptchunkcarry_races 2 162 | A, 1 fillers on one spot | B (chunk size 8) | 78 pixels differ
+T12 ptchunkcarry_races 2 164 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 2 166 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 2 168 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 2 170 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 2 174 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 2 178 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 2 206 | A, 1 fillers on one spot | B (chunk size 8) | 74 pixels differ
+T12 ptchunkcarry_races 2 212 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 2 216 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 2 218 | A, 1 fillers on one spot | B (chunk size 8) | 51 pixels differ
+T12 ptchunkcarry_races 2 242 | A, 1 fillers on one spot | B (chunk size 8) | 18 pixels differ
+T12 ptchunkcarry_races 2 248 | A, 1 fillers on one spot | B (chunk size 8) | 70 pixels differ
+T12 ptchunkcarry_races 2 250 | A, 1 fillers on one spot | B (chunk size 8) | 20 pixels differ
+T12 ptchunkcarry_races 2 256 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 2 258 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 2 280 | A, 1 fillers on one spot | B (chunk size 8) | 23 pixels differ
+T12 ptchunkcarry_races 2 284 | A, 1 fillers on one spot | B (chunk size 8) | 120 pixels differ
+T12 ptchunkcarry_races 2 286 | A, 1 fillers on one spot | B (chunk size 8) | 97 pixels differ
+T12 ptchunkcarry_races 2 290 | A, 1 fillers on one spot | B (chunk size 8) | 20 pixels differ
+T12 ptchunkcarry_races 2 292 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 2 294 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 2 298 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 3 8 | A, 1 fillers on one spot | B (chunk size 8) | 18 pixels differ
+T12 ptchunkcarry_races 3 10 | A, 1 fillers on one spot | B (chunk size 8) | 21 pixels differ
+T12 ptchunkcarry_races 3 12 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 3 16 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 3 18 | A, 1 fillers on one spot | B (chunk size 8) | 18 pixels differ
+T12 ptchunkcarry_races 3 44 | A, 1 fillers on one spot | B (chunk size 8) | 37 pixels differ
+T12 ptchunkcarry_races 3 46 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 3 48 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 3 50 | A, 1 fillers on one spot | B (chunk size 8) | 81 pixels differ
+T12 ptchunkcarry_races 3 54 | A, 1 fillers on one spot | B (chunk size 8) | 80 pixels differ
+T12 ptchunkcarry_races 3 58 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 3 84 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 3 90 | A, 1 fillers on one spot | B (chunk size 8) | 78 pixels differ
+T12 ptchunkcarry_races 3 92 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 3 94 | A, 1 fillers on one spot | B (chunk size 8) | 80 pixels differ
+T12 ptchunkcarry_races 3 96 | A, 1 fillers on one spot | B (chunk size 8) | 41 pixels differ
+T12 ptchunkcarry_races 3 98 | A, 1 fillers on one spot | B (chunk size 8) | 19 pixels differ
+T12 ptchunkcarry_races 3 126 | A, 1 fillers on one spot | B (chunk size 8) | 94 pixels differ
+T12 ptchunkcarry_races 3 128 | A, 1 fillers on one spot | B (chunk size 8) | 82 pixels differ
+T12 ptchunkcarry_races 3 132 | A, 1 fillers on one spot | B (chunk size 8) | 21 pixels differ
+T12 ptchunkcarry_races 3 134 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 3 136 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 3 138 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 3 164 | A, 1 fillers on one spot | B (chunk size 8) | 19 pixels differ
+T12 ptchunkcarry_races 3 166 | A, 1 fillers on one spot | B (chunk size 8) | 45 pixels differ
+T12 ptchunkcarry_races 3 170 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 3 172 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 3 176 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 3 204 | A, 1 fillers on one spot | B (chunk size 8) | 41 pixels differ
+T12 ptchunkcarry_races 3 208 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 3 210 | A, 1 fillers on one spot | B (chunk size 8) | 82 pixels differ
+T12 ptchunkcarry_races 3 212 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 3 214 | A, 1 fillers on one spot | B (chunk size 8) | 37 pixels differ
+T12 ptchunkcarry_races 3 216 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 3 218 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 3 244 | A, 1 fillers on one spot | B (chunk size 8) | 41 pixels differ
+T12 ptchunkcarry_races 3 248 | A, 1 fillers on one spot | B (chunk size 8) | 115 pixels differ
+T12 ptchunkcarry_races 3 256 | A, 1 fillers on one spot | B (chunk size 8) | 80 pixels differ
+T12 ptchunkcarry_races 3 258 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 3 288 | A, 1 fillers on one spot | B (chunk size 8) | 45 pixels differ
+T12 ptchunkcarry_races 3 292 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 3 294 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 3 298 | A, 1 fillers on one spot | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 4 4 | A, 2 fillers on one spot | B (chunk size 11) | 19 pixels differ
+T12 ptchunkcarry_races 4 6 | A, 2 fillers on one spot | B (chunk size 11) | 18 pixels differ
+T12 ptchunkcarry_races 4 8 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 4 10 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 4 12 | A, 2 fillers on one spot | B (chunk size 11) | 63 pixels differ
+T12 ptchunkcarry_races 4 14 | A, 2 fillers on one spot | B (chunk size 11) | 78 pixels differ
+T12 ptchunkcarry_races 4 16 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 4 18 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 4 46 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 4 50 | A, 2 fillers on one spot | B (chunk size 11) | 80 pixels differ
+T12 ptchunkcarry_races 4 54 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 4 56 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 4 58 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 4 80 | A, 2 fillers on one spot | B (chunk size 11) | 23 pixels differ
+T12 ptchunkcarry_races 4 82 | A, 2 fillers on one spot | B (chunk size 11) | 17 pixels differ
+T12 ptchunkcarry_races 4 90 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 4 92 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 4 94 | A, 2 fillers on one spot | B (chunk size 11) | 70 pixels differ
+T12 ptchunkcarry_races 4 98 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 4 124 | A, 2 fillers on one spot | B (chunk size 11) | 76 pixels differ
+T12 ptchunkcarry_races 4 126 | A, 2 fillers on one spot | B (chunk size 11) | 123 pixels differ
+T12 ptchunkcarry_races 4 130 | A, 2 fillers on one spot | B (chunk size 11) | 20 pixels differ
+T12 ptchunkcarry_races 4 132 | A, 2 fillers on one spot | B (chunk size 11) | 99 pixels differ
+T12 ptchunkcarry_races 4 162 | A, 2 fillers on one spot | B (chunk size 11) | 78 pixels differ
+T12 ptchunkcarry_races 4 164 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 4 166 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 4 168 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 4 170 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 4 174 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 4 178 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 4 206 | A, 2 fillers on one spot | B (chunk size 11) | 74 pixels differ
+T12 ptchunkcarry_races 4 212 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 4 216 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 4 218 | A, 2 fillers on one spot | B (chunk size 11) | 51 pixels differ
+T12 ptchunkcarry_races 4 242 | A, 2 fillers on one spot | B (chunk size 11) | 18 pixels differ
+T12 ptchunkcarry_races 4 248 | A, 2 fillers on one spot | B (chunk size 11) | 70 pixels differ
+T12 ptchunkcarry_races 4 250 | A, 2 fillers on one spot | B (chunk size 11) | 20 pixels differ
+T12 ptchunkcarry_races 4 256 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 4 258 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 4 280 | A, 2 fillers on one spot | B (chunk size 11) | 23 pixels differ
+T12 ptchunkcarry_races 4 284 | A, 2 fillers on one spot | B (chunk size 11) | 120 pixels differ
+T12 ptchunkcarry_races 4 286 | A, 2 fillers on one spot | B (chunk size 11) | 97 pixels differ
+T12 ptchunkcarry_races 4 290 | A, 2 fillers on one spot | B (chunk size 11) | 20 pixels differ
+T12 ptchunkcarry_races 4 292 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 4 294 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 4 298 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 5 8 | A, 2 fillers on one spot | B (chunk size 11) | 18 pixels differ
+T12 ptchunkcarry_races 5 10 | A, 2 fillers on one spot | B (chunk size 11) | 21 pixels differ
+T12 ptchunkcarry_races 5 12 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 5 16 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 5 18 | A, 2 fillers on one spot | B (chunk size 11) | 18 pixels differ
+T12 ptchunkcarry_races 5 44 | A, 2 fillers on one spot | B (chunk size 11) | 37 pixels differ
+T12 ptchunkcarry_races 5 46 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 5 48 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 5 50 | A, 2 fillers on one spot | B (chunk size 11) | 81 pixels differ
+T12 ptchunkcarry_races 5 54 | A, 2 fillers on one spot | B (chunk size 11) | 80 pixels differ
+T12 ptchunkcarry_races 5 58 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 5 84 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 5 90 | A, 2 fillers on one spot | B (chunk size 11) | 78 pixels differ
+T12 ptchunkcarry_races 5 92 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 5 94 | A, 2 fillers on one spot | B (chunk size 11) | 80 pixels differ
+T12 ptchunkcarry_races 5 96 | A, 2 fillers on one spot | B (chunk size 11) | 41 pixels differ
+T12 ptchunkcarry_races 5 98 | A, 2 fillers on one spot | B (chunk size 11) | 19 pixels differ
+T12 ptchunkcarry_races 5 126 | A, 2 fillers on one spot | B (chunk size 11) | 94 pixels differ
+T12 ptchunkcarry_races 5 128 | A, 2 fillers on one spot | B (chunk size 11) | 82 pixels differ
+T12 ptchunkcarry_races 5 132 | A, 2 fillers on one spot | B (chunk size 11) | 21 pixels differ
+T12 ptchunkcarry_races 5 134 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 5 136 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 5 138 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 5 164 | A, 2 fillers on one spot | B (chunk size 11) | 19 pixels differ
+T12 ptchunkcarry_races 5 166 | A, 2 fillers on one spot | B (chunk size 11) | 45 pixels differ
+T12 ptchunkcarry_races 5 170 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 5 172 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 5 176 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 5 204 | A, 2 fillers on one spot | B (chunk size 11) | 41 pixels differ
+T12 ptchunkcarry_races 5 208 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 5 210 | A, 2 fillers on one spot | B (chunk size 11) | 82 pixels differ
+T12 ptchunkcarry_races 5 212 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 5 214 | A, 2 fillers on one spot | B (chunk size 11) | 37 pixels differ
+T12 ptchunkcarry_races 5 216 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 5 218 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 5 244 | A, 2 fillers on one spot | B (chunk size 11) | 41 pixels differ
+T12 ptchunkcarry_races 5 248 | A, 2 fillers on one spot | B (chunk size 11) | 115 pixels differ
+T12 ptchunkcarry_races 5 256 | A, 2 fillers on one spot | B (chunk size 11) | 80 pixels differ
+T12 ptchunkcarry_races 5 258 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 5 288 | A, 2 fillers on one spot | B (chunk size 11) | 45 pixels differ
+T12 ptchunkcarry_races 5 292 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 5 294 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 5 298 | A, 2 fillers on one spot | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 6 4 | A, 3 fillers on one spot | B (chunk size 14) | 19 pixels differ
+T12 ptchunkcarry_races 6 6 | A, 3 fillers on one spot | B (chunk size 14) | 18 pixels differ
+T12 ptchunkcarry_races 6 8 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 6 10 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 6 12 | A, 3 fillers on one spot | B (chunk size 14) | 63 pixels differ
+T12 ptchunkcarry_races 6 14 | A, 3 fillers on one spot | B (chunk size 14) | 78 pixels differ
+T12 ptchunkcarry_races 6 16 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 6 18 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 6 46 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 6 50 | A, 3 fillers on one spot | B (chunk size 14) | 80 pixels differ
+T12 ptchunkcarry_races 6 54 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 6 56 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 6 58 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 6 80 | A, 3 fillers on one spot | B (chunk size 14) | 23 pixels differ
+T12 ptchunkcarry_races 6 82 | A, 3 fillers on one spot | B (chunk size 14) | 17 pixels differ
+T12 ptchunkcarry_races 6 90 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 6 92 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 6 94 | A, 3 fillers on one spot | B (chunk size 14) | 70 pixels differ
+T12 ptchunkcarry_races 6 98 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 6 124 | A, 3 fillers on one spot | B (chunk size 14) | 76 pixels differ
+T12 ptchunkcarry_races 6 126 | A, 3 fillers on one spot | B (chunk size 14) | 123 pixels differ
+T12 ptchunkcarry_races 6 130 | A, 3 fillers on one spot | B (chunk size 14) | 20 pixels differ
+T12 ptchunkcarry_races 6 132 | A, 3 fillers on one spot | B (chunk size 14) | 99 pixels differ
+T12 ptchunkcarry_races 6 162 | A, 3 fillers on one spot | B (chunk size 14) | 78 pixels differ
+T12 ptchunkcarry_races 6 164 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 6 166 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 6 168 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 6 170 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 6 174 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 6 178 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 6 206 | A, 3 fillers on one spot | B (chunk size 14) | 74 pixels differ
+T12 ptchunkcarry_races 6 212 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 6 216 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 6 218 | A, 3 fillers on one spot | B (chunk size 14) | 51 pixels differ
+T12 ptchunkcarry_races 6 242 | A, 3 fillers on one spot | B (chunk size 14) | 18 pixels differ
+T12 ptchunkcarry_races 6 248 | A, 3 fillers on one spot | B (chunk size 14) | 70 pixels differ
+T12 ptchunkcarry_races 6 250 | A, 3 fillers on one spot | B (chunk size 14) | 20 pixels differ
+T12 ptchunkcarry_races 6 256 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 6 258 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 6 280 | A, 3 fillers on one spot | B (chunk size 14) | 23 pixels differ
+T12 ptchunkcarry_races 6 284 | A, 3 fillers on one spot | B (chunk size 14) | 120 pixels differ
+T12 ptchunkcarry_races 6 286 | A, 3 fillers on one spot | B (chunk size 14) | 97 pixels differ
+T12 ptchunkcarry_races 6 290 | A, 3 fillers on one spot | B (chunk size 14) | 20 pixels differ
+T12 ptchunkcarry_races 6 292 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 6 294 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 6 298 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 7 8 | A, 3 fillers on one spot | B (chunk size 14) | 18 pixels differ
+T12 ptchunkcarry_races 7 10 | A, 3 fillers on one spot | B (chunk size 14) | 21 pixels differ
+T12 ptchunkcarry_races 7 12 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 7 16 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 7 18 | A, 3 fillers on one spot | B (chunk size 14) | 18 pixels differ
+T12 ptchunkcarry_races 7 44 | A, 3 fillers on one spot | B (chunk size 14) | 37 pixels differ
+T12 ptchunkcarry_races 7 46 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 7 48 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 7 50 | A, 3 fillers on one spot | B (chunk size 14) | 81 pixels differ
+T12 ptchunkcarry_races 7 54 | A, 3 fillers on one spot | B (chunk size 14) | 80 pixels differ
+T12 ptchunkcarry_races 7 58 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 7 84 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 7 90 | A, 3 fillers on one spot | B (chunk size 14) | 78 pixels differ
+T12 ptchunkcarry_races 7 92 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 7 94 | A, 3 fillers on one spot | B (chunk size 14) | 80 pixels differ
+T12 ptchunkcarry_races 7 96 | A, 3 fillers on one spot | B (chunk size 14) | 41 pixels differ
+T12 ptchunkcarry_races 7 98 | A, 3 fillers on one spot | B (chunk size 14) | 19 pixels differ
+T12 ptchunkcarry_races 7 126 | A, 3 fillers on one spot | B (chunk size 14) | 94 pixels differ
+T12 ptchunkcarry_races 7 128 | A, 3 fillers on one spot | B (chunk size 14) | 82 pixels differ
+T12 ptchunkcarry_races 7 132 | A, 3 fillers on one spot | B (chunk size 14) | 21 pixels differ
+T12 ptchunkcarry_races 7 134 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 7 136 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 7 138 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 7 164 | A, 3 fillers on one spot | B (chunk size 14) | 19 pixels differ
+T12 ptchunkcarry_races 7 166 | A, 3 fillers on one spot | B (chunk size 14) | 45 pixels differ
+T12 ptchunkcarry_races 7 170 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 7 172 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 7 176 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 7 204 | A, 3 fillers on one spot | B (chunk size 14) | 41 pixels differ
+T12 ptchunkcarry_races 7 208 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 7 210 | A, 3 fillers on one spot | B (chunk size 14) | 82 pixels differ
+T12 ptchunkcarry_races 7 212 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 7 214 | A, 3 fillers on one spot | B (chunk size 14) | 37 pixels differ
+T12 ptchunkcarry_races 7 216 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 7 218 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 7 244 | A, 3 fillers on one spot | B (chunk size 14) | 41 pixels differ
+T12 ptchunkcarry_races 7 248 | A, 3 fillers on one spot | B (chunk size 14) | 115 pixels differ
+T12 ptchunkcarry_races 7 256 | A, 3 fillers on one spot | B (chunk size 14) | 80 pixels differ
+T12 ptchunkcarry_races 7 258 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 7 288 | A, 3 fillers on one spot | B (chunk size 14) | 45 pixels differ
+T12 ptchunkcarry_races 7 292 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 7 294 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 7 298 | A, 3 fillers on one spot | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 8 4 | A, 4 fillers on one spot | B (chunk size 17) | 19 pixels differ
+T12 ptchunkcarry_races 8 6 | A, 4 fillers on one spot | B (chunk size 17) | 18 pixels differ
+T12 ptchunkcarry_races 8 8 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 8 10 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 8 12 | A, 4 fillers on one spot | B (chunk size 17) | 63 pixels differ
+T12 ptchunkcarry_races 8 14 | A, 4 fillers on one spot | B (chunk size 17) | 78 pixels differ
+T12 ptchunkcarry_races 8 16 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 8 18 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 8 46 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 8 50 | A, 4 fillers on one spot | B (chunk size 17) | 80 pixels differ
+T12 ptchunkcarry_races 8 54 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 8 56 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 8 58 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 8 80 | A, 4 fillers on one spot | B (chunk size 17) | 23 pixels differ
+T12 ptchunkcarry_races 8 82 | A, 4 fillers on one spot | B (chunk size 17) | 17 pixels differ
+T12 ptchunkcarry_races 8 90 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 8 92 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 8 94 | A, 4 fillers on one spot | B (chunk size 17) | 70 pixels differ
+T12 ptchunkcarry_races 8 98 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 8 124 | A, 4 fillers on one spot | B (chunk size 17) | 76 pixels differ
+T12 ptchunkcarry_races 8 126 | A, 4 fillers on one spot | B (chunk size 17) | 123 pixels differ
+T12 ptchunkcarry_races 8 130 | A, 4 fillers on one spot | B (chunk size 17) | 20 pixels differ
+T12 ptchunkcarry_races 8 132 | A, 4 fillers on one spot | B (chunk size 17) | 99 pixels differ
+T12 ptchunkcarry_races 8 162 | A, 4 fillers on one spot | B (chunk size 17) | 78 pixels differ
+T12 ptchunkcarry_races 8 164 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 8 166 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 8 168 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 8 170 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 8 174 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 8 178 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 8 206 | A, 4 fillers on one spot | B (chunk size 17) | 74 pixels differ
+T12 ptchunkcarry_races 8 212 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 8 216 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 8 218 | A, 4 fillers on one spot | B (chunk size 17) | 51 pixels differ
+T12 ptchunkcarry_races 8 242 | A, 4 fillers on one spot | B (chunk size 17) | 18 pixels differ
+T12 ptchunkcarry_races 8 248 | A, 4 fillers on one spot | B (chunk size 17) | 70 pixels differ
+T12 ptchunkcarry_races 8 250 | A, 4 fillers on one spot | B (chunk size 17) | 20 pixels differ
+T12 ptchunkcarry_races 8 256 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 8 258 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 8 280 | A, 4 fillers on one spot | B (chunk size 17) | 23 pixels differ
+T12 ptchunkcarry_races 8 284 | A, 4 fillers on one spot | B (chunk size 17) | 120 pixels differ
+T12 ptchunkcarry_races 8 286 | A, 4 fillers on one spot | B (chunk size 17) | 97 pixels differ
+T12 ptchunkcarry_races 8 290 | A, 4 fillers on one spot | B (chunk size 17) | 20 pixels differ
+T12 ptchunkcarry_races 8 292 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 8 294 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 8 298 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 9 8 | A, 4 fillers on one spot | B (chunk size 17) | 18 pixels differ
+T12 ptchunkcarry_races 9 10 | A, 4 fillers on one spot | B (chunk size 17) | 21 pixels differ
+T12 ptchunkcarry_races 9 12 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 9 16 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 9 18 | A, 4 fillers on one spot | B (chunk size 17) | 18 pixels differ
+T12 ptchunkcarry_races 9 44 | A, 4 fillers on one spot | B (chunk size 17) | 37 pixels differ
+T12 ptchunkcarry_races 9 46 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 9 48 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 9 50 | A, 4 fillers on one spot | B (chunk size 17) | 81 pixels differ
+T12 ptchunkcarry_races 9 54 | A, 4 fillers on one spot | B (chunk size 17) | 80 pixels differ
+T12 ptchunkcarry_races 9 58 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 9 84 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 9 90 | A, 4 fillers on one spot | B (chunk size 17) | 78 pixels differ
+T12 ptchunkcarry_races 9 92 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 9 94 | A, 4 fillers on one spot | B (chunk size 17) | 80 pixels differ
+T12 ptchunkcarry_races 9 96 | A, 4 fillers on one spot | B (chunk size 17) | 41 pixels differ
+T12 ptchunkcarry_races 9 98 | A, 4 fillers on one spot | B (chunk size 17) | 19 pixels differ
+T12 ptchunkcarry_races 9 126 | A, 4 fillers on one spot | B (chunk size 17) | 94 pixels differ
+T12 ptchunkcarry_races 9 128 | A, 4 fillers on one spot | B (chunk size 17) | 82 pixels differ
+T12 ptchunkcarry_races 9 132 | A, 4 fillers on one spot | B (chunk size 17) | 21 pixels differ
+T12 ptchunkcarry_races 9 134 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 9 136 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 9 138 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 9 164 | A, 4 fillers on one spot | B (chunk size 17) | 19 pixels differ
+T12 ptchunkcarry_races 9 166 | A, 4 fillers on one spot | B (chunk size 17) | 45 pixels differ
+T12 ptchunkcarry_races 9 170 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 9 172 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 9 176 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 9 204 | A, 4 fillers on one spot | B (chunk size 17) | 41 pixels differ
+T12 ptchunkcarry_races 9 208 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 9 210 | A, 4 fillers on one spot | B (chunk size 17) | 82 pixels differ
+T12 ptchunkcarry_races 9 212 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 9 214 | A, 4 fillers on one spot | B (chunk size 17) | 37 pixels differ
+T12 ptchunkcarry_races 9 216 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 9 218 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 9 244 | A, 4 fillers on one spot | B (chunk size 17) | 41 pixels differ
+T12 ptchunkcarry_races 9 248 | A, 4 fillers on one spot | B (chunk size 17) | 115 pixels differ
+T12 ptchunkcarry_races 9 256 | A, 4 fillers on one spot | B (chunk size 17) | 80 pixels differ
+T12 ptchunkcarry_races 9 258 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 9 288 | A, 4 fillers on one spot | B (chunk size 17) | 45 pixels differ
+T12 ptchunkcarry_races 9 292 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 9 294 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 9 298 | A, 4 fillers on one spot | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 10 4 | A, 5 fillers on one spot | B (chunk size 20) | 19 pixels differ
+T12 ptchunkcarry_races 10 6 | A, 5 fillers on one spot | B (chunk size 20) | 18 pixels differ
+T12 ptchunkcarry_races 10 8 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 10 10 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 10 12 | A, 5 fillers on one spot | B (chunk size 20) | 63 pixels differ
+T12 ptchunkcarry_races 10 14 | A, 5 fillers on one spot | B (chunk size 20) | 78 pixels differ
+T12 ptchunkcarry_races 10 16 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 10 18 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 10 46 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 10 50 | A, 5 fillers on one spot | B (chunk size 20) | 80 pixels differ
+T12 ptchunkcarry_races 10 54 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 10 56 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 10 58 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 10 80 | A, 5 fillers on one spot | B (chunk size 20) | 23 pixels differ
+T12 ptchunkcarry_races 10 82 | A, 5 fillers on one spot | B (chunk size 20) | 17 pixels differ
+T12 ptchunkcarry_races 10 90 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 10 92 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 10 94 | A, 5 fillers on one spot | B (chunk size 20) | 70 pixels differ
+T12 ptchunkcarry_races 10 98 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 10 124 | A, 5 fillers on one spot | B (chunk size 20) | 76 pixels differ
+T12 ptchunkcarry_races 10 126 | A, 5 fillers on one spot | B (chunk size 20) | 123 pixels differ
+T12 ptchunkcarry_races 10 130 | A, 5 fillers on one spot | B (chunk size 20) | 20 pixels differ
+T12 ptchunkcarry_races 10 132 | A, 5 fillers on one spot | B (chunk size 20) | 99 pixels differ
+T12 ptchunkcarry_races 10 162 | A, 5 fillers on one spot | B (chunk size 20) | 78 pixels differ
+T12 ptchunkcarry_races 10 164 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 10 166 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 10 168 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 10 170 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 10 174 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 10 178 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 10 206 | A, 5 fillers on one spot | B (chunk size 20) | 74 pixels differ
+T12 ptchunkcarry_races 10 212 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 10 216 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 10 218 | A, 5 fillers on one spot | B (chunk size 20) | 51 pixels differ
+T12 ptchunkcarry_races 10 242 | A, 5 fillers on one spot | B (chunk size 20) | 18 pixels differ
+T12 ptchunkcarry_races 10 248 | A, 5 fillers on one spot | B (chunk size 20) | 70 pixels differ
+T12 ptchunkcarry_races 10 250 | A, 5 fillers on one spot | B (chunk size 20) | 20 pixels differ
+T12 ptchunkcarry_races 10 256 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 10 258 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 10 280 | A, 5 fillers on one spot | B (chunk size 20) | 23 pixels differ
+T12 ptchunkcarry_races 10 284 | A, 5 fillers on one spot | B (chunk size 20) | 120 pixels differ
+T12 ptchunkcarry_races 10 286 | A, 5 fillers on one spot | B (chunk size 20) | 97 pixels differ
+T12 ptchunkcarry_races 10 290 | A, 5 fillers on one spot | B (chunk size 20) | 20 pixels differ
+T12 ptchunkcarry_races 10 292 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 10 294 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 10 298 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 11 8 | A, 5 fillers on one spot | B (chunk size 20) | 18 pixels differ
+T12 ptchunkcarry_races 11 10 | A, 5 fillers on one spot | B (chunk size 20) | 21 pixels differ
+T12 ptchunkcarry_races 11 12 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 11 16 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 11 18 | A, 5 fillers on one spot | B (chunk size 20) | 18 pixels differ
+T12 ptchunkcarry_races 11 44 | A, 5 fillers on one spot | B (chunk size 20) | 37 pixels differ
+T12 ptchunkcarry_races 11 46 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 11 48 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 11 50 | A, 5 fillers on one spot | B (chunk size 20) | 81 pixels differ
+T12 ptchunkcarry_races 11 54 | A, 5 fillers on one spot | B (chunk size 20) | 80 pixels differ
+T12 ptchunkcarry_races 11 58 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 11 84 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 11 90 | A, 5 fillers on one spot | B (chunk size 20) | 78 pixels differ
+T12 ptchunkcarry_races 11 92 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 11 94 | A, 5 fillers on one spot | B (chunk size 20) | 80 pixels differ
+T12 ptchunkcarry_races 11 96 | A, 5 fillers on one spot | B (chunk size 20) | 41 pixels differ
+T12 ptchunkcarry_races 11 98 | A, 5 fillers on one spot | B (chunk size 20) | 19 pixels differ
+T12 ptchunkcarry_races 11 126 | A, 5 fillers on one spot | B (chunk size 20) | 94 pixels differ
+T12 ptchunkcarry_races 11 128 | A, 5 fillers on one spot | B (chunk size 20) | 82 pixels differ
+T12 ptchunkcarry_races 11 132 | A, 5 fillers on one spot | B (chunk size 20) | 21 pixels differ
+T12 ptchunkcarry_races 11 134 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 11 136 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 11 138 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 11 164 | A, 5 fillers on one spot | B (chunk size 20) | 19 pixels differ
+T12 ptchunkcarry_races 11 166 | A, 5 fillers on one spot | B (chunk size 20) | 45 pixels differ
+T12 ptchunkcarry_races 11 170 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 11 172 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 11 176 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 11 204 | A, 5 fillers on one spot | B (chunk size 20) | 41 pixels differ
+T12 ptchunkcarry_races 11 208 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 11 210 | A, 5 fillers on one spot | B (chunk size 20) | 82 pixels differ
+T12 ptchunkcarry_races 11 212 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 11 214 | A, 5 fillers on one spot | B (chunk size 20) | 37 pixels differ
+T12 ptchunkcarry_races 11 216 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 11 218 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 11 244 | A, 5 fillers on one spot | B (chunk size 20) | 41 pixels differ
+T12 ptchunkcarry_races 11 248 | A, 5 fillers on one spot | B (chunk size 20) | 115 pixels differ
+T12 ptchunkcarry_races 11 256 | A, 5 fillers on one spot | B (chunk size 20) | 80 pixels differ
+T12 ptchunkcarry_races 11 258 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 11 288 | A, 5 fillers on one spot | B (chunk size 20) | 45 pixels differ
+T12 ptchunkcarry_races 11 292 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 11 294 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 11 298 | A, 5 fillers on one spot | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 12 4 | A, 6 fillers on one spot | B (chunk size 23) | 19 pixels differ
+T12 ptchunkcarry_races 12 6 | A, 6 fillers on one spot | B (chunk size 23) | 18 pixels differ
+T12 ptchunkcarry_races 12 8 | A, 6 fillers on one spot | B (chunk size 23) | 156 pixels differ
+T12 ptchunkcarry_races 12 10 | A, 6 fillers on one spot | B (chunk size 23) | 156 pixels differ
+T12 ptchunkcarry_races 12 12 | A, 6 fillers on one spot | B (chunk size 23) | 63 pixels differ
+T12 ptchunkcarry_races 12 14 | A, 6 fillers on one spot | B (chunk size 23) | 78 pixels differ
+T12 ptchunkcarry_races 12 16 | A, 6 fillers on one spot | B (chunk size 23) | 156 pixels differ
+T12 ptchunkcarry_races 12 18 | A, 6 fillers on one spot | B (chunk size 23) | 156 pixels differ
+T12 ptchunkcarry_races 12 80 | A, 6 fillers on one spot | B (chunk size 23) | 23 pixels differ
+T12 ptchunkcarry_races 12 280 | A, 6 fillers on one spot | B (chunk size 23) | 23 pixels differ
+T12 ptchunkcarry_races 13 8 | A, 6 fillers on one spot | B (chunk size 23) | 18 pixels differ
+T12 ptchunkcarry_races 13 10 | A, 6 fillers on one spot | B (chunk size 23) | 21 pixels differ
+T12 ptchunkcarry_races 13 12 | A, 6 fillers on one spot | B (chunk size 23) | 156 pixels differ
+T12 ptchunkcarry_races 13 16 | A, 6 fillers on one spot | B (chunk size 23) | 156 pixels differ
+T12 ptchunkcarry_races 13 18 | A, 6 fillers on one spot | B (chunk size 23) | 18 pixels differ
+T12 ptchunkcarry_races 14 4 | A, 7 fillers on one spot | B (chunk size 26) | 19 pixels differ
+T12 ptchunkcarry_races 14 6 | A, 7 fillers on one spot | B (chunk size 26) | 18 pixels differ
+T12 ptchunkcarry_races 14 8 | A, 7 fillers on one spot | B (chunk size 26) | 156 pixels differ
+T12 ptchunkcarry_races 14 10 | A, 7 fillers on one spot | B (chunk size 26) | 156 pixels differ
+T12 ptchunkcarry_races 14 12 | A, 7 fillers on one spot | B (chunk size 26) | 63 pixels differ
+T12 ptchunkcarry_races 14 14 | A, 7 fillers on one spot | B (chunk size 26) | 78 pixels differ
+T12 ptchunkcarry_races 14 16 | A, 7 fillers on one spot | B (chunk size 26) | 156 pixels differ
+T12 ptchunkcarry_races 14 18 | A, 7 fillers on one spot | B (chunk size 26) | 156 pixels differ
+T12 ptchunkcarry_races 14 80 | A, 7 fillers on one spot | B (chunk size 26) | 23 pixels differ
+T12 ptchunkcarry_races 14 280 | A, 7 fillers on one spot | B (chunk size 26) | 23 pixels differ
+T12 ptchunkcarry_races 15 8 | A, 7 fillers on one spot | B (chunk size 26) | 18 pixels differ
+T12 ptchunkcarry_races 15 10 | A, 7 fillers on one spot | B (chunk size 26) | 21 pixels differ
+T12 ptchunkcarry_races 15 12 | A, 7 fillers on one spot | B (chunk size 26) | 156 pixels differ
+T12 ptchunkcarry_races 15 16 | A, 7 fillers on one spot | B (chunk size 26) | 156 pixels differ
+T12 ptchunkcarry_races 15 18 | A, 7 fillers on one spot | B (chunk size 26) | 18 pixels differ
+T12 ptchunkcarry_races 20 4 | A, 0 fillers side by side | B (chunk size 5) | 19 pixels differ
+T12 ptchunkcarry_races 20 6 | A, 0 fillers side by side | B (chunk size 5) | 18 pixels differ
+T12 ptchunkcarry_races 20 8 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 20 10 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 20 12 | A, 0 fillers side by side | B (chunk size 5) | 63 pixels differ
+T12 ptchunkcarry_races 20 14 | A, 0 fillers side by side | B (chunk size 5) | 78 pixels differ
+T12 ptchunkcarry_races 20 16 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 20 18 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 20 46 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 20 50 | A, 0 fillers side by side | B (chunk size 5) | 80 pixels differ
+T12 ptchunkcarry_races 20 54 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 20 56 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 20 58 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 20 80 | A, 0 fillers side by side | B (chunk size 5) | 23 pixels differ
+T12 ptchunkcarry_races 20 82 | A, 0 fillers side by side | B (chunk size 5) | 17 pixels differ
+T12 ptchunkcarry_races 20 90 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 20 92 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 20 94 | A, 0 fillers side by side | B (chunk size 5) | 70 pixels differ
+T12 ptchunkcarry_races 20 98 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 20 124 | A, 0 fillers side by side | B (chunk size 5) | 76 pixels differ
+T12 ptchunkcarry_races 20 126 | A, 0 fillers side by side | B (chunk size 5) | 123 pixels differ
+T12 ptchunkcarry_races 20 130 | A, 0 fillers side by side | B (chunk size 5) | 20 pixels differ
+T12 ptchunkcarry_races 20 132 | A, 0 fillers side by side | B (chunk size 5) | 99 pixels differ
+T12 ptchunkcarry_races 20 162 | A, 0 fillers side by side | B (chunk size 5) | 78 pixels differ
+T12 ptchunkcarry_races 20 164 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 20 166 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 20 168 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 20 170 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 20 174 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 20 178 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 20 206 | A, 0 fillers side by side | B (chunk size 5) | 74 pixels differ
+T12 ptchunkcarry_races 20 212 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 20 216 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 20 218 | A, 0 fillers side by side | B (chunk size 5) | 51 pixels differ
+T12 ptchunkcarry_races 20 242 | A, 0 fillers side by side | B (chunk size 5) | 18 pixels differ
+T12 ptchunkcarry_races 20 248 | A, 0 fillers side by side | B (chunk size 5) | 70 pixels differ
+T12 ptchunkcarry_races 20 250 | A, 0 fillers side by side | B (chunk size 5) | 20 pixels differ
+T12 ptchunkcarry_races 20 256 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 20 258 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 20 280 | A, 0 fillers side by side | B (chunk size 5) | 23 pixels differ
+T12 ptchunkcarry_races 20 284 | A, 0 fillers side by side | B (chunk size 5) | 120 pixels differ
+T12 ptchunkcarry_races 20 286 | A, 0 fillers side by side | B (chunk size 5) | 97 pixels differ
+T12 ptchunkcarry_races 20 290 | A, 0 fillers side by side | B (chunk size 5) | 20 pixels differ
+T12 ptchunkcarry_races 20 292 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 20 294 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 20 298 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 21 8 | A, 0 fillers side by side | B (chunk size 5) | 18 pixels differ
+T12 ptchunkcarry_races 21 10 | A, 0 fillers side by side | B (chunk size 5) | 21 pixels differ
+T12 ptchunkcarry_races 21 12 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 21 16 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 21 18 | A, 0 fillers side by side | B (chunk size 5) | 18 pixels differ
+T12 ptchunkcarry_races 21 44 | A, 0 fillers side by side | B (chunk size 5) | 37 pixels differ
+T12 ptchunkcarry_races 21 46 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 21 48 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 21 50 | A, 0 fillers side by side | B (chunk size 5) | 81 pixels differ
+T12 ptchunkcarry_races 21 54 | A, 0 fillers side by side | B (chunk size 5) | 80 pixels differ
+T12 ptchunkcarry_races 21 58 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 21 84 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 21 90 | A, 0 fillers side by side | B (chunk size 5) | 78 pixels differ
+T12 ptchunkcarry_races 21 92 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 21 94 | A, 0 fillers side by side | B (chunk size 5) | 80 pixels differ
+T12 ptchunkcarry_races 21 96 | A, 0 fillers side by side | B (chunk size 5) | 41 pixels differ
+T12 ptchunkcarry_races 21 98 | A, 0 fillers side by side | B (chunk size 5) | 19 pixels differ
+T12 ptchunkcarry_races 21 126 | A, 0 fillers side by side | B (chunk size 5) | 94 pixels differ
+T12 ptchunkcarry_races 21 128 | A, 0 fillers side by side | B (chunk size 5) | 82 pixels differ
+T12 ptchunkcarry_races 21 132 | A, 0 fillers side by side | B (chunk size 5) | 21 pixels differ
+T12 ptchunkcarry_races 21 134 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 21 136 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 21 138 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 21 164 | A, 0 fillers side by side | B (chunk size 5) | 19 pixels differ
+T12 ptchunkcarry_races 21 166 | A, 0 fillers side by side | B (chunk size 5) | 45 pixels differ
+T12 ptchunkcarry_races 21 170 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 21 172 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 21 176 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 21 204 | A, 0 fillers side by side | B (chunk size 5) | 41 pixels differ
+T12 ptchunkcarry_races 21 208 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 21 210 | A, 0 fillers side by side | B (chunk size 5) | 82 pixels differ
+T12 ptchunkcarry_races 21 212 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 21 214 | A, 0 fillers side by side | B (chunk size 5) | 37 pixels differ
+T12 ptchunkcarry_races 21 216 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 21 218 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 21 244 | A, 0 fillers side by side | B (chunk size 5) | 41 pixels differ
+T12 ptchunkcarry_races 21 248 | A, 0 fillers side by side | B (chunk size 5) | 115 pixels differ
+T12 ptchunkcarry_races 21 256 | A, 0 fillers side by side | B (chunk size 5) | 80 pixels differ
+T12 ptchunkcarry_races 21 258 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 21 288 | A, 0 fillers side by side | B (chunk size 5) | 45 pixels differ
+T12 ptchunkcarry_races 21 292 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 21 294 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 21 298 | A, 0 fillers side by side | B (chunk size 5) | 156 pixels differ
+T12 ptchunkcarry_races 22 4 | A, 1 fillers side by side | B (chunk size 8) | 19 pixels differ
+T12 ptchunkcarry_races 22 6 | A, 1 fillers side by side | B (chunk size 8) | 18 pixels differ
+T12 ptchunkcarry_races 22 8 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 22 10 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 22 12 | A, 1 fillers side by side | B (chunk size 8) | 63 pixels differ
+T12 ptchunkcarry_races 22 14 | A, 1 fillers side by side | B (chunk size 8) | 78 pixels differ
+T12 ptchunkcarry_races 22 16 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 22 18 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 22 46 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 22 50 | A, 1 fillers side by side | B (chunk size 8) | 80 pixels differ
+T12 ptchunkcarry_races 22 54 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 22 56 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 22 58 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 22 80 | A, 1 fillers side by side | B (chunk size 8) | 23 pixels differ
+T12 ptchunkcarry_races 22 82 | A, 1 fillers side by side | B (chunk size 8) | 17 pixels differ
+T12 ptchunkcarry_races 22 90 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 22 92 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 22 94 | A, 1 fillers side by side | B (chunk size 8) | 70 pixels differ
+T12 ptchunkcarry_races 22 98 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 22 124 | A, 1 fillers side by side | B (chunk size 8) | 76 pixels differ
+T12 ptchunkcarry_races 22 126 | A, 1 fillers side by side | B (chunk size 8) | 123 pixels differ
+T12 ptchunkcarry_races 22 130 | A, 1 fillers side by side | B (chunk size 8) | 20 pixels differ
+T12 ptchunkcarry_races 22 132 | A, 1 fillers side by side | B (chunk size 8) | 99 pixels differ
+T12 ptchunkcarry_races 22 162 | A, 1 fillers side by side | B (chunk size 8) | 78 pixels differ
+T12 ptchunkcarry_races 22 164 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 22 166 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 22 168 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 22 170 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 22 174 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 22 178 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 22 206 | A, 1 fillers side by side | B (chunk size 8) | 74 pixels differ
+T12 ptchunkcarry_races 22 212 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 22 216 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 22 218 | A, 1 fillers side by side | B (chunk size 8) | 51 pixels differ
+T12 ptchunkcarry_races 22 242 | A, 1 fillers side by side | B (chunk size 8) | 18 pixels differ
+T12 ptchunkcarry_races 22 248 | A, 1 fillers side by side | B (chunk size 8) | 70 pixels differ
+T12 ptchunkcarry_races 22 250 | A, 1 fillers side by side | B (chunk size 8) | 20 pixels differ
+T12 ptchunkcarry_races 22 256 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 22 258 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 22 280 | A, 1 fillers side by side | B (chunk size 8) | 23 pixels differ
+T12 ptchunkcarry_races 22 284 | A, 1 fillers side by side | B (chunk size 8) | 120 pixels differ
+T12 ptchunkcarry_races 22 286 | A, 1 fillers side by side | B (chunk size 8) | 97 pixels differ
+T12 ptchunkcarry_races 22 290 | A, 1 fillers side by side | B (chunk size 8) | 20 pixels differ
+T12 ptchunkcarry_races 22 292 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 22 294 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 22 298 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 23 8 | A, 1 fillers side by side | B (chunk size 8) | 18 pixels differ
+T12 ptchunkcarry_races 23 10 | A, 1 fillers side by side | B (chunk size 8) | 21 pixels differ
+T12 ptchunkcarry_races 23 12 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 23 16 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 23 18 | A, 1 fillers side by side | B (chunk size 8) | 18 pixels differ
+T12 ptchunkcarry_races 23 44 | A, 1 fillers side by side | B (chunk size 8) | 37 pixels differ
+T12 ptchunkcarry_races 23 46 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 23 48 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 23 50 | A, 1 fillers side by side | B (chunk size 8) | 81 pixels differ
+T12 ptchunkcarry_races 23 54 | A, 1 fillers side by side | B (chunk size 8) | 80 pixels differ
+T12 ptchunkcarry_races 23 58 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 23 84 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 23 90 | A, 1 fillers side by side | B (chunk size 8) | 78 pixels differ
+T12 ptchunkcarry_races 23 92 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 23 94 | A, 1 fillers side by side | B (chunk size 8) | 80 pixels differ
+T12 ptchunkcarry_races 23 96 | A, 1 fillers side by side | B (chunk size 8) | 41 pixels differ
+T12 ptchunkcarry_races 23 98 | A, 1 fillers side by side | B (chunk size 8) | 19 pixels differ
+T12 ptchunkcarry_races 23 126 | A, 1 fillers side by side | B (chunk size 8) | 94 pixels differ
+T12 ptchunkcarry_races 23 128 | A, 1 fillers side by side | B (chunk size 8) | 82 pixels differ
+T12 ptchunkcarry_races 23 132 | A, 1 fillers side by side | B (chunk size 8) | 21 pixels differ
+T12 ptchunkcarry_races 23 134 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 23 136 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 23 138 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 23 164 | A, 1 fillers side by side | B (chunk size 8) | 19 pixels differ
+T12 ptchunkcarry_races 23 166 | A, 1 fillers side by side | B (chunk size 8) | 45 pixels differ
+T12 ptchunkcarry_races 23 170 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 23 172 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 23 176 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 23 204 | A, 1 fillers side by side | B (chunk size 8) | 41 pixels differ
+T12 ptchunkcarry_races 23 208 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 23 210 | A, 1 fillers side by side | B (chunk size 8) | 82 pixels differ
+T12 ptchunkcarry_races 23 212 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 23 214 | A, 1 fillers side by side | B (chunk size 8) | 37 pixels differ
+T12 ptchunkcarry_races 23 216 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 23 218 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 23 244 | A, 1 fillers side by side | B (chunk size 8) | 41 pixels differ
+T12 ptchunkcarry_races 23 248 | A, 1 fillers side by side | B (chunk size 8) | 115 pixels differ
+T12 ptchunkcarry_races 23 256 | A, 1 fillers side by side | B (chunk size 8) | 80 pixels differ
+T12 ptchunkcarry_races 23 258 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 23 288 | A, 1 fillers side by side | B (chunk size 8) | 45 pixels differ
+T12 ptchunkcarry_races 23 292 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 23 294 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 23 298 | A, 1 fillers side by side | B (chunk size 8) | 156 pixels differ
+T12 ptchunkcarry_races 24 4 | A, 2 fillers side by side | B (chunk size 11) | 19 pixels differ
+T12 ptchunkcarry_races 24 6 | A, 2 fillers side by side | B (chunk size 11) | 18 pixels differ
+T12 ptchunkcarry_races 24 8 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 24 10 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 24 12 | A, 2 fillers side by side | B (chunk size 11) | 63 pixels differ
+T12 ptchunkcarry_races 24 14 | A, 2 fillers side by side | B (chunk size 11) | 78 pixels differ
+T12 ptchunkcarry_races 24 16 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 24 18 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 24 46 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 24 50 | A, 2 fillers side by side | B (chunk size 11) | 80 pixels differ
+T12 ptchunkcarry_races 24 54 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 24 56 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 24 58 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 24 80 | A, 2 fillers side by side | B (chunk size 11) | 23 pixels differ
+T12 ptchunkcarry_races 24 82 | A, 2 fillers side by side | B (chunk size 11) | 17 pixels differ
+T12 ptchunkcarry_races 24 90 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 24 92 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 24 94 | A, 2 fillers side by side | B (chunk size 11) | 70 pixels differ
+T12 ptchunkcarry_races 24 98 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 24 124 | A, 2 fillers side by side | B (chunk size 11) | 76 pixels differ
+T12 ptchunkcarry_races 24 126 | A, 2 fillers side by side | B (chunk size 11) | 123 pixels differ
+T12 ptchunkcarry_races 24 130 | A, 2 fillers side by side | B (chunk size 11) | 20 pixels differ
+T12 ptchunkcarry_races 24 132 | A, 2 fillers side by side | B (chunk size 11) | 99 pixels differ
+T12 ptchunkcarry_races 24 162 | A, 2 fillers side by side | B (chunk size 11) | 78 pixels differ
+T12 ptchunkcarry_races 24 164 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 24 166 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 24 168 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 24 170 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 24 174 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 24 178 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 24 206 | A, 2 fillers side by side | B (chunk size 11) | 74 pixels differ
+T12 ptchunkcarry_races 24 212 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 24 216 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 24 218 | A, 2 fillers side by side | B (chunk size 11) | 51 pixels differ
+T12 ptchunkcarry_races 24 242 | A, 2 fillers side by side | B (chunk size 11) | 18 pixels differ
+T12 ptchunkcarry_races 24 248 | A, 2 fillers side by side | B (chunk size 11) | 70 pixels differ
+T12 ptchunkcarry_races 24 250 | A, 2 fillers side by side | B (chunk size 11) | 20 pixels differ
+T12 ptchunkcarry_races 24 256 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 24 258 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 24 280 | A, 2 fillers side by side | B (chunk size 11) | 23 pixels differ
+T12 ptchunkcarry_races 24 284 | A, 2 fillers side by side | B (chunk size 11) | 120 pixels differ
+T12 ptchunkcarry_races 24 286 | A, 2 fillers side by side | B (chunk size 11) | 97 pixels differ
+T12 ptchunkcarry_races 24 290 | A, 2 fillers side by side | B (chunk size 11) | 20 pixels differ
+T12 ptchunkcarry_races 24 292 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 24 294 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 24 298 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 25 8 | A, 2 fillers side by side | B (chunk size 11) | 18 pixels differ
+T12 ptchunkcarry_races 25 10 | A, 2 fillers side by side | B (chunk size 11) | 21 pixels differ
+T12 ptchunkcarry_races 25 12 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 25 16 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 25 18 | A, 2 fillers side by side | B (chunk size 11) | 18 pixels differ
+T12 ptchunkcarry_races 25 44 | A, 2 fillers side by side | B (chunk size 11) | 37 pixels differ
+T12 ptchunkcarry_races 25 46 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 25 48 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 25 50 | A, 2 fillers side by side | B (chunk size 11) | 81 pixels differ
+T12 ptchunkcarry_races 25 54 | A, 2 fillers side by side | B (chunk size 11) | 80 pixels differ
+T12 ptchunkcarry_races 25 58 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 25 84 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 25 90 | A, 2 fillers side by side | B (chunk size 11) | 78 pixels differ
+T12 ptchunkcarry_races 25 92 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 25 94 | A, 2 fillers side by side | B (chunk size 11) | 80 pixels differ
+T12 ptchunkcarry_races 25 96 | A, 2 fillers side by side | B (chunk size 11) | 41 pixels differ
+T12 ptchunkcarry_races 25 98 | A, 2 fillers side by side | B (chunk size 11) | 19 pixels differ
+T12 ptchunkcarry_races 25 126 | A, 2 fillers side by side | B (chunk size 11) | 94 pixels differ
+T12 ptchunkcarry_races 25 128 | A, 2 fillers side by side | B (chunk size 11) | 82 pixels differ
+T12 ptchunkcarry_races 25 132 | A, 2 fillers side by side | B (chunk size 11) | 21 pixels differ
+T12 ptchunkcarry_races 25 134 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 25 136 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 25 138 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 25 164 | A, 2 fillers side by side | B (chunk size 11) | 19 pixels differ
+T12 ptchunkcarry_races 25 166 | A, 2 fillers side by side | B (chunk size 11) | 45 pixels differ
+T12 ptchunkcarry_races 25 170 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 25 172 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 25 176 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 25 204 | A, 2 fillers side by side | B (chunk size 11) | 41 pixels differ
+T12 ptchunkcarry_races 25 208 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 25 210 | A, 2 fillers side by side | B (chunk size 11) | 82 pixels differ
+T12 ptchunkcarry_races 25 212 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 25 214 | A, 2 fillers side by side | B (chunk size 11) | 37 pixels differ
+T12 ptchunkcarry_races 25 216 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 25 218 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 25 244 | A, 2 fillers side by side | B (chunk size 11) | 41 pixels differ
+T12 ptchunkcarry_races 25 248 | A, 2 fillers side by side | B (chunk size 11) | 115 pixels differ
+T12 ptchunkcarry_races 25 256 | A, 2 fillers side by side | B (chunk size 11) | 80 pixels differ
+T12 ptchunkcarry_races 25 258 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 25 288 | A, 2 fillers side by side | B (chunk size 11) | 45 pixels differ
+T12 ptchunkcarry_races 25 292 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 25 294 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 25 298 | A, 2 fillers side by side | B (chunk size 11) | 156 pixels differ
+T12 ptchunkcarry_races 26 4 | A, 3 fillers side by side | B (chunk size 14) | 19 pixels differ
+T12 ptchunkcarry_races 26 6 | A, 3 fillers side by side | B (chunk size 14) | 18 pixels differ
+T12 ptchunkcarry_races 26 8 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 26 10 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 26 12 | A, 3 fillers side by side | B (chunk size 14) | 63 pixels differ
+T12 ptchunkcarry_races 26 14 | A, 3 fillers side by side | B (chunk size 14) | 78 pixels differ
+T12 ptchunkcarry_races 26 16 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 26 18 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 26 46 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 26 50 | A, 3 fillers side by side | B (chunk size 14) | 80 pixels differ
+T12 ptchunkcarry_races 26 54 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 26 56 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 26 58 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 26 80 | A, 3 fillers side by side | B (chunk size 14) | 23 pixels differ
+T12 ptchunkcarry_races 26 82 | A, 3 fillers side by side | B (chunk size 14) | 17 pixels differ
+T12 ptchunkcarry_races 26 90 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 26 92 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 26 94 | A, 3 fillers side by side | B (chunk size 14) | 70 pixels differ
+T12 ptchunkcarry_races 26 98 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 26 124 | A, 3 fillers side by side | B (chunk size 14) | 76 pixels differ
+T12 ptchunkcarry_races 26 126 | A, 3 fillers side by side | B (chunk size 14) | 123 pixels differ
+T12 ptchunkcarry_races 26 130 | A, 3 fillers side by side | B (chunk size 14) | 20 pixels differ
+T12 ptchunkcarry_races 26 132 | A, 3 fillers side by side | B (chunk size 14) | 99 pixels differ
+T12 ptchunkcarry_races 26 162 | A, 3 fillers side by side | B (chunk size 14) | 78 pixels differ
+T12 ptchunkcarry_races 26 164 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 26 166 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 26 168 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 26 170 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 26 174 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 26 178 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 26 206 | A, 3 fillers side by side | B (chunk size 14) | 74 pixels differ
+T12 ptchunkcarry_races 26 212 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 26 216 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 26 218 | A, 3 fillers side by side | B (chunk size 14) | 51 pixels differ
+T12 ptchunkcarry_races 26 242 | A, 3 fillers side by side | B (chunk size 14) | 18 pixels differ
+T12 ptchunkcarry_races 26 248 | A, 3 fillers side by side | B (chunk size 14) | 70 pixels differ
+T12 ptchunkcarry_races 26 250 | A, 3 fillers side by side | B (chunk size 14) | 20 pixels differ
+T12 ptchunkcarry_races 26 256 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 26 258 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 26 280 | A, 3 fillers side by side | B (chunk size 14) | 23 pixels differ
+T12 ptchunkcarry_races 26 284 | A, 3 fillers side by side | B (chunk size 14) | 120 pixels differ
+T12 ptchunkcarry_races 26 286 | A, 3 fillers side by side | B (chunk size 14) | 97 pixels differ
+T12 ptchunkcarry_races 26 290 | A, 3 fillers side by side | B (chunk size 14) | 20 pixels differ
+T12 ptchunkcarry_races 26 292 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 26 294 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 26 298 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 27 8 | A, 3 fillers side by side | B (chunk size 14) | 18 pixels differ
+T12 ptchunkcarry_races 27 10 | A, 3 fillers side by side | B (chunk size 14) | 21 pixels differ
+T12 ptchunkcarry_races 27 12 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 27 16 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 27 18 | A, 3 fillers side by side | B (chunk size 14) | 18 pixels differ
+T12 ptchunkcarry_races 27 44 | A, 3 fillers side by side | B (chunk size 14) | 37 pixels differ
+T12 ptchunkcarry_races 27 46 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 27 48 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 27 50 | A, 3 fillers side by side | B (chunk size 14) | 81 pixels differ
+T12 ptchunkcarry_races 27 54 | A, 3 fillers side by side | B (chunk size 14) | 80 pixels differ
+T12 ptchunkcarry_races 27 58 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 27 84 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 27 90 | A, 3 fillers side by side | B (chunk size 14) | 78 pixels differ
+T12 ptchunkcarry_races 27 92 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 27 94 | A, 3 fillers side by side | B (chunk size 14) | 80 pixels differ
+T12 ptchunkcarry_races 27 96 | A, 3 fillers side by side | B (chunk size 14) | 41 pixels differ
+T12 ptchunkcarry_races 27 98 | A, 3 fillers side by side | B (chunk size 14) | 19 pixels differ
+T12 ptchunkcarry_races 27 126 | A, 3 fillers side by side | B (chunk size 14) | 94 pixels differ
+T12 ptchunkcarry_races 27 128 | A, 3 fillers side by side | B (chunk size 14) | 82 pixels differ
+T12 ptchunkcarry_races 27 132 | A, 3 fillers side by side | B (chunk size 14) | 21 pixels differ
+T12 ptchunkcarry_races 27 134 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 27 136 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 27 138 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 27 164 | A, 3 fillers side by side | B (chunk size 14) | 19 pixels differ
+T12 ptchunkcarry_races 27 166 | A, 3 fillers side by side | B (chunk size 14) | 45 pixels differ
+T12 ptchunkcarry_races 27 170 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 27 172 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 27 176 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 27 204 | A, 3 fillers side by side | B (chunk size 14) | 41 pixels differ
+T12 ptchunkcarry_races 27 208 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 27 210 | A, 3 fillers side by side | B (chunk size 14) | 82 pixels differ
+T12 ptchunkcarry_races 27 212 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 27 214 | A, 3 fillers side by side | B (chunk size 14) | 37 pixels differ
+T12 ptchunkcarry_races 27 216 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 27 218 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 27 244 | A, 3 fillers side by side | B (chunk size 14) | 41 pixels differ
+T12 ptchunkcarry_races 27 248 | A, 3 fillers side by side | B (chunk size 14) | 115 pixels differ
+T12 ptchunkcarry_races 27 256 | A, 3 fillers side by side | B (chunk size 14) | 80 pixels differ
+T12 ptchunkcarry_races 27 258 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 27 288 | A, 3 fillers side by side | B (chunk size 14) | 45 pixels differ
+T12 ptchunkcarry_races 27 292 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 27 294 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 27 298 | A, 3 fillers side by side | B (chunk size 14) | 156 pixels differ
+T12 ptchunkcarry_races 28 4 | A, 4 fillers side by side | B (chunk size 17) | 19 pixels differ
+T12 ptchunkcarry_races 28 6 | A, 4 fillers side by side | B (chunk size 17) | 18 pixels differ
+T12 ptchunkcarry_races 28 8 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 28 10 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 28 12 | A, 4 fillers side by side | B (chunk size 17) | 63 pixels differ
+T12 ptchunkcarry_races 28 14 | A, 4 fillers side by side | B (chunk size 17) | 78 pixels differ
+T12 ptchunkcarry_races 28 16 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 28 18 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 28 46 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 28 50 | A, 4 fillers side by side | B (chunk size 17) | 80 pixels differ
+T12 ptchunkcarry_races 28 54 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 28 56 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 28 58 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 28 80 | A, 4 fillers side by side | B (chunk size 17) | 23 pixels differ
+T12 ptchunkcarry_races 28 82 | A, 4 fillers side by side | B (chunk size 17) | 17 pixels differ
+T12 ptchunkcarry_races 28 90 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 28 92 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 28 94 | A, 4 fillers side by side | B (chunk size 17) | 70 pixels differ
+T12 ptchunkcarry_races 28 98 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 28 124 | A, 4 fillers side by side | B (chunk size 17) | 76 pixels differ
+T12 ptchunkcarry_races 28 126 | A, 4 fillers side by side | B (chunk size 17) | 123 pixels differ
+T12 ptchunkcarry_races 28 130 | A, 4 fillers side by side | B (chunk size 17) | 20 pixels differ
+T12 ptchunkcarry_races 28 132 | A, 4 fillers side by side | B (chunk size 17) | 99 pixels differ
+T12 ptchunkcarry_races 28 162 | A, 4 fillers side by side | B (chunk size 17) | 78 pixels differ
+T12 ptchunkcarry_races 28 164 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 28 166 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 28 168 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 28 170 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 28 174 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 28 178 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 28 206 | A, 4 fillers side by side | B (chunk size 17) | 74 pixels differ
+T12 ptchunkcarry_races 28 212 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 28 216 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 28 218 | A, 4 fillers side by side | B (chunk size 17) | 51 pixels differ
+T12 ptchunkcarry_races 28 242 | A, 4 fillers side by side | B (chunk size 17) | 18 pixels differ
+T12 ptchunkcarry_races 28 248 | A, 4 fillers side by side | B (chunk size 17) | 70 pixels differ
+T12 ptchunkcarry_races 28 250 | A, 4 fillers side by side | B (chunk size 17) | 20 pixels differ
+T12 ptchunkcarry_races 28 256 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 28 258 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 28 280 | A, 4 fillers side by side | B (chunk size 17) | 23 pixels differ
+T12 ptchunkcarry_races 28 284 | A, 4 fillers side by side | B (chunk size 17) | 120 pixels differ
+T12 ptchunkcarry_races 28 286 | A, 4 fillers side by side | B (chunk size 17) | 97 pixels differ
+T12 ptchunkcarry_races 28 290 | A, 4 fillers side by side | B (chunk size 17) | 20 pixels differ
+T12 ptchunkcarry_races 28 292 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 28 294 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 28 298 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 29 8 | A, 4 fillers side by side | B (chunk size 17) | 18 pixels differ
+T12 ptchunkcarry_races 29 10 | A, 4 fillers side by side | B (chunk size 17) | 21 pixels differ
+T12 ptchunkcarry_races 29 12 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 29 16 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 29 18 | A, 4 fillers side by side | B (chunk size 17) | 18 pixels differ
+T12 ptchunkcarry_races 29 44 | A, 4 fillers side by side | B (chunk size 17) | 37 pixels differ
+T12 ptchunkcarry_races 29 46 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 29 48 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 29 50 | A, 4 fillers side by side | B (chunk size 17) | 81 pixels differ
+T12 ptchunkcarry_races 29 54 | A, 4 fillers side by side | B (chunk size 17) | 80 pixels differ
+T12 ptchunkcarry_races 29 58 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 29 84 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 29 90 | A, 4 fillers side by side | B (chunk size 17) | 78 pixels differ
+T12 ptchunkcarry_races 29 92 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 29 94 | A, 4 fillers side by side | B (chunk size 17) | 80 pixels differ
+T12 ptchunkcarry_races 29 96 | A, 4 fillers side by side | B (chunk size 17) | 41 pixels differ
+T12 ptchunkcarry_races 29 98 | A, 4 fillers side by side | B (chunk size 17) | 19 pixels differ
+T12 ptchunkcarry_races 29 126 | A, 4 fillers side by side | B (chunk size 17) | 94 pixels differ
+T12 ptchunkcarry_races 29 128 | A, 4 fillers side by side | B (chunk size 17) | 82 pixels differ
+T12 ptchunkcarry_races 29 132 | A, 4 fillers side by side | B (chunk size 17) | 21 pixels differ
+T12 ptchunkcarry_races 29 134 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 29 136 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 29 138 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 29 164 | A, 4 fillers side by side | B (chunk size 17) | 19 pixels differ
+T12 ptchunkcarry_races 29 166 | A, 4 fillers side by side | B (chunk size 17) | 45 pixels differ
+T12 ptchunkcarry_races 29 170 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 29 172 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 29 176 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 29 204 | A, 4 fillers side by side | B (chunk size 17) | 41 pixels differ
+T12 ptchunkcarry_races 29 208 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 29 210 | A, 4 fillers side by side | B (chunk size 17) | 82 pixels differ
+T12 ptchunkcarry_races 29 212 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 29 214 | A, 4 fillers side by side | B (chunk size 17) | 37 pixels differ
+T12 ptchunkcarry_races 29 216 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 29 218 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 29 244 | A, 4 fillers side by side | B (chunk size 17) | 41 pixels differ
+T12 ptchunkcarry_races 29 248 | A, 4 fillers side by side | B (chunk size 17) | 115 pixels differ
+T12 ptchunkcarry_races 29 256 | A, 4 fillers side by side | B (chunk size 17) | 80 pixels differ
+T12 ptchunkcarry_races 29 258 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 29 288 | A, 4 fillers side by side | B (chunk size 17) | 45 pixels differ
+T12 ptchunkcarry_races 29 292 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 29 294 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 29 298 | A, 4 fillers side by side | B (chunk size 17) | 156 pixels differ
+T12 ptchunkcarry_races 30 4 | A, 5 fillers side by side | B (chunk size 20) | 19 pixels differ
+T12 ptchunkcarry_races 30 6 | A, 5 fillers side by side | B (chunk size 20) | 18 pixels differ
+T12 ptchunkcarry_races 30 8 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 30 10 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 30 12 | A, 5 fillers side by side | B (chunk size 20) | 63 pixels differ
+T12 ptchunkcarry_races 30 14 | A, 5 fillers side by side | B (chunk size 20) | 78 pixels differ
+T12 ptchunkcarry_races 30 16 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 30 18 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 30 46 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 30 50 | A, 5 fillers side by side | B (chunk size 20) | 80 pixels differ
+T12 ptchunkcarry_races 30 54 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 30 56 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 30 58 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 30 80 | A, 5 fillers side by side | B (chunk size 20) | 23 pixels differ
+T12 ptchunkcarry_races 30 82 | A, 5 fillers side by side | B (chunk size 20) | 17 pixels differ
+T12 ptchunkcarry_races 30 90 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 30 92 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 30 94 | A, 5 fillers side by side | B (chunk size 20) | 70 pixels differ
+T12 ptchunkcarry_races 30 98 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 30 124 | A, 5 fillers side by side | B (chunk size 20) | 76 pixels differ
+T12 ptchunkcarry_races 30 126 | A, 5 fillers side by side | B (chunk size 20) | 123 pixels differ
+T12 ptchunkcarry_races 30 130 | A, 5 fillers side by side | B (chunk size 20) | 20 pixels differ
+T12 ptchunkcarry_races 30 132 | A, 5 fillers side by side | B (chunk size 20) | 99 pixels differ
+T12 ptchunkcarry_races 30 162 | A, 5 fillers side by side | B (chunk size 20) | 78 pixels differ
+T12 ptchunkcarry_races 30 164 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 30 166 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 30 168 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 30 170 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 30 174 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 30 178 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 30 206 | A, 5 fillers side by side | B (chunk size 20) | 74 pixels differ
+T12 ptchunkcarry_races 30 212 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 30 216 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 30 218 | A, 5 fillers side by side | B (chunk size 20) | 51 pixels differ
+T12 ptchunkcarry_races 30 242 | A, 5 fillers side by side | B (chunk size 20) | 18 pixels differ
+T12 ptchunkcarry_races 30 248 | A, 5 fillers side by side | B (chunk size 20) | 70 pixels differ
+T12 ptchunkcarry_races 30 250 | A, 5 fillers side by side | B (chunk size 20) | 20 pixels differ
+T12 ptchunkcarry_races 30 256 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 30 258 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 30 280 | A, 5 fillers side by side | B (chunk size 20) | 23 pixels differ
+T12 ptchunkcarry_races 30 284 | A, 5 fillers side by side | B (chunk size 20) | 120 pixels differ
+T12 ptchunkcarry_races 30 286 | A, 5 fillers side by side | B (chunk size 20) | 97 pixels differ
+T12 ptchunkcarry_races 30 290 | A, 5 fillers side by side | B (chunk size 20) | 20 pixels differ
+T12 ptchunkcarry_races 30 292 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 30 294 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 30 298 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 31 8 | A, 5 fillers side by side | B (chunk size 20) | 18 pixels differ
+T12 ptchunkcarry_races 31 10 | A, 5 fillers side by side | B (chunk size 20) | 21 pixels differ
+T12 ptchunkcarry_races 31 12 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 31 16 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 31 18 | A, 5 fillers side by side | B (chunk size 20) | 18 pixels differ
+T12 ptchunkcarry_races 31 44 | A, 5 fillers side by side | B (chunk size 20) | 37 pixels differ
+T12 ptchunkcarry_races 31 46 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 31 48 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 31 50 | A, 5 fillers side by side | B (chunk size 20) | 81 pixels differ
+T12 ptchunkcarry_races 31 54 | A, 5 fillers side by side | B (chunk size 20) | 80 pixels differ
+T12 ptchunkcarry_races 31 58 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 31 84 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 31 90 | A, 5 fillers side by side | B (chunk size 20) | 78 pixels differ
+T12 ptchunkcarry_races 31 92 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 31 94 | A, 5 fillers side by side | B (chunk size 20) | 80 pixels differ
+T12 ptchunkcarry_races 31 96 | A, 5 fillers side by side | B (chunk size 20) | 41 pixels differ
+T12 ptchunkcarry_races 31 98 | A, 5 fillers side by side | B (chunk size 20) | 19 pixels differ
+T12 ptchunkcarry_races 31 126 | A, 5 fillers side by side | B (chunk size 20) | 94 pixels differ
+T12 ptchunkcarry_races 31 128 | A, 5 fillers side by side | B (chunk size 20) | 82 pixels differ
+T12 ptchunkcarry_races 31 132 | A, 5 fillers side by side | B (chunk size 20) | 21 pixels differ
+T12 ptchunkcarry_races 31 134 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 31 136 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 31 138 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 31 164 | A, 5 fillers side by side | B (chunk size 20) | 19 pixels differ
+T12 ptchunkcarry_races 31 166 | A, 5 fillers side by side | B (chunk size 20) | 45 pixels differ
+T12 ptchunkcarry_races 31 170 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 31 172 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 31 176 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 31 204 | A, 5 fillers side by side | B (chunk size 20) | 41 pixels differ
+T12 ptchunkcarry_races 31 208 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 31 210 | A, 5 fillers side by side | B (chunk size 20) | 82 pixels differ
+T12 ptchunkcarry_races 31 212 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 31 214 | A, 5 fillers side by side | B (chunk size 20) | 37 pixels differ
+T12 ptchunkcarry_races 31 216 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 31 218 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 31 244 | A, 5 fillers side by side | B (chunk size 20) | 41 pixels differ
+T12 ptchunkcarry_races 31 248 | A, 5 fillers side by side | B (chunk size 20) | 115 pixels differ
+T12 ptchunkcarry_races 31 256 | A, 5 fillers side by side | B (chunk size 20) | 80 pixels differ
+T12 ptchunkcarry_races 31 258 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 31 288 | A, 5 fillers side by side | B (chunk size 20) | 45 pixels differ
+T12 ptchunkcarry_races 31 292 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 31 294 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 31 298 | A, 5 fillers side by side | B (chunk size 20) | 156 pixels differ
+T12 ptchunkcarry_races 32 4 | A, 6 fillers side by side | B (chunk size 23) | 19 pixels differ
+T12 ptchunkcarry_races 32 6 | A, 6 fillers side by side | B (chunk size 23) | 18 pixels differ
+T12 ptchunkcarry_races 32 8 | A, 6 fillers side by side | B (chunk size 23) | 156 pixels differ
+T12 ptchunkcarry_races 32 10 | A, 6 fillers side by side | B (chunk size 23) | 156 pixels differ
+T12 ptchunkcarry_races 32 12 | A, 6 fillers side by side | B (chunk size 23) | 63 pixels differ
+T12 ptchunkcarry_races 32 14 | A, 6 fillers side by side | B (chunk size 23) | 78 pixels differ
+T12 ptchunkcarry_races 32 16 | A, 6 fillers side by side | B (chunk size 23) | 156 pixels differ
+T12 ptchunkcarry_races 32 18 | A, 6 fillers side by side | B (chunk size 23) | 156 pixels differ
+T12 ptchunkcarry_races 32 80 | A, 6 fillers side by side | B (chunk size 23) | 23 pixels differ
+T12 ptchunkcarry_races 32 280 | A, 6 fillers side by side | B (chunk size 23) | 23 pixels differ
+T12 ptchunkcarry_races 33 8 | A, 6 fillers side by side | B (chunk size 23) | 18 pixels differ
+T12 ptchunkcarry_races 33 10 | A, 6 fillers side by side | B (chunk size 23) | 21 pixels differ
+T12 ptchunkcarry_races 33 12 | A, 6 fillers side by side | B (chunk size 23) | 156 pixels differ
+T12 ptchunkcarry_races 33 16 | A, 6 fillers side by side | B (chunk size 23) | 156 pixels differ
+T12 ptchunkcarry_races 33 18 | A, 6 fillers side by side | B (chunk size 23) | 18 pixels differ
+T12 ptchunkcarry_races 34 4 | A, 7 fillers side by side | B (chunk size 26) | 19 pixels differ
+T12 ptchunkcarry_races 34 6 | A, 7 fillers side by side | B (chunk size 26) | 18 pixels differ
+T12 ptchunkcarry_races 34 8 | A, 7 fillers side by side | B (chunk size 26) | 156 pixels differ
+T12 ptchunkcarry_races 34 10 | A, 7 fillers side by side | B (chunk size 26) | 156 pixels differ
+T12 ptchunkcarry_races 34 12 | A, 7 fillers side by side | B (chunk size 26) | 63 pixels differ
+T12 ptchunkcarry_races 34 14 | A, 7 fillers side by side | B (chunk size 26) | 78 pixels differ
+T12 ptchunkcarry_races 34 16 | A, 7 fillers side by side | B (chunk size 26) | 156 pixels differ
+T12 ptchunkcarry_races 34 18 | A, 7 fillers side by side | B (chunk size 26) | 156 pixels differ
+T12 ptchunkcarry_races 34 80 | A, 7 fillers side by side | B (chunk size 26) | 23 pixels differ
+T12 ptchunkcarry_races 34 280 | A, 7 fillers side by side | B (chunk size 26) | 23 pixels differ
+T12 ptchunkcarry_races 35 8 | A, 7 fillers side by side | B (chunk size 26) | 18 pixels differ
+T12 ptchunkcarry_races 35 10 | A, 7 fillers side by side | B (chunk size 26) | 21 pixels differ
+T12 ptchunkcarry_races 35 12 | A, 7 fillers side by side | B (chunk size 26) | 156 pixels differ
+T12 ptchunkcarry_races 35 16 | A, 7 fillers side by side | B (chunk size 26) | 156 pixels differ
+T12 ptchunkcarry_races 35 18 | A, 7 fillers side by side | B (chunk size 26) | 18 pixels differ
+T12 ptchunkrun_races 0 4 | kind 0: A fails 8-15, then B: a chunk each | 19 pixels differ
+T12 ptchunkrun_races 0 6 | kind 0: A fails 8-15, then B: a chunk each | 18 pixels differ
+T12 ptchunkrun_races 0 8 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 0 10 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 0 12 | kind 0: A fails 8-15, then B: a chunk each | 63 pixels differ
+T12 ptchunkrun_races 0 14 | kind 0: A fails 8-15, then B: a chunk each | 78 pixels differ
+T12 ptchunkrun_races 0 16 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 0 18 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 0 46 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 0 50 | kind 0: A fails 8-15, then B: a chunk each | 80 pixels differ
+T12 ptchunkrun_races 0 54 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 0 56 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 0 58 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 0 80 | kind 0: A fails 8-15, then B: a chunk each | 23 pixels differ
+T12 ptchunkrun_races 0 82 | kind 0: A fails 8-15, then B: a chunk each | 17 pixels differ
+T12 ptchunkrun_races 0 90 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 0 92 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 0 94 | kind 0: A fails 8-15, then B: a chunk each | 70 pixels differ
+T12 ptchunkrun_races 0 98 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 0 124 | kind 0: A fails 8-15, then B: a chunk each | 76 pixels differ
+T12 ptchunkrun_races 0 126 | kind 0: A fails 8-15, then B: a chunk each | 123 pixels differ
+T12 ptchunkrun_races 0 130 | kind 0: A fails 8-15, then B: a chunk each | 20 pixels differ
+T12 ptchunkrun_races 0 132 | kind 0: A fails 8-15, then B: a chunk each | 99 pixels differ
+T12 ptchunkrun_races 0 162 | kind 0: A fails 8-15, then B: a chunk each | 78 pixels differ
+T12 ptchunkrun_races 0 164 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 0 166 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 0 168 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 0 170 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 0 174 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 0 178 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 0 206 | kind 0: A fails 8-15, then B: a chunk each | 74 pixels differ
+T12 ptchunkrun_races 0 212 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 0 216 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 0 218 | kind 0: A fails 8-15, then B: a chunk each | 51 pixels differ
+T12 ptchunkrun_races 0 242 | kind 0: A fails 8-15, then B: a chunk each | 18 pixels differ
+T12 ptchunkrun_races 0 248 | kind 0: A fails 8-15, then B: a chunk each | 70 pixels differ
+T12 ptchunkrun_races 0 250 | kind 0: A fails 8-15, then B: a chunk each | 20 pixels differ
+T12 ptchunkrun_races 0 256 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 0 258 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 0 280 | kind 0: A fails 8-15, then B: a chunk each | 23 pixels differ
+T12 ptchunkrun_races 0 284 | kind 0: A fails 8-15, then B: a chunk each | 120 pixels differ
+T12 ptchunkrun_races 0 286 | kind 0: A fails 8-15, then B: a chunk each | 97 pixels differ
+T12 ptchunkrun_races 0 290 | kind 0: A fails 8-15, then B: a chunk each | 20 pixels differ
+T12 ptchunkrun_races 0 292 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 0 294 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 0 298 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 1 8 | kind 0: A fails 8-15, then B: a chunk each | 18 pixels differ
+T12 ptchunkrun_races 1 10 | kind 0: A fails 8-15, then B: a chunk each | 21 pixels differ
+T12 ptchunkrun_races 1 12 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 1 16 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 1 18 | kind 0: A fails 8-15, then B: a chunk each | 18 pixels differ
+T12 ptchunkrun_races 1 44 | kind 0: A fails 8-15, then B: a chunk each | 37 pixels differ
+T12 ptchunkrun_races 1 46 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 1 48 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 1 50 | kind 0: A fails 8-15, then B: a chunk each | 81 pixels differ
+T12 ptchunkrun_races 1 54 | kind 0: A fails 8-15, then B: a chunk each | 80 pixels differ
+T12 ptchunkrun_races 1 58 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 1 84 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 1 90 | kind 0: A fails 8-15, then B: a chunk each | 78 pixels differ
+T12 ptchunkrun_races 1 92 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 1 94 | kind 0: A fails 8-15, then B: a chunk each | 80 pixels differ
+T12 ptchunkrun_races 1 96 | kind 0: A fails 8-15, then B: a chunk each | 41 pixels differ
+T12 ptchunkrun_races 1 98 | kind 0: A fails 8-15, then B: a chunk each | 19 pixels differ
+T12 ptchunkrun_races 1 126 | kind 0: A fails 8-15, then B: a chunk each | 94 pixels differ
+T12 ptchunkrun_races 1 128 | kind 0: A fails 8-15, then B: a chunk each | 82 pixels differ
+T12 ptchunkrun_races 1 132 | kind 0: A fails 8-15, then B: a chunk each | 21 pixels differ
+T12 ptchunkrun_races 1 134 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 1 136 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 1 138 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 1 164 | kind 0: A fails 8-15, then B: a chunk each | 19 pixels differ
+T12 ptchunkrun_races 1 166 | kind 0: A fails 8-15, then B: a chunk each | 45 pixels differ
+T12 ptchunkrun_races 1 170 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 1 172 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 1 176 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 1 204 | kind 0: A fails 8-15, then B: a chunk each | 41 pixels differ
+T12 ptchunkrun_races 1 208 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 1 210 | kind 0: A fails 8-15, then B: a chunk each | 82 pixels differ
+T12 ptchunkrun_races 1 212 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 1 214 | kind 0: A fails 8-15, then B: a chunk each | 37 pixels differ
+T12 ptchunkrun_races 1 216 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 1 218 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 1 244 | kind 0: A fails 8-15, then B: a chunk each | 41 pixels differ
+T12 ptchunkrun_races 1 248 | kind 0: A fails 8-15, then B: a chunk each | 115 pixels differ
+T12 ptchunkrun_races 1 256 | kind 0: A fails 8-15, then B: a chunk each | 80 pixels differ
+T12 ptchunkrun_races 1 258 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 1 288 | kind 0: A fails 8-15, then B: a chunk each | 45 pixels differ
+T12 ptchunkrun_races 1 292 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 1 294 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 1 298 | kind 0: A fails 8-15, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 4 10 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 70 pixels differ
+T12 ptchunkrun_races 4 12 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 16 pixels differ
+T12 ptchunkrun_races 4 16 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 70 pixels differ
+T12 ptchunkrun_races 4 18 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 34 pixels differ
+T12 ptchunkrun_races 4 50 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 34 pixels differ
+T12 ptchunkrun_races 4 54 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 34 pixels differ
+T12 ptchunkrun_races 4 56 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 70 pixels differ
+T12 ptchunkrun_races 4 58 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 70 pixels differ
+T12 ptchunkrun_races 4 90 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 70 pixels differ
+T12 ptchunkrun_races 4 92 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 53 pixels differ
+T12 ptchunkrun_races 4 98 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 34 pixels differ
+T12 ptchunkrun_races 4 126 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 33 pixels differ
+T12 ptchunkrun_races 4 162 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 17 pixels differ
+T12 ptchunkrun_races 4 164 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 33 pixels differ
+T12 ptchunkrun_races 4 166 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 36 pixels differ
+T12 ptchunkrun_races 4 168 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 70 pixels differ
+T12 ptchunkrun_races 4 170 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 34 pixels differ
+T12 ptchunkrun_races 4 174 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 70 pixels differ
+T12 ptchunkrun_races 4 178 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 70 pixels differ
+T12 ptchunkrun_races 4 206 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 19 pixels differ
+T12 ptchunkrun_races 4 212 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 70 pixels differ
+T12 ptchunkrun_races 4 216 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 70 pixels differ
+T12 ptchunkrun_races 4 218 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 19 pixels differ
+T12 ptchunkrun_races 4 256 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 70 pixels differ
+T12 ptchunkrun_races 4 258 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 70 pixels differ
+T12 ptchunkrun_races 4 286 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 17 pixels differ
+T12 ptchunkrun_races 4 292 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 70 pixels differ
+T12 ptchunkrun_races 4 294 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 70 pixels differ
+T12 ptchunkrun_races 4 298 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 70 pixels differ
+T12 ptchunkrun_races 5 16 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 54 pixels differ
+T12 ptchunkrun_races 5 44 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 17 pixels differ
+T12 ptchunkrun_races 5 48 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 70 pixels differ
+T12 ptchunkrun_races 5 50 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 18 pixels differ
+T12 ptchunkrun_races 5 54 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 34 pixels differ
+T12 ptchunkrun_races 5 58 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 53 pixels differ
+T12 ptchunkrun_races 5 84 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 52 pixels differ
+T12 ptchunkrun_races 5 90 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 19 pixels differ
+T12 ptchunkrun_races 5 92 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 70 pixels differ
+T12 ptchunkrun_races 5 98 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 18 pixels differ
+T12 ptchunkrun_races 5 126 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 37 pixels differ
+T12 ptchunkrun_races 5 128 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 16 pixels differ
+T12 ptchunkrun_races 5 134 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 19 pixels differ
+T12 ptchunkrun_races 5 136 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 70 pixels differ
+T12 ptchunkrun_races 5 138 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 70 pixels differ
+T12 ptchunkrun_races 5 170 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 70 pixels differ
+T12 ptchunkrun_races 5 176 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 70 pixels differ
+T12 ptchunkrun_races 5 208 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 19 pixels differ
+T12 ptchunkrun_races 5 210 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 17 pixels differ
+T12 ptchunkrun_races 5 212 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 70 pixels differ
+T12 ptchunkrun_races 5 216 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 70 pixels differ
+T12 ptchunkrun_races 5 248 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 18 pixels differ
+T12 ptchunkrun_races 5 258 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 70 pixels differ
+T12 ptchunkrun_races 5 292 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 70 pixels differ
+T12 ptchunkrun_races 5 294 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 70 pixels differ
+T12 ptchunkrun_races 5 298 | kind 2: A1 fails 8-15, A2 fails 12-19, B: a chunk each | 70 pixels differ
+T12 ptchunkrun_races 6 10 | kind 3: A1, A2 in one chunk, B in the next | 70 pixels differ
+T12 ptchunkrun_races 6 12 | kind 3: A1, A2 in one chunk, B in the next | 16 pixels differ
+T12 ptchunkrun_races 6 16 | kind 3: A1, A2 in one chunk, B in the next | 70 pixels differ
+T12 ptchunkrun_races 6 18 | kind 3: A1, A2 in one chunk, B in the next | 34 pixels differ
+T12 ptchunkrun_races 6 50 | kind 3: A1, A2 in one chunk, B in the next | 34 pixels differ
+T12 ptchunkrun_races 6 54 | kind 3: A1, A2 in one chunk, B in the next | 34 pixels differ
+T12 ptchunkrun_races 6 56 | kind 3: A1, A2 in one chunk, B in the next | 70 pixels differ
+T12 ptchunkrun_races 6 58 | kind 3: A1, A2 in one chunk, B in the next | 70 pixels differ
+T12 ptchunkrun_races 6 90 | kind 3: A1, A2 in one chunk, B in the next | 70 pixels differ
+T12 ptchunkrun_races 6 92 | kind 3: A1, A2 in one chunk, B in the next | 53 pixels differ
+T12 ptchunkrun_races 6 98 | kind 3: A1, A2 in one chunk, B in the next | 34 pixels differ
+T12 ptchunkrun_races 6 126 | kind 3: A1, A2 in one chunk, B in the next | 33 pixels differ
+T12 ptchunkrun_races 6 162 | kind 3: A1, A2 in one chunk, B in the next | 17 pixels differ
+T12 ptchunkrun_races 6 164 | kind 3: A1, A2 in one chunk, B in the next | 33 pixels differ
+T12 ptchunkrun_races 6 166 | kind 3: A1, A2 in one chunk, B in the next | 36 pixels differ
+T12 ptchunkrun_races 6 168 | kind 3: A1, A2 in one chunk, B in the next | 70 pixels differ
+T12 ptchunkrun_races 6 170 | kind 3: A1, A2 in one chunk, B in the next | 34 pixels differ
+T12 ptchunkrun_races 6 174 | kind 3: A1, A2 in one chunk, B in the next | 70 pixels differ
+T12 ptchunkrun_races 6 178 | kind 3: A1, A2 in one chunk, B in the next | 70 pixels differ
+T12 ptchunkrun_races 6 206 | kind 3: A1, A2 in one chunk, B in the next | 19 pixels differ
+T12 ptchunkrun_races 6 212 | kind 3: A1, A2 in one chunk, B in the next | 70 pixels differ
+T12 ptchunkrun_races 6 216 | kind 3: A1, A2 in one chunk, B in the next | 70 pixels differ
+T12 ptchunkrun_races 6 218 | kind 3: A1, A2 in one chunk, B in the next | 19 pixels differ
+T12 ptchunkrun_races 6 256 | kind 3: A1, A2 in one chunk, B in the next | 70 pixels differ
+T12 ptchunkrun_races 6 258 | kind 3: A1, A2 in one chunk, B in the next | 70 pixels differ
+T12 ptchunkrun_races 6 286 | kind 3: A1, A2 in one chunk, B in the next | 17 pixels differ
+T12 ptchunkrun_races 6 292 | kind 3: A1, A2 in one chunk, B in the next | 70 pixels differ
+T12 ptchunkrun_races 6 294 | kind 3: A1, A2 in one chunk, B in the next | 70 pixels differ
+T12 ptchunkrun_races 6 298 | kind 3: A1, A2 in one chunk, B in the next | 70 pixels differ
+T12 ptchunkrun_races 7 16 | kind 3: A1, A2 in one chunk, B in the next | 54 pixels differ
+T12 ptchunkrun_races 7 44 | kind 3: A1, A2 in one chunk, B in the next | 17 pixels differ
+T12 ptchunkrun_races 7 48 | kind 3: A1, A2 in one chunk, B in the next | 70 pixels differ
+T12 ptchunkrun_races 7 50 | kind 3: A1, A2 in one chunk, B in the next | 18 pixels differ
+T12 ptchunkrun_races 7 54 | kind 3: A1, A2 in one chunk, B in the next | 34 pixels differ
+T12 ptchunkrun_races 7 58 | kind 3: A1, A2 in one chunk, B in the next | 53 pixels differ
+T12 ptchunkrun_races 7 84 | kind 3: A1, A2 in one chunk, B in the next | 52 pixels differ
+T12 ptchunkrun_races 7 90 | kind 3: A1, A2 in one chunk, B in the next | 19 pixels differ
+T12 ptchunkrun_races 7 92 | kind 3: A1, A2 in one chunk, B in the next | 70 pixels differ
+T12 ptchunkrun_races 7 98 | kind 3: A1, A2 in one chunk, B in the next | 18 pixels differ
+T12 ptchunkrun_races 7 126 | kind 3: A1, A2 in one chunk, B in the next | 37 pixels differ
+T12 ptchunkrun_races 7 128 | kind 3: A1, A2 in one chunk, B in the next | 16 pixels differ
+T12 ptchunkrun_races 7 134 | kind 3: A1, A2 in one chunk, B in the next | 19 pixels differ
+T12 ptchunkrun_races 7 136 | kind 3: A1, A2 in one chunk, B in the next | 70 pixels differ
+T12 ptchunkrun_races 7 138 | kind 3: A1, A2 in one chunk, B in the next | 70 pixels differ
+T12 ptchunkrun_races 7 170 | kind 3: A1, A2 in one chunk, B in the next | 70 pixels differ
+T12 ptchunkrun_races 7 176 | kind 3: A1, A2 in one chunk, B in the next | 70 pixels differ
+T12 ptchunkrun_races 7 208 | kind 3: A1, A2 in one chunk, B in the next | 19 pixels differ
+T12 ptchunkrun_races 7 210 | kind 3: A1, A2 in one chunk, B in the next | 17 pixels differ
+T12 ptchunkrun_races 7 212 | kind 3: A1, A2 in one chunk, B in the next | 70 pixels differ
+T12 ptchunkrun_races 7 216 | kind 3: A1, A2 in one chunk, B in the next | 70 pixels differ
+T12 ptchunkrun_races 7 248 | kind 3: A1, A2 in one chunk, B in the next | 18 pixels differ
+T12 ptchunkrun_races 7 258 | kind 3: A1, A2 in one chunk, B in the next | 70 pixels differ
+T12 ptchunkrun_races 7 292 | kind 3: A1, A2 in one chunk, B in the next | 70 pixels differ
+T12 ptchunkrun_races 7 294 | kind 3: A1, A2 in one chunk, B in the next | 70 pixels differ
+T12 ptchunkrun_races 7 298 | kind 3: A1, A2 in one chunk, B in the next | 70 pixels differ
+T12 ptchunkrun_races 8 4 | kind 4: A fails 8-15, a filler, B: a chunk each | 19 pixels differ
+T12 ptchunkrun_races 8 6 | kind 4: A fails 8-15, a filler, B: a chunk each | 18 pixels differ
+T12 ptchunkrun_races 8 8 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 8 10 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 8 12 | kind 4: A fails 8-15, a filler, B: a chunk each | 63 pixels differ
+T12 ptchunkrun_races 8 14 | kind 4: A fails 8-15, a filler, B: a chunk each | 78 pixels differ
+T12 ptchunkrun_races 8 16 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 8 18 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 8 46 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 8 50 | kind 4: A fails 8-15, a filler, B: a chunk each | 80 pixels differ
+T12 ptchunkrun_races 8 54 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 8 56 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 8 58 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 8 80 | kind 4: A fails 8-15, a filler, B: a chunk each | 23 pixels differ
+T12 ptchunkrun_races 8 82 | kind 4: A fails 8-15, a filler, B: a chunk each | 17 pixels differ
+T12 ptchunkrun_races 8 90 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 8 92 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 8 94 | kind 4: A fails 8-15, a filler, B: a chunk each | 70 pixels differ
+T12 ptchunkrun_races 8 98 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 8 124 | kind 4: A fails 8-15, a filler, B: a chunk each | 76 pixels differ
+T12 ptchunkrun_races 8 126 | kind 4: A fails 8-15, a filler, B: a chunk each | 123 pixels differ
+T12 ptchunkrun_races 8 130 | kind 4: A fails 8-15, a filler, B: a chunk each | 20 pixels differ
+T12 ptchunkrun_races 8 132 | kind 4: A fails 8-15, a filler, B: a chunk each | 99 pixels differ
+T12 ptchunkrun_races 8 162 | kind 4: A fails 8-15, a filler, B: a chunk each | 78 pixels differ
+T12 ptchunkrun_races 8 164 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 8 166 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 8 168 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 8 170 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 8 174 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 8 178 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 8 206 | kind 4: A fails 8-15, a filler, B: a chunk each | 74 pixels differ
+T12 ptchunkrun_races 8 212 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 8 216 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 8 218 | kind 4: A fails 8-15, a filler, B: a chunk each | 51 pixels differ
+T12 ptchunkrun_races 8 242 | kind 4: A fails 8-15, a filler, B: a chunk each | 18 pixels differ
+T12 ptchunkrun_races 8 248 | kind 4: A fails 8-15, a filler, B: a chunk each | 70 pixels differ
+T12 ptchunkrun_races 8 250 | kind 4: A fails 8-15, a filler, B: a chunk each | 20 pixels differ
+T12 ptchunkrun_races 8 256 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 8 258 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 8 280 | kind 4: A fails 8-15, a filler, B: a chunk each | 23 pixels differ
+T12 ptchunkrun_races 8 284 | kind 4: A fails 8-15, a filler, B: a chunk each | 120 pixels differ
+T12 ptchunkrun_races 8 286 | kind 4: A fails 8-15, a filler, B: a chunk each | 97 pixels differ
+T12 ptchunkrun_races 8 290 | kind 4: A fails 8-15, a filler, B: a chunk each | 20 pixels differ
+T12 ptchunkrun_races 8 292 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 8 294 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 8 298 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 9 8 | kind 4: A fails 8-15, a filler, B: a chunk each | 18 pixels differ
+T12 ptchunkrun_races 9 10 | kind 4: A fails 8-15, a filler, B: a chunk each | 21 pixels differ
+T12 ptchunkrun_races 9 12 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 9 16 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 9 18 | kind 4: A fails 8-15, a filler, B: a chunk each | 18 pixels differ
+T12 ptchunkrun_races 9 44 | kind 4: A fails 8-15, a filler, B: a chunk each | 37 pixels differ
+T12 ptchunkrun_races 9 46 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 9 48 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 9 50 | kind 4: A fails 8-15, a filler, B: a chunk each | 81 pixels differ
+T12 ptchunkrun_races 9 54 | kind 4: A fails 8-15, a filler, B: a chunk each | 80 pixels differ
+T12 ptchunkrun_races 9 58 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 9 84 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 9 90 | kind 4: A fails 8-15, a filler, B: a chunk each | 78 pixels differ
+T12 ptchunkrun_races 9 92 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 9 94 | kind 4: A fails 8-15, a filler, B: a chunk each | 80 pixels differ
+T12 ptchunkrun_races 9 96 | kind 4: A fails 8-15, a filler, B: a chunk each | 41 pixels differ
+T12 ptchunkrun_races 9 98 | kind 4: A fails 8-15, a filler, B: a chunk each | 19 pixels differ
+T12 ptchunkrun_races 9 126 | kind 4: A fails 8-15, a filler, B: a chunk each | 94 pixels differ
+T12 ptchunkrun_races 9 128 | kind 4: A fails 8-15, a filler, B: a chunk each | 82 pixels differ
+T12 ptchunkrun_races 9 132 | kind 4: A fails 8-15, a filler, B: a chunk each | 21 pixels differ
+T12 ptchunkrun_races 9 134 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 9 136 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 9 138 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 9 164 | kind 4: A fails 8-15, a filler, B: a chunk each | 19 pixels differ
+T12 ptchunkrun_races 9 166 | kind 4: A fails 8-15, a filler, B: a chunk each | 45 pixels differ
+T12 ptchunkrun_races 9 170 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 9 172 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 9 176 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 9 204 | kind 4: A fails 8-15, a filler, B: a chunk each | 41 pixels differ
+T12 ptchunkrun_races 9 208 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 9 210 | kind 4: A fails 8-15, a filler, B: a chunk each | 82 pixels differ
+T12 ptchunkrun_races 9 212 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 9 214 | kind 4: A fails 8-15, a filler, B: a chunk each | 37 pixels differ
+T12 ptchunkrun_races 9 216 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 9 218 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 9 244 | kind 4: A fails 8-15, a filler, B: a chunk each | 41 pixels differ
+T12 ptchunkrun_races 9 248 | kind 4: A fails 8-15, a filler, B: a chunk each | 115 pixels differ
+T12 ptchunkrun_races 9 256 | kind 4: A fails 8-15, a filler, B: a chunk each | 80 pixels differ
+T12 ptchunkrun_races 9 258 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 9 288 | kind 4: A fails 8-15, a filler, B: a chunk each | 45 pixels differ
+T12 ptchunkrun_races 9 292 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 9 294 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 9 298 | kind 4: A fails 8-15, a filler, B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 18 4 | kind 9: A, then B: a chunk each, size 6 | 19 pixels differ
+T12 ptchunkrun_races 18 6 | kind 9: A, then B: a chunk each, size 6 | 18 pixels differ
+T12 ptchunkrun_races 18 8 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 18 10 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 18 12 | kind 9: A, then B: a chunk each, size 6 | 63 pixels differ
+T12 ptchunkrun_races 18 14 | kind 9: A, then B: a chunk each, size 6 | 78 pixels differ
+T12 ptchunkrun_races 18 16 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 18 18 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 18 46 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 18 50 | kind 9: A, then B: a chunk each, size 6 | 80 pixels differ
+T12 ptchunkrun_races 18 54 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 18 56 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 18 58 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 18 80 | kind 9: A, then B: a chunk each, size 6 | 23 pixels differ
+T12 ptchunkrun_races 18 82 | kind 9: A, then B: a chunk each, size 6 | 17 pixels differ
+T12 ptchunkrun_races 18 90 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 18 92 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 18 94 | kind 9: A, then B: a chunk each, size 6 | 70 pixels differ
+T12 ptchunkrun_races 18 98 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 18 124 | kind 9: A, then B: a chunk each, size 6 | 76 pixels differ
+T12 ptchunkrun_races 18 126 | kind 9: A, then B: a chunk each, size 6 | 123 pixels differ
+T12 ptchunkrun_races 18 130 | kind 9: A, then B: a chunk each, size 6 | 20 pixels differ
+T12 ptchunkrun_races 18 132 | kind 9: A, then B: a chunk each, size 6 | 99 pixels differ
+T12 ptchunkrun_races 18 162 | kind 9: A, then B: a chunk each, size 6 | 78 pixels differ
+T12 ptchunkrun_races 18 164 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 18 166 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 18 168 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 18 170 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 18 174 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 18 178 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 18 206 | kind 9: A, then B: a chunk each, size 6 | 74 pixels differ
+T12 ptchunkrun_races 18 212 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 18 216 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 18 218 | kind 9: A, then B: a chunk each, size 6 | 51 pixels differ
+T12 ptchunkrun_races 18 242 | kind 9: A, then B: a chunk each, size 6 | 18 pixels differ
+T12 ptchunkrun_races 18 248 | kind 9: A, then B: a chunk each, size 6 | 70 pixels differ
+T12 ptchunkrun_races 18 250 | kind 9: A, then B: a chunk each, size 6 | 20 pixels differ
+T12 ptchunkrun_races 18 256 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 18 258 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 18 280 | kind 9: A, then B: a chunk each, size 6 | 23 pixels differ
+T12 ptchunkrun_races 18 284 | kind 9: A, then B: a chunk each, size 6 | 120 pixels differ
+T12 ptchunkrun_races 18 286 | kind 9: A, then B: a chunk each, size 6 | 97 pixels differ
+T12 ptchunkrun_races 18 290 | kind 9: A, then B: a chunk each, size 6 | 20 pixels differ
+T12 ptchunkrun_races 18 292 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 18 294 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 18 298 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 19 8 | kind 9: A, then B: a chunk each, size 6 | 18 pixels differ
+T12 ptchunkrun_races 19 10 | kind 9: A, then B: a chunk each, size 6 | 21 pixels differ
+T12 ptchunkrun_races 19 12 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 19 16 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 19 18 | kind 9: A, then B: a chunk each, size 6 | 18 pixels differ
+T12 ptchunkrun_races 19 44 | kind 9: A, then B: a chunk each, size 6 | 37 pixels differ
+T12 ptchunkrun_races 19 46 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 19 48 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 19 50 | kind 9: A, then B: a chunk each, size 6 | 81 pixels differ
+T12 ptchunkrun_races 19 54 | kind 9: A, then B: a chunk each, size 6 | 80 pixels differ
+T12 ptchunkrun_races 19 58 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 19 84 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 19 90 | kind 9: A, then B: a chunk each, size 6 | 78 pixels differ
+T12 ptchunkrun_races 19 92 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 19 94 | kind 9: A, then B: a chunk each, size 6 | 80 pixels differ
+T12 ptchunkrun_races 19 96 | kind 9: A, then B: a chunk each, size 6 | 41 pixels differ
+T12 ptchunkrun_races 19 98 | kind 9: A, then B: a chunk each, size 6 | 19 pixels differ
+T12 ptchunkrun_races 19 126 | kind 9: A, then B: a chunk each, size 6 | 94 pixels differ
+T12 ptchunkrun_races 19 128 | kind 9: A, then B: a chunk each, size 6 | 82 pixels differ
+T12 ptchunkrun_races 19 132 | kind 9: A, then B: a chunk each, size 6 | 21 pixels differ
+T12 ptchunkrun_races 19 134 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 19 136 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 19 138 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 19 164 | kind 9: A, then B: a chunk each, size 6 | 19 pixels differ
+T12 ptchunkrun_races 19 166 | kind 9: A, then B: a chunk each, size 6 | 45 pixels differ
+T12 ptchunkrun_races 19 170 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 19 172 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 19 176 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 19 204 | kind 9: A, then B: a chunk each, size 6 | 41 pixels differ
+T12 ptchunkrun_races 19 208 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 19 210 | kind 9: A, then B: a chunk each, size 6 | 82 pixels differ
+T12 ptchunkrun_races 19 212 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 19 214 | kind 9: A, then B: a chunk each, size 6 | 37 pixels differ
+T12 ptchunkrun_races 19 216 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 19 218 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 19 244 | kind 9: A, then B: a chunk each, size 6 | 41 pixels differ
+T12 ptchunkrun_races 19 248 | kind 9: A, then B: a chunk each, size 6 | 115 pixels differ
+T12 ptchunkrun_races 19 256 | kind 9: A, then B: a chunk each, size 6 | 80 pixels differ
+T12 ptchunkrun_races 19 258 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 19 288 | kind 9: A, then B: a chunk each, size 6 | 45 pixels differ
+T12 ptchunkrun_races 19 292 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 19 294 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 19 298 | kind 9: A, then B: a chunk each, size 6 | 156 pixels differ
+T12 ptchunkrun_races 20 4 | kind 10: A, a filler | B, size 8 | 19 pixels differ
+T12 ptchunkrun_races 20 6 | kind 10: A, a filler | B, size 8 | 18 pixels differ
+T12 ptchunkrun_races 20 8 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 20 10 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 20 12 | kind 10: A, a filler | B, size 8 | 63 pixels differ
+T12 ptchunkrun_races 20 14 | kind 10: A, a filler | B, size 8 | 78 pixels differ
+T12 ptchunkrun_races 20 16 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 20 18 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 20 46 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 20 50 | kind 10: A, a filler | B, size 8 | 80 pixels differ
+T12 ptchunkrun_races 20 54 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 20 56 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 20 58 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 20 80 | kind 10: A, a filler | B, size 8 | 23 pixels differ
+T12 ptchunkrun_races 20 82 | kind 10: A, a filler | B, size 8 | 17 pixels differ
+T12 ptchunkrun_races 20 90 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 20 92 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 20 94 | kind 10: A, a filler | B, size 8 | 70 pixels differ
+T12 ptchunkrun_races 20 98 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 20 124 | kind 10: A, a filler | B, size 8 | 76 pixels differ
+T12 ptchunkrun_races 20 126 | kind 10: A, a filler | B, size 8 | 123 pixels differ
+T12 ptchunkrun_races 20 130 | kind 10: A, a filler | B, size 8 | 20 pixels differ
+T12 ptchunkrun_races 20 132 | kind 10: A, a filler | B, size 8 | 99 pixels differ
+T12 ptchunkrun_races 20 162 | kind 10: A, a filler | B, size 8 | 78 pixels differ
+T12 ptchunkrun_races 20 164 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 20 166 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 20 168 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 20 170 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 20 174 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 20 178 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 20 206 | kind 10: A, a filler | B, size 8 | 74 pixels differ
+T12 ptchunkrun_races 20 212 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 20 216 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 20 218 | kind 10: A, a filler | B, size 8 | 51 pixels differ
+T12 ptchunkrun_races 20 242 | kind 10: A, a filler | B, size 8 | 18 pixels differ
+T12 ptchunkrun_races 20 248 | kind 10: A, a filler | B, size 8 | 70 pixels differ
+T12 ptchunkrun_races 20 250 | kind 10: A, a filler | B, size 8 | 20 pixels differ
+T12 ptchunkrun_races 20 256 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 20 258 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 20 280 | kind 10: A, a filler | B, size 8 | 23 pixels differ
+T12 ptchunkrun_races 20 284 | kind 10: A, a filler | B, size 8 | 120 pixels differ
+T12 ptchunkrun_races 20 286 | kind 10: A, a filler | B, size 8 | 97 pixels differ
+T12 ptchunkrun_races 20 290 | kind 10: A, a filler | B, size 8 | 20 pixels differ
+T12 ptchunkrun_races 20 292 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 20 294 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 20 298 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 21 8 | kind 10: A, a filler | B, size 8 | 18 pixels differ
+T12 ptchunkrun_races 21 10 | kind 10: A, a filler | B, size 8 | 21 pixels differ
+T12 ptchunkrun_races 21 12 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 21 16 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 21 18 | kind 10: A, a filler | B, size 8 | 18 pixels differ
+T12 ptchunkrun_races 21 44 | kind 10: A, a filler | B, size 8 | 37 pixels differ
+T12 ptchunkrun_races 21 46 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 21 48 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 21 50 | kind 10: A, a filler | B, size 8 | 81 pixels differ
+T12 ptchunkrun_races 21 54 | kind 10: A, a filler | B, size 8 | 80 pixels differ
+T12 ptchunkrun_races 21 58 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 21 84 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 21 90 | kind 10: A, a filler | B, size 8 | 78 pixels differ
+T12 ptchunkrun_races 21 92 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 21 94 | kind 10: A, a filler | B, size 8 | 80 pixels differ
+T12 ptchunkrun_races 21 96 | kind 10: A, a filler | B, size 8 | 41 pixels differ
+T12 ptchunkrun_races 21 98 | kind 10: A, a filler | B, size 8 | 19 pixels differ
+T12 ptchunkrun_races 21 126 | kind 10: A, a filler | B, size 8 | 94 pixels differ
+T12 ptchunkrun_races 21 128 | kind 10: A, a filler | B, size 8 | 82 pixels differ
+T12 ptchunkrun_races 21 132 | kind 10: A, a filler | B, size 8 | 21 pixels differ
+T12 ptchunkrun_races 21 134 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 21 136 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 21 138 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 21 164 | kind 10: A, a filler | B, size 8 | 19 pixels differ
+T12 ptchunkrun_races 21 166 | kind 10: A, a filler | B, size 8 | 45 pixels differ
+T12 ptchunkrun_races 21 170 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 21 172 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 21 176 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 21 204 | kind 10: A, a filler | B, size 8 | 41 pixels differ
+T12 ptchunkrun_races 21 208 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 21 210 | kind 10: A, a filler | B, size 8 | 82 pixels differ
+T12 ptchunkrun_races 21 212 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 21 214 | kind 10: A, a filler | B, size 8 | 37 pixels differ
+T12 ptchunkrun_races 21 216 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 21 218 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 21 244 | kind 10: A, a filler | B, size 8 | 41 pixels differ
+T12 ptchunkrun_races 21 248 | kind 10: A, a filler | B, size 8 | 115 pixels differ
+T12 ptchunkrun_races 21 256 | kind 10: A, a filler | B, size 8 | 80 pixels differ
+T12 ptchunkrun_races 21 258 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 21 288 | kind 10: A, a filler | B, size 8 | 45 pixels differ
+T12 ptchunkrun_races 21 292 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 21 294 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 21 298 | kind 10: A, a filler | B, size 8 | 156 pixels differ
+T12 ptchunkrun_races 26 4 | kind 13: A over the upper left half, then B: a chunk each | 19 pixels differ
+T12 ptchunkrun_races 26 6 | kind 13: A over the upper left half, then B: a chunk each | 18 pixels differ
+T12 ptchunkrun_races 26 8 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 26 10 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 26 12 | kind 13: A over the upper left half, then B: a chunk each | 63 pixels differ
+T12 ptchunkrun_races 26 14 | kind 13: A over the upper left half, then B: a chunk each | 78 pixels differ
+T12 ptchunkrun_races 26 16 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 26 18 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 26 46 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 26 50 | kind 13: A over the upper left half, then B: a chunk each | 80 pixels differ
+T12 ptchunkrun_races 26 54 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 26 56 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 26 58 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 26 80 | kind 13: A over the upper left half, then B: a chunk each | 23 pixels differ
+T12 ptchunkrun_races 26 82 | kind 13: A over the upper left half, then B: a chunk each | 17 pixels differ
+T12 ptchunkrun_races 26 90 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 26 92 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 26 94 | kind 13: A over the upper left half, then B: a chunk each | 70 pixels differ
+T12 ptchunkrun_races 26 98 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 26 124 | kind 13: A over the upper left half, then B: a chunk each | 76 pixels differ
+T12 ptchunkrun_races 26 126 | kind 13: A over the upper left half, then B: a chunk each | 123 pixels differ
+T12 ptchunkrun_races 26 130 | kind 13: A over the upper left half, then B: a chunk each | 20 pixels differ
+T12 ptchunkrun_races 26 132 | kind 13: A over the upper left half, then B: a chunk each | 99 pixels differ
+T12 ptchunkrun_races 26 162 | kind 13: A over the upper left half, then B: a chunk each | 78 pixels differ
+T12 ptchunkrun_races 26 164 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 26 166 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 26 168 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 26 170 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 26 174 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 26 178 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 26 206 | kind 13: A over the upper left half, then B: a chunk each | 74 pixels differ
+T12 ptchunkrun_races 26 212 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 26 216 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 26 218 | kind 13: A over the upper left half, then B: a chunk each | 51 pixels differ
+T12 ptchunkrun_races 26 242 | kind 13: A over the upper left half, then B: a chunk each | 18 pixels differ
+T12 ptchunkrun_races 26 248 | kind 13: A over the upper left half, then B: a chunk each | 70 pixels differ
+T12 ptchunkrun_races 26 250 | kind 13: A over the upper left half, then B: a chunk each | 20 pixels differ
+T12 ptchunkrun_races 26 256 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 26 258 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 26 280 | kind 13: A over the upper left half, then B: a chunk each | 23 pixels differ
+T12 ptchunkrun_races 26 284 | kind 13: A over the upper left half, then B: a chunk each | 120 pixels differ
+T12 ptchunkrun_races 26 286 | kind 13: A over the upper left half, then B: a chunk each | 97 pixels differ
+T12 ptchunkrun_races 26 290 | kind 13: A over the upper left half, then B: a chunk each | 20 pixels differ
+T12 ptchunkrun_races 26 292 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 26 294 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 26 298 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 27 8 | kind 13: A over the upper left half, then B: a chunk each | 18 pixels differ
+T12 ptchunkrun_races 27 10 | kind 13: A over the upper left half, then B: a chunk each | 21 pixels differ
+T12 ptchunkrun_races 27 12 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 27 16 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 27 18 | kind 13: A over the upper left half, then B: a chunk each | 18 pixels differ
+T12 ptchunkrun_races 27 44 | kind 13: A over the upper left half, then B: a chunk each | 37 pixels differ
+T12 ptchunkrun_races 27 46 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 27 48 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 27 50 | kind 13: A over the upper left half, then B: a chunk each | 81 pixels differ
+T12 ptchunkrun_races 27 54 | kind 13: A over the upper left half, then B: a chunk each | 80 pixels differ
+T12 ptchunkrun_races 27 58 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 27 84 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 27 90 | kind 13: A over the upper left half, then B: a chunk each | 78 pixels differ
+T12 ptchunkrun_races 27 92 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 27 94 | kind 13: A over the upper left half, then B: a chunk each | 80 pixels differ
+T12 ptchunkrun_races 27 96 | kind 13: A over the upper left half, then B: a chunk each | 41 pixels differ
+T12 ptchunkrun_races 27 98 | kind 13: A over the upper left half, then B: a chunk each | 19 pixels differ
+T12 ptchunkrun_races 27 126 | kind 13: A over the upper left half, then B: a chunk each | 94 pixels differ
+T12 ptchunkrun_races 27 128 | kind 13: A over the upper left half, then B: a chunk each | 82 pixels differ
+T12 ptchunkrun_races 27 132 | kind 13: A over the upper left half, then B: a chunk each | 21 pixels differ
+T12 ptchunkrun_races 27 134 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 27 136 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 27 138 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 27 164 | kind 13: A over the upper left half, then B: a chunk each | 19 pixels differ
+T12 ptchunkrun_races 27 166 | kind 13: A over the upper left half, then B: a chunk each | 45 pixels differ
+T12 ptchunkrun_races 27 170 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 27 172 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 27 176 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 27 204 | kind 13: A over the upper left half, then B: a chunk each | 41 pixels differ
+T12 ptchunkrun_races 27 208 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 27 210 | kind 13: A over the upper left half, then B: a chunk each | 82 pixels differ
+T12 ptchunkrun_races 27 212 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 27 214 | kind 13: A over the upper left half, then B: a chunk each | 37 pixels differ
+T12 ptchunkrun_races 27 216 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 27 218 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 27 244 | kind 13: A over the upper left half, then B: a chunk each | 41 pixels differ
+T12 ptchunkrun_races 27 248 | kind 13: A over the upper left half, then B: a chunk each | 115 pixels differ
+T12 ptchunkrun_races 27 256 | kind 13: A over the upper left half, then B: a chunk each | 80 pixels differ
+T12 ptchunkrun_races 27 258 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 27 288 | kind 13: A over the upper left half, then B: a chunk each | 45 pixels differ
+T12 ptchunkrun_races 27 292 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 27 294 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ
+T12 ptchunkrun_races 27 298 | kind 13: A over the upper left half, then B: a chunk each | 156 pixels differ

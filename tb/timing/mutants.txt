@@ -1,0 +1,10 @@
+# tb/timing/mutants.txt: the timing harness's mutants (PLAN MT0: "a planted mutant (+1 clk a run in the cutter) must make
+# the gate fail on the cut scenes"), run by tools/gate/mutants.py (make timing-harness-mutants); the probe:
+# tools/timing/timing_probe.sh <group> with the mutant's p2-offline (tb/timing/gate.txt's checks of that group).
+#
+# Format: <id> | <file in rtl/v1/isp> | <original fragment> | <mutated fragment> | <probe> [args] | <what it breaks>
+@dir rtl/v1/isp ISP_DIR
+@obj P2OFF_OBJDIR
+@probe cut p2-offline-tprobe timing_probe cut
+
+cut-run-plus1 | p2_isp_cut.sv | logic   b_emit, b_eoe, b_take, null_take;\n  lanes_t len_mask;\n  always_comb begin\n    len_mask = '0;\n    for (int i = 0; i < P2_TILE; i++)\n      len_mask[i] = 5'(i) <= 5'(e - s);\n    b_emit = b_v && starts != '0; | logic   b_emit, b_eoe, b_take, null_take;\n  logic   mut_gap;\n  always_ff @(posedge clk) mut_gap <= !rst && b_take;\n  lanes_t len_mask;\n  always_comb begin\n    len_mask = '0;\n    for (int i = 0; i < P2_TILE; i++)\n      len_mask[i] = 5'(i) <= 5'(e - s);\n    b_emit = b_v && starts != '0 && !mut_gap; | cut | PLAN MT0: one clock more a run in the cutter (a bubble after every run taken): the cut slope 2 clk a run, every placement's difference doubled

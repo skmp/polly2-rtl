@@ -376,7 +376,8 @@ the framebuffer as written so far, the RTL from the render's start) has its diff
   Verilated `p2_core`.
 - One persistent core per process: tile buffers and `offsKept` carry across renders.
 - The VRAM model serves the core from `emu_vram` (§1.6).
-- Timing line on stderr: `p2: render <n> isp <clk> tsp <clk> video <clk> vramrace <words>`.
+- Timing line on stderr: `p2: render <n> isp <clk> tsp <clk> video <clk> vramrace <words>`; with `P2_TIMING=1` (MT0) a
+  `p2: timing ...` line before it (the per-unit clocks and counts, p2_core's `+p2timing` tap).
 - Hung render: `p2: render <n> did not end` after `P2_CLK_LIMIT`.
 - dreamcast-tests' scripts run unchanged:
   `NULLDC3=<polly2-rtl>/tools OFFLINE_TOOL=p2-offline OFFLINE=<polly2-rtl>/build/p2-offline PVR_TESTS=<polly2-rtl>/build/pvr_tests`
@@ -438,6 +439,27 @@ the framebuffer as written so far, the RTL from the render's start) has its diff
 - **`+occlog`** per-unit occupancy traces (conv §7.5) localize a timing mismatch.
 - **`model/timing`** (optional, MT0): a C++ clocked model of ARCHITECTURE §5, validated against REPORT.md. It is a
   debugging reference for `gate_cycle.sh` and never decides an RTL mechanism (conv §4.7).
+- **As built (MT0, 2026-11-26; timing.md §11).**
+  - The timed scenes: dreamcast-tests timemeas `main.c` `TM_EMIT` (D7 (a)), `make -C pvr-tests/timemeas emit`: one PC
+    program a variant (all, cut, order, setupk, sortoff, and the SPAN_SORT_CFG overrides); `tools/timing/tm_item.sh` runs
+    renders of one through p2-offline (`P2_RENDERS` skips the others; items cut at scene boundaries by
+    `tools/timing/tm_items.py`), `tm_log.py` writes the console's log format, `gate_timing.py` checks and tabulates.
+  - The fits: the plan's 3005 / 2695 / 2755 are REPORT's rounding; the archived least is 2998.5 / 2686.5 / 2745.5. K = 319
+    fitted on the 0888 tile; and, since the write-out's format dependence needs a per-line row cost (ARCHITECTURE §3.2.1
+    had `VR_ROW` "fitted later"), `VR_ROW` = 10 fitted once on `clip 0 - clip 4` (the 0888 write-out's excess over its
+    reader, 311 clk), before K. Both in `tb/timing/k.txt`; the timing runs only (`P2_VR_ROW`), the functional gates keep 2.
+    The 16-bit and 888 tiles are then checks, not fits (residuals 11.5 and 9.5).
+  - The gate also checks the cutter (one clock a run: the slope over 64 .. 384 runs and cut k 0 - 5's single
+    differences), which is what the planted mutant fails; cut k 6, 7 are reported (MT2).
+  - The race lists: `races_variable.txt` from fit/accbuf_logs (timing lines; no multi-run pictures are archived, so the
+    picture cells are the ones the tests' descriptions call run-variable: accbuf_races, blendpos_races);
+    `races_expected.txt` from the RTL's run (T11 7 cells, T12 1,683); `tools/timing/races_check.py` (static in
+    timing-harness, against an RTL run in timing-report).
+  - `P2_TIMED_WRITES` (tb/frame/p2_rendercore.cpp): `<clock> <register offset> <value>` lines, `@<render>` sections, one
+    write a clock through the register port; the palette clock from `tools/timing/tm_order_writes.py` (one write every
+    12.24 clk, the console's mean rate). `+occlog` (27 tracks: every module p2_core instantiates, the queues RUNQ / PXQ / TILEQ / ENTQ with `F` lines) and
+    `+p2timing` in p2_core (conventions 7.5).
+  - Not built: `model/timing` (optional).
 
 ### 1.6 The VRAM model (ARCHITECTURE §3.2.1)
 
@@ -1612,6 +1634,17 @@ copy of rtl/v1 is one mutant control). Where the tree differs from the text belo
 - `+occlog` on every unit.
 - Optionally `model/timing`.
 
+**As built (2026-11-26).** `make timing-harness` PASS (about 20 s), `make timing-harness-mutants` PASS (3 of 3),
+`make timing-fit` (VR_ROW 10, K 319), `make timing-report` (the starting table, timing.md §11.3). The RTL changes beyond
+the taps: p2_wout_put's 888 straddle in one clock and its 16-word write FIFO (ARCHITECTURE §3.10 As built (MT0); the die check in §3.12 "MT0"), which
+the gate needs (the format dependence); the functional gates are bit-identical. §1.5 As built has the rest.
+Round 4 (2026-11-27, the verifier's round 3): `races_var.py` keys a timing line by every number between its kind and
+"W" (the 72 `T flush v fb n` lines were dropped before) and judges each line's least (end: min of t1 t2): 40 of the
+128 lines vary (timing.md §11.4); `+occlog` gains PTC, IBUF, TILEQ, ENTQ, REGS (27 tracks, conventions 7.5); the
+write FIFO's die check is in ARCHITECTURE §3.12 "MT0". The RTL change is simulation only (`` `ifndef SYNTHESIS ``):
+lint, timing-harness (32.6 s), timing-harness-mutants (3 of 3, 80 s), timing-report (761 s, the same table) and
+frames-mutants (3 of 3, 566 s) PASS; the round-3 runs of every other gate stand.
+
 **Gate** `make timing-harness`:
 - `K` fitted on the empty 0888 tile (3005).
 - The empty 16-bit tile (2695) and the 888 tile (2755) checked against the same `K` within 0-14. That checks the
@@ -1632,7 +1665,7 @@ used to fit a parameter, it is listed under "fits" and not gated. Where the mech
 | MT4 | `ALU_NM`, `ALU_NA`, `L_*` (TSP) if the scheduler needs a choice | setup 39 / 48 / 64 / 49 / +5.00; the sprite table (h x w); look-ahead 11.2; the dcalcs burst stalls | **PT 58** (no structural cause, GAP); sort-off 44 / +19 / 12 and the crowded-lines table (T6) | T6 |
 | MT5 | — | run start 3.9 / 4.2 / 6.3; 4.7 / 6 / 8; share 13.7 / 22.8 | lineshare (T7); mixed-`vmask` runs (T19) | T7, T19 |
 | MT6 | **`D_PP` on B = 1035** | the per-pixel table (1.01 .. 4.28); align2 parities; first-tile extras; 2.14 memory bound; the small translucent layer 52 / 61 (1x1), from `D_PP` and pcache replays | 8x8 / 32x1 layers 100 / 114-119 (T13); cache organisation (T8) | T8, T13 |
-| MT7 | `WO_FIFO` only if T10 / T15 have returned | write-out 1045 / 1105 / 1357, clip; per-tile overlap 1042 / 1096 / 1358 and 1363 / 1041.5; SEC WRITE +1025; keep-Z costs 17 / 32 / 2981 | **Z clear 142, empty tile 335, the 55-90 of a tile with polygons** (T1, T13); ~370 clk not overlapped at 16 bpp (T9) | T1, T9, T10, T13 |
+| MT7 | `WO_FIFO` only if T10 / T15 have returned (`VR_ROW` was fitted at MT0 on clip 0 - clip 4, so the 0888 write-out's 1357 is not gated again) | write-out 1045 / 1105, clip; per-tile overlap 1042 / 1096 / 1358 and 1363 / 1041.5; SEC WRITE +1025; keep-Z costs 17 / 32 / 2981 | **Z clear 142, empty tile 335, the 55-90 of a tile with polygons** (T1, T13); ~370 clk not overlapped at 16 bpp (T9) | T1, T9, T10, T13 |
 | MT8 | — | deterministic cells of accbuf_races, keepz_races, ptchunkrun_races, ptchunkcarry_races outside `races_expected.txt`; the blendpos statistic (§1.5); accbuf T end / T stall / T flush thresholds (n = 36 / 32, 56, 96 / 64) within the test's step | the cells in `races_expected.txt` (T11, T12) | T10, T11, T12, T20 |
 | MT9 | — | T17's display-off frames once T17 exists; hangs (behind D6): bumphang's stop tile and carry-over, two empty keep-Z tiles, the SCALER_CTL change | rendertimes.txt (display on; tolerance after G4) | T15, T17, T18 |
 
@@ -1702,7 +1735,7 @@ dreamcast-tests owner through `OPEN_ITEMS.md`. Never run from here. Ordered by w
 
 | to | request | needed by |
 |---|---|---|
-| dreamcast-tests | PC emission of the timemeas timed scenes, preceded by `echo T <scene>` (conv §7.6.2 option a) | MT0 |
+| ~~dreamcast-tests~~ | ~~PC emission of the timemeas timed scenes~~ done by MT0 (D7: timemeas `TM_EMIT`, dreamcast-tests `cab1e28`) | MT0 |
 | dreamcast-tests | multi-run race logs for every `*_races` test as data, at least 3 runs (blendpos_races has 1) | MT8 |
 | dreamcast-tests | T1-T21, F1-F3, F7-F18 above | MT1-MT9, refsw3 GAPs |
 | polly2-rtl spec readers | re-transcribe isp §7-9, §15, num §3 (EdgeHW), H7a, H14, §4 (depth flavour), §8 (A1 edge site, A3, G3-G6, G12) to refsw3 `708fb8cd` (ARCHITECTURE §0.1): done; the edge sections to `4f3efe15` (§0.1b): done; the depth sections to `4f3efe15` (`0de9776b`, `4f3efe15`): done; the TSP sections to `4f3efe15` (`2bee80f2`, `4f3efe15`): done (M9, tsp header, §4.1, §4.3, §4.4, §8.1, §8.2, §9.1, §22) | M9 |
@@ -1721,13 +1754,39 @@ dreamcast-tests owner through `OPEN_ITEMS.md`. Never run from here. Ordered by w
 | D4 | ~~num §8 DEFECT D1: MipSelect divides by zero for `Sdet == 0`~~ | **closed** by refsw3 `2bee80f2`: measured (tsp2_mipdz, tsp2_mipdz2), a length of all ones and the last level (dzForce); the RTL follows (M9: K8 and dz compared on every such primitive) |
 | D5 | Races policy: gate only the deterministic cells? Model run-to-run sources (refresh)? | deterministic cells only, with `races_expected.txt` keyed by probe; refresh as a VRAM-model option |
 | D6 | Hangs: reproduce bumphang, the SPAN_SORT_CFG 0x100 / 0x10001 hangs, two empty keep-Z tiles, the SCALER_CTL stall? | yes where a mechanism is stated (bumphang counter, `p2_tbuf_hs`, scaler stall), behind `P2_HANGS=1`; not the 0x100 / 0x10001 hangs (no mechanism, each try costs a power cycle) |
-| D7 | timemeas scenes: the owner's PC emission, or our own emitter | the owner's emission |
+| D7 | timemeas scenes: the owner's PC emission, or our own emitter | **decided** below: the PC emission, built by us in dreamcast-tests |
 | D8 | Render log hex depth field (conv G6) | yes |
 | D9 | ~~When the depthgaps patch lands~~ | **closed**: landed as `708fb8cd`; the stored depth is the 64-bit key behind `p2_zword_pkg` |
 | D10 | Module prefix `p2_`, unit folder names, frame subsets | as conventions.md and ARCHITECTURE §1.1 |
 | D11 (new) | SB_ISTERR bit 0 ("ISP out of cache"): a CPU-visible register bit with a measured rule [M ispcache], which refsw3 does not model | model it in `p2_isp_pcache` behind `P2_ISTERR=1`, and ask nulldc3 to add it to refsw3 so that rule 1 (no rule refsw3 lacks) holds; off by default meanwhile |
 | D12 (new, M9) | Sampled full gates (rule 10): "all phase-halt items" and "1-1.5 h" do not leave room for the "random subset of free-running segments". The 6,084 phase-halt items in full cost 47,409 CPU s (3,255 s queue wall at J 16, 2026-11-23; 49,681 in M7's exhaustive run, 90,611 in M8's on a busier box), so a 4,000 s isp-tile-full budget draws about 119 of 7,401 free-running segments (1.9 % of their weight) beside the 12 always-run ones, and none on a clean tree | as built: every phase-halt item in full, the random draws whatever the budget leaves (the gates' default). Alternatives: (a) `SAMPLE_PH_RENDERS=8`, each phase-halt case's first 8 renders where it has more (130 cases; a third to a half of the phase-halt weight freed for free-running draws; phase-halt carries the RTL's state, so a case cannot be cut elsewhere); (b) a larger `SAMPLE_BUDGET` (each further hour at J 16 is about 55,000 CPU s; the free-running items in full cost 124,000 CPU s in M7's exhaustive run, 339,000 in M8's) |
 | D13 (new, M13; M12's verifier) | The VRAM-race class (§0 rule 4, §1.6) lets a render the hazard detector flags differ by any amount without failing. M13's sequencer mutant "a 5-word entry read as 6" passes scenegen seed 6 that way (the misread region array reads 20 framebuffer words; 8,041 words differ, all in the race class) and fails seed 18. In the tree the gates now list every race render with its difference count per configuration (frames, frames-full, frames-hw); frames-hw's readback check (M13 round 2) puts a readback after a VRAM-race render in the same class, counted per item and per configuration | as built: the class is reported, never a pass or a fail (the rule unchanged). Options: (a) a pinned expected-race list (`tb/frames/races_expected.txt`: case, render, configuration, the difference count or "equal"), failing when a render enters or leaves the list or its count changes; (b) failing when the number of race renders or of differing race renders of a configuration changes from the last accepted run (cheaper, weaker: a mutant that only changes the amount passes) |
+
+**Decided (2026-11-26, delegated by the owner on 2026-11-25: "decide as you see fit; the console is available").**
+These answers replace the proposals in the table where they differ.
+- **D1:** the TA is out of scope for the CORE milestones (M0-M13, MT0-MT9, MQ and the exhaustive run). The owner has
+  made the TA **the follow-up track once the CORE is done**. Keep the CORE's interfaces clean for it: the TA list input,
+  and p2-offline's refsw3-ta seam.
+- **D2:** as proposed. Display and SPG stalls are a VRAM-model option, off for timemeas and on for rendertimes.
+- **D5:** as proposed. Only deterministic cells are gated, through `tb/timing/races_expected.txt` keyed by probe. Refresh
+  is a VRAM-model option.
+- **D6:** as proposed. Hangs with a stated mechanism are reproduced behind `P2_HANGS=1`; the SPAN_SORT_CFG 0x100 /
+  0x10001 hangs are not.
+- **D7:** option (a), the PC emission, **built by this project in dreamcast-tests**. timemeas `main.c` is compiled for the
+  PC, and each scene is preceded by `echo T <scene>`. Commit it in dreamcast-tests, which is ours (commit regularly,
+  push only when asked). It replaces both the §4 request and the `tm_emit.cpp` fallback.
+- **D8:** yes. **D10:** as conventions.md. **D12:** as built.
+- **D11:** model SB_ISTERR bit 0 in `p2_isp_pcache` behind `P2_ISTERR=1`. Add the same rule to refsw3 on nulldc3 branch
+  `skmp/refsw3`, so that rule 1 holds.
+- **D13:** option (a). `tb/frames/races_expected.txt` is pinned, with case, render, configuration and the difference
+  count or "equal". The gate fails when a render enters or leaves the list, or its count changes. As built (MT0):
+  `tools/gate/races_expected.py`, a step of make frames / frames-full (gate `frames`) and frames-hw / frames-hw-full
+  (gate `frames-hw`, an item's race renders and its race-class differences); only the cases that ran are checked; built
+  with `--write` from the accepted runs; a selftest (a changed count, a dropped and an extra line must fail).
+- **Console:** from MT0 on, the MT milestones may run their own console probes (T1-T21; §3 said "never run from here").
+  - Use only dreamcast-tests `run2.sh hw=` (or `hwrun.sh`), under `/tmp/pvr_tests/console.lock`.
+  - Never run two console jobs at once, and never use `dc-tool-ip -r`.
+  - Archive every result in dreamcast-tests like the existing `fit/hw` tests.
 
 ## 6. Risks
 

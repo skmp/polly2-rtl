@@ -210,4 +210,8 @@ grep -h '^frames_hw: .*\(differ, refsw3\|pixels differ, refsw3 equal\|did not en
 while IFS= read -r l; do note "$l"; done < "$GATE_DIR/tb.txt"
 grep -qE '\([1-9][0-9]* FAIL\)' "$GATE_DIR/tb.txt" && { GATE_LINES+=("frames-hw: FAIL"); GATE_FAILED=1; }
 grep -qE '^[a-z]+-base: [1-9]' "$GATE_DIR/tb.txt" || { GATE_LINES+=("frames-hw: no item ran: FAIL"); GATE_FAILED=1; }
+# PLAN 5 D13 (a): the VRAM-race renders against the pinned list tb/frames/races_expected.txt (a render that enters or
+# leaves it, or a count that changes, fails; only the cases that ran are checked), with the checker's selftest
+gate_step races-expected python3 tools/gate/races_expected.py --gate frames-hw --selftest "$GATE_DIR"/runs-*/*.log
+while IFS= read -r l; do note "$l"; done < <(grep '^races-expected: ' "$GATE_DIR/races-expected.log" | tail -12)
 gate_end
