@@ -1,0 +1,46 @@
+# docs/probes.txt: the status of every console probe of PLAN 3 (timing T1-T21, functional F1-F18), read by
+# tools/timing/races_check.py (PLAN 1.5: a probe marked landed must have no line left in tb/timing/races_expected.txt).
+# Kept by hand: a probe's line changes when its console run is archived in dreamcast-tests (landed) or when it is closed.
+#
+# <probe> | <status> | <unblocks> | <where it stands (2026-11-26, MT0)>
+# status: open (not run), partial (run in part; what is known is in docs/timing.md), landed (run and archived; its
+# mechanism fitted or decided, its expected misses gone), closed (answered otherwise, or not needed)
+T1  | partial | VR_LAT, SEQ_AHEAD, OLW_AHEAD; MT1-MT7 | tim 3.1a (t1stamp_clock, not committed in dreamcast-tests: T1_SET 1 calibration done; T1_SET 2 and b-e open; the probe wedged the console twice, a safer design is needed first)
+T2  | open    | ISP_*, row-skip rule, MV_GAP; MT1 | TM_ISPRAST
+T3  | open    | RUNQ_N / flags / ENT_N, the 32x1-rows pace; MT2 | TM_ISPQ2
+T4  | open    | the row barrier form; MT2 | TM_CUT2 (the cut overlap table 58 of 128, 11 of 256)
+T5  | open    | sorter rates and emit condition, early drains; MT3 | TM_ORDER + stamps
+T6  | open    | STORE_N, replacement, PT's 58; MT4 | TM_SETUPK2 (sort off 0x000 only)
+T7  | open    | ALU_NM, PXQ_*, lineshare; MT5 | TM_SPAN2
+T8  | open    | texture cache organisation, miss latency, coherence; MT6 | TM_TEXC
+T9  | open    | VR_ROW (fitted at MT0 meanwhile, docs/timing.md 11), half contention; MT7 | TM_WO
+T10 | open    | WO_FIFO, the shared-port mechanism; MT7, MT8 | accbuf_wo_races
+T11 | open    | p2_tbuf_hs; MT8 | accbuf T flush refined + stamps
+T12 | open    | P2_PTCARRY (K1 / K2); MT8 | ptchunkcarry2_races + stamps
+T13 | open    | sweep costs, PCACHE_N, what pcache stores; MT1, MT6, MT7 | TM_PASS
+T14 | open    | arbiter priority (display, TA, refresh); MT9 | TM_VRAM
+T15 | open    | ev_vid, WO_FIFO; MT9 | end-of-render bits
+T16 | open    | SupSample points a clock; MT6 | untimed features
+T17 | open    | whole-frame acceptance; MT9 | pvr-renderer over 786 dumps, display off
+T18 | open    | bumphang structure; MT9 | bumphang counter
+T19 | open    | the store key, mixed-vmask run start; MT4, MT5 | mixed-volume runs
+T20 | open    | the PASS_DONE wait; MT8 with T12 | PT pass turnaround
+T21 | open    | p2_isp_ctl_tg; tim 3.12 | pre-sorted TR-modifier background skip
+F1  | open    | num D1 (mipmapped, Sdet == 0) | covmeas degenerate, mipmapped
+F2  | open    | num A1 / H7b (SupSample half-line, B = -0) | ssrare-like page
+F3  | open    | num G1 (DCalcCtrl 1 adder reach) | first-vertex sums
+F4  | closed  | - | faredge resolved by refsw3 6784ea3d (1,340 / 1,340)
+F5  | closed  | - | zovf resolved by 708fb8cd (1,080 / 1,080)
+F6  | closed  | - | the depthgaps patch landed as 708fb8cd
+F7  | open    | isp 15 #17 (keep Z keeps the stencil) | volume in entry 1, keep Z entry 2
+F8  | open    | isp 15 #18 (OP_MOD with no OP / PT list) | an entry with only OP_MOD and TR
+F9  | open    | isp 15 #16 (VolumeMode 3..7) | modvol variants
+F10 | open    | isp 15 #19 (a quad at a chunk boundary) | ptchunkq / ptchunklag variants
+F11 | open    | conv G8 (SOFTRESET, power-on tile buffers) | render, SOFTRESET, keep-Z tile
+F12 | open    | tsp 22 #9 (offsKept with an all-zero setter) | offspersist variant
+F13 | open    | isp 15 #14, tsp 22 #1 (PARAM_BASE not 1 MB aligned) | PARAM_BASE with bit 19
+F14 | closed  | - | infinite / 2^126 determinant: refsw3 4f3efe15; det 0 with an infinite corner: depthgaps_dzinf
+F15 | open    | tsp 22 #11 (stuck alpha with textures, autosort) | blendsel variants
+F16 | open    | tsp 22 #12-14 (SupSample in PT_MV, TR modvols, 1555 / 4444 render to texture) | as TODO C6, C7, C10
+F17 | closed  | - | edge.h's points, refsw3 1040c4aa (left: why row 31, no probe designed)
+F18 | partial | isp 15 #6, #11 (a slope of 2^128 or more after the division) | 0de9776b measured the rest

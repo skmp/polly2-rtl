@@ -133,12 +133,13 @@ module p2_core
   p2_rm_t      cmd_rm;
   p2_entrec_t  cmd_rec;
   logic        pass_done, anyfail, ent_done;
+  logic        ctl_busy;               // statistics (the timing tap, +occlog)
   p2_isp_ctl u_ctl (.clk, .rst, .ent_v, .ent_rdy, .ent, .bg_tag(isp_backgnd_t), .bg_depth(isp_backgnd_d),
     .sw_v, .sw_op, .sw_key, .sw_tag, .sw_busy, .walk_v, .walk_addr, .walk_scan, .walk_rm, .tilex, .tiley,
     .has_prim, .front_idle, .back_idle, .ho_take, .ho_block, .more, .more_clr, .pt, .pt_en, .pt_restart, .pt_set_cur,
     .pt_cur, .pt_fw_clr, .pt_fw, .pt_hold, .pt_more_chunks, .pc_reset, .pc_tr, .pc_fill_en, .pc_ovf, .rp_start,
     .rp_busy, .src_rp, .cmd_v, .cmd_rdy, .cmd_end, .cmd_rm, .cmd_opinpt, .cmd_last, .cmd_rec, .cut_idle, .pass_done,
-    .anyfail, .halt_en(1'b0), .resume(1'b0), .halted(), .halt_phase(), .busy(), .ent_done, .st_chunks(), .st_passes(),
+    .anyfail, .halt_en(1'b0), .resume(1'b0), .halted(), .halt_phase(), .busy(ctl_busy), .ent_done, .st_chunks(), .st_passes(),
     .st_trpasses(), .st_ptshades());
 
   // ---------------------------------------------------------------------------------------------- ISP: front (C1, C2)
@@ -242,7 +243,9 @@ module p2_core
   // ---------------------------------------------------------------------------------------------- the run queue, the sorter
   logic       q_v, q_rdy, so_v, so_rdy, so_nd;
   p2_rs_t     q_d, so_d;
-  p2_runq u_runq (.clk, .rst, .in_v(rs_v), .in_rdy(rs_rdy), .in_d(rs), .out_v(q_v), .out_rdy(q_rdy), .out_d(q_d), .occ());
+  logic [$clog2(300 + 1)-1:0] runq_occ;   // statistics (the timing tap, +occlog); p2_runq's RUNQ_N 300
+  p2_runq u_runq (.clk, .rst, .in_v(rs_v), .in_rdy(rs_rdy), .in_d(rs), .out_v(q_v), .out_rdy(q_rdy), .out_d(q_d),
+    .occ(runq_occ));
   p2_sort u_sort (.clk, .rst, .cfg_on(span_sort_cfg[0]), .cfg_offs(span_sort_cfg[8]), .in_v(q_v), .in_rdy(q_rdy),
     .in_d(q_d), .out_v(so_v), .out_rdy(so_rdy), .out_d(so_d), .out_new_drain(so_nd), .t_full(), .t_wait(), .t_end());
   logic       eq_v, eq_rdy;
@@ -278,8 +281,9 @@ module p2_core
     .t_srq(), .t_pinned(), .t_la_wait(), .t_job(), .t_hit());
   logic         pr_v, pr_rdy;
   p2_tsp_prim_t pr;
+  logic         tpf_idle, tsu_idle, rst_busy;      // statistics (the timing tap, +occlog)
   p2_tsp_pfetch u_tpfetch (.clk, .rst, .jb_v, .jb_rdy, .jb, .param_base, .shad_intensity(fpu_shad_scale[8]),
-    .pr_v, .pr_rdy, .pr, .idle(), .m_v(m3_v), .m_rdy(c_rdy[P2_C_TSP_PFETCH]), .m_addr(m3_addr),
+    .pr_v, .pr_rdy, .pr, .idle(tpf_idle), .m_v(m3_v), .m_rdy(c_rdy[P2_C_TSP_PFETCH]), .m_addr(m3_addr),
     .m_rv(c_rv[P2_C_TSP_PFETCH]), .m_rrdy(m3_rrdy), .m_rdata(c_rdata[P2_C_TSP_PFETCH][31:0]));
   logic                        hold;
   p2_fp16_t [P2_TSP_NM-1:0]    rs_a;
@@ -287,7 +291,7 @@ module p2_core
   p2_tsp_rsp_t [P2_TSP_NM-1:0] rs_p;
   p2_tsp_setup u_tsetup (.clk, .rst, .pr_v, .pr_rdy, .pr, .fpu_shad_scale, .fpu_perp_val, .hold, .rs_a, .rs_b, .rs_p,
     .sh_v, .sh_idx, .sh_w, .sp_v, .sp_idx, .sp_plane, .sp_w, .sk_v, .sk_idx, .sk_w, .done, .done_idx,
-    .idle(), .t_issue(), .t_cls(), .t_pc(), .t_uw(), .t_wv(), .t_wrd());
+    .idle(tsu_idle), .t_issue(), .t_cls(), .t_pc(), .t_uw(), .t_wv(), .t_wrd());
 
   // ---------------------------------------------------------------------------------------------- TSP: run start, queue, pipe
   logic          rd2_v, rd2_rdy;
@@ -295,16 +299,19 @@ module p2_core
   p2_tsp_rstart u_rstart (.clk, .rst, .flush, .half(half_offset[1]), .er_v(tq_v), .er_rdy(tq_rdy),
     .er_tilex(tq_d.tilex), .er_tiley(tq_d.tiley), .in_v(hd_v), .in_rdy(hd_rdy), .in_item(hd_item), .in_need(hd_need),
     .in_idx(hd_idx), .rw_v, .rw_idx, .rw_row, .rw_hdr, .rw_k, .rw_plane, .hold, .rs_a, .rs_b, .rs_p,
-    .o_v(rd2_v), .o_rdy(rd2_rdy), .o_d(rd2_d), .t_busy(), .t_reload(), .t_mul());
+    .o_v(rd2_v), .o_rdy(rd2_rdy), .o_d(rd2_d), .t_busy(rst_busy), .t_reload(), .t_mul());
   logic          pq_v, pq_rdy, cred_ret;
   p2_tsp_rdesc_t pq_d;
+  logic [5:0]    pxq_runs;             // statistics (the timing tap, +occlog)
+  logic [8:0]    pxq_pix;
   p2_pxq u_pxq (.clk, .rst, .i_v(rd2_v), .i_rdy(rd2_rdy), .i_d(rd2_d), .o_v(pq_v), .o_rdy(pq_rdy), .o_d(pq_d), .cred_ret,
-    .t_runs(), .t_pix());
+    .t_runs(pxq_runs), .t_pix(pxq_pix));
 
   logic                   tb_rd_en, tb_rd_b2, tb_wr_en, tb_wr_b2, tb_hold, tb_swap, wo_busy, t_p10;
   logic [P2_PIX_BITS-1:0] tb_rd_idx, tb_wr_idx;
   logic [31:0]            tb_rd_b1_data, tb_rd_b2_data, tb_wr_data;
   p2_pp_ctl_t             p10c;
+  logic                   pp_stall, pp_tstall, pp_fill, pp_miss;   // statistics (the timing tap, +occlog)
   p2_tsp_pp u_pp (.clk, .rst, .flush, .text_control, .pal_ram_ctrl(pal_ram_ctrl[1:0]), .half_tex(half_offset[2]),
     .fog_col_ram, .fog_col_vert, .fog_density(fog_density[15:0]), .fog_clamp_max, .fog_clamp_min, .pt_alpha_ref,
     .pal_we, .pal_widx, .pal_wdata, .ft_we, .ft_idx, .ft_wdata, .ok_we(1'b0), .ok_wdata('0), .offs_kept(),
@@ -313,16 +320,17 @@ module p2_core
     .m_rdata(c_rdata[P2_C_TEX]),
     .tb_rd_en, .tb_rd_idx, .tb_rd_b2, .tb_rd_b1_data, .tb_rd_b2_data, .tb_wr_en, .tb_wr_b2, .tb_wr_idx, .tb_wr_data,
     .fb_v(fbk_v), .fb_rdy(fbk_rdy), .fb(fbm), .rel_v, .rel_need, .rel_idx, .ext_stall(1'b0), .tb_hold, .wo_busy,
-    .stall(),
+    .stall(pp_stall),
     .p3_v(), .p3_take(), .p3_ctl(), .p3_val(), .p3_q(), .p3_base(), .p3_offs(), .p3_level(), .p3_k(), .p3_rl(),
     .p3_rk(), .t_p7(), .t_p7_ctl(), .t_p10, .t_p10_ctl(p10c), .t_stuck(), .t_at(), .t_drain(), .t_p0(),
-    .t_tex_stall(), .t_fill(), .t_miss(), .t_fb_block());
+    .t_tex_stall(pp_tstall), .t_fill(pp_fill), .t_miss(pp_miss), .t_fb_block());
 
   // ---------------------------------------------------------------------------------------------- the tile buffers, write-out
   logic        wo_re, wo_gnt, wo_start, wo_eof, wo_rd_done;
   logic [9:0]  wo_idx;
   logic [31:0] wo_data;
   logic [5:0]  wo_tx, wo_ty;
+  logic        tctl_idle;              // statistics (the timing tap, +occlog)
   p2_tbuf u_tbuf (.clk, .rst, .swap(tb_swap), .sel(),
     .rd_en(tb_rd_en), .rd_idx(tb_rd_idx), .rd_b2(tb_rd_b2), .rd_b1_data(tb_rd_b1_data), .rd_b2_data(tb_rd_b2_data),
     .wr_en(tb_wr_en), .wr_b2(tb_wr_b2), .wr_idx(tb_wr_idx), .wr_data(tb_wr_data),
@@ -330,7 +338,7 @@ module p2_core
     .dbg_we(1'b0), .dbg_b2(1'b0), .dbg_idx('0), .dbg_wdata('0), .dbg_b1(), .dbg_b2_data());
   p2_tbuf_ctl #(.P2_HS(P2_HS)) u_tctl (.clk, .rst, .flush, .p10_eoe(t_p10 && p10c.eoe), .eq_v, .eq_rdy, .eq(eq_d),
     .swap(tb_swap), .hold(tb_hold), .wo_start, .wo_tx, .wo_ty, .wo_eof, .wo_busy, .wo_rd_done, .ev_tsp, .ev_vid,
-    .idle());
+    .idle(tctl_idle));
   p2_wout u_wout (.clk, .rst, .flush, .fb_w_ctrl, .fb_w_linestride, .fb_w_sof1, .fb_w_sof2, .fb_x_clip, .fb_y_clip,
     .fb_r_ctrl, .scaler_ctl, .y_coeff, .start(wo_start), .tx(wo_tx), .ty(wo_ty), .eof(wo_eof), .busy(wo_busy),
     .rd_done(wo_rd_done), .rd_re(wo_re), .rd_idx(wo_idx), .rd_gnt(wo_gnt), .rd_data(wo_data),
@@ -364,6 +372,244 @@ module p2_core
         end
         $fflush(zt_fd);
       end
+    end
+
+  // ---------------------------------------------------------------------------------------------- the timing tap (sim)
+  // PLAN MT0, 1.5 / conventions 7.6: with +p2timing (p2-offline's P2_TIMING=1), one line a render on stderr when ev_isp,
+  // ev_tsp and ev_vid have all fired, just before p2-offline's "p2: render" line:
+  //   p2: timing isp <c> tsp <c> vid <c> ent <n> obj <n> obj0 <c> prim <n> ho <n> cull <n> rdesc <n> runs <n>
+  //              null <n> cut0 <c> cut1 <c> cutbusy <n> qisp <n> qmax <n> sorted <n> jobs <n> setups <n> rstart <n>
+  //              pxq <n> px <n> px0 <c> px1 <c> tex <n> miss <n> fill <n> wo <n> wo0 <c> wow <n> wow0 <c> wow1 <c>
+  // <c>: a clock counted as p2-offline's isp / tsp / video (the STARTRENDER write is clock 0; `start` is clock 1), -1 when
+  // it did not happen; <n>: a count over the render. What each counts (a handshake or a pulse of the signal named):
+  //   ent ent_v&&ent_rdy (region array entries), obj ob_v&&ob_rdy (objects out of p2_isp_olw; obj0 the first), prim
+  //   asm_v&&asm_rdy (primitives assembled), ho ho_take (set-up primitives to the raster; replays not counted), cull
+  //   pc_v&&pc_culled, rdesc rd_v&&ra_rdy (descriptors into the raster, replays counted), runs / null rs_v&&rs_rdy
+  //   (run items cut / null eoe items; cut0 / cut1 the first and last run), cutbusy clocks p2_isp_cut not idle, qisp the
+  //   run queue's places taken at ev_isp, qmax its most, sorted so_v&&so_rdy, jobs jb_v&&jb_rdy (TSP parameter fetches),
+  //   setups `done` (primitives set up), rstart rd2_v&&rd2_rdy (runs started), pxq pq_v&&pq_rdy (runs into the pipe), px
+  //   t_p10 (points leaving P10; px0 / px1 the first and the last), tex VRAM texture requests granted, miss / fill the
+  //   texture cache's misses / clocks filling, wo wo_start (tiles written out; wo0 the first), wow VRAM write-out words
+  //   granted (wow0 / wow1 the first and the last).
+  // It reads p2_core's wires only and changes no clock.
+  bit     tm_en = 1'b0;
+  bit     tm_run = 1'b0;
+  longint tm_c, tm_isp, tm_tsp, tm_vid, tm_obj0, tm_cut0, tm_cut1, tm_px0, tm_px1, tm_wo0, tm_wow0, tm_wow1;
+  longint tm_ent, tm_obj, tm_prim, tm_ho, tm_cull, tm_rdesc, tm_runs, tm_null, tm_cutbusy, tm_qisp, tm_qmax, tm_sorted,
+          tm_jobs, tm_setups, tm_rstart, tm_pxq, tm_px, tm_tex, tm_miss, tm_fill, tm_wo, tm_wow;
+  initial tm_en = $test$plusargs("p2timing");
+  always @(posedge clk)
+    if (tm_en && !rst) begin
+      if (start) begin
+        tm_run = 1'b1;
+        tm_c = 1;
+        {tm_isp, tm_tsp, tm_vid, tm_obj0, tm_cut0, tm_cut1, tm_px0, tm_px1, tm_wo0, tm_wow0, tm_wow1} = {11{64'(-1)}};
+        {tm_ent, tm_obj, tm_prim, tm_ho, tm_cull, tm_rdesc, tm_runs, tm_null, tm_cutbusy, tm_qisp, tm_qmax, tm_sorted,
+         tm_jobs, tm_setups, tm_rstart, tm_pxq, tm_px, tm_tex, tm_miss, tm_fill, tm_wo, tm_wow} = '0;
+      end else if (tm_run)
+        tm_c = tm_c + 1;
+      if (tm_run) begin
+        if (ent_v && ent_rdy) tm_ent++;
+        if (ob_v && ob_rdy) begin
+          if (tm_obj == 0) tm_obj0 = tm_c;
+          tm_obj++;
+        end
+        if (asm_v && asm_rdy) tm_prim++;
+        if (ho_take) tm_ho++;
+        if (pc_v && pc_culled) tm_cull++;
+        if (rd_v && ra_rdy) tm_rdesc++;
+        if (rs_v && rs_rdy) begin
+          if (rs.null_) tm_null++;
+          else begin
+            if (tm_runs == 0) tm_cut0 = tm_c;
+            tm_cut1 = tm_c;
+            tm_runs++;
+          end
+        end
+        if (!cut_idle) tm_cutbusy++;
+        if (64'(runq_occ) > tm_qmax) tm_qmax = 64'(runq_occ);
+        if (so_v && so_rdy) tm_sorted++;
+        if (jb_v && jb_rdy) tm_jobs++;
+        if (done) tm_setups++;
+        if (rd2_v && rd2_rdy) tm_rstart++;
+        if (pq_v && pq_rdy) tm_pxq++;
+        if (t_p10) begin
+          if (tm_px == 0) tm_px0 = tm_c;
+          tm_px1 = tm_c;
+          tm_px++;
+        end
+        if (m4_v && c_rdy[P2_C_TEX]) tm_tex++;
+        if (pp_miss) tm_miss++;
+        if (pp_fill) tm_fill++;
+        if (wo_start) begin
+          if (tm_wo == 0) tm_wo0 = tm_c;
+          tm_wo++;
+        end
+        if (m5_v && c_rdy[P2_C_WOUT]) begin
+          if (tm_wow == 0) tm_wow0 = tm_c;
+          tm_wow1 = tm_c;
+          tm_wow++;
+        end
+        if (ev_isp && tm_isp < 0) begin
+          tm_isp  = tm_c;
+          tm_qisp = 64'(runq_occ);
+        end
+        if (ev_tsp && tm_tsp < 0) tm_tsp = tm_c;
+        if (ev_vid && tm_vid < 0) tm_vid = tm_c;
+        if (tm_isp >= 0 && tm_tsp >= 0 && tm_vid >= 0) begin
+          $fwrite(32'h8000_0002, "p2: timing isp %0d tsp %0d vid %0d ent %0d obj %0d obj0 %0d prim %0d ho %0d cull %0d",
+                  tm_isp, tm_tsp, tm_vid, tm_ent, tm_obj, tm_obj0, tm_prim, tm_ho, tm_cull);
+          $fwrite(32'h8000_0002, " rdesc %0d runs %0d null %0d cut0 %0d cut1 %0d cutbusy %0d qisp %0d qmax %0d sorted %0d",
+                  tm_rdesc, tm_runs, tm_null, tm_cut0, tm_cut1, tm_cutbusy, tm_qisp, tm_qmax, tm_sorted);
+          $fwrite(32'h8000_0002, " jobs %0d setups %0d rstart %0d pxq %0d px %0d px0 %0d px1 %0d tex %0d miss %0d fill %0d",
+                  tm_jobs, tm_setups, tm_rstart, tm_pxq, tm_px, tm_px0, tm_px1, tm_tex, tm_miss, tm_fill);
+          $fwrite(32'h8000_0002, " wo %0d wo0 %0d wow %0d wow0 %0d wow1 %0d\n", tm_wo, tm_wo0, tm_wow, tm_wow0, tm_wow1);
+          tm_run = 1'b0;
+        end
+      end
+    end
+
+  // ---------------------------------------------------------------------------------------------- +occlog (sim)
+  // conventions 7.5: the per-clock occupancy trace in polly2-rtl-lite's POLLY2OCC 1 format (tools/occview): with
+  // +occlog[=file] (default occ.log), a line "@<clock> <hex> [v<i>=<n> ...]" whenever a unit's 2-bit state or a value
+  // changes, the clock counted from the core's reset; "R <clock>" at each render's `start`, "D <clock>" when its ev_isp,
+  // ev_tsp and ev_vid have all fired; "X <track> <clock> <len> <addr>" for each episode of an event track, written when
+  // it ends (not in clock order). A unit's state: 0 waiting for input, 1 busy, 2 blocked on its output (its valid held
+  // against a ready low). Each unit's from its own handshakes and idle / busy outputs:
+  //   SEQ  seq_busy / ent_v&&!ent_rdy        CTL  ctl_busy / cmd_v&&!cmd_rdy     OLW  !olw_idle / ob_v&&!ob_rdy
+  //   IPF  !pf_idle / asm_v&&!asm_rdy        ISU  !su_idle / su_v&&!su_rdy       PCACHE rp_busy / rp_v&&!rp_rdy
+  //   RAST !ra_idle / row_v&&!out_rdy        PIX  !px_idle                       IFB  !fb_idle
+  //   CUT  !cut_idle / rs_v&&!rs_rdy         RUNQ q_v / !rs_rdy (full)           SORT q_v||so_v / so_v&&!so_rdy
+  //   STORE so_v||hd_v||jb_v / hd_v&&!hd_rdy  TPF !tpf_idle / pr_v&&!pr_rdy      TSU  !tsu_idle
+  //   RSTART rst_busy||hd_v / rd2_v&&!rd2_rdy PXQ pq_v / !rd2_rdy (full)         PP   pq_v||t_p10 / pp_stall
+  //   TBUF !tctl_idle / tb_hold              WOUT wo_busy / m5_v&&!m5_rdy        MEM  any client's request / one held
+  //   TEXSTALL pp_tstall                     PTC  pt / o_v&&!o_rdy               IBUF any port of p2_isp_buf or sw_busy
+  //   TILEQ tq_v / !tq_in_rdy (full)         ENTQ eq_v / !eqi_rdy (full)         REGS reg_wr||reg_rd
+  // IBUF (the tile depth / tag RAMs) and REGS have no output handshake, so they are never 2: IBUF's row barrier
+  // (bar_ok) shows as PIX / CUT waiting. PTC is busy through the punch-through phase, 2 while its hand-off is held.
+  // Values: v0 ISP tile x, v1 tile y, v2 run queue places, v3 pixel queue pixels, v4 its runs, v5 write-out tile x, v6
+  // tile y, v7 entries taken, v8 tile queue records, v9 entry queue records (both p2_isp_entq's ENT_N 32, counted here
+  // from their handshakes), v10 register writes. Event track 0 TEX$FILL (pp_fill: the texture cache filling), stall.
+  localparam int OCC_NU = 27, OCC_NV = 11;
+  int     occ_fd = 0;
+  string  occ_fn;
+  longint occ_cyc = 0;
+  bit     occ_first = 1'b1, occ_live = 1'b0, occ_fi, occ_ft, occ_fv;
+  logic [2*OCC_NU-1:0] occ_vec, occ_prev;
+  int     occ_val [OCC_NV], occ_pv [OCC_NV];
+  int     occ_ents = 0, occ_tqn = 0, occ_eqn = 0, occ_wrs = 0;
+  bit     occ_ev_op = 1'b0;
+  longint occ_ev_c0;
+  function automatic logic [1:0] occ_st(input logic busy, input logic blk);
+    return blk ? 2'd2 : busy ? 2'd1 : 2'd0;
+  endfunction
+  always_comb begin
+    occ_vec = '0;
+    occ_vec[2*0  +: 2] = occ_st(seq_busy, ent_v && !ent_rdy);
+    occ_vec[2*1  +: 2] = occ_st(ctl_busy, cmd_v && !cmd_rdy);
+    occ_vec[2*2  +: 2] = occ_st(!olw_idle, ob_v && !ob_rdy);
+    occ_vec[2*3  +: 2] = occ_st(!pf_idle, asm_v && !asm_rdy);
+    occ_vec[2*4  +: 2] = occ_st(!su_idle, su_v && !su_rdy);
+    occ_vec[2*5  +: 2] = occ_st(rp_busy, rp_v && !rp_rdy);
+    occ_vec[2*6  +: 2] = occ_st(!ra_idle, row_v && !out_rdy);
+    occ_vec[2*7  +: 2] = occ_st(!px_idle, 1'b0);
+    occ_vec[2*8  +: 2] = occ_st(!fb_idle, 1'b0);
+    occ_vec[2*9  +: 2] = occ_st(!cut_idle, rs_v && !rs_rdy);
+    occ_vec[2*10 +: 2] = occ_st(q_v, !rs_rdy);
+    occ_vec[2*11 +: 2] = occ_st(q_v || so_v, so_v && !so_rdy);
+    occ_vec[2*12 +: 2] = occ_st(so_v || hd_v || jb_v, hd_v && !hd_rdy);
+    occ_vec[2*13 +: 2] = occ_st(!tpf_idle, pr_v && !pr_rdy);
+    occ_vec[2*14 +: 2] = occ_st(!tsu_idle, 1'b0);
+    occ_vec[2*15 +: 2] = occ_st(rst_busy || hd_v, rd2_v && !rd2_rdy);
+    occ_vec[2*16 +: 2] = occ_st(pq_v, !rd2_rdy);
+    occ_vec[2*17 +: 2] = occ_st(pq_v || t_p10, pp_stall);
+    occ_vec[2*18 +: 2] = occ_st(!tctl_idle, tb_hold);
+    occ_vec[2*19 +: 2] = occ_st(wo_busy, m5_v && !c_rdy[P2_C_WOUT]);
+    occ_vec[2*20 +: 2] = occ_st(c_v != '0, (c_v & ~c_rdy) != '0);
+    occ_vec[2*21 +: 2] = occ_st(pp_tstall, 1'b0);
+    occ_vec[2*22 +: 2] = occ_st(pt, o_v && !o_rdy);
+    occ_vec[2*23 +: 2] = occ_st(f_re || c_re || fb_re || w_v || cv_we || cs_we || fbw_v || sw_busy, 1'b0);
+    occ_vec[2*24 +: 2] = occ_st(tq_v, !tq_in_rdy);
+    occ_vec[2*25 +: 2] = occ_st(eq_v, !eqi_rdy);
+    occ_vec[2*26 +: 2] = occ_st(reg_wr || reg_rd, 1'b0);
+  end
+  always_comb begin
+    occ_val[0] = int'(tilex);
+    occ_val[1] = int'(tiley);
+    occ_val[2] = int'(runq_occ);
+    occ_val[3] = int'(pxq_pix);
+    occ_val[4] = int'(pxq_runs);
+    occ_val[5] = int'(wo_tx);
+    occ_val[6] = int'(wo_ty);
+    occ_val[7] = occ_ents;
+    occ_val[8] = occ_tqn;
+    occ_val[9] = occ_eqn;
+    occ_val[10] = occ_wrs;
+  end
+  initial begin
+    if ($value$plusargs("occlog=%s", occ_fn)) occ_fd = $fopen(occ_fn, "w");
+    else if ($test$plusargs("occlog")) occ_fd = $fopen("occ.log", "w");
+    if (occ_fd != 0) begin
+      $fwrite(occ_fd, "POLLY2OCC 1\n");
+      $fwrite(occ_fd, "U 0 SEQ\nU 1 CTL\nU 2 OLW\nU 3 IPF\nU 4 ISU\nU 5 PCACHE\nU 6 RAST\nU 7 PIX\nU 8 IFB\nU 9 CUT\n");
+      $fwrite(occ_fd, "U 10 RUNQ\nU 11 SORT\nU 12 STORE\nU 13 TPF\nU 14 TSU\nU 15 RSTART\nU 16 PXQ\nU 17 PP\nU 18 TBUF\n");
+      $fwrite(occ_fd, "U 19 WOUT\nU 20 MEM\nU 21 TEXSTALL\nU 22 PTC\nU 23 IBUF\nU 24 TILEQ\nU 25 ENTQ\nU 26 REGS\n");
+      $fwrite(occ_fd, "V 0 isp_tx\nV 1 isp_ty\nV 2 runq_n\nV 3 pxq_pix\nV 4 pxq_runs\nV 5 wo_tx\nV 6 wo_ty\nV 7 entries\n");
+      $fwrite(occ_fd, "V 8 tileq_n\nV 9 entq_n\nV 10 reg_wrs\n");
+      $fwrite(occ_fd, "F 10 2 300\nF 16 3 %0d\nF 24 8 32\nF 25 9 32\n", P2_PXQ_PIX);
+      $fwrite(occ_fd, "T 0 TEX$FILL stall\n");
+    end
+  end
+  always @(posedge clk)
+    if (occ_fd != 0) begin
+      occ_cyc++;
+      if (rst) {occ_tqn, occ_eqn} = '0;
+      else begin
+        occ_tqn += int'(tq_in_v && tq_in_rdy) - int'(tq_v && tq_rdy);
+        occ_eqn += int'(eqi_v && eqi_rdy) - int'(eq_v && eq_rdy);
+      end
+      if (!rst) begin
+        if (start) begin
+          $fwrite(occ_fd, "R %0d\n", occ_cyc);
+          occ_live = 1'b1;
+          {occ_fi, occ_ft, occ_fv} = '0;
+        end
+        if (ent_v && ent_rdy) occ_ents++;
+        if (reg_wr) occ_wrs++;
+        if (occ_first || occ_vec != occ_prev || occ_val != occ_pv) begin
+          $fwrite(occ_fd, "@%0d %h", occ_cyc, occ_vec);
+          for (int i = 0; i < OCC_NV; i++)
+            if (occ_first || occ_val[i] != occ_pv[i])
+              $fwrite(occ_fd, " v%0d=%0d", i, occ_val[i]);
+          $fwrite(occ_fd, "\n");
+          occ_prev  = occ_vec;
+          occ_pv    = occ_val;
+          occ_first = 1'b0;
+        end
+        if (occ_ev_op && !pp_fill) begin
+          $fwrite(occ_fd, "X 0 %0d %0d 0\n", occ_ev_c0, occ_cyc - occ_ev_c0);
+          occ_ev_op = 1'b0;
+        end
+        if (!occ_ev_op && pp_fill) begin
+          occ_ev_op = 1'b1;
+          occ_ev_c0 = occ_cyc;
+        end
+        if (occ_live) begin
+          if (ev_isp) occ_fi = 1'b1;
+          if (ev_tsp) occ_ft = 1'b1;
+          if (ev_vid) occ_fv = 1'b1;
+          if (occ_fi && occ_ft && occ_fv) begin
+            $fwrite(occ_fd, "D %0d\n", occ_cyc);
+            $fflush(occ_fd);
+            occ_live = 1'b0;
+          end
+        end
+      end
+    end
+  final
+    if (occ_fd != 0) begin
+      if (occ_ev_op) $fwrite(occ_fd, "X 0 %0d %0d 0\n", occ_ev_c0, occ_cyc - occ_ev_c0);
+      $fclose(occ_fd);
     end
 `endif
 endmodule

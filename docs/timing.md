@@ -1227,6 +1227,91 @@ left out here.)
 8. **Hangs**: bumphang's tile of stop and carry-over; two empty keep-Z tiles; SCALER_CTL change.
 
 
+## 11. The timing harness (MT0, 2026-11-26): K, VR_ROW and the starting table
+
+PLAN MT0; `make timing-harness`, `timing-harness-mutants`, `timing-fit`, `timing-report` (tb/mk/timing.mk,
+tools/timing/). The timed scenes are dreamcast-tests pvr-tests/timemeas `main.c` built for the PC with `TM_EMIT`
+(`make -C pvr-tests/timemeas emit`, dreamcast-tests `cab1e28`; PLAN 5 D7 option (a)): the console run's command stream,
+each measured render preceded by `echo T <what> a b c d`. p2-offline replays it with the timing tap (`P2_TIMING=1`:
+`p2: timing ...`, rtl/v1/p2_core.sv); `tools/timing/tm_log.py` writes the console's `T ... W ...` lines from the RTL's
+clocks (counts = 2 x (clocks + K)); `tools/timing/gate_timing.py` compares with the least of
+fit/timemeas_logs/timemeas_run*.log (analyze.py's combination). One render a scene (`TM_REPS` 1: the RTL is
+deterministic; a scene's renders always run in one process, and P2_RENDERS skips the others, so an item's result does not
+depend on where the stream is cut: the gate's scenes give the same clocks alone and inside the whole stream).
+
+### 11.1 The timing configuration (tb/timing/k.txt), fitted once (PLAN 0 rule 6)
+
+| value | fitted on | how | result |
+|---|---|---|---|
+| `VR_ROW` (the VRAM model's row change, `P2_VR_ROW`; ARCHITECTURE §3.2.1, §6) | `clip 0` against `clip 4`: the empty 0888 tile written out against the same tile with FB_X_CLIP leaving nothing, i.e. the write-out's per-line excess over the reader: console 311 clk | the least \|rtl - console\| over VR_ROW 4 .. 16 (make timing-fit: 127, 159, ..., 287, **319**, 351, ...) | **10** (error +8) |
+| `K` (STARTRENDER to the core's clock 0 plus the event to the CPU) | `bgonly 0 0 0 0`, the empty 0888 tile (five empty lists, the background): console 5997 counts = 2998.5 clk (the least of the archived runs; REPORT's 2998-3005, PLAN's "3005") | K = round(2998.5 - 2673) - 7 (Python's round, half to even: 326), the reading's lateness taken as the middle of the poll's 0 .. 14 | **319** |
+
+`VR_ROW` 10 is the timing runs' value only; the functional gates keep the model's 2 (their VRAM timing is swept anyway,
+VR_LAT 1 / 4 / 8 / 16 and +vramvary). With it the RTL's write-out of a single tile takes 1340 / 1084 / 1022 clk at 0888 /
+888 / 565 (console 1355 / 1105 / 1045, tim 3.11), after two MT0 changes in p2_wout_put (ARCHITECTURE §3.10 As built
+(MT0): the 888 pixel across a word boundary in one clock; a 16-word write FIFO between the pixel side and C5).
+
+### 11.2 The MT0 gate
+
+| check (tb/timing/gate.txt) | console | RTL + K | residual / difference | |
+|---|---|---|---|---|
+| abs tsp bgonly 0 0 0 0 (the fit scene) | 2998.5 | 2673 + 319 | 6.5 (0 .. 14) | PASS |
+| abs tsp wout 1 1 0 0 (565) | 2686.5 | 2356 + 319 | 11.5 | PASS |
+| abs tsp wout 4 1 0 0 (888) | 2745.5 | 2417 + 319 | 9.5 | PASS |
+| slope isp, cut k 0 - 3 (64 .. 384 more runs) | 1.004 clk a run | 1.000 | within 0.1 | PASS |
+| diff isp cut k 0 .. 5 (seen against not seen) | 61 / 126 / 252 / 383 / 127 / 126 | 64 / 128 / 256 / 384 / 128 / 128 | within 5 | PASS |
+
+Reported, not gated: cut k 6, 7 (a line of 32 one-pixel runs, 4 / 8 lines): console 126 / 252, RTL 134 / 258 (MT2's cut
+tables); cut's TSP differences (console 170 / 1170 for k 0 / 3 against the RTL's 0 / 496: the TSP side of small runs,
+MT5 / MT6). The mutant gate: the cutter +1 clk a run fails every cut check (slope 2.000, k 0: 128 against 61); the 888
+pixel in two clocks and a 2-word write FIFO fail the wout checks.
+
+### 11.3 The starting table (make timing-report, 2026-11-26; build/timing/report/table.txt)
+
+6,381 scenes of the variants all, cut (order, setupk, sortoff: the palette clock, read by order.py, not in the T table);
+44 have no console number (scenes added to main.c after the last full console run). The TSP's residual console - (rtl +
+K), per kind: below 0 (the RTL slower) / in 0 .. 14 / above 14 (the RTL faster):
+
+| result | scenes |
+|---|---|
+| in 0 .. 14 | 88 |
+| RTL slower (residual < 0) | 5,601 |
+| RTL faster (residual > 14) | 648 |
+
+What stands out (the work list of MT1-MT7, with the units the PLAN gives them):
+- **The front end before the first pixel** (MT1, T1): the RTL's first background pixel at 248 clk + K against the
+  console's 545; the ISP's bit residual is -375 on every one-tile scene (RTL ISP bit 403 + 319 against 346.5): K, fitted
+  on the TSP's bit, absorbs a front end that is ~300 clk short and a TSP side that is long elsewhere. The ISP's bit of the
+  empty tile without list pointers: RTL 102 (console 208.5); each empty list pointer +31 (console 28-31): the per-pointer
+  cost is right, the start is not.
+- **Entries in front** (MT7): bgonly with 1 / 2 / 4 dummy entries -78 / -32 / -31; zk 1 (keep Z, five empty lists) -261.
+- **Many tiles** (MT7, T9): `tiles 0 n` pitch 1474 clk a 0888 tile against 1358 (n = 32 .. 64: -2414 / -5855): with one
+  open row a half the model thrashes between the write-out and the region array, both in half 0 (no SDRAM banks). The
+  64-tile textured scenes (share, span*, lineshare*, rows, pfetch, vol2pitch: medians -55,000 to -100,000; spantex2
+  -476,000) are 25 % too slow at VR_ROW 2 already (share 2 0 8 0: console 146,105, RTL 182,358 at VR_ROW 2, 238,250 at
+  10): texture and parameter traffic against the write-out in the one-row model, and the TSP's per-run costs.
+- **Per object** (MT1): the isp scenes, e.g. isp 1 1 0 64 / 256: residual -441 / -1167 (the per-object ISP costs grow with N).
+- **TSP setup and runs** (MT4-MT6): tsp / tspH medians -1234 / -355; dcalc -1120; allf -1101; layerfmt -797.
+- **Modifier volumes** (MT1): mv / mvb / mvp medians -430 .. -665, mvtr / mvtrv / mvpshape +50 .. +120 (the RTL faster).
+- The palette clock end to end: 25 order scenes, every pixel given a value (order.py --fit runs on the RTL's log); the
+  RTL's palette 8 bpp shades at ~1 clk a pixel against the console's ~2 (tim 3.1a: "the palette stamp slows the core").
+
+### 11.4 The races lists (PLAN 1.5, 5 D5)
+
+- `tb/timing/races_variable.txt` (tools/timing/races_var.py): 40 of accbuf's 128 timing lines vary by more than a poll
+  quantum over fit/accbuf_logs runs 1-6, judged on each line's least (T end: min of t1 t2; T stall: t[0], the least of
+  nine; T flush: its best of three): 24 of the 40 end lines, 10 of the 16 stall lines, 6 of the 72 flush lines (runs 3-6
+  only; flush 0 0 0 / 40 / 96, 0 1 0 / 16, 2 0 48), by 29-89 counts. MT8's flush thresholds skip those six. The key is
+  every number between the kind and "W" (flush has three: v fb n; round 1 of MT0 parsed two and dropped all 72 flush
+  lines, and took t1 rather than the least for end, listing 41 of 56). No multi-run picture archive exists, so the picture cells
+  are those the tests' descriptions call run-variable: accbuf_races pages 0 / 1 A-D, page 3 from cell 10, page 4 (101
+  regions), and every blendpos_races region (1,536: the blendpos statistic, MT8).
+- `tb/timing/races_expected.txt` (tools/timing/races_check.py --write, from the RTL's run under VR_ROW 10): 1,690
+  deterministic cells the RTL misses: T11 7 (accbuf_races page 0 / 1 H and page 2, keepz_races cell 11), T12 1,683
+  (ptchunkcarry_races 1,128, ptchunkrun_races 555): the RTL gives refsw3's picture there (accbuf 87 / 163, keepz 19 / 20,
+  blendpos 1,469 / 1,536 regions equal to the console, as refsw3). Every other deterministic cell equals the console's
+  (5,492 of 7,319 cells equal). docs/probes.txt has every probe's status.
+
 ## Appendix A. Throughput and storage, in one place
 
 | work | clk |

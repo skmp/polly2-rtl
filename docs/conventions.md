@@ -647,6 +647,18 @@ other:
   - viewed with `tools/occview` (adapted from polly2-rtl-lite `polly2-core/tools/occview`).
 
   The occupancy trace is how a timing mismatch is located (section 7.6).
+
+  As built (MT0, `rtl/v1/p2_core.sv`): one trace for the whole core, from p2_core's wires (the units' handshakes and idle /
+  busy outputs, listed in the block's header): 27 units (SEQ CTL OLW IPF ISU PCACHE RAST PIX IFB CUT RUNQ SORT STORE TPF TSU
+  RSTART PXQ PP TBUF WOUT MEM TEXSTALL PTC IBUF TILEQ ENTQ REGS: every module p2_core instantiates, p2_tbuf and p2_tbuf_ctl sharing TBUF, TEXSTALL
+  the pixel pipe's texture stall, p2_hw_check only an elaboration check; p2_isp_buf and
+  p2_regs have no output handshake, so their state is 0 / 1 only, IBUF's row barrier showing as PIX / CUT waiting),
+  11 values (ISP tile, run queue places, pixel queue pixels and runs, write-out tile, entries, tile queue and entry
+  queue records, register writes), `F` lines for the four queues (RUNQ, PXQ, TILEQ, ENTQ), `R` / `D` at each render's `start` and end, event track 0 `TEX$FILL`.
+  p2-offline passes it with `P2_PLUSARGS=+occlog=<file>`.
+- **`+p2timing`** (MT0, `rtl/v1/p2_core.sv`; p2-offline's `P2_TIMING=1`): one line a render on stderr, `p2: timing isp <c>
+  tsp <c> vid <c> ...`, the per-unit clocks and counts the MT milestones read (the block's header lists them), just before
+  p2-offline's `p2: render` line.
 - **`+rendlog=file`** (section 7.4.4).
 - **`+ztap=file`** (M13, `rtl/v1/p2_core.sv`): the depth tap of section 7.4.3. Each entry's tile depths as the ISP leaves
   them (when p2_isp_ctl's `ent_done` pulses: the entry's sweeps, walks and pass feedback complete, the next entry's CLEAR
@@ -694,7 +706,14 @@ other:
   `tb/timing/races_variable.txt`. The list is built from the archived multi-run logs (for example
   `fit/accbuf_logs` runs 4-6). GAP: that list does not exist as data yet.
 - **Game frames.** `rendertimes.txt`, with a tolerance to be fixed once its method is known (GAP).
-- **How to obtain the timemeas scenes (GAP).** The scenes are console-only code, so the RTL cannot replay them
+- **The timemeas scenes (As built MT0, option (a), PLAN 5 D7).** dreamcast-tests pvr-tests/timemeas `main.c` built with
+  `TM_EMIT` for the PC (`make -C pvr-tests/timemeas emit`: one program a variant, all / cut / order / setupk / sortoff and
+  the SPAN_SORT_CFG overrides) prints the console run's command stream, each measured render preceded by `echo T <what>
+  a b c d` (palette clock renders by `echo O ...`, their pixels read back and echoed as `R` lines). p2-offline replays
+  it; `tools/timing/tm_log.py` makes the console's `T ... W ...` lines from its clocks (counts = 2 x (clocks + K)), which
+  analyze.py and order.py read unchanged. The gate: `make timing-harness` (`tools/timing/gate_timing.sh`, PLAN MT0).
+  The text below is the plan as it was.
+- **How to obtain the timemeas scenes (GAP, closed by MT0).** The scenes are console-only code, so the RTL cannot replay them
   unchanged. Two options:
   - **(a) preferred.** Ask the dreamcast-tests owner for a PC emission of the timed scenes. Each scene would be
     preceded by `echo T <scene>`, and `p2-offline` answers with `T <scene> <least> <middle>` lines in the console
@@ -867,13 +886,13 @@ were provably stale. When a header is wrong, fix it in the same change.
 | # | what is not known | what it blocks | what would close it |
 |---|---|---|---|
 | G1 | **VRAM timing**: the SDRAM's latency, banks, page and refresh behaviour, and contention with the TA, the CPU and the display reads, as the core sees it | cycle accuracy of texture fetch, parameter fetch and write-out (`vram_model.h` has no measured timing) | console probes (dreamcast-tests TODO D7 "SDRAM and burst settings"); shrike4 `tools/hw/vram-contention` measured the CPU side only |
-| G2 | **timemeas scenes are console-only code**; the PC build emits none of the timed scenes | the absolute and difference timing gate (7.6.2) | a PC emission of the scenes in dreamcast-tests (7.6.2 option a) |
+| G2 | ~~**timemeas scenes are console-only code**~~ **closed (MT0)**: main.c `TM_EMIT` (7.6.2 As built) | the absolute and difference timing gate (7.6.2) | a PC emission of the scenes in dreamcast-tests (7.6.2 option a) |
 | G3 | **`K`**: the latency from the STARTRENDER write to the core, and from the event to the CPU, separately from the 0-14 clock poll latency | absolute timing comparisons | fit once on the empty one-tile scene; a console probe that varies the poll loop |
 | G4 | **`rendertimes.txt` method**: display on or off, poll granularity, which tool (dreamster pvr-renderer; its source is not in this checkout) | the game-frame timing gate | the pvr-renderer source, or a re-measurement with timemeas's method |
-| G5 | **run-to-run variability per cell** of the `*_races` tests, as data | the races gate | build `races_variable.txt` from the archived multi-run logs; more console runs where there is only one |
+| G5 | **run-to-run variability per cell** of the `*_races` tests, as data (MT0: `tb/timing/races_variable.txt` from the accbuf timing logs and the tests' own descriptions; no multi-run pictures are archived) | the races gate | build `races_variable.txt` from the archived multi-run logs; more console runs where there is only one |
 | G6 | refcore's render log prints depths as `%f` | exact depth diffs in `rendlog_diff.py` | a hex field in refcore (nulldc3 owner), or depth readouts |
 | G7 | **TA in scope?** `p2-offline` keeps refsw3-ta in C++. TA input arriving during a render (multi-buffered frames) is not exercised: the offline render is synchronous | TA and core overlap timing | the owner's decision on a TA RTL; ta-tests (`compare_dumps.py`) would then be its gate |
 | G8 | **What SOFTRESET clears** in the core (tile buffers, the accumulation-buffer swap state, the caches), and what the power-on contents are | the reset contract of 4.4 and the `reset` command mapping in `p2-offline` | a console probe: render, SOFTRESET, then a keep-Z tile that shows the buffer |
 | G9 | Display / SPG stalls of the core (about 3 µs per line read; timemeas turns the display off) | timing of renders with the display on (the game frames) | out of the CORE's scope unless the owner says otherwise; then a probe with the display on |
 | G10 | ~~The L2 glue (7.3) and `p2-offline`'s link are checked at the symbol level only, not yet compiled~~ **The glue half is closed by M5** (`make refglue-selftest`: compiled and linked, and its phase driver equal to refsw3-offline after every render of the tile subset); `p2-offline`'s link is still symbol-level only | `p2-offline` | its bring-up (M12) |
-| G11 | `TM_ORDER` (palette clock) needs CPU register writes timed against the render; `p2-offline` renders synchronously and has no timed-write command | the span sorter's order gate (2b) at the clock level | a `p2-offline` option of our own (env `P2_TIMED_WRITES=<file>`: clock / register / value lists); the console scenes as in G2 |
+| G11 | ~~`TM_ORDER` needs timed CPU register writes~~ **closed (MT0)**: p2-offline `P2_TIMED_WRITES=<file>` (tb/frame/p2_rendercore.cpp), the palette clock from `tools/timing/tm_order_writes.py` | the span sorter's order gate (2b) at the clock level | a `p2-offline` option of our own (env `P2_TIMED_WRITES=<file>`: clock / register / value lists); the console scenes as in G2 |

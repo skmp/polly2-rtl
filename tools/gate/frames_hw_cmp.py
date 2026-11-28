@@ -341,6 +341,9 @@ def main():
             what = (f"{m[1]} of {m[2]} archived depths the console's" + (f" ({untapped} not tapped)" if untapped else "") +
                     f"; {clk}")
     nf = failures + (1 if fail and not failures else 0)
+    if races:
+        # PLAN 5 D13: the item's VRAM-race renders, for tb/frames/races_expected.txt (tools/gate/races_expected.py)
+        print(f"{tag}: VRAM-race renders " + " ".join(f"r{i}" for i in races))
     print(f"{tag}: {what}; {checks} checks, {nf} failures")
     # the queue's per-group counts (tools/gate/pq.py reads ": <c> checks, <f> failures" at a line's end)
     print(f"{tag}: {checks} checks, {nf} failures")

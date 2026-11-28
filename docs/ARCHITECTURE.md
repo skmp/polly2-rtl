@@ -465,7 +465,8 @@ Where it differs from the text above:
 - A 32-bit request takes half `a[22]`, word `a[21:2]`; bits 23 and up are dropped, which is `pvr_map32`'s 8 MB wrap
   (its static bits are only `a[1:0]` with 8 MB). The 64-bit view (`cN_w64`) takes word `A[22:3]` of both halves.
 - The VRAM model (`tb/common/vram_model.h`, §3.2.1) has a request queue of 4 a half, `VR_LAT` 8, rows of 512 words with
-  `VR_ROW` 2 [G] (not fitted yet). `+vramvary` adds 0 .. 12 clocks to a request, drops `vh_req_rdy` one clock in four at
+  `VR_ROW` 2 [G] (not fitted yet; MT0 fitted it to 10 for the timing runs, `P2_VR_ROW`, tb/timing/k.txt; the functional
+  gates keep 2). `+vramvary` adds 0 .. 12 clocks to a request, drops `vh_req_rdy` one clock in four at
   random, and stalls a half for up to 63 clocks one clock in 64. The hazard detector's bitmaps are there (no client
   writes in M6).
 
@@ -1956,6 +1957,16 @@ and RenderCORE's end-of-entry logic.
   [M scalermeas]. [I] The scaler state survives renders and deadlocks a handshake when the factor changes under it.
   A hang feature: PLAN MT9, D6.
 
+**As built (MT0, `p2_wout_put.sv`; PLAN MT0, tim §3.11).** Two timing changes, the words and their order unchanged (make
+frames bit-identical): (1) a packed 888 pixel across a word boundary whose first group merges into the writer's word goes
+in one clock (`both`: the merged word written, the second group the next word), so the 888 tile runs at one pixel a clock,
+not 1.5; (2) the writer's words reach C5 through a write FIFO of `WO_WFIFO` 16 words, so the pixel side keeps one pixel a
+clock while the word side waits on a row change: a tile line costs `max(reader, W + VR_ROW)`, the console's per-line form.
+With `VR_ROW` 10 the single-tile write-outs are 1340 / 1084 / 1022 clk at 0888 / 888 / 565 against the console's 1355 /
+1105 / 1045, and the empty tiles' TSP bits fall within the poll window of one K (make timing-harness). Not yet: the
+multi-tile 0888 pitch (RTL 1474 a tile against 1358: the model's one open row a half thrashes between the write-out and
+the region array, both in half 0; SDRAM banks, T9 / MT7).
+
 **As built (M12, `rtl/v1/wout/p2_wout.sv`, `p2_wout_put.sv`; PLAN M12).** refsw3 RenderCORE's write-out at `4f3efe15`
 (copies core-put, core-writeout, core-endframe), gated by `make wout` against those copies and by `make frames`.
 - **Reader and line FIFO**: on a WRITE's start the reader issues buffer 2's words in tile raster order, one a clock on the
@@ -2065,6 +2076,15 @@ where noted):
 in `p2_core`, no RAM in synthesis); `p2_regs`'s ID / REVISION constants sit after the read-back RAM's output register
 (the RAM unchanged, the block-13 / block-10 note above stands).
 
+**MT0** (PLAN MT0) adds one RAM-like store and changes no grouping or module boundary; the die check (PLAN 0 rule 9,
+agents/dc_powervr/NOTES.md, "Corrections" and "Video path research"):
+
+| unit (MT0) | die block | agrees | departs, or the die says nothing |
+|---|---|---|---|
+| `p2_wout_put`'s write FIFO: `WO_WFIFO` 16 words of 57 bits (21-bit word address, 4 byte enables, 32 data: 912 bits, flip-flops / a small RAM) between the writer and C5 (§3.10 As built (MT0)) | 16 write-out / scaler / video out (low; "looks large" for the job) and 15 texture memory arbiter / VRAM interface (low) | a small write buffer on the write-out's side towards the VRAM interface: NOTES' "Display and write-out need little RAM" (1.5-4 Kbit) holds with it (the ring's 8 Kbit is the larger departure, M12 above), and block 16's unexplained standard cells leave room for it; the M12 row's open question "whether the console's write-out path has its own buffer in 15 or 16" (T9) is answered here by the measurement, not the die: the console's per-line form `max(32.66, W + 10.4)` (tim 3.11) needs the pixel side to run on while the word side waits on a row change | the die shows no macro for it, and gives no depth: 16 is [G] (p2_wout_put's header: it holds the ~5 words a 16-bit line makes while a 10-clock row change is open), T10. Not changed by the die: console measurements decide (rule 9) |
+| `p2_wout_put`'s 888 straddle in one clock (`both`) | 16 | logic only | the die says nothing |
+| the +occlog / +p2timing / +ztap taps (`p2_core`, `` `ifndef SYNTHESIS ``) | - | simulation only, no logic or RAM in synthesis | - |
+
 ## 4. Ordering and hazards: the observable orders and the mechanism that keeps each
 
 | observable order (spec) | mechanism |
@@ -2138,7 +2158,8 @@ in `p2_core`, no RAM in synthesis); `p2_regs`'s ID / REVISION constants sit afte
 | run start's coefficient cache and reload | as built M10: one entry a volume, keyed (tag, volume, tile); rows of four planes; the reload not overlapped with the products (4.00 / 5.00 / 7.00 within, 8.1 / 9.1 / 12.1 across, against 3.9 / 4.2 / 6.3 and ~4.7 / 6 / 8) | [I] / [G] | T7, MT5 |
 | SupSample points per clock | 1 | [G] | T16 |
 | texture cache organisation, miss latency, C5 coherence | direct-mapped 8 KB, 64 B lines, no snoop (as built M11: four read ports, one fill at a time, the taps gathered; §3.8 As built (M11)) | [G] | T8 |
-| `VR_LAT`, `VR_ROW`, refresh, half contention, arbitration priority | 8, fitted, off, as §3.2 | [G] | T9, T14 |
+| `VR_LAT`, `VR_ROW`, refresh, half contention, arbitration priority | 8, fitted, off, as §3.2 (MT0: `VR_ROW` 10, fitted once on `clip 0 - clip 4`, the 0888 write-out's per-line excess: RTL 319 against 311; tb/timing/k.txt, timing.md §11; the timing runs only, the functional gates keep 2) | [G] | T9, T14 |
+| `WO_WFIFO` (MT0, p2_wout_put's write FIFO) | 16 words | [I] from the per-line form `max(32.66, W + 10.4)`; the depth [G] | T10 |
 | `WO_FIFO` | 64 px (as built M12, p2_wout's line FIFO) | [G] | T10, T15 |
 | write-out line overhead | in the VRAM model | [I] | T9, T10 |
 | SrcSelect && DstSelect waits for the write-out | yes | [G] | T10 |

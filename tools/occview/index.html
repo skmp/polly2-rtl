@@ -1,0 +1,1153 @@
+<!DOCTYPE html>
+<!-- tools/occview: the +occlog viewer (conventions.md 7.5), adapted from polly2-rtl-lite polly2-core/tools/occview for p2_core's units (MT0: the LAYOUT and the annotations). Open it in a browser and drop an occ.log on it. -->
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>polly2-rtl polly2 occupancy viewer</title>
+<!-- social embeds (x/twitter, facebook, discord). Discord/FB require ABSOLUTE
+     image URLs; hosted at https://drk.emudev.org/occview/ with the PNG beside this file. -->
+<meta property="og:type" content="website"/>
+<meta property="og:url" content="https://drk.emudev.org/occview/"/>
+<meta property="og:title" content="polly2 occupancy viewer"/>
+<meta property="og:description" content="Seekable per-clock pipeline occupancy visualizer for the polly2 Dreamcast PVR core: per-unit underflow/busy/overflow tracks + live dataflow diagram."/>
+<meta property="og:image" content="https://drk.emudev.org/occview/occview-diagram.png"/>
+<meta property="og:image:width" content="970"/>
+<meta property="og:image:height" content="816"/>
+<meta name="twitter:card" content="summary_large_image"/>
+<meta name="twitter:title" content="polly2 occupancy viewer"/>
+<meta name="twitter:description" content="Seekable per-clock pipeline occupancy visualizer for the polly2 Dreamcast PVR core."/>
+<meta name="twitter:image" content="https://drk.emudev.org/occview/occview-diagram.png"/>
+<style>
+  :root {
+    --c-under: #e2b93d;   /* underflow - waiting for data */
+    --c-busy:  #3fa34d;   /* busy */
+    --c-over:  #d64541;   /* overflow - blocked on output */
+    --c-idle:  #2a2a30;
+    --bg: #16161a; --panel: #1f1f24; --fg: #d8d8dc; --dim: #8a8a92;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font: 13px/1.4 "Segoe UI", system-ui, sans-serif; }
+  #drop-wrap { display:flex; justify-content:center; align-items:center; height:100vh; }
+  #drop-area { width:70vw; height:45vh; border:3px dashed #555; border-radius:14px;
+               display:flex; flex-direction:column; gap:12px; justify-content:center;
+               align-items:center; color:var(--dim); font-size:1.15rem; }
+  #drop-area.highlight { border-color:var(--c-busy); color:var(--fg); }
+  #progress { display:none; position:fixed; inset:0; background:rgba(0,0,0,.7);
+              z-index:50; justify-content:center; align-items:center; flex-direction:column; gap:10px; }
+  #progress .bar { width:40vw; height:10px; background:#333; border-radius:5px; overflow:hidden; }
+  #progress .bar div { height:100%; width:0%; background:var(--c-busy); }
+  #app { display:none; padding:8px 10px; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  #topbar { margin-bottom:6px; }
+  #topbar b { color:#fff; }
+  .legend span { display:inline-flex; align-items:center; gap:4px; margin-right:10px; }
+  .swatch { display:inline-block; width:12px; height:12px; border-radius:2px; }
+  canvas { display:block; }
+  #overview { width:100%; height:56px; background:var(--panel); border-radius:4px; cursor:crosshair; }
+  #evlegend { margin:4px 0 3px; font-size:12px; color:var(--dim); gap:14px; }
+  #evlegend .ev { display:inline-flex; align-items:center; gap:5px; }
+  #evlegend .ev b { color:var(--fg); font-family:Consolas,monospace; font-weight:600; }
+  #evlegend .ev span.k { color:var(--dim); font-family:Consolas,monospace; }
+  #tracks   { width:100%; background:var(--panel); border-radius:4px; cursor:crosshair; margin-top:6px; }
+  #seekrow  { margin-top:6px; }
+  #seek { flex:1; }
+  input[type=number] { width:110px; background:#26262c; color:var(--fg);
+                       border:1px solid #444; border-radius:3px; padding:2px 6px; }
+  button { background:#2c2c34; color:var(--fg); border:1px solid #4a4a52;
+           border-radius:3px; padding:2px 10px; cursor:pointer; }
+  button:hover { background:#3a3a44; }
+  #main { display:flex; gap:10px; margin-top:8px; align-items:flex-start; }
+  #svgbox { background:var(--panel); border-radius:4px; padding:4px; flex:0 0 auto; }
+  #valuesbox { background:var(--panel); border-radius:4px; padding:8px 10px; flex:1 1 auto;
+               max-height:560px; overflow-y:auto; }
+  #valuesbox table { border-collapse:collapse; width:100%; }
+  #valuesbox td { padding:1px 8px 1px 0; font-family:Consolas,monospace; font-size:12px; }
+  #valuesbox td.n { color:var(--dim); }
+  #tooltip { display:none; position:fixed; background:#000c; color:#fff; padding:3px 8px;
+             border-radius:3px; font-family:Consolas,monospace; font-size:12px;
+             pointer-events:none; z-index:60; white-space:pre; }
+  .hint { color:var(--dim); font-size:12px; }
+</style>
+</head>
+<body>
+
+<div id="drop-wrap">
+  <div id="drop-area">
+    <div>Drop a <b>+occlog</b> trace here (occ.log)</div>
+    <div>or</div>
+    <input type="file" id="file-input" accept=".log,text/plain"/>
+    <div class="hint">generate with: ./tb &lt;scene&gt; +occlog=occ.log &nbsp;(frontendtsplp)</div>
+  </div>
+</div>
+
+<div id="progress"><div>parsing…</div><div class="bar"><div id="pbar"></div></div></div>
+
+<div id="app">
+  <div class="row" id="topbar">
+    <b id="fname"></b>
+    <span>cycle <b id="curcyc">0</b> / <span id="totcyc">0</span></span>
+    <span class="legend">
+      <span><i class="swatch" style="background:var(--c-under)"></i>underflow (waiting for data)</span>
+      <span><i class="swatch" style="background:var(--c-busy)"></i>busy</span>
+      <span><i class="swatch" style="background:var(--c-over)"></i>overflow (blocked)</span>
+      <span style="opacity:.85">| FIFOs:
+        <i class="swatch" style="width:52px;background:linear-gradient(90deg,#995a1c,#8baf20,#24c624,#dcdc14,#f20000)"></i>
+        empty&rarr;half&rarr;full</span>
+    </span>
+    <span class="hint">wheel: zoom &nbsp; drag: pan &nbsp; click: seek &nbsp; &larr;/&rarr;: step change &nbsp; shift+&larr;/&rarr;: &plusmn;1% </span>
+    <span class="hint">event rows: bar height = share of the column stalled; zoom in for line addresses</span>
+  </div>
+  <div class="row" id="evlegend"></div>
+  <canvas id="overview"></canvas>
+  <canvas id="tracks"></canvas>
+  <div class="row" id="seekrow">
+    <button id="prevch">&larr; change</button>
+    <input type="range" id="seek" min="0" max="1000000" value="0"/>
+    <button id="nextch">change &rarr;</button>
+    <input type="number" id="cycin" value="0"/>
+    <button id="goto">go</button>
+  </div>
+  <div id="main">
+    <div id="svgbox"></div>
+    <div id="valuesbox"><table id="valtable"></table></div>
+  </div>
+</div>
+<div id="tooltip"></div>
+
+<script>
+'use strict';
+// ============================== data model ==============================
+const DB = {
+  units: [], vals: [], enums: {},           // header
+  sCyc: null, sLo: null, sHi: null, nS: 0,  // state-change records
+  vCyc: [], vVal: [],                       // per-value-id change arrays
+  fifos: [],                                // unit -> {vid, depth} for queue tracks
+  marks: [],                                // {c, t:'R'|'D'}
+  total: 0,
+  order: [],                                // track DISPLAY order (row -> unit idx)
+  // ---- interval EVENT tracks (X records): tex-cache misses / prefetches / waits ----
+  // Per track, three parallel arrays sorted by start cycle (the log emits an X on the
+  // episode's CLOSING edge, so file order is by END - the parser sorts). Kept as flat
+  // typed arrays for the same reason the state records are: a busy scene has tens of
+  // thousands of misses and per-event objects are what made the first cut sluggish.
+  ev: [],                                   // tidx -> {name, kind, c0, len, addr, n}
+};
+// Event colours. Stall tracks are HOT (they are lost shade-pipe cycles); the info
+// track (prefetch) is COOL - it overlaps demand work on purpose, so it must not
+// read as damage. PFWAIT is amber: a stall, but one that cost no extra DDR traffic.
+const EV_COLORS = { 'TC$MISS': '#e0483c', 'TC$PREFETCH': '#3d7fd6',
+                    'TC$PFWAIT': '#e08a2e', 'TC$FETCH': '#8d5ad6',
+                    'VQ$MISS': '#b5379c', 'VQ$FETCH': '#c98ad6' };
+const EV_FALLBACK = ['#e0483c', '#3d7fd6', '#e08a2e', '#b5379c', '#59b8a8', '#c8c840'];
+function evColor(t) { return EV_COLORS[t.name] || EV_FALLBACK[t.idx % EV_FALLBACK.length]; }
+// index of the last event on track t starting at or before cycle c (-1 if none)
+function evIdxAt(t, c) { return idxAt(t.c0, t.n, c); }
+// events overlapping [t0,t1), as index range [i,j). Episodes can be long, so the
+// scan starts a bounded distance back from t0 rather than at 0: MAXLEN is the
+// track's longest episode, and nothing starting before t0-MAXLEN can reach t0.
+function evRange(t, t0, t1) {
+  let i = idxAt(t.c0, t.n, t0 - t.maxLen);
+  if (i < 0) i = 0;
+  let j = idxAt(t.c0, t.n, t1 - 1) + 1;
+  if (j < i) j = i;
+  return [i, j];
+}
+// Display order: log unit indices are stable, but SORTC moved architecturally
+// (pre-fetch check: it now gates records BEFORE the iterator's param fetch), so
+// show its row between EQ and ITER. Falls back to identity for unknown names.
+function computeOrder() {
+  const o = DB.units.map((_, i) => i);
+  const si = DB.units.indexOf('SORTC'), ei = DB.units.indexOf('EQ');
+  if (si >= 0 && ei >= 0) {
+    o.splice(o.indexOf(si), 1);
+    o.splice(o.indexOf(ei) + 1, 0, si);
+  }
+  return o;
+}
+const NSTATE = 3;
+const COLORS = ['#e2b93d', '#3fa34d', '#d64541'];   // under, busy, over
+const IDLE = '#2a2a30';
+// FIFO fill ramp: EMPTY = orange (downstream starving), HALF = green (healthy
+// flow), FULL = red (upstream backpressured). Hue walks 30 -> 120 -> 0 so both
+// failure modes are warm and the healthy middle is green.
+function fifoColor(f) {
+  if (f < 0) return IDLE;
+  if (f > 1) f = 1;
+  // Hue walks 33 (orange) -> 120 (green) -> 0 (red). EMPTY must read as clearly
+  // ORANGE, so it stays bright/vivid; fill DARKENS toward a deep saturated red.
+  // (Hue alone is ambiguous - the descent re-crosses orange near 7/8 full - so
+  // the brightness ramp is what separates "empty" from "nearly full".)
+  const h  = f <= 0.5 ? 33 + f * 174 : 120 - (f - 0.5) * 240;
+  const sa = f <= 0.5 ? 0.95 - f * 0.30 : 0.80 + (f - 0.5) * 0.40;
+  const v  = f <= 0.5 ? 0.97 - f * 0.20 : 0.87 - (f - 0.5) * 0.20;
+  return hsv2css(h, Math.min(sa, 1), Math.min(v, 1));
+}
+function hsv2css(h, s, v) {
+  const c = v * s, x = c * (1 - Math.abs(((h / 60) % 2) - 1)), m = v - c;
+  let r, g, b;
+  if      (h <  60) { r = c; g = x; b = 0; }
+  else if (h < 120) { r = x; g = c; b = 0; }
+  else if (h < 180) { r = 0; g = c; b = x; }
+  else if (h < 240) { r = 0; g = x; b = c; }
+  else if (h < 300) { r = x; g = 0; b = c; }
+  else              { r = c; g = 0; b = x; }
+  const q = (n) => Math.round((n + m) * 255).toString(16).padStart(2, '0');
+  return '#' + q(r) + q(g) + q(b);
+}
+
+function stateOf(lo, hi, u) {
+  return u < 16 ? (lo >>> (2*u)) & 3 : (hi >>> (2*(u-16))) & 3;
+}
+// last index i with arr[i] <= c  (-1 if none)
+function idxAt(arr, n, c) {
+  let lo = 0, hi = n - 1, r = -1;
+  while (lo <= hi) { const m = (lo+hi) >> 1;
+    if (arr[m] <= c) { r = m; lo = m+1; } else hi = m-1; }
+  return r;
+}
+function stateAtCycle(c, u) {
+  const i = idxAt(DB.sCyc, DB.nS, c);
+  if (i < 0) return -1;
+  return stateOf(DB.sLo[i], DB.sHi[i], u);
+}
+function valAtCycle(c, vid) {
+  const a = DB.vCyc[vid]; if (!a || !a.length) return null;
+  const i = idxAt(a, a.length, c);
+  return i < 0 ? null : DB.vVal[vid][i];
+}
+// Per-column HISTOGRAM of a queue's fill level: time spent at each level, so a
+// zoomed-out column can be drawn as a proportional STACK (same treatment the
+// state tracks get) instead of collapsing to a mean - a queue that flips between
+// empty and full must not look half-full. Returns W*NB time weights.
+function binLevels(vid, t0, t1, W, depth, NB) {
+  const a = DB.vCyc[vid], b = DB.vVal[vid];
+  if (!a || !a.length) return null;
+  const out = new Float64Array(W * NB);
+  const span = t1 - t0;
+  const bucket = (v) => {
+    let k = depth > 0 ? Math.round(v / depth * (NB - 1)) : 0;
+    return k < 0 ? 0 : (k > NB - 1 ? NB - 1 : k);
+  };
+  let i = idxAt(a, a.length, t0); if (i < 0) i = 0;
+  for (; i < a.length; i++) {
+    const c0 = Math.max(a[i], t0);
+    const c1 = Math.min(i+1 < a.length ? a[i+1] : DB.total, t1);
+    if (c0 >= t1) break;
+    if (c1 <= c0) continue;
+    const k = bucket(b[i]);
+    let px0 = Math.floor((c0 - t0) / span * W);
+    let px1 = Math.ceil ((c1 - t0) / span * W);
+    if (px1 > W) px1 = W; if (px0 < 0) px0 = 0;
+    if (px1 - px0 === 1) out[px0 * NB + k] += (c1 - c0);
+    else for (let px = px0; px < px1; px++) {
+      const pc0 = t0 + px / W * span, pc1 = t0 + (px+1) / W * span;
+      const ov = Math.min(c1, pc1) - Math.max(c0, pc0);
+      if (ov > 0) out[px * NB + k] += ov;
+    }
+  }
+  return out;
+}
+// Time spent in each occupancy state over [t0,t1) - the numbers behind a
+// zoomed-out column's stack, for the hover readout.
+function stateStats(u, t0, t1) {
+  if (t1 <= t0) t1 = t0 + 1;
+  const acc = [0, 0, 0];
+  let wt = 0;
+  let i = idxAt(DB.sCyc, DB.nS, t0); if (i < 0) i = 0;
+  for (; i < DB.nS; i++) {
+    const c0 = Math.max(DB.sCyc[i], t0);
+    const c1 = Math.min(i+1 < DB.nS ? DB.sCyc[i+1] : DB.total, t1);
+    if (c0 >= t1) break;
+    if (c1 <= c0) continue;
+    acc[stateOf(DB.sLo[i], DB.sHi[i], u)] += (c1 - c0);
+    wt += (c1 - c0);
+  }
+  return wt ? { acc, wt } : null;
+}
+// percentages that always total 100 (largest share absorbs the rounding drift)
+function pctSplit(parts, total) {
+  const raw = parts.map(v => v / total * 100);
+  const r = raw.map(v => Math.round(v));
+  const d = 100 - r.reduce((a, b) => a + b, 0);
+  if (d !== 0) r[raw.indexOf(Math.max(...raw))] += d;
+  return r;
+}
+// min / time-weighted mean / max of a value channel over [t0,t1) - the numbers
+// behind a zoomed-out FIFO column, for the hover readout.
+function statsOfValue(vid, t0, t1) {
+  const a = DB.vCyc[vid], b = DB.vVal[vid];
+  if (!a || !a.length) return null;
+  if (t1 <= t0) t1 = t0 + 1;
+  let i = idxAt(a, a.length, t0); if (i < 0) i = 0;
+  let mn = Infinity, mx = -Infinity, sum = 0, wt = 0;
+  for (; i < a.length; i++) {
+    const c0 = Math.max(a[i], t0);
+    const c1 = Math.min(i+1 < a.length ? a[i+1] : DB.total, t1);
+    if (c0 >= t1) break;
+    if (c1 <= c0) continue;
+    const v = b[i];
+    if (v < mn) mn = v;
+    if (v > mx) mx = v;
+    sum += v * (c1 - c0); wt += (c1 - c0);
+  }
+  if (!wt) {                                   // no change lands inside: held value
+    const v = valAtCycle(t0, vid);
+    return v == null ? null : { min: v, avg: v, max: v };
+  }
+  return { min: mn, avg: sum / wt, max: mx };
+}
+function enumName(vid, v) {
+  const e = DB.enums[vid];
+  return e && (v in e) ? e[v] : String(v);
+}
+
+// ============================== parser ==============================
+function parseLog(text, done, progress) {
+  const units = [], vals = [], enums = {}, fifos = [], evd = [], evRaw = [];
+  let sCyc = new Float64Array(1<<16), sLo = new Uint32Array(1<<16),
+      sHi = new Uint32Array(1<<16), nS = 0;
+  const vCyc = [], vVal = [];
+  const marks = [];
+  let total = 0, pLo = -1, pHi = -1;
+
+  let pos = 0, lineNo = 0;
+  const len = text.length;
+  if (!text.startsWith('POLLY2OCC')) { alert('not a POLLY2OCC log'); return; }
+
+  function growS() {
+    const c2 = new Float64Array(sCyc.length*2); c2.set(sCyc); sCyc = c2;
+    const l2 = new Uint32Array(sLo.length*2); l2.set(sLo); sLo = l2;
+    const h2 = new Uint32Array(sHi.length*2); h2.set(sHi); sHi = h2;
+  }
+  function step() {
+    const CHUNK = 2_000_000;                       // chars per slice
+    const end = Math.min(pos + CHUNK, len);
+    while (pos < len) {
+      let nl = text.indexOf('\n', pos);
+      if (nl === -1) nl = len;
+      const line = text.substring(pos, nl);
+      pos = nl + 1; lineNo++;
+      if (line.length) {
+        const c0 = line.charCodeAt(0);
+        if (c0 === 64) {                            // '@cyc HEX [v..]'
+          const sp1 = line.indexOf(' ');
+          const cyc = +line.substring(1, sp1);
+          let sp2 = line.indexOf(' ', sp1+1);
+          if (sp2 === -1) sp2 = line.length;
+          const hex = line.substring(sp1+1, sp2);
+          const hi = parseInt(hex.substring(0, hex.length-8), 16) || 0;
+          const lo = parseInt(hex.substring(hex.length-8), 16) >>> 0;
+          if (lo !== pLo || hi !== pHi) {
+            if (nS === sCyc.length) growS();
+            sCyc[nS] = cyc; sLo[nS] = lo; sHi[nS] = hi; nS++;
+            pLo = lo; pHi = hi;
+          }
+          let p = sp2 + 1;
+          while (p < line.length) {                 // ' v<i>=<n>' tokens
+            let sp = line.indexOf(' ', p);
+            if (sp === -1) sp = line.length;
+            const eq = line.indexOf('=', p);
+            if (eq > p && eq < sp && line.charCodeAt(p) === 118) {  // 'v'
+              const vid = +line.substring(p+1, eq);
+              const vv  = +line.substring(eq+1, sp);
+              (vCyc[vid] || (vCyc[vid] = [])).push(cyc);
+              (vVal[vid] || (vVal[vid] = [])).push(vv);
+            }
+            p = sp + 1;
+          }
+          total = Math.max(total, cyc);
+        } else if (c0 === 85) {                     // 'U i NAME'
+          const t = line.split(' '); units[+t[1]] = t[2];
+        } else if (c0 === 86) {                     // 'V i name'
+          const t = line.split(' '); vals[+t[1]] = t[2];
+        } else if (c0 === 70) {                     // 'F unit vid depth'
+          const t = line.split(' ');
+          fifos[+t[1]] = { vid: +t[2], depth: +t[3] };
+        } else if (c0 === 69) {                     // 'E vid a:N,b:N'
+          const t = line.split(' '); const m = {};
+          for (const kv of t[2].split(',')) { const [k, n] = kv.split(':'); m[+k] = n; }
+          enums[+t[1]] = m;
+        } else if (c0 === 84) {                     // 'T idx NAME kind'
+          const t = line.split(' ');
+          evd[+t[1]] = { name: t[2], kind: t[3] || 'stall' };
+          (evRaw[+t[1]] || (evRaw[+t[1]] = []));
+        } else if (c0 === 88) {                     // 'X tidx cyc len addr'
+          const t = line.split(' ');
+          const ti = +t[1], c = +t[2], ln = +t[3];
+          (evRaw[ti] || (evRaw[ti] = [])).push(c, ln, parseInt(t[4], 16));
+          total = Math.max(total, c + ln);
+        } else if (c0 === 82 || c0 === 68) {        // 'R c' / 'D c'
+          const t = line.split(' ');
+          marks.push({ c: +t[1], t: line[0] });
+          total = Math.max(total, +t[1]);
+        }
+      }
+      if (pos >= end) break;
+    }
+    progress(pos / len);
+    if (pos < len) { setTimeout(step, 0); return; }
+    DB.units = units; DB.vals = vals; DB.enums = enums; DB.fifos = fifos;
+    DB.sCyc = sCyc; DB.sLo = sLo; DB.sHi = sHi; DB.nS = nS;
+    DB.vCyc = vCyc.map(a => a ? Float64Array.from(a) : null);
+    DB.vVal = vVal.map(a => a ? Float64Array.from(a) : null);
+    DB.marks = marks; DB.total = total + 1;
+    // Event tracks: X lines arrive in CLOSE order, so sort each track by start
+    // cycle (the binary searches all assume it) and pack into typed arrays.
+    DB.ev = [];
+    for (let ti = 0; ti < evd.length; ti++) {
+      if (!evd[ti]) continue;
+      const r = evRaw[ti] || [];
+      const n = r.length / 3;
+      const ord = Array.from({ length: n }, (_, k) => k)
+                       .sort((a, b) => r[a*3] - r[b*3]);
+      const c0 = new Float64Array(n), len = new Float64Array(n), addr = new Float64Array(n);
+      let maxLen = 0, sum = 0;
+      for (let k = 0; k < n; k++) {
+        const s = ord[k] * 3;
+        c0[k] = r[s]; len[k] = r[s+1]; addr[k] = r[s+2];
+        if (len[k] > maxLen) maxLen = len[k];
+        sum += len[k];
+      }
+      DB.ev.push({ idx: DB.ev.length, name: evd[ti].name, kind: evd[ti].kind,
+                   c0, len, addr, n, maxLen, cycles: sum });
+    }
+    done();
+  }
+  setTimeout(step, 0);
+}
+
+// ============================== track rendering ==============================
+const GUTTER = 78, ROW_H = 20, ROW_GAP = 2, AXIS_H = 18;
+let view = { t0: 0, t1: 1 };
+let cursor = 0;
+const trkCv = document.getElementById('tracks');
+const ovCv  = document.getElementById('overview');
+let ovImg = null;                       // offscreen full-run render
+
+function nUnits() { return DB.units.length; }
+
+// paint the span [t0,t1) of unit rows into ctx at x-range [x0,x1) with W px columns
+function paintBins(ctx, t0, t1, x0, W, rowH, rowGap, topY) {
+  const NU = nUnits();
+  const bins = new Float32Array(W * NU * NSTATE);
+  const span = t1 - t0;
+  let i = idxAt(DB.sCyc, DB.nS, t0); if (i < 0) i = 0;
+  for (; i < DB.nS; i++) {
+    const c0 = Math.max(DB.sCyc[i], t0);
+    const c1 = Math.min(i+1 < DB.nS ? DB.sCyc[i+1] : DB.total, t1);
+    if (c0 >= t1) break;
+    if (c1 <= c0) continue;
+    const lo = DB.sLo[i], hi = DB.sHi[i];
+    let px0 = Math.floor((c0 - t0) / span * W);
+    let px1 = Math.ceil ((c1 - t0) / span * W);
+    if (px1 > W) px1 = W; if (px0 < 0) px0 = 0;
+    for (let u = 0; u < NU; u++) {
+      const st = stateOf(lo, hi, u);
+      const base = u * NSTATE + st;
+      if (px1 - px0 === 1) {
+        bins[(px0 * NU * NSTATE) + base] += (c1 - c0);
+      } else {
+        for (let px = px0; px < px1; px++) {
+          const pc0 = t0 + px    / W * span;
+          const pc1 = t0 + (px+1) / W * span;
+          const ov = Math.min(c1, pc1) - Math.max(c0, pc0);
+          if (ov > 0) bins[(px * NU * NSTATE) + base] += ov;
+        }
+      }
+    }
+  }
+  for (let r = 0; r < NU; r++) {
+    const u = DB.order[r] ?? r;
+    const y = topY + r * (rowH + rowGap);
+    ctx.fillStyle = IDLE;
+    ctx.fillRect(x0, y, W, rowH);
+    // FIFO units are drawn as a FILL LEVEL (orange=empty .. green=half ..
+    // red=full) instead of an under/busy/over state: for a queue, "empty" and
+    // "full" are the two interesting failures and both are invisible in a
+    // 3-state view. Colours are quantised to 5% so equal columns merge into runs.
+    const fifo = DB.fifos && DB.fifos[u];
+    if (fifo) {
+      const NB = Math.min(fifo.depth + 1, 17);          // one bucket per level
+      const hist = binLevels(fifo.vid, t0, t1, W, fifo.depth, NB);
+      let fRunStart = 0, fRunCol = null;
+      const flushF = (pxEnd) => {
+        if (fRunCol !== null && fRunCol !== IDLE && pxEnd > fRunStart) {
+          ctx.fillStyle = fRunCol; ctx.fillRect(x0+fRunStart, y, pxEnd-fRunStart, rowH);
+        }
+        fRunCol = null;
+      };
+      for (let px = 0; px < W; px++) {
+        let tot = 0, nz = 0, only = -1;
+        if (hist) for (let k = 0; k < NB; k++) {
+          const v = hist[px*NB + k];
+          if (v > 0) { tot += v; nz++; only = k; }
+        }
+        if (tot <= 0) {                                  // no samples here
+          if (fRunCol !== IDLE) { flushF(px); fRunStart = px; fRunCol = IDLE; }
+          continue;
+        }
+        if (nz === 1) {                                  // one level -> solid run
+          const col = fifoColor(only / (NB - 1));
+          if (col !== fRunCol) { flushF(px); fRunStart = px; fRunCol = col; }
+          continue;
+        }
+        // mixed: proportional stack, EMPTY at the top -> FULL at the bottom
+        // (matches the state tracks' under/busy/over ordering)
+        flushF(px);
+        let yy = y, acc = 0;
+        for (let k = 0; k < NB; k++) {
+          const v = hist[px*NB + k]; if (v <= 0) continue;
+          acc += v;
+          const yEnd = (acc === tot) ? y + rowH : y + Math.round(acc / tot * rowH);
+          if (yEnd > yy) {
+            ctx.fillStyle = fifoColor(k / (NB - 1));
+            ctx.fillRect(x0+px, yy, 1, yEnd-yy);
+          }
+          yy = yEnd;
+        }
+        fRunStart = px + 1;
+      }
+      flushF(W);
+      continue;
+    }
+    // A pixel column can cover many cycles when zoomed out. A column whose cycles
+    // are ALL one state is drawn as a solid run (runs are merged across columns,
+    // so a zoomed-in view is one fillRect per state change). A MIXED column is
+    // drawn as a vertical STACK proportional to the time in each state, ordered
+    // under / busy / over top-to-bottom - so 5 under, 3 busy, 2 over reads as
+    // 50% yellow over 30% green over 20% red instead of hiding the minority
+    // states behind whichever one happened to dominate.
+    let runStart = 0, runColor = null;
+    const flushRun = (pxEnd) => {
+      if (runColor !== null && runColor !== IDLE && pxEnd > runStart) {
+        ctx.fillStyle = runColor; ctx.fillRect(x0+runStart, y, pxEnd-runStart, rowH);
+      }
+      runColor = null;
+    };
+    for (let px = 0; px < W; px++) {
+      const o = px * NU * NSTATE + u * NSTATE;
+      const b0 = bins[o], b1 = bins[o+1], b2 = bins[o+2];
+      const tot = b0 + b1 + b2;
+      let col;
+      if (tot <= 0)            col = IDLE;              // no samples in this column
+      else if (b1 === 0 && b2 === 0) col = COLORS[0];
+      else if (b0 === 0 && b2 === 0) col = COLORS[1];
+      else if (b0 === 0 && b1 === 0) col = COLORS[2];
+      else col = null;                                  // mixed -> stack
+      if (col !== null) {
+        if (col !== runColor) { flushRun(px); runStart = px; runColor = col; }
+        continue;
+      }
+      flushRun(px);                                     // stacks break the run
+      let yy = y, acc = 0;
+      for (let s = 0; s < NSTATE; s++) {
+        const v = bins[o+s]; if (v <= 0) continue;
+        acc += v;
+        // accumulate before rounding so the segments always tile rowH exactly
+        const yEnd = (s === NSTATE-1 || acc === tot) ? y + rowH
+                                                     : y + Math.round(acc / tot * rowH);
+        if (yEnd > yy) { ctx.fillStyle = COLORS[s]; ctx.fillRect(x0+px, yy, 1, yEnd-yy); }
+        yy = yEnd;
+      }
+      runStart = px + 1;
+    }
+    flushRun(W);
+  }
+}
+
+// Event rows live BELOW the unit rows in the same zoomable canvas, separated by a
+// gap. Row geometry helpers (used by the hit-testing in the hover handler too).
+const EV_ROW_SEP = 8;
+function evRowTop() { return AXIS_H + nUnits() * (ROW_H + ROW_GAP) + EV_ROW_SEP; }
+function evRowAt(y) {                       // canvas y -> event track index (or -1)
+  if (!DB.ev.length) return -1;
+  const r = Math.floor((y - evRowTop()) / (ROW_H + ROW_GAP));
+  return (r >= 0 && r < DB.ev.length) ? r : -1;
+}
+// Draw one event track's episodes over [t0,t1).
+//
+// Like the unit rows, a pixel column can cover far more than one cycle, and a
+// column that is only PARTLY inside an episode must not read the same as one that
+// is fully covered. So a column is drawn at a HEIGHT proportional to its coverage
+// (the same "collapse to height" treatment the state stacks use): fully covered =
+// the whole row, half covered = half height, BOTTOM-ALIGNED so the row reads as a
+// bar chart off a common baseline - heights are comparable at a glance, which a
+// centred ribbon does not give you. A column with several short episodes in it sums
+// their coverage, so a burst of ten 4-cycle misses in a 100-cycle column is a
+// 40%-height bar - visibly different from one long stall.
+//
+// Zoomed in far enough that an episode exceeds ADDR_MIN_PX, its ADDRESS is written
+// inside the span - which is the whole point of the track: "which line stalled
+// here", not just "a stall happened here".
+const ADDR_MIN_PX = 46;
+const EV_MIN_H = 2;                     // a covered column is never thinner than this
+function paintEvRow(ctx, t, t0, t1, x0, W, y, rowH) {
+  ctx.fillStyle = '#26262c'; ctx.fillRect(x0, y, W, rowH);
+  if (!t.n) return;
+  const span = t1 - t0;
+  const cpp = span / W;
+  const col = evColor(t);
+  const [i0, j0] = evRange(t, t0, t1);
+  // per-column coverage in cycles + how many episodes touched it (the count is what
+  // separates "one long stall" from "many short ones" in the tooltip and the label
+  // rule below)
+  const cov = new Float64Array(W);
+  const cnt = new Uint32Array(W);
+  const labels = [];
+  for (let k = i0; k < j0; k++) {
+    const c0 = t.c0[k], c1 = c0 + t.len[k];
+    if (c1 <= t0 || c0 >= t1) continue;
+    const a = Math.max(c0, t0), b = Math.min(c1, t1);
+    let px0 = Math.floor((a - t0) / span * W);
+    let px1 = Math.ceil ((b - t0) / span * W);
+    if (px0 < 0) px0 = 0; if (px1 > W) px1 = W;
+    if (px1 <= px0) px1 = px0 + 1;
+    for (let px = px0; px < px1 && px < W; px++) {
+      const pc0 = t0 + px / W * span, pc1 = t0 + (px+1) / W * span;
+      const ov = Math.min(b, pc1) - Math.max(a, pc0);
+      if (ov > 0) { cov[px] += ov; cnt[px]++; }
+    }
+    // an episode wide enough to hold text gets a label (its true, unclipped width
+    // decides, so a span running off the left edge still gets one)
+    const w = (b - a) / span * W;
+    if (w >= ADDR_MIN_PX) labels.push({ x: x0 + (a - t0) / span * W, w, k, cov: b - a });
+  }
+  // paint, merging equal-height neighbours into runs (a zoomed-in view is then one
+  // fillRect per episode rather than one per pixel)
+  ctx.fillStyle = col;
+  let runStart = -1, runH = -1;
+  const flush = (pxEnd) => {
+    if (runStart >= 0 && runH > 0)
+      ctx.fillRect(x0 + runStart, y + rowH - runH, pxEnd - runStart, runH);
+    runStart = -1; runH = -1;
+  };
+  for (let px = 0; px < W; px++) {
+    let h = 0;
+    if (cov[px] > 0) {
+      const f = Math.min(1, cov[px] / cpp);
+      h = Math.max(EV_MIN_H, Math.round(f * rowH));
+    }
+    if (h !== runH) { flush(px); runStart = px; runH = h; }
+  }
+  flush(W);
+  if (!labels.length) return;
+  ctx.font = '10px Consolas, monospace';
+  for (const L of labels) {
+    // address + duration; drop the duration first when the span is tight
+    const a = '0x' + t.addr[L.k].toString(16);
+    const txt = L.w >= ADDR_MIN_PX + 44 ? `${a}  ${t.len[L.k]}c` : a;
+    // A labelled episode spans whole pixels, so its bar is full height and the text
+    // sits ON it (dark ink). Only when the bar is short - a labelled span sharing
+    // its columns with empty cycles - does the text fall outside it, so light ink
+    // on the row background is used instead.
+    const barH = Math.max(EV_MIN_H, Math.round(Math.min(1, L.cov / (L.w * cpp)) * rowH));
+    ctx.fillStyle = barH >= rowH - 2 ? '#12121a' : '#cfcfd6';
+    ctx.save();
+    ctx.beginPath(); ctx.rect(L.x, y, L.w, rowH); ctx.clip();
+    ctx.fillText(txt, L.x + 3, y + rowH - 6);
+    ctx.restore();
+  }
+}
+
+function drawTracks() {
+  const NU = nUnits();
+  const cssW = trkCv.clientWidth || trkCv.parentElement.clientWidth;
+  const H = AXIS_H + NU * (ROW_H + ROW_GAP)
+          + (DB.ev.length ? EV_ROW_SEP + DB.ev.length * (ROW_H + ROW_GAP) : 0);
+  const dpr = window.devicePixelRatio || 1;
+  trkCv.width = cssW * dpr; trkCv.height = H * dpr;
+  trkCv.style.height = H + 'px';
+  const ctx = trkCv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, H);
+  const W = cssW - GUTTER;
+
+  // axis
+  ctx.fillStyle = '#26262c'; ctx.fillRect(GUTTER, 0, W, AXIS_H);
+  ctx.fillStyle = '#9a9aa2'; ctx.font = '11px Consolas, monospace';
+  const span = view.t1 - view.t0;
+  const step = Math.pow(10, Math.floor(Math.log10(span / 6)));
+  const nice = span/step > 30 ? step*5 : span/step > 12 ? step*2 : step;
+  for (let c = Math.ceil(view.t0/nice)*nice; c < view.t1; c += nice) {
+    const x = GUTTER + (c - view.t0) / span * W;
+    ctx.fillStyle = '#3a3a42'; ctx.fillRect(x, AXIS_H, 1, H - AXIS_H);
+    ctx.fillStyle = '#9a9aa2'; ctx.fillText(c.toLocaleString(), x+3, 12);
+  }
+  // unit names (display order)
+  ctx.font = '12px Consolas, monospace';
+  for (let r = 0; r < NU; r++) {
+    const y = AXIS_H + r * (ROW_H + ROW_GAP);
+    ctx.fillStyle = '#bcbcc4';
+    ctx.fillText(DB.units[DB.order[r] ?? r], 6, y + ROW_H - 6);
+  }
+  paintBins(ctx, view.t0, view.t1, GUTTER, Math.max(1, Math.floor(W)), ROW_H, ROW_GAP, AXIS_H);
+
+  // event rows (tex-cache misses / prefetches / waits), below the unit rows
+  if (DB.ev.length) {
+    const top = evRowTop();
+    ctx.fillStyle = '#3a3a42'; ctx.fillRect(GUTTER, top - EV_ROW_SEP/2, W, 1);
+    ctx.font = '11px Consolas, monospace';
+    for (let ti = 0; ti < DB.ev.length; ti++) {
+      const y = top + ti * (ROW_H + ROW_GAP);
+      ctx.fillStyle = evColor(DB.ev[ti]);
+      ctx.fillText(DB.ev[ti].name, 6, y + ROW_H - 6);
+      paintEvRow(ctx, DB.ev[ti], view.t0, view.t1, GUTTER,
+                 Math.max(1, Math.floor(W)), y, ROW_H);
+    }
+    ctx.font = '12px Consolas, monospace';
+  }
+
+  // render marks
+  for (const m of DB.marks) {
+    if (m.c < view.t0 || m.c > view.t1) continue;
+    const x = GUTTER + (m.c - view.t0) / span * W;
+    ctx.fillStyle = m.t === 'R' ? '#5aa0ff' : '#ff7ad0';
+    ctx.fillRect(x, 0, 1, H);
+    ctx.fillText(m.t, x+2, AXIS_H + 10);
+  }
+  // cursor
+  if (cursor >= view.t0 && cursor <= view.t1) {
+    const x = GUTTER + (cursor - view.t0) / span * W;
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(x, 0, 1, H);
+  }
+}
+
+function buildOverview() {
+  const NU = nUnits();
+  const OW = 2048, rowH = 2, gap = 0;
+  const oc = document.createElement('canvas');
+  oc.width = OW; oc.height = NU * rowH;
+  paintBins(oc.getContext('2d'), 0, DB.total, 0, OW, rowH, gap, 0);
+  ovImg = oc;
+}
+function drawOverview() {
+  const cssW = ovCv.clientWidth || ovCv.parentElement.clientWidth;
+  const H = 56;
+  const dpr = window.devicePixelRatio || 1;
+  ovCv.width = cssW * dpr; ovCv.height = H * dpr;
+  const ctx = ovCv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#1f1f24'; ctx.fillRect(0, 0, cssW, H);
+  if (ovImg) ctx.drawImage(ovImg, 0, 0, ovImg.width, ovImg.height, 0, 2, cssW, H-4);
+  // view window
+  const x0 = view.t0 / DB.total * cssW, x1 = view.t1 / DB.total * cssW;
+  ctx.strokeStyle = '#ffffffaa'; ctx.lineWidth = 1;
+  ctx.strokeRect(x0, 0.5, Math.max(2, x1-x0), H-1);
+  ctx.fillStyle = '#ffffff18'; ctx.fillRect(x0, 0, Math.max(2, x1-x0), H);
+  // cursor
+  const cx = cursor / DB.total * cssW;
+  ctx.fillStyle = '#fff'; ctx.fillRect(cx, 0, 1, H);
+}
+
+// ============================== event track helpers ==============================
+function buildEvLegend() {
+  const el = document.getElementById('evlegend');
+  if (!DB.ev.length) { el.innerHTML = ''; return; }
+  el.innerHTML = DB.ev.map(t => {
+    const pct = DB.total ? (t.cycles / DB.total * 100).toFixed(1) : '0.0';
+    const avg = t.n ? (t.cycles / t.n).toFixed(1) : '0';
+    return `<span class="ev"><i class="swatch" style="background:${evColor(t)}"></i>` +
+           `<b>${t.name}</b> <span class="k">${t.n.toLocaleString()} ev, ` +
+           `${t.cycles.toLocaleString()} cyc (${pct}%), avg ${avg}</span></span>`;
+  }).join('');
+}
+
+// ============================== SVG pipeline diagram ==============================
+// unit: index into DB.units (colored by state); u:null boxes are passive (gray)
+const LAYOUT = {
+  // polly2-rtl's units in rtl/v1/p2_core.sv's +occlog order (U 0 .. 26; conventions.md 7.5)
+  w: 640, h: 520,
+  blocks: [
+    { id:'SEQ',     u:0,  x: 10, y: 26, w: 60, h: 34, label:'seq\n(region)' },
+    { id:'CTL',     u:1,  x: 80, y: 26, w: 60, h: 34, label:'isp ctl' },
+    { id:'OLW',     u:2,  x:150, y: 26, w: 60, h: 34, label:'OL walk' },
+    { id:'IPF',     u:3,  x:220, y: 26, w: 70, h: 34, label:'ISP param\nfetch' },
+    { id:'ISU',     u:4,  x:300, y: 26, w: 70, h: 34, label:'ISP setup' },
+    { id:'PCACHE',  u:5,  x:380, y: 26, w: 70, h: 34, label:'prim cache' },
+    { id:'RAST',    u:6,  x: 10, y:110, w: 70, h: 34, label:'raster' },
+    { id:'PIX',     u:7,  x: 90, y:110, w: 70, h: 34, label:'depth/tag\npixels' },
+    { id:'IFB',     u:8,  x:170, y:110, w: 70, h: 34, label:'feedback' },
+    { id:'CUT',     u:9,  x:250, y:110, w: 60, h: 34, label:'cutter' },
+    { id:'RUNQ',    u:10, x:320, y:110, w: 60, h: 34, label:'run queue' },
+    { id:'SORT',    u:11, x:390, y:110, w: 60, h: 34, label:'span sort' },
+    { id:'STORE',   u:12, x: 10, y:200, w: 70, h: 34, label:'TSP store' },
+    { id:'TPF',     u:13, x: 90, y:200, w: 70, h: 34, label:'TSP param\nfetch' },
+    { id:'TSU',     u:14, x:170, y:200, w: 70, h: 34, label:'TSP setup' },
+    { id:'RSTART',  u:15, x:250, y:200, w: 60, h: 34, label:'run start' },
+    { id:'PXQ',     u:16, x:320, y:200, w: 60, h: 34, label:'pixel q' },
+    { id:'PP',      u:17, x:390, y:200, w: 70, h: 34, label:'pixel pipe' },
+    { id:'TEXSTALL',u:21, x:390, y:250, w: 70, h: 26, label:'tex stall' },
+    { id:'PTC',     u:22, x:460, y: 26, w: 70, h: 34, label:'PT chunks' },
+    { id:'IBUF',    u:23, x: 90, y:150, w:150, h: 26, label:'tile depth/tag RAM' },
+    { id:'TILEQ',   u:24, x:460, y:110, w: 60, h: 34, label:'tile q' },
+    { id:'ENTQ',    u:25, x:530, y:110, w: 60, h: 34, label:'entry q' },
+    { id:'REGS',    u:26, x: 10, y:390, w:100, h: 30, label:'registers' },
+    { id:'TBUF',    u:18, x:470, y:200, w: 60, h: 34, label:'tile bufs' },
+    { id:'WOUT',    u:19, x:540, y:200, w: 60, h: 34, label:'write-out' },
+    { id:'MEM',     u:20, x: 10, y:330, w:590, h: 40, label:'VRAM clients C0-C5 (p2_mem)' },
+  ],
+  arrows: [
+    ['SEQ','CTL'], ['CTL','OLW'], ['OLW','IPF'], ['IPF','ISU'], ['ISU','PCACHE'],
+    ['PCACHE','RAST','wrap'], ['RAST','PIX'], ['PIX','IFB'], ['IFB','CUT'], ['CUT','RUNQ'], ['RUNQ','SORT'],
+    ['SORT','STORE','wrap'], ['STORE','TPF'], ['TPF','TSU'], ['TSU','RSTART'], ['RSTART','PXQ'], ['PXQ','PP'],
+    ['PP','TEXSTALL','v'], ['PP','TBUF'], ['TBUF','WOUT'],
+    ['MEM','SEQ','mem'], ['MEM','OLW','mem'], ['MEM','IPF','mem'], ['MEM','TPF','mem'], ['MEM','PP','mem'], ['MEM','WOUT','mem'],
+  ],
+};
+
+function buildSvg() {
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('width', LAYOUT.w); svg.setAttribute('height', LAYOUT.h);
+  svg.setAttribute('viewBox', `0 0 ${LAYOUT.w} ${LAYOUT.h}`);
+  const defs = document.createElementNS(NS, 'defs');
+  defs.innerHTML = `<marker id="arr" viewBox="0 0 10 10" refX="9" refY="5"
+      markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#8a8a92"/></marker>`;
+  svg.appendChild(defs);
+
+  const byId = {};
+  for (const b of LAYOUT.blocks) byId[b.id] = b;
+
+  // arrows first (under blocks)
+  for (const [f, t, kind] of LAYOUT.arrows) {
+    const A = byId[f], B = byId[t];
+    const p = document.createElementNS(NS, 'path');
+    let d;
+    if (kind === 'v') {
+      d = `M${A.x+A.w/2} ${A.y+A.h} L${B.x+B.w/2} ${B.y}`;
+      if (A.y > B.y) d = `M${A.x+A.w/2} ${A.y} L${B.x+B.w/2} ${B.y+B.h}`;
+    } else if (kind === 'wrap') {       // end of a row -> start of the next row
+      const midY = (A.y + A.h + B.y) / 2;
+      d = `M${A.x+A.w/2} ${A.y+A.h} L${A.x+A.w/2} ${midY} L${B.x+B.w/2} ${midY} L${B.x+B.w/2} ${B.y}`;
+    } else if (kind === 'vdown') {         // straight down at B's column (A wider than B)
+      d = `M${B.x+B.w/2} ${A.y+A.h} L${B.x+B.w/2} ${B.y}`;
+    } else if (kind === 'vup') {           // straight up at A's column (B wider than A)
+      d = `M${A.x+A.w/2} ${A.y} L${A.x+A.w/2} ${B.y+B.h}`;
+    } else if (kind === 'dash') {          // side-channel (demote writes etc):
+      // elbow route - out of A's right edge, across, then up into B's bottom edge
+      d = `M${A.x+A.w} ${A.y+A.h/2} L${B.x+B.w/2} ${A.y+A.h/2} L${B.x+B.w/2} ${B.y+B.h}`;
+      p.setAttribute('stroke-dasharray', '3 3');
+    } else if (kind === 'mem') {
+      const midY = (A.y + B.y + B.h) / 2;
+      d = `M${B.x+B.w/2+8} ${B.y+B.h} L${B.x+B.w/2+8} ${A.y}`;
+      p.setAttribute('stroke-dasharray', '3 3');
+      p.setAttribute('marker-start', 'url(#arr)');
+    } else {
+      d = `M${A.x+A.w} ${A.y+A.h/2} L${B.x} ${B.y+B.h/2}`;
+    }
+    p.setAttribute('d', d);
+    p.setAttribute('fill', 'none'); p.setAttribute('stroke', '#8a8a92');
+    p.setAttribute('stroke-width', '1.4');
+    if (kind !== 'mem') p.setAttribute('marker-end', 'url(#arr)');
+    svg.appendChild(p);
+  }
+  // blocks
+  for (const b of LAYOUT.blocks) {
+    const g = document.createElementNS(NS, 'g');
+    const r = document.createElementNS(NS, 'rect');
+    r.setAttribute('x', b.x); r.setAttribute('y', b.y);
+    r.setAttribute('width', b.w); r.setAttribute('height', b.h);
+    r.setAttribute('rx', 4);
+    r.setAttribute('fill', IDLE); r.setAttribute('stroke', '#55555f');
+    r.id = 'blk-' + b.id;
+    g.appendChild(r);
+    const lines = b.label.split('\n');
+    lines.forEach((ln, i) => {
+      const t = document.createElementNS(NS, 'text');
+      t.setAttribute('x', b.x + b.w/2);
+      t.setAttribute('y', b.y + b.h/2 + (i - (lines.length-1)/2) * 12 + 4);
+      t.setAttribute('text-anchor', 'middle');
+      t.setAttribute('fill', '#101014'); t.setAttribute('font-size', '11');
+      t.setAttribute('font-weight', '600');
+      t.setAttribute('id', `blklbl-${b.id}-${i}`);
+      t.textContent = ln;
+      g.appendChild(t);
+    });
+    // per-block dynamic annotation (below or above the box)
+    const a = document.createElementNS(NS, 'text');
+    a.setAttribute('x', b.x + b.w/2); a.setAttribute('y', b.y - 4);
+    a.setAttribute('text-anchor', 'middle');
+    a.setAttribute('fill', '#9a9aa2');
+    a.setAttribute('font-size', '10'); a.setAttribute('font-family', 'Consolas, monospace');
+    a.id = 'ann-' + b.id;
+    g.appendChild(a);
+    svg.appendChild(g);
+  }
+  // global header annotation
+  const hdr = document.createElementNS(NS, 'text');
+  hdr.setAttribute('x', 10); hdr.setAttribute('y', 14);
+  hdr.setAttribute('fill', '#d8d8dc'); hdr.setAttribute('font-size', '12');
+  hdr.setAttribute('font-family', 'Consolas, monospace');
+  hdr.id = 'ann-hdr';
+  svg.appendChild(hdr);
+  document.getElementById('svgbox').appendChild(svg);
+}
+
+function fmtVal(vid) {
+  const v = valAtCycle(cursor, vid);
+  return v === null ? '-' : enumName(vid, v);
+}
+function updateSvg() {
+  const c = cursor;
+  for (const b of LAYOUT.blocks) {
+    const r = document.getElementById('blk-' + b.id);
+    if (!r) continue;
+    if (b.u === null) { r.setAttribute('fill', '#3a3a44'); continue; }
+    const s = stateAtCycle(c, b.u);
+    r.setAttribute('fill', s < 0 ? IDLE : COLORS[s]);
+    for (let i = 0; ; i++) {
+      const t = document.getElementById(`blklbl-${b.id}-${i}`);
+      if (!t) break;
+      t.setAttribute('fill', s < 0 ? '#777' : '#101014');
+    }
+  }
+  const ann = (id, txt) => { const e = document.getElementById('ann-' + id); if (e) e.textContent = txt; };
+  ann('hdr',   `ISP tile(${fmtVal(0)},${fmtVal(1)})  entries=${fmtVal(7)}  write-out tile(${fmtVal(5)},${fmtVal(6)})`);
+  ann('RUNQ',  `${fmtVal(2)}`);
+  ann('PXQ',   `${fmtVal(3)} px ${fmtVal(4)} runs`);
+  ann('WOUT',  `tile(${fmtVal(5)},${fmtVal(6)})`);
+}
+
+function updateValues() {
+  const rows = [];
+  for (let i = 0; i < DB.vals.length; i++) {
+    if (!DB.vals[i]) continue;
+    rows.push(`<tr><td class="n">v${i} ${DB.vals[i]}</td><td>${fmtVal(i)}</td></tr>`);
+  }
+  document.getElementById('valtable').innerHTML = rows.join('');
+}
+
+// ============================== interaction ==============================
+// every canvas that shows the current view/cursor, repainted together
+function redrawTimeline() { drawTracks(); drawOverview(); }
+const seek = document.getElementById('seek');
+function setCursor(c, recenters) {
+  cursor = Math.max(0, Math.min(DB.total - 1, Math.round(c)));
+  document.getElementById('curcyc').textContent = cursor.toLocaleString();
+  document.getElementById('cycin').value = cursor;
+  seek.value = Math.round(cursor / DB.total * 1000000);
+  if (recenters && (cursor < view.t0 || cursor > view.t1)) {
+    const span = view.t1 - view.t0;
+    view.t0 = Math.max(0, cursor - span/2);
+    view.t1 = Math.min(DB.total, view.t0 + span);
+  }
+  redrawTimeline(); updateSvg(); updateValues();
+}
+function clampView() {
+  const span = Math.max(10, Math.min(DB.total, view.t1 - view.t0));
+  view.t0 = Math.max(0, Math.min(DB.total - span, view.t0));
+  view.t1 = view.t0 + span;
+}
+function trackTime(ev) {
+  const rect = trkCv.getBoundingClientRect();
+  const x = ev.clientX - rect.left - GUTTER;
+  const W = rect.width - GUTTER;
+  return view.t0 + Math.max(0, Math.min(1, x / W)) * (view.t1 - view.t0);
+}
+
+trkCv.addEventListener('wheel', ev => {
+  ev.preventDefault();
+  const t = trackTime(ev);
+  const f = ev.deltaY > 0 ? 1.3 : 1/1.3;
+  view.t0 = t - (t - view.t0) * f;
+  view.t1 = t + (view.t1 - t) * f;
+  clampView(); redrawTimeline();
+}, { passive: false });
+
+let drag = null;
+trkCv.addEventListener('mousedown', ev => {
+  drag = { x: ev.clientX, t0: view.t0, t1: view.t1, moved: false };
+});
+window.addEventListener('mousemove', ev => {
+  if (drag) {
+    const rect = trkCv.getBoundingClientRect();
+    const W = rect.width - GUTTER;
+    const dt = (ev.clientX - drag.x) / W * (drag.t1 - drag.t0);
+    if (Math.abs(ev.clientX - drag.x) > 3) drag.moved = true;
+    view.t0 = drag.t0 - dt; view.t1 = drag.t1 - dt;
+    clampView(); redrawTimeline();
+  } else if (ev.target === trkCv) {
+    // hover tooltip
+    const rect = trkCv.getBoundingClientRect();
+    const row = Math.floor((ev.clientY - rect.top - AXIS_H) / (ROW_H + ROW_GAP));
+    const erow = evRowAt(ev.clientY - rect.top);
+    const tt = document.getElementById('tooltip');
+    if (erow >= 0 && ev.clientX - rect.left > GUTTER) {
+      // EVENT row: report the episode under the cursor exactly (address + span), or
+      // the aggregate when the column covers more than one.
+      const t = DB.ev[erow];
+      const c = Math.round(trackTime(ev));
+      const W = rect.width - GUTTER;
+      const cpp = (view.t1 - view.t0) / Math.max(1, W);
+      const lo = c - cpp/2, hi = c + cpp/2;
+      const [i0, j0] = evRange(t, lo, Math.max(hi, lo + 1));
+      const hits = [];
+      for (let k = i0; k < j0; k++)
+        if (t.c0[k] + t.len[k] > lo && t.c0[k] < hi) hits.push(k);
+      const head = `${t.name} (${t.kind}) @ ${c.toLocaleString()}` +
+                   (cpp > 1.0001 ? `   (${Math.round(cpp).toLocaleString()} cyc/px)` : '');
+      if (!hits.length) tt.textContent = head + '\nno event';
+      else if (hits.length === 1) {
+        const k = hits[0];
+        tt.textContent = head +
+          `\naddr 0x${t.addr[k].toString(16)}  (line 0x${(t.addr[k] >>> 2).toString(16)})` +
+          `\n${t.c0[k].toLocaleString()} .. ${(t.c0[k]+t.len[k]).toLocaleString()}` +
+          `   ${t.len[k].toLocaleString()} cycles`;
+      } else {
+        let cyc = 0;
+        for (const k of hits) cyc += Math.min(t.c0[k]+t.len[k], hi) - Math.max(t.c0[k], lo);
+        tt.textContent = head +
+          `\n${hits.length} events here, ${Math.round(cyc).toLocaleString()} cycles covered` +
+          `\nfirst 0x${t.addr[hits[0]].toString(16)}  last 0x${t.addr[hits[hits.length-1]].toString(16)}` +
+          `\n(zoom in for per-event addresses)`;
+      }
+      tt.style.display = 'block';
+      tt.style.left = (ev.clientX + 14) + 'px';
+      tt.style.top  = (ev.clientY + 12) + 'px';
+    } else if (row >= 0 && row < nUnits() && ev.clientX - rect.left > GUTTER) {
+      const u = DB.order[row] ?? row;
+      const t = Math.round(trackTime(ev));
+      // one pixel column covers `cpp` cycles; when that is more than one, a
+      // single sample misrepresents the column - report the same breakdown the
+      // stack is drawn from, over exactly the cycles the column represents.
+      const W = rect.width - GUTTER;
+      const cpp = (view.t1 - view.t0) / Math.max(1, W);
+      const zoomed = cpp <= 1.0001;
+      const lo = t - cpp/2, hi = t + cpp/2;
+      const span = zoomed ? '' : `   (${Math.round(cpp).toLocaleString()} cyc/px)`;
+      const fifo = DB.fifos && DB.fifos[u];
+      if (fifo) {
+        const st = statsOfValue(fifo.vid, lo, hi);
+        const pct = (v) => Math.round(v / fifo.depth * 100) + '%';
+        tt.textContent = `${DB.units[u]} @ ${t.toLocaleString()}  depth ${fifo.depth}${span}\n` +
+          (!st ? 'no data'
+               : zoomed
+                 ? `fill ${st.max} / ${fifo.depth}  (${pct(st.max)})`
+                 : `fill min ${st.min}  avg ${st.avg.toFixed(1)}  max ${st.max}\n` +
+                   `     ${pct(st.min)} .. ${pct(st.avg)} .. ${pct(st.max)}`);
+      } else {
+        const s = stateAtCycle(t, u);
+        const ss = zoomed ? null : stateStats(u, lo, hi);
+        tt.textContent = `${DB.units[u]} @ ${t.toLocaleString()}${span}\n` +
+          (ss ? (() => {
+                  const p = pctSplit(ss.acc, ss.wt);
+                  return `underflow ${p[0]}%   busy ${p[1]}%   overflow ${p[2]}%`;
+                })()
+              : s < 0 ? 'no data'
+                      : ['UNDERFLOW (waiting for data)','BUSY','OVERFLOW (blocked)'][s]);
+      }
+      tt.style.display = 'block';
+      tt.style.left = (ev.clientX + 14) + 'px';
+      tt.style.top  = (ev.clientY + 12) + 'px';
+    } else tt.style.display = 'none';
+  }
+});
+window.addEventListener('mouseup', ev => {
+  if (drag && !drag.moved && ev.target === trkCv) setCursor(trackTime(ev), false);
+  drag = null;
+});
+trkCv.addEventListener('mouseleave', () =>
+  document.getElementById('tooltip').style.display = 'none');
+
+let ovDrag = false;
+function stripSeek(cv, ev) {
+  const rect = cv.getBoundingClientRect();
+  const t = (ev.clientX - rect.left) / rect.width * DB.total;
+  const span = view.t1 - view.t0;
+  view.t0 = t - span/2; view.t1 = t + span/2;
+  clampView(); setCursor(t, false);
+}
+function ovSeek(ev) { stripSeek(ovCv, ev); }
+ovCv.addEventListener('mousedown', ev => { ovDrag = true; ovSeek(ev); });
+window.addEventListener('mousemove', ev => { if (ovDrag) ovSeek(ev); });
+window.addEventListener('mouseup', () => ovDrag = false);
+
+seek.addEventListener('input', () => setCursor(+seek.value / 1000000 * DB.total, true));
+document.getElementById('goto').addEventListener('click', () =>
+  setCursor(+document.getElementById('cycin').value, true));
+document.getElementById('cycin').addEventListener('keydown', ev => {
+  if (ev.key === 'Enter') setCursor(+document.getElementById('cycin').value, true);
+});
+function stepChange(dir) {
+  let i = idxAt(DB.sCyc, DB.nS, cursor);
+  i += dir > 0 ? 1 : (DB.sCyc[i] === cursor ? -1 : 0);
+  if (i < 0) i = 0; if (i >= DB.nS) i = DB.nS - 1;
+  setCursor(DB.sCyc[i], true);
+}
+document.getElementById('prevch').addEventListener('click', () => stepChange(-1));
+document.getElementById('nextch').addEventListener('click', () => stepChange(+1));
+window.addEventListener('keydown', ev => {
+  if (ev.target.tagName === 'INPUT' && ev.target.type !== 'range') return;
+  if (ev.key === 'ArrowLeft')  { ev.shiftKey ? setCursor(cursor - DB.total/100, true) : stepChange(-1); ev.preventDefault(); }
+  if (ev.key === 'ArrowRight') { ev.shiftKey ? setCursor(cursor + DB.total/100, true) : stepChange(+1); ev.preventDefault(); }
+});
+window.addEventListener('resize', () => { redrawTimeline(); });
+
+// ============================== file loading ==============================
+const dropArea = document.getElementById('drop-area');
+['dragenter','dragover','dragleave','drop'].forEach(n => {
+  document.body.addEventListener(n, e => e.preventDefault());
+  dropArea.addEventListener(n, e => e.preventDefault());
+});
+['dragenter','dragover'].forEach(n =>
+  dropArea.addEventListener(n, () => dropArea.classList.add('highlight')));
+['dragleave','drop'].forEach(n =>
+  dropArea.addEventListener(n, () => dropArea.classList.remove('highlight')));
+dropArea.addEventListener('drop', e => {
+  if (e.dataTransfer.files.length) loadFile(e.dataTransfer.files[0]);
+});
+document.body.addEventListener('drop', e => {   // allow re-drop anywhere once loaded
+  if (e.dataTransfer.files.length) loadFile(e.dataTransfer.files[0]);
+});
+document.getElementById('file-input').addEventListener('change', e => {
+  if (e.target.files.length) loadFile(e.target.files[0]);
+});
+
+function loadText(name, text) {
+  const prog = document.getElementById('progress');
+  prog.style.display = 'flex';
+  // reset DB for re-drop
+  DB.vCyc = []; DB.vVal = []; DB.marks = []; DB.total = 0;
+  document.getElementById('svgbox').innerHTML = '';
+  parseLog(text, () => {
+    prog.style.display = 'none';
+    document.getElementById('drop-wrap').style.display = 'none';
+    document.getElementById('app').style.display = 'block';
+    document.getElementById('fname').textContent = name;
+    document.getElementById('totcyc').textContent = DB.total.toLocaleString();
+    DB.order = computeOrder();
+    view = { t0: 0, t1: DB.total };
+    buildSvg();
+    buildOverview();
+    buildEvLegend();
+    setCursor(0, false);
+  }, f => document.getElementById('pbar').style.width = (f*100).toFixed(1) + '%');
+}
+function loadFile(file) {
+  const rd = new FileReader();
+  rd.onload = ev => loadText(file.name, ev.target.result);
+  rd.readAsText(file);
+}
+
+// ?logfile=relpath : auto-fetch a log relative to this page's URL (needs http(s);
+// file:// pages can't fetch - serve the dir, e.g. `python3 -m http.server`).
+{
+  const lf = new URLSearchParams(location.search).get('logfile');
+  if (lf) {
+    document.getElementById('progress').style.display = 'flex';
+    fetch(lf)
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.text(); })
+      .then(text => loadText(lf, text))
+      .catch(err => {
+        document.getElementById('progress').style.display = 'none';
+        alert(`failed to fetch "${lf}": ${err.message}` +
+              (location.protocol === 'file:' ? '\n(file:// cannot fetch - serve the directory over http)' : ''));
+      });
+  }
+}
+</script>
+</body>
+</html>

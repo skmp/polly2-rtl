@@ -1,0 +1,6 @@
+# tb/timing/k.txt: the timing configuration (PLAN 1.5, MT0; docs/timing.md 11), written by make timing-fit, read by
+# tools/timing (tmlib.read_cfg) and the timing gates. Each value is fitted once and never adjusted per scene.
+# VR_ROW: the least |rtl - console| of clip 0 - clip 4 (the 0888 write-out's per-line excess, tb/timing/gate.txt
+# fitdiff) over VR_ROW 4, .., 16: error 8 clk; K: K = round(2998.5 - 2673) - 7 = 319 (the reading's lateness taken as the middle of 0..14)
+VR_ROW 10
+K 319

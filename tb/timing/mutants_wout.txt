@@ -1,0 +1,10 @@
+# tb/timing/mutants_wout.txt: the timing harness's write-out mutant (make timing-harness-mutants), run by
+# tools/gate/mutants.py; the probe: tools/timing/timing_probe.sh wout with the mutant's p2-offline.
+#
+# Format: <id> | <file in rtl/v1/wout> | <original fragment> | <mutated fragment> | <probe> [args] | <what it breaks>
+@dir rtl/v1/wout WOUT_DIR
+@obj P2OFF_OBJDIR
+@probe wout p2-offline-tprobe timing_probe wout
+
+wout-888-two-clocks | p2_wout_put.sv | assign both    = p_v && g_v && !g_second && beb != '0 && wa == p_w; | assign both    = 1'b0; | wout | MT0: a packed 888 pixel across a word boundary in two clocks (one group a clock, M12's writer): the 888 tile 1.5 clk a pixel, 48 + the row change a line
+wout-no-wfifo | p2_wout_put.sv | parameter int WO_WFIFO = 16 | parameter int WO_WFIFO = 2 | wout | MT0: no write FIFO to speak of (2 words): the row change stalls the pixel side, the 16-bit tile costs the reader's time plus most of the row changes

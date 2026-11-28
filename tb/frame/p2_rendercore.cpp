@@ -15,19 +15,38 @@
 //      its state lost: what refsw3-offline does after it is the same as after any render).
 // The hazard detector (ARCHITECTURE 3.2.1): a render whose C0-C4 reads touch a 32-bit word its C5 writes is VRAM-race:
 // `vramrace` is the number of such words (0: not a race render), `first` the first of them.
-// Environment: P2_VR_LAT (the VRAM model's read latency, 8), P2_VRAMVARY=<seed> (+vramvary: random latency, ready drops
+// Environment: P2_VR_LAT (the VRAM model's read latency, 8), P2_VR_ROW (its row change, 2; the timing runs use the
+// fitted value, tb/timing/vram.txt), P2_VRAMVARY=<seed> (+vramvary: random latency, ready drops
 // and stalls; 0 off), P2_CLK_LIMIT (clocks a render may take, 2e9), P2_VERBOSE=1 (each render's statistics),
 // P2_PLUSARGS (the RTL's plusargs, e.g. +wotrace).
+// Timing (PLAN MT0, 1.5; conventions.md 7.6):
+//   P2_TIMING=1        +p2timing: p2_core's timing tap prints "p2: timing <key> <value> ..." (the per-unit clocks and counts
+//                      of the render, rtl/v1/p2_core.sv) just before the render's "p2: render" line
+//   P2_RENDERS=<a>-<b>[,<c>-<d>...]   only these renders are clocked; any other is skipped ("p2: render <n> skipped": the
+//                      core is not clocked, video memory and the core's state are left as they are). The timing runs cut a
+//                      stream into items at scene boundaries this way (tools/timing/tm_run.sh)
+//   P2_TIMED_WRITES=<file>  register writes applied while the render is clocked (TM_ORDER's palette clock): lines
+//                      "<clock> <register offset, hex> <value, hex>", the clock counted as the p2: line's (the
+//                      STARTRENDER write is clock 0; a write at clock k is k clocks after it); a line "@<render>" makes the lines after it that
+//                      render's only (before any "@": every render's). One write a clock through the register port, in
+//                      file order; a write due while another is applied goes the clock after. "#" starts a comment.
+//                      A render that had timed writes is preceded by "p2: timed writes <k>": those applied by the TSP's
+//                      bit (the console's "writes" of TM_ORDER's O line).
+// stdout is flushed at each render, so that the stream's "echo" lines (refsw3-offline prints them on stdout) and these
+// stderr lines are in stream order when both go to one file (2>&1).
 //
 // Dual mode (-DP2_DUAL, make p2-offline-dual): the L2 glue is linked too; each render first runs refcore's RenderCORE_sw
 // on a copy of video memory, then the RTL on emu_vram, and the two are compared word by word: "p2-dual: render <n>:
 // <k> words differ, first at <32-bit-area address> (tile x y, pixel x y)" or "p2-dual: render <n>: equal". The RTL's
 // memory is the one kept.
+#include <algorithm>
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "Vp2_core.h"
@@ -58,6 +77,14 @@ struct Frame {
     long renders = 0;
     uint64_t limit = 2000000000ull;
     bool verbose = false;
+    // P2_RENDERS: the ranges clocked (empty: all)
+    std::vector<std::pair<long, long>> sel;
+    // P2_TIMED_WRITES: per render (-1: every render), (clock, word, value) in file order
+    struct TimedWrite {
+        uint64_t clk;
+        uint32_t word, value;
+    };
+    std::map<long, std::vector<TimedWrite>> tw;
 
     void vram_drive()
     {
@@ -123,14 +150,64 @@ struct Frame {
         t = new Vp2_core;
         if (const char* s = getenv("P2_VR_LAT"))
             vm.vrLat = atoi(s);
+        if (const char* s = getenv("P2_VR_ROW")) {
+            vm.vrRow = atoi(s);
+            fprintf(stderr, "p2: VR_ROW %d\n", vm.vrRow);
+        }
         if (const char* s = getenv("P2_VRAMVARY"))
             vm.varySeed = strtoull(s, nullptr, 0);
         if (const char* s = getenv("P2_CLK_LIMIT"))
             limit = strtoull(s, nullptr, 0);
         verbose = getenv("P2_VERBOSE") && atoi(getenv("P2_VERBOSE"));
+        if (const char* s = getenv("P2_RENDERS")) {
+            for (const char* c = s; *c;) {
+                char* e;
+                long a = strtol(c, &e, 0), b = a;
+                if (e == c) break;
+                if (*e == '-') b = strtol(e + 1, &e, 0);
+                sel.emplace_back(a, b);
+                c = *e == ',' ? e + 1 : e;
+            }
+        }
+        if (const char* s = getenv("P2_TIMED_WRITES")) {
+            FILE* f = fopen(s, "r");
+            if (!f) {
+                fprintf(stderr, "p2: cannot read P2_TIMED_WRITES %s\n", s);
+                exit(1);
+            }
+            char line[256];
+            long cur = -1;
+            size_t n = 0;
+            while (fgets(line, sizeof line, f)) {
+                char* c = line;
+                while (*c == ' ' || *c == '\t') c++;
+                if (*c == '#' || *c == '\n' || !*c) continue;
+                if (*c == '@') {
+                    cur = strtol(c + 1, nullptr, 0);
+                    continue;
+                }
+                unsigned long long k;
+                unsigned w, v;
+                if (sscanf(c, "%llu %x %x", &k, &w, &v) != 3 || w >= 0x2000 || (w & 3)) {
+                    fprintf(stderr, "p2: P2_TIMED_WRITES: bad line: %s", line);
+                    exit(1);
+                }
+                tw[cur].push_back({ (uint64_t)k, w >> 2, v });
+                n++;
+            }
+            fclose(f);
+            fprintf(stderr, "p2: %zu timed register writes from %s\n", n, s);
+        }
         vm.init(refcore::emu_vram);
         reset();
         fprintf(stderr, "p2: p2_core, VR_LAT %d, vramvary %llu\n", vm.vrLat, (unsigned long long)vm.varySeed);
+    }
+    bool selected(long n) const
+    {
+        if (sel.empty()) return true;
+        for (const auto& r : sel)
+            if (n >= r.first && n <= r.second) return true;
+        return false;
     }
     void reg_write(uint32_t word, uint32_t v)
     {
@@ -143,9 +220,28 @@ struct Frame {
 
     void render()
     {
-        if (!t)
+        fflush(stdout);
+        if (!t) {
+            if (getenv("P2_TIMING") && atoi(getenv("P2_TIMING"))) {
+                static std::string extra;
+                extra = std::string(getenv("P2_PLUSARGS") ? getenv("P2_PLUSARGS") : "") + " +p2timing";
+                setenv("P2_PLUSARGS", extra.c_str(), 1);
+            }
             init();
+        }
         const long n = renders++;
+        if (!selected(n)) {
+            fprintf(stderr, "p2: render %ld skipped\n", n);
+            return;
+        }
+        // the timed writes of this render: its own and every render's, merged in clock order (stable: file order)
+        std::vector<TimedWrite> w;
+        for (long k : { -1L, n }) {
+            auto it = tw.find(k);
+            if (it != tw.end()) w.insert(w.end(), it->second.begin(), it->second.end());
+        }
+        std::stable_sort(w.begin(), w.end(), [](const TimedWrite& a, const TimedWrite& b) { return a.clk < b.clk; });
+        size_t wi = 0;
         vm.init(refcore::emu_vram);
         vm.reseed((uint64_t)n, 0);
         vm.begin_render();
@@ -160,16 +256,30 @@ struct Frame {
         const uint64_t c0 = cyc;
         reg_write(0x014 / 4, 0xFFFFFFFFu);
         uint64_t tIsp = 0, tTsp = 0, tVid = 0;
+        size_t wTsp = 0;                    // timed writes applied by the TSP's bit
         bool hung = false;
         for (;;) {
             if (t->ev_isp && !tIsp) tIsp = cyc - c0;
-            if (t->ev_tsp && !tTsp) tTsp = cyc - c0;
+            if (t->ev_tsp && !tTsp) {
+                tTsp = cyc - c0;
+                wTsp = wi;
+            }
             if (t->ev_vid && !tVid) tVid = cyc - c0;
             if (tIsp && tTsp && tVid)
                 break;
             if (cyc - c0 > limit) {
                 hung = true;
                 break;
+            }
+            // a timed write due: through the register port on this clock (clock cyc - c0, STARTRENDER's write is 0)
+            if (wi < w.size() && w[wi].clk <= cyc - c0) {
+                t->reg_wr = 1;
+                t->reg_addr = w[wi].word;
+                t->reg_wdata = w[wi].value;
+                wi++;
+                tick();
+                t->reg_wr = 0;
+                continue;
             }
             tick();
         }
@@ -184,6 +294,8 @@ struct Frame {
             tick();
             quiet = (vm.busy() || t->vh_req_v) ? 0 : quiet + 1;
         }
+        if (!w.empty())
+            fprintf(stderr, "p2: timed writes %zu\n", wTsp);
         const uint64_t race = vm.race_words();
         if (race) {
             // the 32-bit word index (half 0 even) as a 32-bit-area address

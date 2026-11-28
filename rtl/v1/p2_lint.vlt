@@ -14,5 +14,8 @@ lint_off -rule UNUSEDSIGNAL -file "*/p2_zword_pkg.sv" -match "*'r'[31:30]*"
 // unit reads (UNUSEDSIGNAL)
 lint_off -rule PINCONNECTEMPTY -file "*/p2_core.sv"
 lint_off -rule UNUSEDSIGNAL -file "*/p2_core.sv"
+// p2_core (MT0): the simulation-only timing tap and +occlog (`ifndef SYNTHESIS) count and print with blocking variables in
+// their clocked blocks, as procedural testbench code; no logic of the core is written that way
+lint_off -rule BLKSEQ -file "*/p2_core.sv"
 // p2_tbuf_hs: P2_HS = 0 does not read the action's kind
 lint_off -rule UNUSEDSIGNAL -file "*/p2_tbuf_hs.sv" -match "*'is_*"

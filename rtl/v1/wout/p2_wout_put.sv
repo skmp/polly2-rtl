@@ -22,9 +22,15 @@
 //            follows. C5 is a 32-bit-view client: the physical word {w, h} at address {h, w, 2'b00}.
 // [M tim 3.11: 1045 / 1105 / 1357 clk a tile at 16 / 24 / 32 bpp, also fully clipped, dither changes nothing; one word a
 // clock, the per-line cost from the VRAM model's row change, VR_ROW (T9)]
+//   write FIFO  the writer's words go to C5 through a FIFO of WO_WFIFO words (MT0, [I] from tim 3.11's per-line form
+//            max(32.66, W + 10.4): the pixel side runs at one pixel a clock while the word side waits on a row change, so
+//            a tile line costs the slower of the two, not their sum; 16 words hold the ~5 words a 16-bit line makes while
+//            a 10-clock row change is open). The FIFO's depth is [G] beside WO_FIFO (T10: the reader's lead).
 module p2_wout_put
   import p2_regs_pkg::*;
-(
+#(
+  parameter int WO_WFIFO = 16             // the write FIFO's words (MT0 [I], below)
+) (
   input  logic         clk,
   input  logic         rst,
   input  logic         flush,           // a render's start: the strip number back to 0
@@ -62,7 +68,8 @@ module p2_wout_put
   logic [31:0] s_px;
   logic        s_done;                  // P1's pixel leaves this clock
   assign i_rdy = !s_v || s_done;
-  assign idle  = !s_v && !p_v;
+  logic        wf_empty;
+  assign idle  = !s_v && !p_v && wf_empty;
 
   // the strip counter
   logic        sbuf;
@@ -168,7 +175,11 @@ module p2_wout_put
   end
 
   // ---------------------------------------------------------------------------------------------- the groups out
-  // P1 hands its groups to the writer one a clock: the first, then (if any) the second
+  // P1 hands its groups to the writer one a clock: the first, then (if any) the second; but when the first merges into
+  // the writer's word and a second follows (a packed 888 pixel across a word boundary), both go in one clock: the
+  // merged word is written and the second group is the writer's next word (`both`; MT0: the 888 write-out at one pixel
+  // a clock, 24 words + the row change a tile line [M tim 3.11: 1105], not 1.5 clocks a pixel; the same requests in the
+  // same order as one group a clock)
   logic        g_second;               // the first group has gone
   logic        g_v, g_rdy;
   logic [20:0] g_w;
@@ -178,7 +189,8 @@ module p2_wout_put
   assign g_w    = g_second ? wb : wa;
   assign g_be   = g_second ? beb : bea;
   assign g_d    = g_second ? db : da;
-  assign s_done = s_v && !sgrow && (drop || (g_rdy && (g_second || beb == '0)));
+  logic        both;
+  assign s_done = s_v && !sgrow && (drop || (g_rdy && (g_second || beb == '0 || both)));
 
   always_ff @(posedge clk) begin
     if (rst) begin
@@ -212,24 +224,76 @@ module p2_wout_put
   logic [20:0] p_w;
   logic [3:0]  p_be;
   logic [31:0] p_d;
-  assign merge   = p_v && g_v && g_w == p_w;
-  assign m_v     = p_v && !merge;
-  assign m_addr  = {1'b0, p_w[0], p_w[20:1], 2'b00};
-  assign m_be    = p_be;
-  assign m_wdata = p_d;
-  assign g_rdy   = merge || !p_v || m_rdy;
+  logic [3:0]  pa_be;                   // the writer's word with the first group merged (`both`)
+  logic [31:0] pa_d;
+  always_comb begin
+    pa_be = p_be | bea;
+    pa_d  = p_d;
+    for (int b = 0; b < 4; b++)
+      if (bea[b]) pa_d[8 * b +: 8] = da[8 * b +: 8];
+  end
+  // the word the writer hands to the write FIFO (w_v: it goes this clock when the FIFO has room, wf_rdy)
+  logic        w_v, wf_rdy;
+  logic [3:0]  w_be;
+  logic [31:0] w_d;
+  assign both    = p_v && g_v && !g_second && beb != '0 && wa == p_w;
+  assign merge   = p_v && g_v && g_w == p_w && !both;
+  assign w_v     = p_v && !merge;
+  assign w_be    = both ? pa_be : p_be;
+  assign w_d     = both ? pa_d : p_d;
+  assign g_rdy   = merge || !p_v || wf_rdy;
   always_ff @(posedge clk) begin
     if (rst)
       p_v <= 1'b0;
-    else if (merge) begin
+    else if (both) begin
+      if (wf_rdy) begin
+        p_w  <= wb;
+        p_be <= beb;
+        p_d  <= db;
+      end
+    end else if (merge) begin
       p_be <= p_be | g_be;
       for (int b = 0; b < 4; b++)
         if (g_be[b]) p_d[8 * b +: 8] <= g_d[8 * b +: 8];
-    end else if (!p_v || m_rdy) begin
+    end else if (!p_v || wf_rdy) begin
       p_v  <= g_v;
       p_w  <= g_w;
       p_be <= g_be;
       p_d  <= g_d;
+    end
+  end
+
+  // ---------------------------------------------------------------------------------------------- the write FIFO (C5)
+  localparam int WFB = $clog2(WO_WFIFO);
+  logic [20:0]  wf_w  [WO_WFIFO];
+  logic [3:0]   wf_be [WO_WFIFO];
+  logic [31:0]  wf_d  [WO_WFIFO];
+  logic [WFB-1:0] wf_rp, wf_wp;
+  logic [WFB:0]   wf_n;
+  logic         wf_push, wf_pop;
+  assign wf_empty = wf_n == '0;
+  assign wf_rdy   = wf_n != (WFB + 1)'(WO_WFIFO);
+  assign wf_push  = w_v && wf_rdy;
+  assign m_v      = !wf_empty;
+  assign m_addr   = {1'b0, wf_w[wf_rp][0], wf_w[wf_rp][20:1], 2'b00};
+  assign m_be     = wf_be[wf_rp];
+  assign m_wdata  = wf_d[wf_rp];
+  assign wf_pop   = m_v && m_rdy;
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      wf_rp <= '0;
+      wf_wp <= '0;
+      wf_n  <= '0;
+    end else begin
+      if (wf_push) begin
+        wf_w[wf_wp]  <= p_w;
+        wf_be[wf_wp] <= w_be;
+        wf_d[wf_wp]  <= w_d;
+        wf_wp        <= wf_wp + 1'b1;
+      end
+      if (wf_pop)
+        wf_rp <= wf_rp + 1'b1;
+      wf_n <= wf_n + (WFB + 1)'(wf_push) - (WFB + 1)'(wf_pop);
     end
   end
 endmodule
